@@ -174,7 +174,7 @@ fn read_config_files(
 ) -> (SerdeValue, HashMap<String, Expression>, HashMap<String, Box<dyn Fn(&str) -> bool>>) {
     let mut config = json!({
         //"table": {},
-        "datatype": {},
+        //"datatype": {},
         //"special": {},
         "rule": {},
         "constraints": {
@@ -186,8 +186,9 @@ fn read_config_files(
         },
     });
 
-    let mut special_config: SerdeMap<String, SerdeValue> = SerdeMap::new();
+    let mut specials_config: SerdeMap<String, SerdeValue> = SerdeMap::new();
     let mut tables_config: SerdeMap<String, SerdeValue> = SerdeMap::new();
+    let mut datatypes_config: SerdeMap<String, SerdeValue> = SerdeMap::new();
 
     let special_table_types = json!({
         "table": {"required": true},
@@ -199,7 +200,7 @@ fn read_config_files(
 
     // Initialize the special table entries in the config map:
     for t in special_table_types.keys() {
-        special_config.insert(t.to_string(), SerdeValue::Null);
+        specials_config.insert(t.to_string(), SerdeValue::Null);
     }
 
     let path = table_table_path;
@@ -239,12 +240,12 @@ fn read_config_files(
             }
 
             if special_table_types.contains_key(row_type) {
-                match special_config.get(row_type) {
+                match specials_config.get(row_type) {
                     Some(SerdeValue::Null) => (),
                     _ => panic!("Multiple tables with type '{}' declared in '{}'", row_type, path),
                 }
                 let row_table = row.get("table").and_then(|t| t.as_str()).unwrap();
-                special_config
+                specials_config
                     .insert(row_type.to_string(), SerdeValue::String(row_table.to_string()));
             } else {
                 panic!("Unrecognized table type '{}' in '{}'", row_type, path);
@@ -259,14 +260,14 @@ fn read_config_files(
     // Check that all the required special tables are present
     for (table_type, table_spec) in special_table_types.iter() {
         if let Some(SerdeValue::Bool(true)) = table_spec.get("required") {
-            if let Some(SerdeValue::Null) = special_config.get(table_type) {
+            if let Some(SerdeValue::Null) = specials_config.get(table_type) {
                 panic!("Missing required '{}' table in '{}'", table_type, path);
             }
         }
     }
 
     // Load datatype table
-    let table_name = special_config.get("datatype").and_then(|d| d.as_str()).unwrap();
+    let table_name = specials_config.get("datatype").and_then(|d| d.as_str()).unwrap();
     let path = String::from(
         tables_config.get(table_name).and_then(|t| t.get("path")).and_then(|p| p.as_str()).unwrap(),
     );
@@ -295,34 +296,25 @@ fn read_config_files(
             }
         }
 
-        if let Some(SerdeValue::Object(dt_config)) = config.get_mut("datatype") {
-            let dt_name = row.get("datatype").and_then(|d| d.as_str()).unwrap();
-            let condition = row.get("condition").and_then(|c| c.as_str());
-            let (parsed_condition, compiled_condition) =
-                compile_condition(condition, parser, &compiled_conditions);
-            if let Some(c) = condition {
-                parsed_conditions.insert(dt_name.to_string(), parsed_condition);
-                compiled_conditions.insert(dt_name.to_string(), compiled_condition);
-            }
-            dt_config.insert(dt_name.to_string(), SerdeValue::Object(row));
-        } else {
-            panic!("Programming error: No 'datatype' key in config map")
+        let dt_name = row.get("datatype").and_then(|d| d.as_str()).unwrap();
+        let condition = row.get("condition").and_then(|c| c.as_str());
+        let (parsed_condition, compiled_condition) =
+            compile_condition(condition, parser, &compiled_conditions);
+        if let Some(c) = condition {
+            parsed_conditions.insert(dt_name.to_string(), parsed_condition);
+            compiled_conditions.insert(dt_name.to_string(), compiled_condition);
         }
+        datatypes_config.insert(dt_name.to_string(), SerdeValue::Object(row));
     }
 
     for dt in vec!["text", "empty", "line", "word"] {
-        if !config
-            .get("datatype")
-            .and_then(|d| d.as_object())
-            .and_then(|d| Some(d.contains_key(dt)))
-            .unwrap()
-        {
+        if !datatypes_config.contains_key(dt) {
             panic!("Missing required datatype: '{}'", dt);
         }
     }
 
     // Load column table
-    let table_name = special_config.get("column").and_then(|d| d.as_str()).unwrap();
+    let table_name = specials_config.get("column").and_then(|d| d.as_str()).unwrap();
     let path = String::from(
         tables_config.get(table_name).and_then(|t| t.get("path")).and_then(|p| p.as_str()).unwrap(),
     );
@@ -355,23 +347,13 @@ fn read_config_files(
         }
 
         if let Some(SerdeValue::String(nulltype)) = row.get("nulltype") {
-            if !config
-                .get("datatype")
-                .and_then(|d| d.as_object())
-                .and_then(|d| Some(d.contains_key(nulltype)))
-                .unwrap()
-            {
+            if !datatypes_config.contains_key(nulltype) {
                 panic!("Undefined nulltype '{}' reading '{}'", nulltype, path);
             }
         }
 
         let datatype = row.get("datatype").and_then(|d| d.as_str()).unwrap();
-        if !config
-            .get("datatype")
-            .and_then(|d| d.as_object())
-            .and_then(|d| Some(d.contains_key(datatype)))
-            .unwrap()
-        {
+        if !datatypes_config.contains_key(datatype) {
             panic!("Undefined datatype '{}' reading '{}'", datatype, path);
         }
 
@@ -407,7 +389,7 @@ fn read_config_files(
     }
 
     // Load rule table if it exists
-    if let Some(SerdeValue::String(table_name)) = special_config.get("rule") {
+    if let Some(SerdeValue::String(table_name)) = specials_config.get("rule") {
         let path = String::from(
             tables_config
                 .get(table_name)
