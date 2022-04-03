@@ -406,21 +406,16 @@ fn read_config_files(
         }
     }
 
-    /*
-
     // Load rule table if it exists
-    if let Some(SerdeValue::String(table_name)) = config.get("special").and_then(|s| s.get("rule"))
-    {
-        // HERE:
+    if let Some(SerdeValue::String(table_name)) = special_config.get("rule") {
         let path = String::from(
-            config
-                .get("table")
-                .and_then(|c| c.get(table_name))
+            tables_config
+                .get(table_name)
                 .and_then(|t| t.get("path"))
                 .and_then(|p| p.as_str())
                 .unwrap(),
         );
-        let rows = read_tsv(&path);
+        let rows = read_tsv(&path.to_string());
         for row in rows {
             for column in vec![
                 "table",
@@ -442,22 +437,14 @@ fn read_config_files(
             }
 
             let row_table = row.get("table").and_then(|t| t.as_str()).unwrap();
-            // HERE
-            if !config
-                .get("table")
-                .and_then(|c| c.as_object())
-                .and_then(|c| Some(c.contains_key(row_table)))
-                .unwrap()
-            {
+            if !tables_config.contains_key(row_table) {
                 panic!("Undefined table '{}' reading '{}'", row_table, path);
             }
 
             for column in vec!["when column", "then column"] {
                 let row_column = row.get(column).and_then(|c| c.as_str()).unwrap();
-                // HERE:
-                if !config
-                    .get("table")
-                    .and_then(|c| c.get(row_table))
+                if !tables_config
+                    .get(row_table)
                     .and_then(|t| t.get("column"))
                     .and_then(|c| c.as_object())
                     .and_then(|c| Some(c.contains_key(row_column)))
@@ -467,7 +454,6 @@ fn read_config_files(
                 }
             }
 
-            // TODO: Fix the problems here.
             for column in vec!["when condition", "then condition"] {
                 let condition = row.get(column).and_then(|c| c.as_str());
                 if let Some(c) = condition {
@@ -512,10 +498,7 @@ fn read_config_files(
             }
         }
     }
-    */
 
-    let mut parsed_conditions: HashMap<String, Expression> = HashMap::new();
-    let mut compiled_conditions: HashMap<String, Box<dyn Fn(&str) -> bool>> = HashMap::new();
     (config, parsed_conditions, compiled_conditions)
 }
 
