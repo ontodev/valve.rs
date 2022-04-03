@@ -171,21 +171,14 @@ fn compile_condition(
 fn read_config_files(
     table_table_path: &String,
     parser: &StartParser,
-) -> (SerdeValue, HashMap<String, Expression>, HashMap<String, Box<dyn Fn(&str) -> bool>>) {
-    let mut config = json!({
-        //"table": {},
-        //"datatype": {},
-        //"special": {},
-        //"rule": {},
-        "constraints": {
-            "foreign": {},
-            "unique": {},
-            "primary": {},
-            "tree": {},
-            "under": {},
-        },
-    });
-
+) -> (
+    SerdeMap<String, SerdeValue>,
+    SerdeMap<String, SerdeValue>,
+    SerdeMap<String, SerdeValue>,
+    SerdeMap<String, SerdeValue>,
+    HashMap<String, Expression>,
+    HashMap<String, Box<dyn Fn(&str) -> bool>>,
+) {
     let mut specials_config: SerdeMap<String, SerdeValue> = SerdeMap::new();
     let mut tables_config: SerdeMap<String, SerdeValue> = SerdeMap::new();
     let mut datatypes_config: SerdeMap<String, SerdeValue> = SerdeMap::new();
@@ -475,7 +468,14 @@ fn read_config_files(
         }
     }
 
-    (config, parsed_conditions, compiled_conditions)
+    (
+        specials_config,
+        tables_config,
+        datatypes_config,
+        rules_config,
+        parsed_conditions,
+        compiled_conditions,
+    )
 }
 
 fn configure_db(config: &mut SerdeValue, parser: &StartParser) {
@@ -788,12 +788,22 @@ async fn main() -> Result<(), sqlx::Error> {
     let table = &args[1];
     let db_dir = &args[2];
     let parser = StartParser::new();
-    let (mut config, parsed_conditions, compiled_conditions) = read_config_files(table, &parser);
+    let (
+        mut specials_config,
+        mut tables_config,
+        mut datatypes_config,
+        mut rules_config,
+        parsed_conditions,
+        compiled_conditions,
+    ) = read_config_files(table, &parser);
 
     let connection_options =
         SqliteConnectOptions::from_str("sqlite://build/cmi-pb.db")?.create_if_missing(true);
     let pool = SqlitePoolOptions::new().max_connections(5).connect_with(connection_options).await?;
     sqlx::query("PRAGMA foreign_keys = ON").execute(&pool).await?;
+
+    println!("SVABOODIA!!");
+    let mut config = json!({}); // REMOVE LATER
     configure_and_load_db(&mut config, &pool, &parser, &parsed_conditions, &compiled_conditions)
         .await
 }
