@@ -267,8 +267,9 @@ fn read_config_files(
 
     // Load datatype table
     let table_name = special_config.get("datatype").and_then(|d| d.as_str()).unwrap();
-    let path =
-        tables_config.get(table_name).and_then(|t| t.get("path")).and_then(|p| p.as_str()).unwrap();
+    let path = String::from(
+        tables_config.get(table_name).and_then(|t| t.get("path")).and_then(|p| p.as_str()).unwrap(),
+    );
 
     let mut parsed_conditions: HashMap<String, Expression> = HashMap::new();
     let mut compiled_conditions: HashMap<String, Box<dyn Fn(&str) -> bool>> = HashMap::new();
@@ -320,22 +321,13 @@ fn read_config_files(
         }
     }
 
-    /*
     // Load column table
-    let table_name = String::from(
-        // HERE:
-        config.get("special").and_then(|s| s.get("column")).and_then(|c| c.as_str()).unwrap(),
-    );
-    // HERE:
+    let table_name = special_config.get("column").and_then(|d| d.as_str()).unwrap();
     let path = String::from(
-        config
-            .get("table")
-            .and_then(|c| c.get(table_name))
-            .and_then(|t| t.get("path"))
-            .and_then(|p| p.as_str())
-            .unwrap(),
+        tables_config.get(table_name).and_then(|t| t.get("path")).and_then(|p| p.as_str()).unwrap(),
     );
-    let rows = read_tsv(&path);
+    let rows = read_tsv(&path.to_string());
+
     for mut row in rows {
         for column in vec!["table", "column", "nulltype", "datatype"] {
             if !row.contains_key(column) || row.get(column) == None {
@@ -358,13 +350,7 @@ fn read_config_files(
         }
 
         let row_table = row.get("table").and_then(|t| t.as_str()).unwrap();
-        // HERE:
-        if !config
-            .get("table")
-            .and_then(|c| c.as_object())
-            .and_then(|c| Some(c.contains_key(row_table)))
-            .unwrap()
-        {
+        if !tables_config.contains_key(row_table) {
             panic!("Undefined table '{}' reading '{}'", row_table, path);
         }
 
@@ -408,11 +394,8 @@ fn read_config_files(
 
         let row_table = row.get("table").and_then(|t| t.as_str()).unwrap();
         let column_name = row.get("column").and_then(|c| c.as_str()).unwrap();
-        // HERE
-        if let Some(SerdeValue::Object(columns_config)) = config
-            .get_mut("table")
-            .and_then(|t| t.get_mut(row_table))
-            .and_then(|t| t.get_mut("column"))
+        if let Some(SerdeValue::Object(columns_config)) =
+            tables_config.get_mut(row_table).and_then(|t| t.get_mut("column"))
         {
             columns_config.insert(column_name.to_string(), SerdeValue::Object(row));
         } else {
@@ -422,7 +405,6 @@ fn read_config_files(
             );
         }
     }
-    */
 
     /*
 
