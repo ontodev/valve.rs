@@ -173,7 +173,7 @@ fn read_config_files(
     parser: &StartParser,
 ) -> (SerdeValue, HashMap<String, Expression>, HashMap<String, Box<dyn Fn(&str) -> bool>>) {
     let mut config = json!({
-        "table": {},
+        //"table": {},
         "datatype": {},
         //"special": {},
         "rule": {},
@@ -187,6 +187,7 @@ fn read_config_files(
     });
 
     let mut special_config: SerdeMap<String, SerdeValue> = SerdeMap::new();
+    let mut tables_config: SerdeMap<String, SerdeValue> = SerdeMap::new();
 
     let special_table_types = json!({
         "table": {"required": true},
@@ -252,8 +253,7 @@ fn read_config_files(
 
         row.insert(String::from("column"), SerdeValue::Object(SerdeMap::new()));
         let row_table = row.get("table").and_then(|t| t.as_str()).unwrap();
-        // UNCOMMENT THIS:
-        //tables_config.insert(row_table.to_string(), SerdeValue::Object(row));
+        tables_config.insert(row_table.to_string(), SerdeValue::Object(row));
     }
 
     // Check that all the required special tables are present
@@ -266,25 +266,13 @@ fn read_config_files(
     }
 
     // Load datatype table
-    /*
-    let path = String::from(
-        config
-            .get("table")
-            .and_then(|c| {
-                let table_name = config
-                    .get("special")
-                    .and_then(|s| s.get("datatype"))
-                    .and_then(|d| d.as_str())
-                    .unwrap();
-                c.get(table_name.to_string())
-            })
-            .and_then(|t| t.get("path"))
-            .and_then(|p| p.as_str())
-            .unwrap(),
-    );
+    let table_name = special_config.get("datatype").and_then(|d| d.as_str()).unwrap();
+    let path =
+        tables_config.get(table_name).and_then(|t| t.get("path")).and_then(|p| p.as_str()).unwrap();
+
     let mut parsed_conditions: HashMap<String, Expression> = HashMap::new();
     let mut compiled_conditions: HashMap<String, Box<dyn Fn(&str) -> bool>> = HashMap::new();
-    let rows = read_tsv(&path);
+    let rows = read_tsv(&path.to_string());
     for mut row in rows {
         for column in vec!["datatype", "parent", "condition", "SQL type"] {
             if !row.contains_key(column) || row.get(column) == None {
@@ -315,7 +303,6 @@ fn read_config_files(
                 parsed_conditions.insert(dt_name.to_string(), parsed_condition);
                 compiled_conditions.insert(dt_name.to_string(), compiled_condition);
             }
-            //let mut row = row.clone();
             dt_config.insert(dt_name.to_string(), SerdeValue::Object(row));
         } else {
             panic!("Programming error: No 'datatype' key in config map")
@@ -332,7 +319,6 @@ fn read_config_files(
             panic!("Missing required datatype: '{}'", dt);
         }
     }
-    */
 
     /*
     // Load column table
