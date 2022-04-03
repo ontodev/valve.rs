@@ -1,0 +1,75 @@
+Column	Label	CURIE	IRI	Source Ontology Label	Parent	Comments
+A CMI-PB:column	A CMI-PB:alternativeTerm		ID	LABEL	C %	
+subject.infancy_vac	aP	VO:0000738	http://purl.obolibrary.org/obo/VO_0000738	DTaP vaccine (Diphtheria-Tetanus-Pertussis vaccine)	vaccine
+subject.infancy_vac 	wP	VO:0003106	http://purl.obolibrary.org/obo/VO_0003106	DTwP vaccine (diphtheria, tetanus and whole cell pertussis vaccine)	vaccine
+subject.biological_sex 	Male	PATO:0000384	http://purl.obolibrary.org/obo/PATO_0000384	Male	characteristic
+subject.biological_sex 	Female	PATO:0000383	http://purl.obolibrary.org/obo/PATO_0000383	Female	characteristic
+sample.sample_type	Blood	OBI:0000655	http://purl.obolibrary.org/obo/OBI_0000655	blood specimen	specimen	As discussed in the meeting, somehow, we should have PBMCs and plasma samples here. We can discuss this in person.
+ab_titer.isotype	IgE	PR:000050258	http://purl.obolibrary.org/obo/PR_000050258	IgE heavy chain protein	protein
+ab_titer.isotype	IgG	PR:000050252	http://purl.obolibrary.org/obo/PR_000050252	IgG heavy chain protein	protein
+ab_titer.isotype	IgG1	PR:000050253	http://purl.obolibrary.org/obo/PR_000050253	IgG1 heavy chain protein	protein
+ab_titer.isotype	IgG2	PR:000050254	http://purl.obolibrary.org/obo/PR_000050254	IgG2 heavy chain protein	protein
+ab_titer.isotype	IgG3	PR:00005025	http://purl.obolibrary.org/obo/PR_00005025	IgG3 heavy chain protein	protein
+ab_titer.isotype	IgG4	PR:000050256	http://purl.obolibrary.org/obo/PR_000050256	IgG4 heavy chain protein	protein
+ab_titer.antigen	PT	ONTIE:0003550	https://ontology.iedb.org/ontology/ONTIE_0003550	Pertussis toxin complex	protein complex	The 1% PFA is a technical aspect as the protein was fixed with paraformaldehide. I included the detalis only for the Pertussis Toxin.	This is a protein complex, but we don't know where it lives, so we'll put it into ONTIE.
+ab_titer.antigen	1% PFA PT	ONTIE:0003551	https://ontology.iedb.org/ontology/ONTIE_0003551	Pertussis toxin complex, inactivated by PFA	protein complex	Same as above in the 1% PFA PT --> All subunits included
+ab_titer.antigen	PTM	ONTIE:0003552	https://ontology.iedb.org/ontology/ONTIE_0003552	Pertussis toxin complex, inactivated mutant	protein complex	This is a Pertussis Toxin mutant from List Biologicals only some aa modifications added, not sure how this works with ontologies--> https://www.listlabs.com/products/buy-pertussis-toxin-mutant
+	ptxA	uniprot:P04977	https://www.uniprot.org/uniprot/P04977	Pertussis toxin subunit 1	protein	The pertussis Toxin is conformed of 5 subunits (S1, S2, S3, S4 and S5). Those are all contained in this term so it is a mixture of all 5 subunits (I added the Ontology ID for all of those)
+	ptxB	uniprot:P04978	https://www.uniprot.org/uniprot/P04978	Pertussis toxin subunit 2	protein	
+	ptxC	uniprot:P04979	https://www.uniprot.org/uniprot/P04979	Pertussis toxin subunit 3	protein	
+	ptxD	uniprot:P0A3R5	https://www.uniprot.org/uniprot/P0A3R5	Pertussis toxin subunit 4	protein	
+	ptxE	uniprot:P04981	https://www.uniprot.org/uniprot/P04981	Pertussis toxin subunit 5	protein	
+ab_titer.antigen	ACT	uniprot:C8C508	https://www.uniprot.org/uniprot/C8C508	Adenylate cyclase toxin	protein
+ab_titer.antigen	BETV1	uniprot:O23748	https://www.uniprot.org/uniprot/O23748	Pollen allergen, Betv1	protein
+ab_titer.antigen	DT	uniprot:Q5PY51	https://www.uniprot.org/uniprot/Q5PY51	Diphtheria toxin	protein	In this case is the toxoid --> 1% PFA inactivated
+ab_titer.antigen	FELD1	uniprot:P30438	https://www.uniprot.org/uniprot/P30438	Major allergen I polypeptide chain 1	protein	Cat allergen
+ab_titer.antigen	FHA	uniprot:P12255	https://www.uniprot.org/uniprot/P12255	Filamentous hemagglutinin	protein	
+ab_titer.antigen	FIM2/3	ONTIE:0003553	https://ontology.iedb.org/ontology/ONTIE_0003553	Mixture of Fim2 and Fim3	mixture	Contains 2 fimbriae proteins FIM2 and FIM3.
+	fim2	uniprot:Q5I8X0	https://www.uniprot.org/uniprot/Q5I8X0	Fimbrial protein	protein	Fim2
+	fim3	uniprot:A0A171JW18	https://www.uniprot.org/uniprot/A0A171JW18	Fimbrial protein Fim3	protein	Fim3
+ab_titer.antigen	LOLP1	uniprot:P14946	https://www.uniprot.org/uniprot/P14946	Pollen allergen Lol p 1	protein	Pollen allergen
+ab_titer.antigen	LOS	CHEBI:35371	http://purl.obolibrary.org/obo/CHEBI_35371	lipooligosaccharide	molecular entity	Bordetella pertussis has a distinctive cell wall lipooligosaccharide (LOS)
+ab_titer.antigen	Measles	VO:0010784	http://purl.obolibrary.org/obo/VO_0010784	Measles virus protein	vaccine	Thie refers to the viral proteins
+ab_titer.antigen	OVA	uniprot:P01012	https://www.uniprot.org/uniprot/P01012	Ovalbumin	protein
+ab_titer.antigen	PD1	uniprot:Q15116	https://www.uniprot.org/uniprot/Q15116	Programmed cell death protein 1	protein
+ab_titer.antigen	PRN	uniprot:P14283	https://www.uniprot.org/uniprot/P14283	Pertactin autotransporter	protein
+ab_titer.antigen	TT	uniprot:P04958	https://www.uniprot.org/uniprot/P04958	Tetanus toxin	protein	WARNING: This is the ontology for Tetanus Toxin --> List biologicals sells the Toxoid which is slightly modified
+		NCIT:C2660	http://purl.obolibrary.org/obo/NCIT_C2660	Tetanus toxoid vaccine	vaccine	This is the actual toxoid I think. This is not present at Uniprot
+ab_titer.antigen	Total					This one is not an antigen --> Refers to total and is associated with IgG or IgE --> DISCUSS
+ab_titer.unit 	IU/ML	NCIT:C67377	http://purl.obolibrary.org/obo/NCIT_C67377	International Unit per Milliliter	measurement unit label
+ab_titer.unit 	UG/ML	UO:0000274	http://purl.obolibrary.org/obo/UO_0000274	ug/ml microgram per milliliter	measurement unit label
+ab_titer.unit 	MFI	NCIT:C163046	http://purl.obolibrary.org/obo/NCIT_C163046	Mean Fluorescence Intensity Unit		Mean fluorescence intensity
+cell_type.cell_type_name	ASCs (Plasmablasts)	CL:0000980	http://purl.obolibrary.org/obo/CL_0000980	plasmablast	cell
+cell_type.cell_type_name	CD3 Tcells	CL:0000084	http://purl.obolibrary.org/obo/CL_0000084	T cell	cell	CD45+, CD3e+, CD14-
+cell_type.cell_type_name	NK 	CL:0000623	http://purl.obolibrary.org/obo/CL_0000623	natural killer cell	cell	CD45+, CD3e-, CD14-, CD19-, CD4-, CD56+
+cell_type.cell_type_name	mDC	CL:0001057	http://purl.obolibrary.org/obo/CL_0001057	myeloid dendritic cell, human	cell	CD45+, CD3e-, CD14-, CD19-, CD4-, CD56-, CD16-, HLA-DR+, CD123-, CD1c+	HLA-DR was not recognized in the cell-name-and-marker-validator.ontodev.com
+cell_type.cell_type_name	Basophils	CL:0000767	http://purl.obolibrary.org/obo/CL_0000767	basophil	cell	CD45+, CD3e-, CD14-, CD19-, CD4-, CD56-, CD16-, HLA-DR-, CD123++
+cell_type.cell_type_name	Bcells	CL:0001201	http://purl.obolibrary.org/obo/CL_0001201	B cell, CD19-positive	cell	CD45+, CD3e-, CD14-, CD19+	Cell type was not recognized --> Is there any issue with the web/definition? I used the name from the Cell ontology website
+cell_type.cell_type_name	CD33HLADR	CL:0000576	http://purl.obolibrary.org/obo/CL_0000576	monocyte	cell	CD45+, CD33+, HLA-DR+	This is a general gate that can also contain some other cells. We can discuss this. Although the majority will be monocytes, we can have some other subsets.
+cell_type.cell_type_name	CD3CD19				cell	CD45+, CD14-, CD19+, CD3e+	Not sure if doublets exist in the ontology? Those would be T cell + B cell doublets
+cell_type.cell_type_name	CD3CD19neg				cell	CD45+, CD14-, CD19-, CD3e-	Not sure if this gate is both negatives (CD3-CD19-) if that is the case, this is only a gate for subgating
+cell_type.cell_type_name	CD4Tcells	CL:0000624	http://purl.obolibrary.org/obo/CL_0000624	CD4-positive, alpha-beta T cell	cell	CD45+, CD3e+, CD14-,  CD8a-, CD4+
+cell_type.cell_type_name	CD8Tcells	CL:0000625	http://purl.obolibrary.org/obo/CL_0000625	CD8-positive, alpha-beta T cell	cell	CD45+, CD3e+, CD14-,  CD8a+, CD4-
+cell_type.cell_type_name	Classical_Monocytes	CL:0000860	http://purl.obolibrary.org/obo/CL_0000860	classical monocyte	cell	CD45+, CD33+, HLA-DR+, CD14+, CD16-
+cell_type.cell_type_name	Intermediate_Monocytes	CL:0002393	http://purl.obolibrary.org/obo/CL_0002393	intermediate monocyte	cell	CD45+, CD33+, HLA-DR+, CD14+, CD16+
+cell_type.cell_type_name	Monocytes	CL:0000576	http://purl.obolibrary.org/obo/CL_0000576	monocyte	cell	CD45+, CD33+, HLA-DR+	Same as CD33+HLA-DR+
+cell_type.cell_type_name	NaiveCD4	CL:0000895	http://purl.obolibrary.org/obo/CL_0000895	naive thymus-derived CD4-positive, alpha-beta T cell	cell	CD45+, CD3e+, CD14-, CD8a-, CD4+, CD45RA+, CCR7+
+cell_type.cell_type_name	NaiveCD8	CL:0000900	http://purl.obolibrary.org/obo/CL_0000900	naive thymus-derived CD8-positive, alpha-beta T cell	cell	CD45+, CD3e+, CD14-, CD8a+, CD4-, CD45RA+, CCR7+
+cell_type.cell_type_name	Non-Classical_Monocytes	CL:0002396	http://purl.obolibrary.org/obo/CL_0002396	CD14-low, CD16-positive monocyte	cell	CD45+, CD33+, HLA-DR+, CD14-, CD16+
+cell_type.cell_type_name	TcmCD4	CL:0000904	http://purl.obolibrary.org/obo/CL_0000904	central memory CD4-positive, alpha-beta T cell	cell	CD45+, CD3e+, CD14-, CD8a-, CD4+, CD45RA-, CCR7+
+cell_type.cell_type_name	TcmCD8	CL:0000907	http://purl.obolibrary.org/obo/CL_0000907	central memory CD8-positive, alpha-beta T cell	cell	CD45+, CD3e+, CD14-, CD8a+, CD4-, CD45RA-, CCR7+
+cell_type.cell_type_name	TemCD4	CL:0000905	http://purl.obolibrary.org/obo/CL_0000905	effector memory CD4-positive, alpha-beta T cell	cell	CD45+, CD3e+, CD14-, CD8a-, CD4+, CD45RA-, CCR7-
+cell_type.cell_type_name	TemCD8	CL:0000913	http://purl.obolibrary.org/obo/CL_0000913	effector memory CD8-positive, alpha-beta T cell	cell	CD45+, CD3e+, CD14-, CD8a+, CD4-, CD45RA-, CCR7-
+cell_type.cell_type_name	TemraCD4	CL:0000934	http://purl.obolibrary.org/obo/CL_0000934	CD4-positive, alpha-beta cytotoxic T cell	cell	CD45+, CD3e+, CD14-, CD8a-, CD4+, CD45RA+, CCR7-
+cell_type.cell_type_name	TemraCD8	CL:0000794	http://purl.obolibrary.org/obo/CL_0000794	CD8-positive, alpha-beta cytotoxic T cell	cell	CD45+, CD3e+, CD14-, CD8a+, CD4-, CD45RA+, CCR7-
+cell_type.cell_type_name	Tregs	CL:0000792	http://purl.obolibrary.org/obo/CL_0000792	CD4-positive, CD25-positive, alpha-beta regulatory T cell	cell	CD45+, CD3e+, CD14-, CD8a-, CD4+, CD25+
+cell_type.cell_type_name	pDC	CL:0001058	http://purl.obolibrary.org/obo/CL_0001058	plasmacytoid dendritic cell, human	cell	CD45+, CD3e+, CD14-, CD3-, CD19-, CD56-, CD16-, CD123+, HLA-DR+, CD1c-
+cell_type.gating_method	Automated	OBI:0002776	http://purl.obolibrary.org/obo/OBI_0002776	automatic cell gating	planned process	This refers to automated gating --> Used for CyTOF and cell frequencies
+cell_type.gating_method	Manual	OBI:0002777	http://purl.obolibrary.org/obo/OBI_0002777	manual cell gating	planned process	This refers to manual gating --> Used for CyTOF and cell frequencies
+sample.sample_type	blood plasma	OBI:0100016	http://purl.obolibrary.org/obo/OBI_0100016	blood plasma specimen	specimen	The plasam in our case if heparinized --> Use of heparin as anticoagulant. There is other anticoagulants that can be used.
+sample.sample_type	PBMC	OBI:1110044	http://purl.obolibrary.org/obo/OBI_1110044	cultured PBMC cell population	specimen	The PBMCs in this project are uncultured (transcriptomics and cell frequencies) and cultured in T cell assays. We should discuss this if needed	http://purl.obolibrary.org/obo/OBI_0000548	isolation of PBMCs
+sample.sample_type	nasal swab	OBI:0000917	http://purl.obolibrary.org/obo/OBI_0000917	nasal swab specimen	specimen
+sample.sample_type	sputum	OBI:0002508	http://purl.obolibrary.org/obo/OBI_0002508	sputum specimen	specimen		http://purl.obolibrary.org/obo/UBERON_0007311	sputum
+subject.biological_sex 	Other					Not able to find anything for this. This is just the result of a questionnaire. Should we generate those ontologies?
+subject.biological_sex 	Unknown					Not able to find anything for this. This is just the result of a questionnaire. Should we generate those ontologies?
+subject.biological_sex 	Not Specified					Not able to find anything for this. This is just the result of a questionnaire. Should we generate those ontologies?

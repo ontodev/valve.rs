@@ -1,0 +1,3 @@
+table	when column	when condition	then column	then condition	level	description
+foobar	foo	null	bar	null	error	bar must be null whenever foo is null
+foobar	foo	not null	bar	not null	error	bar cannot be null if foo is not null

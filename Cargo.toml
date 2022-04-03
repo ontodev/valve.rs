@@ -1,10 +1,29 @@
 [package]
 name = "cmi-pb-terminology-rs"
 version = "0.1.0"
-edition = "2021"
+# Because of this issue: https://github.com/lalrpop/lalrpop/issues/650 we need to use the 2018
+# edition of rust for now.
+edition = "2018"
+build = "build.rs"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[build-dependencies.lalrpop]
+version = "0.19.7"
+features = ["lexer"]
 
 [dependencies]
+csv = "1.1"
+regex = "1"
+
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
+
+sqlx = { version = "0.5", features = [ "runtime-async-std-native-tls", "postgres", "sqlite" ] }
+async-std = { version = "1", features = [ "attributes" ] }
+futures = "0.3"
+
+lazy_static = "1.4.0"
+
+[dependencies.lalrpop-util]
+version = "0.19.7"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

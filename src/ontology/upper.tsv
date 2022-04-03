@@ -1,0 +1,25 @@
+ID	Label	Type	Parent	Comment
+ID	LABEL	TYPE	C %	A comment
+BFO:0000040	material entity	owl:Class	owl:Thing
+VO:0000001	vaccine	owl:Class	material entity
+COB:0000013	molecular entity	owl:Class	material entity		
+PR:000000001	protein	owl:Class	molecular entity
+OBI:0100051	specimen	owl:Class	material entity
+CHEBI:60004	mixture	owl:Class	material entity
+GO:0043234	protein complex	owl:Class	material entity
+CL:0000000	cell	owl:Class	material entity
+BFO:0000015	process	owl:Class	owl:Thing
+OBI:0000011	planned process	owl:Class	process
+PATO:0000001	characteristic	owl:Class	owl:Thing
+COB:0000061	information	owl:Class	owl:Thing
+IAO:0000003	measurement unit label	owl:Class	information
+rdfs:label	label	owl:AnnotationProperty
+rdfs:comment	comment	owl:AnnotationProperty
+IAO:0000118	alternative term	owl:AnnotationProperty
+IAO:0000115	definition	owl:AnnotationProperty
+IAO:0000119	definition source	owl:AnnotationProperty
+IAO:0000112	example of usage	owl:AnnotationProperty
+CMI-PB:alternativeTerm	CMI-PB alternative term	owl:AnnotationProperty
+CMI-PB:column	CMI-PB column	owl:AnnotationProperty
+rdf:type	type	rdf:Property
+rdfs:subClassOf	subclass of	rdf:Property

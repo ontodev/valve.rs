@@ -1,0 +1,69 @@
+use regex::Regex;
+use std::str::FromStr;
+use crate::ast::Expression;
+
+
+grammar;
+
+pub Start = CmiExpression+;
+
+CmiExpression: Box<Expression> = {
+    Label => Box::new(Expression::Label(<>)),
+    Function,
+};
+
+Label = {
+    ALPHANUM,
+    DQSTRING,
+    SQSTRING,
+};
+
+ALPHANUM: String = r"[a-zA-Z0-9-_]+" => String::from(<>);
+DQSTRING: String = r#""([^"]|\\")*""# => String::from(<>);
+SQSTRING: String = r#"'([^']|\\')*'"# => String::from(<>);
+
+Function: Box<Expression> = <f:FunctionName> "(" <a:Arguments> ")"
+    => Box::new(Expression::Function(f, a));
+
+FunctionName = ALPHANUM;
+Arguments = Comma<Argument>;
+Comma<T>: Vec<T> = {
+    <mut v:(<T> ",")*> <e:T> => {
+        v.push(e);
+        v
+    }
+};
+
+Argument: Box<Expression> = {
+    Label => Box::new(Expression::Label(<>)),
+    Field,
+    NamedArg,
+    RegexMatch,
+    RegexSub,
+    Function,
+}
+
+Field: Box<Expression> = <l1:Label> "." <l2:Label> => Box::new(Expression::Field(l1, l2));
+NamedArg: Box<Expression> = <l1:Label> "=" <l2:Label> => Box::new(Expression::NamedArg(l1, l2));
+
+// TODO: See if this can be done more efficiently (the call to create an extra regex is wasteful)
+RegexMatch: Box<Expression> = r"/([^/]*\\/[^/]*|[^/]+)/([a-z]*)" => {
+    let fullmatch = String::from(<>);
+    let re = regex::Regex::new(r"/([^/]*\\/[^/]*|[^/]+)/([a-z]*)").unwrap();
+    let caps = re.captures(&fullmatch).unwrap();
+    let pattern = caps.get(1).unwrap().as_str().to_string();
+    let flags = caps.get(2).unwrap().as_str().to_string();
+    Box::new(Expression::RegexMatch(pattern, flags))
+};
+
+// TODO: See if this can be done more efficiently (the call to create an extra regex is wasteful)
+RegexSub: Box<Expression> = r"s/([^/]*\\/[^/]*|[^/]+)/([^/]*\\/[^/]*|[^/]+)/([a-z]*)" => {
+    let fullmatch = String::from(<>);
+    let re = regex::Regex::new(r"s/([^/]*\\/[^/]*|[^/]+)/([^/]*\\/[^/]*|[^/]+)/([a-z]*)")
+        .unwrap();
+    let caps = re.captures(&fullmatch).unwrap();
+    let pattern = caps.get(1).unwrap().as_str().to_string();
+    let replacement = caps.get(2).unwrap().as_str().to_string();
+    let flags = caps.get(3).unwrap().as_str().to_string();
+    Box::new(Expression::RegexSub(pattern, replacement, flags))
+};

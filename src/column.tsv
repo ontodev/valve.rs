@@ -1,0 +1,36 @@
+table	column	nulltype	datatype	structure	description
+table	table		table_name	primary	name of this table
+table	path		path		path to the TSV file for this table, relative to the table.tsv file
+table	type	empty	table_type		type of this table, used for tables with special meanings
+table	description	empty	description		a description of this table
+column	table		table_name	from(table.table)	the table that this column belongs to
+column	column		column_name		the name of this column
+column	datatype		datatype_name	from(datatype.datatype)	the datatype for this column
+column	nulltype	empty	datatype_name	from(datatype.datatype)	the datatype for NULL values in this column
+column	structure	empty	trimmed_line		schema information for this column
+column	description	empty	description		a description of this column
+datatype	datatype		datatype_name	primary	the name of this datatype
+datatype	parent	empty	datatype_name	tree(datatype)	the parent datatype
+datatype	condition	empty	datatype_condition		
+rule	table		table_name		
+rule	when column		column_name		
+rule	when condition		datatype_condition		
+rule	then column		column_name		
+rule	then condition		datatype_condition		
+rule	level		word		
+rule	description	empty	description		
+prefix	prefix		prefix	primary	
+prefix	base		IRI	unique	
+prefix	ontology IRI	empty	IRI		
+prefix	version IRI	empty	IRI		
+import	source		prefix	from(prefix.prefix)	
+import	id		CURIE	unique	
+import	label		label	primary	
+import	parent	empty	label	tree(label)	
+import	related	empty	trimmed_line		
+foobar	child		trimmed_line	from(foreign_table.foreign_column)	
+foobar	parent	empty	trimmed_line	tree(child)	
+foobar	xyzzy	empty	trimmed_line	under(foobar.child, d)	
+foobar	foo	empty	text		
+foobar	bar	empty	text		
+foreign_table	foreign_column		text	primary	

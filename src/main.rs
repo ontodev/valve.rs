@@ -1,47 +1,862 @@
-use std::env;
-use std::process;
+#[macro_use]
+extern crate lalrpop_util;
+extern crate lazy_static;
+
+mod ast;
+
+use lazy_static::lazy_static;
+use regex::Regex;
 use serde_json::{
+    json,
     // SerdeMap by default backed by BTreeMap (see https://docs.serde.rs/serde_json/map/index.html)
     Map as SerdeMap,
     Value as SerdeValue,
 };
 
-fn read_config_files(table: &String) -> SerdeMap<String, SerdeValue> {
-    let mut config = SerdeMap::new();
-    for key in &vec!["table", "datatype", "special", "rule", "constraints"] {
-        config.insert(key.to_string(), SerdeValue::Object({
-            let mut m = SerdeMap::new();
-            m
-        }));
+use sqlx::{
+    sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions},
+    Row,
+};
+
+use std::str::FromStr;
+
+// provides `try_next` for sqlx:
+use futures::TryStreamExt;
+
+use std::collections::HashMap;
+use std::env;
+use std::fs::File;
+use std::process;
+
+use ast::Expression;
+
+lalrpop_mod!(pub cmi_pb_grammar);
+
+use cmi_pb_grammar::StartParser;
+
+type RowMap = SerdeMap<String, SerdeValue>;
+
+lazy_static! {
+    static ref SQLITE_TYPES: Vec<&'static str> = { vec!["text", "integer", "real", "blob"] };
+}
+
+fn read_tsv(path: &String) -> Vec<SerdeMap<String, SerdeValue>> {
+    println!("Opening path: {}", path);
+    let mut rdr = csv::ReaderBuilder::new().delimiter(b'\t').from_reader(
+        File::open(path).unwrap_or_else(|err| {
+            panic!("Unable to open '{}': {}", path, err);
+        }),
+    );
+    println!("Successfully opened path: {}", path);
+
+    let rows: Vec<_> = rdr
+        .deserialize()
+        .map(|result| {
+            let row: RowMap = result.unwrap();
+            row
+        })
+        .collect();
+
+    if rows.len() < 1 {
+        panic!("No rows in {}", path);
     }
 
-    let mut special_table_types = SerdeMap::new();
-    for key in vec!["table", "column", "datatype", "rule"] {
-        special_table_types.insert(key.to_string(), SerdeValue::Object({
-            let mut m = SerdeMap::new();
-            m.insert(String::from("required"), {
-                if key == "rule" {
-                    SerdeValue::Bool(false)
-                } else {
-                    SerdeValue::Bool(true)
+    rows
+}
+
+fn compile_condition(
+    condition_option: Option<&str>,
+    parser: &StartParser,
+    compiled_conditions: &HashMap<String, Box<dyn Fn(&str) -> bool>>,
+) -> (Expression, Box<dyn Fn(&str) -> bool>) {
+    let unquoted_re = Regex::new(r#"^['"](?P<unquoted>.*)['"]$"#).unwrap();
+    match condition_option {
+        // "null" and "not null" conditions do not get assigned a condition but are dealt with
+        // specially. We also return Nulls if the incoming condition_option is None.
+        None | Some("null") | Some("not null") => return (Expression::Null, Box::new(|_| true)),
+        Some(condition) => {
+            let parsed_condition = parser.parse(condition);
+            if let Err(_) = parsed_condition {
+                panic!("ERROR: Could not parse condition: {}", condition);
+            }
+            let parsed_condition = parsed_condition.unwrap();
+            if parsed_condition.len() != 1 {
+                panic!(
+                    "ERROR: Invalid condition: '{}'. Only one condition per column is allowed.",
+                    condition
+                );
+            }
+            let parsed_condition = &parsed_condition[0];
+            match &**parsed_condition {
+                Expression::Function(name, args) => {
+                    if name == "equals" {
+                        if let Expression::Label(label) = &*args[0] {
+                            let label = String::from(unquoted_re.replace(label, "$unquoted"));
+                            return (*parsed_condition.clone(), Box::new(move |x| x == label));
+                        } else {
+                            panic!("ERROR: Invalid condition: {}", condition);
+                        }
+                    } else if vec!["exclude", "match", "search"].contains(&name.as_str()) {
+                        if let Expression::RegexMatch(pattern, flags) = &*args[0] {
+                            let mut pattern =
+                                String::from(unquoted_re.replace(pattern, "$unquoted"));
+                            let mut flags = String::from(flags);
+                            if flags != "" {
+                                flags = format!("(?{})", flags.as_str());
+                            }
+                            match name.as_str() {
+                                "exclude" => {
+                                    pattern = format!("{}{}", flags, pattern);
+                                    let re = Regex::new(pattern.as_str()).unwrap();
+                                    return (
+                                        *parsed_condition.clone(),
+                                        Box::new(move |x| !re.is_match(x)),
+                                    );
+                                }
+                                "match" => {
+                                    pattern = format!("^{}{}$", flags, pattern);
+                                    let re = Regex::new(pattern.as_str()).unwrap();
+                                    return (
+                                        *parsed_condition.clone(),
+                                        Box::new(move |x| re.is_match(x)),
+                                    );
+                                }
+                                "search" => {
+                                    pattern = format!("{}{}", flags, pattern);
+                                    let re = Regex::new(pattern.as_str()).unwrap();
+                                    return (
+                                        *parsed_condition.clone(),
+                                        Box::new(move |x| re.is_match(x)),
+                                    );
+                                }
+                                _ => panic!("Unrecognized function name: {}", name),
+                            };
+                        } else {
+                            panic!(
+                                "Argument to condition: {} is not a regular expression",
+                                condition
+                            );
+                        }
+                    } else if name == "in" {
+                        let mut alternatives: Vec<String> = vec![];
+                        for arg in args {
+                            if let Expression::Label(value) = &**arg {
+                                let value = unquoted_re.replace(value, "$unquoted");
+                                alternatives.push(value.to_string());
+                            } else {
+                                panic!(
+                                    "Programming error: argument: {:?} to function 'in' \
+                                     is not a label",
+                                    arg
+                                );
+                            }
+                        }
+                        return (
+                            *parsed_condition.clone(),
+                            Box::new(move |x| alternatives.contains(&x.to_string())),
+                        );
+                    } else {
+                        panic!("Unrecognized function name: {}", name);
+                    }
                 }
-            });
-            m
-        }));
-    }
-    let special_table_types = special_table_types;
+                // TODO: Implement the rest ...
+                _ => {
+                    panic!("Unrecognized condition: {}", condition);
+                }
+            };
+        }
+    };
+}
 
-    if let Some(SerdeValue::Object(m)) = config.get_mut("special") {
+fn read_config_files(
+    table_table_path: &String,
+    parser: &StartParser,
+) -> (SerdeValue, HashMap<String, Expression>, HashMap<String, Box<dyn Fn(&str) -> bool>>) {
+    let mut config = json!({
+        "table": {},
+        "datatype": {},
+        "special": {},
+        "rule": {},
+        "constraints": {
+            "foreign": {},
+            "unique": {},
+            "primary": {},
+            "tree": {},
+            "under": {},
+        },
+    });
+
+    let special_table_types = json!({
+        "table": {"required": true},
+        "column": {"required": true},
+        "datatype": {"required": true},
+        "rule": {"required": false},
+    });
+    let special_table_types = special_table_types.as_object().unwrap();
+
+    // Initialize the special table entries in the config map:
+    if let Some(SerdeValue::Object(special_config)) = config.get_mut("special") {
         for t in special_table_types.keys() {
-            m.insert(t.to_string(), SerdeValue::Null);
+            special_config.insert(t.to_string(), SerdeValue::Null);
+        }
+    } else {
+        // TODO: There has to be a better way of doing this ...
+        panic!("Programming error: No 'special' key in config map");
+    }
+
+    let path = table_table_path;
+    let rows = read_tsv(path);
+
+    // Load table table
+    for mut row in rows {
+        for column in vec!["table", "path", "type"] {
+            if !row.contains_key(column) || row.get(column) == None {
+                panic!("Missing required column '{}' reading '{}'", column, path);
+            }
+        }
+
+        for column in vec!["table", "path"] {
+            if row.get(column).and_then(|c| c.as_str()).and_then(|c| Some(c.trim())).unwrap() == ""
+            {
+                panic!("Missing required value for '{}' reading '{}'", column, path);
+            }
+        }
+
+        for column in vec!["type"] {
+            if row.get(column).and_then(|c| c.as_str()).and_then(|c| Some(c.trim())).unwrap() == ""
+            {
+                row.remove(&column.to_string());
+            }
+        }
+
+        if let Some(SerdeValue::String(row_type)) = row.get("type") {
+            if row_type == "table" {
+                let row_path = row.get("path").unwrap();
+                if row_path != path {
+                    panic!(
+                        "Special 'table' path '{}' does not match this path '{}'",
+                        row_path, path
+                    );
+                }
+            }
+
+            if special_table_types.contains_key(row_type) {
+                match config.get("special").and_then(|s| s.get(row_type)) {
+                    Some(SerdeValue::Null) => (),
+                    _ => panic!("Multiple tables with type '{}' declared in '{}'", row_type, path),
+                }
+                if let Some(SerdeValue::Object(special_config)) = config.get_mut("special") {
+                    let row_table = row.get("table").and_then(|t| t.as_str()).unwrap();
+                    special_config
+                        .insert(row_type.to_string(), SerdeValue::String(row_table.to_string()));
+                } else {
+                    panic!("Programming error: No 'special' key in config map");
+                }
+            } else {
+                panic!("Unrecognized table type '{}' in '{}'", row_type, path);
+            }
+        }
+
+        row.insert(String::from("column"), SerdeValue::Object(SerdeMap::new()));
+        if let Some(SerdeValue::Object(table_config)) = config.get_mut("table") {
+            let row_table = row.get("table").and_then(|t| t.as_str()).unwrap();
+            table_config.insert(row_table.to_string(), SerdeValue::Object(row));
+        } else {
+            panic!("Programming error: No 'table' key in config map");
         }
     }
 
-    println!("Config: {:#?}", config);
-    config
+    // Check that all the required special tables are present
+    for (table_type, table_spec) in special_table_types.iter() {
+        if let Some(SerdeValue::Bool(true)) = table_spec.get("required") {
+            if let Some(SerdeValue::Null) = config.get("special").and_then(|c| c.get(table_type)) {
+                panic!("Missing required '{}' table in '{}'", table_type, path);
+            }
+        }
+    }
+
+    // Load datatype table
+    let path = String::from(
+        config
+            .get("table")
+            .and_then(|c| {
+                let table_name = config
+                    .get("special")
+                    .and_then(|s| s.get("datatype"))
+                    .and_then(|d| d.as_str())
+                    .unwrap();
+                c.get(table_name.to_string())
+            })
+            .and_then(|t| t.get("path"))
+            .and_then(|p| p.as_str())
+            .unwrap(),
+    );
+
+    let mut parsed_conditions: HashMap<String, Expression> = HashMap::new();
+    let mut compiled_conditions: HashMap<String, Box<dyn Fn(&str) -> bool>> = HashMap::new();
+    let rows = read_tsv(&path);
+    for mut row in rows {
+        for column in vec!["datatype", "parent", "condition", "SQL type"] {
+            if !row.contains_key(column) || row.get(column) == None {
+                panic!("Missing required column '{}' reading '{}'", column, path);
+            }
+        }
+
+        for column in vec!["datatype"] {
+            if row.get(column).and_then(|c| c.as_str()).and_then(|c| Some(c.trim())).unwrap() == ""
+            {
+                panic!("Missing required value for '{}' reading '{}'", column, path);
+            }
+        }
+
+        for column in vec!["parent", "condition", "SQL type"] {
+            if row.get(column).and_then(|c| c.as_str()).and_then(|c| Some(c.trim())).unwrap() == ""
+            {
+                row.remove(&column.to_string());
+            }
+        }
+
+        if let Some(SerdeValue::Object(dt_config)) = config.get_mut("datatype") {
+            let dt_name = row.get("datatype").and_then(|d| d.as_str()).unwrap();
+            let condition = row.get("condition").and_then(|c| c.as_str());
+            let (parsed_condition, compiled_condition) =
+                compile_condition(condition, parser, &compiled_conditions);
+            if let Some(c) = condition {
+                parsed_conditions.insert(dt_name.to_string(), parsed_condition);
+                compiled_conditions.insert(dt_name.to_string(), compiled_condition);
+            }
+            //let mut row = row.clone();
+            dt_config.insert(dt_name.to_string(), SerdeValue::Object(row));
+        } else {
+            panic!("Programming error: No 'datatype' key in config map")
+        }
+    }
+
+    for dt in vec!["text", "empty", "line", "word"] {
+        if !config
+            .get("datatype")
+            .and_then(|d| d.as_object())
+            .and_then(|d| Some(d.contains_key(dt)))
+            .unwrap()
+        {
+            panic!("Missing required datatype: '{}'", dt);
+        }
+    }
+
+    // Load column table
+    let table_name = String::from(
+        config.get("special").and_then(|s| s.get("column")).and_then(|c| c.as_str()).unwrap(),
+    );
+    let path = String::from(
+        config
+            .get("table")
+            .and_then(|c| c.get(table_name))
+            .and_then(|t| t.get("path"))
+            .and_then(|p| p.as_str())
+            .unwrap(),
+    );
+    let rows = read_tsv(&path);
+    for mut row in rows {
+        for column in vec!["table", "column", "nulltype", "datatype"] {
+            if !row.contains_key(column) || row.get(column) == None {
+                panic!("Missing required column '{}' reading '{}'", column, path);
+            }
+        }
+
+        for column in vec!["table", "column", "datatype"] {
+            if row.get(column).and_then(|c| c.as_str()).and_then(|c| Some(c.trim())).unwrap() == ""
+            {
+                panic!("Missing required value for '{}' reading '{}'", column, path);
+            }
+        }
+
+        for column in vec!["nulltype"] {
+            if row.get(column).and_then(|c| c.as_str()).and_then(|c| Some(c.trim())).unwrap() == ""
+            {
+                row.remove(&column.to_string());
+            }
+        }
+
+        let row_table = row.get("table").and_then(|t| t.as_str()).unwrap();
+        if !config
+            .get("table")
+            .and_then(|c| c.as_object())
+            .and_then(|c| Some(c.contains_key(row_table)))
+            .unwrap()
+        {
+            panic!("Undefined table '{}' reading '{}'", row_table, path);
+        }
+
+        if let Some(SerdeValue::String(nulltype)) = row.get("nulltype") {
+            if !config
+                .get("datatype")
+                .and_then(|d| d.as_object())
+                .and_then(|d| Some(d.contains_key(nulltype)))
+                .unwrap()
+            {
+                panic!("Undefined nulltype '{}' reading '{}'", nulltype, path);
+            }
+        }
+
+        let datatype = row.get("datatype").and_then(|d| d.as_str()).unwrap();
+        if !config
+            .get("datatype")
+            .and_then(|d| d.as_object())
+            .and_then(|d| Some(d.contains_key(datatype)))
+            .unwrap()
+        {
+            panic!("Undefined datatype '{}' reading '{}'", datatype, path);
+        }
+
+        let structure = row.get("structure").and_then(|s| s.as_str()).unwrap();
+        if structure != "" {
+            let parsed_structure = parser.parse(structure);
+            if let Err(e) = parsed_structure {
+                panic!(
+                    "While parsing structure: '{}' for column: '{}.{}' got error:\n{}",
+                    structure,
+                    row_table,
+                    row.get("table").and_then(|t| t.as_str()).unwrap(),
+                    e
+                );
+            }
+            let parsed_structure = parsed_structure.unwrap();
+            let parsed_structure = &parsed_structure[0];
+            parsed_conditions.insert(structure.to_string(), *parsed_structure.clone());
+        }
+
+        let row_table = row.get("table").and_then(|t| t.as_str()).unwrap();
+        let column_name = row.get("column").and_then(|c| c.as_str()).unwrap();
+        if let Some(SerdeValue::Object(columns_config)) = config
+            .get_mut("table")
+            .and_then(|t| t.get_mut(row_table))
+            .and_then(|t| t.get_mut("column"))
+        {
+            columns_config.insert(column_name.to_string(), SerdeValue::Object(row));
+        } else {
+            panic!(
+                "Programming error: Unable to find column config for column {}.{}",
+                row_table, column_name
+            );
+        }
+    }
+
+    /*
+
+    ==========================================================================
+    // Note: This code is mostly working, except for the when/then conditions.
+    ==========================================================================
+
+    // Load rule table if it exists
+    if let Some(SerdeValue::String(table_name)) = config.get("special").and_then(|s| s.get("rule"))
+    {
+        let path = String::from(
+            config
+                .get("table")
+                .and_then(|c| c.get(table_name))
+                .and_then(|t| t.get("path"))
+                .and_then(|p| p.as_str())
+                .unwrap(),
+        );
+        let rows = read_tsv(&path);
+        for row in rows {
+            for column in vec![
+                "table",
+                "when column",
+                "when condition",
+                "then column",
+                "then condition",
+                "level",
+                "description",
+            ] {
+                if !row.contains_key(column) || row.get(column) == None {
+                    panic!("Missing required column '{}' reading '{}'", column, path);
+                }
+                if row.get(column).and_then(|c| c.as_str()).and_then(|c| Some(c.trim())).unwrap()
+                    == ""
+                {
+                    panic!("Missing required value for '{}' reading '{}'", column, path);
+                }
+            }
+
+            let row_table = row.get("table").and_then(|t| t.as_str()).unwrap();
+            if !config
+                .get("table")
+                .and_then(|c| c.as_object())
+                .and_then(|c| Some(c.contains_key(row_table)))
+                .unwrap()
+            {
+                panic!("Undefined table '{}' reading '{}'", row_table, path);
+            }
+
+            for column in vec!["when column", "then column"] {
+                let row_column = row.get(column).and_then(|c| c.as_str()).unwrap();
+                if !config
+                    .get("table")
+                    .and_then(|c| c.get(row_table))
+                    .and_then(|t| t.get("column"))
+                    .and_then(|c| c.as_object())
+                    .and_then(|c| Some(c.contains_key(row_column)))
+                    .unwrap()
+                {
+                    panic!("Undefined column '{}.{}' reading '{}'", row_table, row_column, path);
+                }
+            }
+
+            for column in vec!["when condition", "then condition"] {
+                let condition = row.get(column).and_then(|c| c.as_str());
+                if let Some(c) = condition {
+                    let (parsed_condition, compiled_condition) =
+                        compile_condition(condition, parser, &compiled_conditions);
+                    parsed_conditions.insert(c.to_string(), parsed_condition);
+                    compiled_conditions.insert(c.to_string(), compiled_condition);
+                }
+            }
+
+            // Add the rule specified in the given row to the list of rules associated with the
+            // value of the when column:
+            let row_when_column = row.get("when column").and_then(|c| c.as_str()).unwrap();
+            if let Some(SerdeValue::Object(rule_config)) = config.get_mut("rule") {
+                if !rule_config.contains_key(row_table) {
+                    rule_config
+                        .insert(String::from(row_table), SerdeValue::Object(SerdeMap::new()));
+                }
+            } else {
+                panic!("Programming error: No 'rule' key in config.");
+            }
+
+            if let Some(SerdeValue::Object(rule_config_for_table)) =
+                config.get_mut("rule").and_then(|r| r.get_mut(row_table))
+            {
+                if !rule_config_for_table.contains_key(row_when_column) {
+                    rule_config_for_table
+                        .insert(String::from(row_when_column), SerdeValue::Array(vec![]));
+                }
+                if let Some(SerdeValue::Array(rule_config_for_column)) =
+                    rule_config_for_table.get_mut(&row_when_column.to_string())
+                {
+                    rule_config_for_column.push(SerdeValue::Object(row));
+                } else {
+                    panic!(
+                        "Programming error: No '{}' key in rule config for table '{}'",
+                        row_when_column, row_table
+                    );
+                }
+            } else {
+                panic!("Programming error: No 'when column' key in rule config.")
+            }
+        }
+    }
+    */
+
+    //println!("Config: {:#?}", config);
+    //println!("Parsed conditions:\n{:#?}", parsed_conditions);
+    //println!("==================================================");
+    //println!("Compiled conditions:\n{:#?}", compiled_conditions);
+    (config, parsed_conditions, compiled_conditions)
 }
 
-fn main() {
+fn configure_db(config: &mut SerdeValue, parser: &StartParser) {
+    // We need to clone the datatype part of the config because rust's borrow checker prefers it
+    // that way.
+    let dt_config = config.clone();
+    let dt_config = dt_config.get("datatype").and_then(|d| d.as_object()).unwrap();
+    let mut tables_config = config.get_mut("table").and_then(|t| t.as_object_mut()).unwrap();
+    let table_names: Vec<String> = tables_config.keys().cloned().collect();
+    for table_name in table_names {
+        //println!("TABLE: {}", table_name);
+        let mut path = tables_config
+            .get(&table_name)
+            .and_then(|r| r.get("path"))
+            .and_then(|p| Some(p.to_string()))
+            .unwrap();
+        // Remove enclosing quotes that are added as a side-effect of the to_string() conversion
+        path = path.split_off(1);
+        path.truncate(path.len() - 1);
+        //println!("PATH: {:?}", path);
+        let mut rdr = csv::ReaderBuilder::new().has_headers(false).delimiter(b'\t').from_reader(
+            File::open(path.clone()).unwrap_or_else(|err| {
+                panic!("Unable to open '{}': {}", path.clone(), err);
+            }),
+        );
+
+        // Get the columns that have been previously configured:
+        let defined_columns: Vec<String> = tables_config
+            .get(&table_name)
+            .and_then(|r| r.get("column"))
+            .and_then(|v| v.as_object())
+            .and_then(|o| Some(o.keys()))
+            .and_then(|k| Some(k.cloned()))
+            .and_then(|k| Some(k.collect()))
+            .unwrap();
+
+        // Get the actual columns from the data itself:
+        let mut iter = rdr.records();
+        let actual_columns;
+        if let Some(result) = iter.next() {
+            actual_columns = result.unwrap();
+        } else {
+            panic!("No rows in '{}'", path);
+        }
+
+        for column_name in &actual_columns {
+            if !defined_columns.contains(&column_name.to_string()) {
+                let mut cmap: SerdeMap<String, SerdeValue> = SerdeMap::new();
+                cmap.insert(String::from("table"), SerdeValue::String(table_name.to_string()));
+                cmap.insert(String::from("column"), SerdeValue::String(column_name.to_string()));
+                cmap.insert(String::from("nulltype"), SerdeValue::String(String::from("empty")));
+                cmap.insert(String::from("datatype"), SerdeValue::String(String::from("text")));
+                let column = SerdeValue::Object(cmap);
+                // Now we need to do: config["table"][table_name]["column"][column_name] = cmap
+                //println!("COLUMN: {}", column_name);
+                tables_config
+                    .get_mut(&table_name)
+                    .and_then(|r| r.get_mut("column"))
+                    .and_then(|v| v.as_object_mut())
+                    .and_then(|o| o.insert(column_name.to_string(), column));
+            }
+        }
+        for table in vec![table_name.to_string(), format!("{}_conflict", table_name)] {
+            let (table_sql, table_constraints) =
+                create_table(tables_config, &dt_config, &parser, &table);
+            if !table.ends_with("_conflict") {
+                // YOU ARE HERE
+                // ...
+            }
+        }
+    }
+}
+
+fn get_SQL_type(dt_config: &SerdeMap<String, SerdeValue>, datatype: &String) -> Option<String> {
+    //println!("DATATYPE: {}", datatype);
+    if !dt_config.contains_key(datatype) {
+        return None;
+    }
+
+    if let Some(sql_type) = dt_config.get(datatype).and_then(|d| d.get("SQL type")) {
+        //println!("RETURNING: {:?}", sql_type);
+        return Some(sql_type.to_string());
+    }
+
+    let mut parent_datatype = dt_config
+        .get(datatype)
+        .and_then(|d| d.get("parent"))
+        .and_then(|s| Some(s.to_string()))
+        .unwrap();
+
+    // Remove enclosing quotes that are added as a side-effect of the to_string() conversion
+    parent_datatype = parent_datatype.split_off(1);
+    parent_datatype.truncate(parent_datatype.len() - 1);
+
+    //println!("PARENT DATATYPE: {:?}", parent_datatype);
+
+    return get_SQL_type(dt_config, &parent_datatype);
+}
+
+fn create_table(
+    tables_config: &mut SerdeMap<String, SerdeValue>,
+    dt_config: &SerdeMap<String, SerdeValue>,
+    parser: &StartParser,
+    table_name: &String,
+) -> (String, SerdeValue) {
+    let mut output = vec![
+        format!(r#"DROP TABLE IF EXISTS "{}";"#, table_name),
+        format!(r#"CREATE TABLE "{}" ("#, table_name),
+        String::from(r#"  "row_number" INTEGER,"#),
+    ];
+
+    let normal_table_name;
+    if let Some(s) = table_name.strip_suffix("_conflict") {
+        normal_table_name = String::from(s);
+    } else {
+        normal_table_name = table_name.to_string();
+    }
+
+    let columns = tables_config
+        .get(normal_table_name.as_str())
+        .and_then(|c| c.as_object())
+        .and_then(|o| o.get("column"))
+        .and_then(|c| c.as_object())
+        .unwrap();
+
+    let mut table_constraints = json!({
+        "foreign": [],
+        "unique": [],
+        "primary": [],
+        "tree": [],
+        "under": [],
+    });
+
+    let colvals = columns.values();
+    let c = colvals.len();
+    let mut r = 0;
+    for row in colvals {
+        r += 1;
+        let mut sql_type = get_SQL_type(
+            dt_config,
+            &row.get("datatype")
+                .and_then(|d| d.as_str())
+                .and_then(|s| Some(s.to_string()))
+                .unwrap(),
+        )
+        .and_then(|mut s| {
+            // Remove enclosing quotes that are added as a side-effect of the to_string()
+            // conversion
+            s = s.split_off(1);
+            s.truncate(s.len() - 1);
+            Some(s)
+        });
+
+        if let None = sql_type {
+            panic!("Missing SQL type for {}", row.get("datatype").unwrap());
+        }
+        let sql_type = sql_type.unwrap();
+        if !SQLITE_TYPES.contains(&sql_type.to_lowercase().as_str()) {
+            panic!("Unrecognized SQL type '{}' for {}", sql_type, row.get("datatype").unwrap());
+        }
+
+        let column_name = row.get("column").and_then(|s| s.as_str()).unwrap();
+        let mut line = format!(r#"  "{}" {}"#, column_name, sql_type);
+        let structure = row.get("structure").and_then(|s| s.as_str());
+        if let Some(structure) = structure {
+            if structure != "" && !table_name.ends_with("_conflict") {
+                let parsed_structure = parser.parse(structure).unwrap();
+                for expression in parsed_structure {
+                    match *expression {
+                        Expression::Label(value) if value == "primary" => {
+                            line.push_str(" PRIMARY KEY");
+                            let mut primary_keys = table_constraints
+                                .get_mut("primary")
+                                .and_then(|v| v.as_array_mut())
+                                .unwrap();
+                            primary_keys.push(SerdeValue::String(column_name.to_string()));
+                        }
+                        Expression::Label(value) if value == "unique" => {
+                            line.push_str(" UNIQUE");
+                            let mut unique_constraints = table_constraints
+                                .get_mut("unique")
+                                .and_then(|v| v.as_array_mut())
+                                .unwrap();
+                            unique_constraints.push(SerdeValue::String(column_name.to_string()));
+                        }
+                        Expression::Function(name, args) if name == "from" => {
+                            if args.len() != 1 {
+                                panic!("Invalid foreign key: {} for: {}", structure, table_name);
+                            }
+                            match &*args[0] {
+                                Expression::Field(ftable, fcolumn) => {
+                                    let mut foreign_keys = table_constraints
+                                        .get_mut("foreign")
+                                        .and_then(|v| v.as_array_mut())
+                                        .unwrap();
+                                    let foreign_key = json!({
+                                        "column": column_name,
+                                        "ftable": ftable,
+                                        "fcolumn": fcolumn,
+                                    });
+                                    foreign_keys.push(foreign_key);
+                                }
+                                _ => {
+                                    panic!("Invalid foreign key: {} for: {}", structure, table_name)
+                                }
+                            };
+                        }
+                        Expression::Function(name, args) if name == "tree" => {
+                            // TODO: to be implemented
+                        }
+                        Expression::Function(name, args) if name == "under" => {
+                            // TODO: to be implemented
+                        }
+                        _ => panic!(
+                            "Unrecognized structure: {} for {}.{}",
+                            structure, table_name, column_name
+                        ),
+                    };
+                }
+            }
+        }
+        line.push_str(",");
+        output.push(line);
+        let metacol = format!("{}_meta", column_name);
+        let mut line = format!(r#"  "{}" TEXT"#, metacol);
+        if r >= c
+            && table_constraints
+                .get("foreign")
+                .and_then(|v| v.as_array())
+                .and_then(|v| Some(v.is_empty()))
+                .unwrap()
+        {
+            line.push_str(",");
+        }
+        output.push(line);
+    }
+
+    let foreign_keys = table_constraints.get("foreign").and_then(|v| v.as_array()).unwrap();
+    let num_fkeys = foreign_keys.len();
+    for (i, fkey) in foreign_keys.iter().enumerate() {
+        output.push(format!(
+            r#"  FOREIGN KEY ("{}") REFERENCES "{}"("{}"){}"#,
+            fkey.get("column")
+                .and_then(|s| Some(s.to_string()))
+                .and_then(|mut s| {
+                    // Remove enclosing quotes that are added as a side-effect of the to_string()
+                    // conversion
+                    s = s.split_off(1);
+                    s.truncate(s.len() - 1);
+                    Some(s)
+                })
+                .unwrap(),
+            fkey.get("ftable")
+                .and_then(|s| Some(s.to_string()))
+                .and_then(|mut s| {
+                    // Remove enclosing quotes that are added as a side-effect of the to_string()
+                    // conversion
+                    s = s.split_off(1);
+                    s.truncate(s.len() - 1);
+                    Some(s)
+                })
+                .unwrap(),
+            fkey.get("fcolumn")
+                .and_then(|s| Some(s.to_string()))
+                .and_then(|mut s| {
+                    // Remove enclosing quotes that are added as a side-effect of the to_string()
+                    // conversion
+                    s = s.split_off(1);
+                    s.truncate(s.len() - 1);
+                    Some(s)
+                })
+                .unwrap(),
+            if i < (num_fkeys - 1) { "," } else { "" }
+        ));
+    }
+    output.push(String::from(");"));
+    // TODO: Create unique indexes corresponding to tree constraints here:
+    // ...
+
+    // Create a unique index on row_number:
+    output.push(format!(
+        r#"CREATE UNIQUE INDEX "{}_row_number_idx" ON "{}"("row_number");"#,
+        table_name, table_name
+    ));
+
+    let output = String::from(output.join("\n"));
+    return (output, table_constraints);
+}
+
+async fn configure_and_load_db(
+    config: &mut SerdeValue,
+    pool: &SqlitePool,
+    parser: &StartParser,
+    parsed_conditions: &HashMap<String, Expression>,
+    compiled_conditions: &HashMap<String, Box<dyn Fn(&str) -> bool>>,
+) -> Result<(), sqlx::Error> {
+    configure_db(config, parser);
+
+    Ok(())
+}
+
+#[async_std::main]
+async fn main() -> Result<(), sqlx::Error> {
     let args: Vec<String> = env::args().collect();
     if args.len() != 3 {
         println!("Usage: cmi-pb-terminology-rs table db_dir");
@@ -49,7 +864,13 @@ fn main() {
     }
     let table = &args[1];
     let db_dir = &args[2];
-    println!("Arguments passed: table: {}, db_dir: {}", table, db_dir);
+    let parser = StartParser::new();
+    let (mut config, parsed_conditions, compiled_conditions) = read_config_files(table, &parser);
 
-    let config = read_config_files(table);
+    let connection_options =
+        SqliteConnectOptions::from_str("sqlite://build/cmi-pb.db")?.create_if_missing(true);
+    let pool = SqlitePoolOptions::new().max_connections(5).connect_with(connection_options).await?;
+    sqlx::query("PRAGMA foreign_keys = ON").execute(&pool).await?;
+    configure_and_load_db(&mut config, &pool, &parser, &parsed_conditions, &compiled_conditions)
+        .await
 }
