@@ -176,7 +176,7 @@ fn read_config_files(
         //"table": {},
         //"datatype": {},
         //"special": {},
-        "rule": {},
+        //"rule": {},
         "constraints": {
             "foreign": {},
             "unique": {},
@@ -189,6 +189,7 @@ fn read_config_files(
     let mut specials_config: SerdeMap<String, SerdeValue> = SerdeMap::new();
     let mut tables_config: SerdeMap<String, SerdeValue> = SerdeMap::new();
     let mut datatypes_config: SerdeMap<String, SerdeValue> = SerdeMap::new();
+    let mut rules_config: SerdeMap<String, SerdeValue> = SerdeMap::new();
 
     let special_table_types = json!({
         "table": {"required": true},
@@ -449,26 +450,19 @@ fn read_config_files(
             // Add the rule specified in the given row to the list of rules associated with the
             // value of the when column:
             let row_when_column = row.get("when column").and_then(|c| c.as_str()).unwrap();
-            if let Some(SerdeValue::Object(rule_config)) = config.get_mut("rule") {
-                if !rule_config.contains_key(row_table) {
-                    rule_config
-                        .insert(String::from(row_table), SerdeValue::Object(SerdeMap::new()));
-                }
-            } else {
-                panic!("Programming error: No 'rule' key in config.");
+            if !rules_config.contains_key(row_table) {
+                rules_config.insert(String::from(row_table), SerdeValue::Object(SerdeMap::new()));
             }
 
-            if let Some(SerdeValue::Object(rule_config_for_table)) =
-                config.get_mut("rule").and_then(|r| r.get_mut(row_table))
-            {
-                if !rule_config_for_table.contains_key(row_when_column) {
-                    rule_config_for_table
+            if let Some(SerdeValue::Object(table_rule_config)) = rules_config.get_mut(row_table) {
+                if !table_rule_config.contains_key(row_when_column) {
+                    table_rule_config
                         .insert(String::from(row_when_column), SerdeValue::Array(vec![]));
                 }
-                if let Some(SerdeValue::Array(rule_config_for_column)) =
-                    rule_config_for_table.get_mut(&row_when_column.to_string())
+                if let Some(SerdeValue::Array(column_rule_config)) =
+                    table_rule_config.get_mut(&row_when_column.to_string())
                 {
-                    rule_config_for_column.push(SerdeValue::Object(row));
+                    column_rule_config.push(SerdeValue::Object(row));
                 } else {
                     panic!(
                         "Programming error: No '{}' key in rule config for table '{}'",
