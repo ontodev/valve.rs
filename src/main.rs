@@ -484,7 +484,15 @@ fn configure_db(
     datatypes_config: &mut SerdeMap<String, SerdeValue>,
     rules_config: &mut SerdeMap<String, SerdeValue>,
     parser: &StartParser,
-) {
+) -> SerdeMap<String, SerdeValue> {
+    // This is what we will return:
+    let mut constraints_config: SerdeMap<String, SerdeValue> = SerdeMap::new();
+    constraints_config.insert(String::from("foreign"), SerdeValue::Object(SerdeMap::new()));
+    constraints_config.insert(String::from("unique"), SerdeValue::Object(SerdeMap::new()));
+    constraints_config.insert(String::from("primary"), SerdeValue::Object(SerdeMap::new()));
+    constraints_config.insert(String::from("tree"), SerdeValue::Object(SerdeMap::new()));
+    constraints_config.insert(String::from("under"), SerdeValue::Object(SerdeMap::new()));
+
     let table_names: Vec<String> = tables_config.keys().cloned().collect();
     for table_name in table_names {
         //println!("TABLE: {}", table_name);
@@ -538,15 +546,24 @@ fn configure_db(
                     .and_then(|o| o.insert(column_name.to_string(), column));
             }
         }
+
         for table in vec![table_name.to_string(), format!("{}_conflict", table_name)] {
             let (table_sql, table_constraints) =
                 create_table(tables_config, datatypes_config, parser, &table);
             if !table.ends_with("_conflict") {
-                // YOU ARE HERE
-                // ...
+                for constraint_type in vec!["foreign", "unique", "primary", "tree", "under"] {
+                    let table_constraints = table_constraints.get(constraint_type).unwrap().clone();
+                    constraints_config
+                        .get_mut(constraint_type)
+                        .and_then(|o| o.as_object_mut())
+                        .and_then(|o| o.insert(table_name.to_string(), table_constraints));
+                }
             }
+            // YOU ARE HERE
         }
     }
+
+    return constraints_config;
 }
 
 fn get_SQL_type(dt_config: &SerdeMap<String, SerdeValue>, datatype: &String) -> Option<String> {
@@ -775,7 +792,9 @@ async fn configure_and_load_db(
     parsed_conditions: &HashMap<String, Expression>,
     compiled_conditions: &HashMap<String, Box<dyn Fn(&str) -> bool>>,
 ) -> Result<(), sqlx::Error> {
-    configure_db(specials_config, tables_config, datatypes_config, rules_config, parser);
+    let constraints_config =
+        configure_db(specials_config, tables_config, datatypes_config, rules_config, parser);
+    //println!("{:#?}", constraints_config);
 
     Ok(())
 }
