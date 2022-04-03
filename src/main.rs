@@ -175,7 +175,7 @@ fn read_config_files(
     let mut config = json!({
         "table": {},
         "datatype": {},
-        "special": {},
+        //"special": {},
         "rule": {},
         "constraints": {
             "foreign": {},
@@ -186,6 +186,8 @@ fn read_config_files(
         },
     });
 
+    let mut special_config: SerdeMap<String, SerdeValue> = SerdeMap::new();
+
     let special_table_types = json!({
         "table": {"required": true},
         "column": {"required": true},
@@ -195,13 +197,8 @@ fn read_config_files(
     let special_table_types = special_table_types.as_object().unwrap();
 
     // Initialize the special table entries in the config map:
-    if let Some(SerdeValue::Object(special_config)) = config.get_mut("special") {
-        for t in special_table_types.keys() {
-            special_config.insert(t.to_string(), SerdeValue::Null);
-        }
-    } else {
-        // TODO: There has to be a better way of doing this ...
-        panic!("Programming error: No 'special' key in config map");
+    for t in special_table_types.keys() {
+        special_config.insert(t.to_string(), SerdeValue::Null);
     }
 
     let path = table_table_path;
@@ -241,41 +238,35 @@ fn read_config_files(
             }
 
             if special_table_types.contains_key(row_type) {
-                match config.get("special").and_then(|s| s.get(row_type)) {
+                match special_config.get(row_type) {
                     Some(SerdeValue::Null) => (),
                     _ => panic!("Multiple tables with type '{}' declared in '{}'", row_type, path),
                 }
-                if let Some(SerdeValue::Object(special_config)) = config.get_mut("special") {
-                    let row_table = row.get("table").and_then(|t| t.as_str()).unwrap();
-                    special_config
-                        .insert(row_type.to_string(), SerdeValue::String(row_table.to_string()));
-                } else {
-                    panic!("Programming error: No 'special' key in config map");
-                }
+                let row_table = row.get("table").and_then(|t| t.as_str()).unwrap();
+                special_config
+                    .insert(row_type.to_string(), SerdeValue::String(row_table.to_string()));
             } else {
                 panic!("Unrecognized table type '{}' in '{}'", row_type, path);
             }
         }
 
         row.insert(String::from("column"), SerdeValue::Object(SerdeMap::new()));
-        if let Some(SerdeValue::Object(table_config)) = config.get_mut("table") {
-            let row_table = row.get("table").and_then(|t| t.as_str()).unwrap();
-            table_config.insert(row_table.to_string(), SerdeValue::Object(row));
-        } else {
-            panic!("Programming error: No 'table' key in config map");
-        }
+        let row_table = row.get("table").and_then(|t| t.as_str()).unwrap();
+        // UNCOMMENT THIS:
+        //tables_config.insert(row_table.to_string(), SerdeValue::Object(row));
     }
 
     // Check that all the required special tables are present
     for (table_type, table_spec) in special_table_types.iter() {
         if let Some(SerdeValue::Bool(true)) = table_spec.get("required") {
-            if let Some(SerdeValue::Null) = config.get("special").and_then(|c| c.get(table_type)) {
+            if let Some(SerdeValue::Null) = special_config.get(table_type) {
                 panic!("Missing required '{}' table in '{}'", table_type, path);
             }
         }
     }
 
     // Load datatype table
+    /*
     let path = String::from(
         config
             .get("table")
@@ -291,7 +282,6 @@ fn read_config_files(
             .and_then(|p| p.as_str())
             .unwrap(),
     );
-
     let mut parsed_conditions: HashMap<String, Expression> = HashMap::new();
     let mut compiled_conditions: HashMap<String, Box<dyn Fn(&str) -> bool>> = HashMap::new();
     let rows = read_tsv(&path);
@@ -342,11 +332,15 @@ fn read_config_files(
             panic!("Missing required datatype: '{}'", dt);
         }
     }
+    */
 
+    /*
     // Load column table
     let table_name = String::from(
+        // HERE:
         config.get("special").and_then(|s| s.get("column")).and_then(|c| c.as_str()).unwrap(),
     );
+    // HERE:
     let path = String::from(
         config
             .get("table")
@@ -378,6 +372,7 @@ fn read_config_files(
         }
 
         let row_table = row.get("table").and_then(|t| t.as_str()).unwrap();
+        // HERE:
         if !config
             .get("table")
             .and_then(|c| c.as_object())
@@ -427,6 +422,7 @@ fn read_config_files(
 
         let row_table = row.get("table").and_then(|t| t.as_str()).unwrap();
         let column_name = row.get("column").and_then(|c| c.as_str()).unwrap();
+        // HERE
         if let Some(SerdeValue::Object(columns_config)) = config
             .get_mut("table")
             .and_then(|t| t.get_mut(row_table))
@@ -440,16 +436,14 @@ fn read_config_files(
             );
         }
     }
+    */
 
     /*
-
-    ==========================================================================
-    // Note: This code is mostly working, except for the when/then conditions.
-    ==========================================================================
 
     // Load rule table if it exists
     if let Some(SerdeValue::String(table_name)) = config.get("special").and_then(|s| s.get("rule"))
     {
+        // HERE:
         let path = String::from(
             config
                 .get("table")
@@ -480,6 +474,7 @@ fn read_config_files(
             }
 
             let row_table = row.get("table").and_then(|t| t.as_str()).unwrap();
+            // HERE
             if !config
                 .get("table")
                 .and_then(|c| c.as_object())
@@ -491,6 +486,7 @@ fn read_config_files(
 
             for column in vec!["when column", "then column"] {
                 let row_column = row.get(column).and_then(|c| c.as_str()).unwrap();
+                // HERE:
                 if !config
                     .get("table")
                     .and_then(|c| c.get(row_table))
@@ -503,6 +499,7 @@ fn read_config_files(
                 }
             }
 
+            // TODO: Fix the problems here.
             for column in vec!["when condition", "then condition"] {
                 let condition = row.get(column).and_then(|c| c.as_str());
                 if let Some(c) = condition {
@@ -549,10 +546,8 @@ fn read_config_files(
     }
     */
 
-    //println!("Config: {:#?}", config);
-    //println!("Parsed conditions:\n{:#?}", parsed_conditions);
-    //println!("==================================================");
-    //println!("Compiled conditions:\n{:#?}", compiled_conditions);
+    let mut parsed_conditions: HashMap<String, Expression> = HashMap::new();
+    let mut compiled_conditions: HashMap<String, Box<dyn Fn(&str) -> bool>> = HashMap::new();
     (config, parsed_conditions, compiled_conditions)
 }
 
@@ -561,6 +556,7 @@ fn configure_db(config: &mut SerdeValue, parser: &StartParser) {
     // that way.
     let dt_config = config.clone();
     let dt_config = dt_config.get("datatype").and_then(|d| d.as_object()).unwrap();
+    // HERE:
     let mut tables_config = config.get_mut("table").and_then(|t| t.as_object_mut()).unwrap();
     let table_names: Vec<String> = tables_config.keys().cloned().collect();
     for table_name in table_names {
