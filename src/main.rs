@@ -478,13 +478,13 @@ fn read_config_files(
     )
 }
 
-fn configure_db(config: &mut SerdeValue, parser: &StartParser) {
-    // We need to clone the datatype part of the config because rust's borrow checker prefers it
-    // that way.
-    let dt_config = config.clone();
-    let dt_config = dt_config.get("datatype").and_then(|d| d.as_object()).unwrap();
-    // HERE:
-    let mut tables_config = config.get_mut("table").and_then(|t| t.as_object_mut()).unwrap();
+fn configure_db(
+    specials_config: &mut SerdeMap<String, SerdeValue>,
+    tables_config: &mut SerdeMap<String, SerdeValue>,
+    datatypes_config: &mut SerdeMap<String, SerdeValue>,
+    rules_config: &mut SerdeMap<String, SerdeValue>,
+    parser: &StartParser,
+) {
     let table_names: Vec<String> = tables_config.keys().cloned().collect();
     for table_name in table_names {
         //println!("TABLE: {}", table_name);
@@ -530,7 +530,6 @@ fn configure_db(config: &mut SerdeValue, parser: &StartParser) {
                 cmap.insert(String::from("nulltype"), SerdeValue::String(String::from("empty")));
                 cmap.insert(String::from("datatype"), SerdeValue::String(String::from("text")));
                 let column = SerdeValue::Object(cmap);
-                // Now we need to do: config["table"][table_name]["column"][column_name] = cmap
                 //println!("COLUMN: {}", column_name);
                 tables_config
                     .get_mut(&table_name)
@@ -541,7 +540,7 @@ fn configure_db(config: &mut SerdeValue, parser: &StartParser) {
         }
         for table in vec![table_name.to_string(), format!("{}_conflict", table_name)] {
             let (table_sql, table_constraints) =
-                create_table(tables_config, &dt_config, &parser, &table);
+                create_table(tables_config, datatypes_config, parser, &table);
             if !table.ends_with("_conflict") {
                 // YOU ARE HERE
                 // ...
@@ -578,7 +577,7 @@ fn get_SQL_type(dt_config: &SerdeMap<String, SerdeValue>, datatype: &String) -> 
 
 fn create_table(
     tables_config: &mut SerdeMap<String, SerdeValue>,
-    dt_config: &SerdeMap<String, SerdeValue>,
+    datatypes_config: &mut SerdeMap<String, SerdeValue>,
     parser: &StartParser,
     table_name: &String,
 ) -> (String, SerdeValue) {
@@ -616,7 +615,7 @@ fn create_table(
     for row in colvals {
         r += 1;
         let mut sql_type = get_SQL_type(
-            dt_config,
+            datatypes_config,
             &row.get("datatype")
                 .and_then(|d| d.as_str())
                 .and_then(|s| Some(s.to_string()))
@@ -753,7 +752,7 @@ fn create_table(
         ));
     }
     output.push(String::from(");"));
-    // TODO: Create unique indexes corresponding to tree constraints here:
+    // TODO: Create unique indexes corresponding to tree constraints here.
     // ...
 
     // Create a unique index on row_number:
@@ -767,13 +766,16 @@ fn create_table(
 }
 
 async fn configure_and_load_db(
-    config: &mut SerdeValue,
+    specials_config: &mut SerdeMap<String, SerdeValue>,
+    tables_config: &mut SerdeMap<String, SerdeValue>,
+    datatypes_config: &mut SerdeMap<String, SerdeValue>,
+    rules_config: &mut SerdeMap<String, SerdeValue>,
     pool: &SqlitePool,
     parser: &StartParser,
     parsed_conditions: &HashMap<String, Expression>,
     compiled_conditions: &HashMap<String, Box<dyn Fn(&str) -> bool>>,
 ) -> Result<(), sqlx::Error> {
-    configure_db(config, parser);
+    configure_db(specials_config, tables_config, datatypes_config, rules_config, parser);
 
     Ok(())
 }
@@ -802,8 +804,15 @@ async fn main() -> Result<(), sqlx::Error> {
     let pool = SqlitePoolOptions::new().max_connections(5).connect_with(connection_options).await?;
     sqlx::query("PRAGMA foreign_keys = ON").execute(&pool).await?;
 
-    println!("SVABOODIA!!");
-    let mut config = json!({}); // REMOVE LATER
-    configure_and_load_db(&mut config, &pool, &parser, &parsed_conditions, &compiled_conditions)
-        .await
+    configure_and_load_db(
+        &mut specials_config,
+        &mut tables_config,
+        &mut datatypes_config,
+        &mut rules_config,
+        &pool,
+        &parser,
+        &parsed_conditions,
+        &compiled_conditions,
+    )
+    .await
 }
