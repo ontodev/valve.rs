@@ -320,6 +320,7 @@ dependencies = [
  "async-std",
  "csv",
  "futures",
+ "itertools",
  "lalrpop",
  "lalrpop-util",
  "lazy_static",
