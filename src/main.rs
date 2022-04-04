@@ -41,13 +41,13 @@ lazy_static! {
 }
 
 fn read_tsv(path: &String) -> Vec<SerdeMap<String, SerdeValue>> {
-    println!("Opening path: {}", path);
+    //eprintln!("Opening path: {}", path);
     let mut rdr = csv::ReaderBuilder::new().delimiter(b'\t').from_reader(
         File::open(path).unwrap_or_else(|err| {
             panic!("Unable to open '{}': {}", path, err);
         }),
     );
-    println!("Successfully opened path: {}", path);
+    //eprintln!("Successfully opened path: {}", path);
 
     let rows: Vec<_> = rdr
         .deserialize()
@@ -484,7 +484,13 @@ fn configure_db(
     datatypes_config: &mut SerdeMap<String, SerdeValue>,
     rules_config: &mut SerdeMap<String, SerdeValue>,
     parser: &StartParser,
+    write_sql_to_stdout: Option<bool>,
+    write_to_db: Option<bool>,
 ) -> SerdeMap<String, SerdeValue> {
+    // If the optional arguments have not been supplied, give them default values:
+    let write_sql_to_stdout = write_sql_to_stdout.unwrap_or(false);
+    let write_to_db = write_to_db.unwrap_or(false);
+
     // This is what we will return:
     let mut constraints_config: SerdeMap<String, SerdeValue> = SerdeMap::new();
     constraints_config.insert(String::from("foreign"), SerdeValue::Object(SerdeMap::new()));
@@ -495,7 +501,7 @@ fn configure_db(
 
     let table_names: Vec<String> = tables_config.keys().cloned().collect();
     for table_name in table_names {
-        //println!("TABLE: {}", table_name);
+        //eprintln!("TABLE: {}", table_name);
         let mut path = tables_config
             .get(&table_name)
             .and_then(|r| r.get("path"))
@@ -504,7 +510,7 @@ fn configure_db(
         // Remove enclosing quotes that are added as a side-effect of the to_string() conversion
         path = path.split_off(1);
         path.truncate(path.len() - 1);
-        //println!("PATH: {:?}", path);
+        //eprintln!("PATH: {:?}", path);
         let mut rdr = csv::ReaderBuilder::new().has_headers(false).delimiter(b'\t').from_reader(
             File::open(path.clone()).unwrap_or_else(|err| {
                 panic!("Unable to open '{}': {}", path.clone(), err);
@@ -538,7 +544,7 @@ fn configure_db(
                 cmap.insert(String::from("nulltype"), SerdeValue::String(String::from("empty")));
                 cmap.insert(String::from("datatype"), SerdeValue::String(String::from("text")));
                 let column = SerdeValue::Object(cmap);
-                //println!("COLUMN: {}", column_name);
+                //eprintln!("COLUMN: {}", column_name);
                 tables_config
                     .get_mut(&table_name)
                     .and_then(|r| r.get_mut("column"))
@@ -559,7 +565,26 @@ fn configure_db(
                         .and_then(|o| o.insert(table_name.to_string(), table_constraints));
                 }
             }
-            // YOU ARE HERE
+            if write_to_db {
+                // To be implemented.
+            }
+            if write_sql_to_stdout {
+                println!("{}\n", table_sql);
+            }
+        }
+
+        let drop_view_sql = format!(r#"DROP VIEW IF EXISTS "{}_view";"#, table_name);
+        let create_view_sql = format!(
+            r#"CREATE VIEW "{t}_view" AS SELECT * FROM "{t}" UNION SELECT * FROM "{t}_conflict";"#,
+            t = table_name,
+        );
+        let sql = format!("{}\n{}\n", drop_view_sql, create_view_sql);
+
+        if write_sql_to_stdout {
+            println!("{}", sql);
+        }
+        if write_to_db {
+            // To be implemented.
         }
     }
 
@@ -567,13 +592,13 @@ fn configure_db(
 }
 
 fn get_SQL_type(dt_config: &SerdeMap<String, SerdeValue>, datatype: &String) -> Option<String> {
-    //println!("DATATYPE: {}", datatype);
+    //eprintln!("DATATYPE: {}", datatype);
     if !dt_config.contains_key(datatype) {
         return None;
     }
 
     if let Some(sql_type) = dt_config.get(datatype).and_then(|d| d.get("SQL type")) {
-        //println!("RETURNING: {:?}", sql_type);
+        //eprintln!("RETURNING: {:?}", sql_type);
         return Some(sql_type.to_string());
     }
 
@@ -587,7 +612,7 @@ fn get_SQL_type(dt_config: &SerdeMap<String, SerdeValue>, datatype: &String) -> 
     parent_datatype = parent_datatype.split_off(1);
     parent_datatype.truncate(parent_datatype.len() - 1);
 
-    //println!("PARENT DATATYPE: {:?}", parent_datatype);
+    //eprintln!("PARENT DATATYPE: {:?}", parent_datatype);
 
     return get_SQL_type(dt_config, &parent_datatype);
 }
@@ -792,9 +817,16 @@ async fn configure_and_load_db(
     parsed_conditions: &HashMap<String, Expression>,
     compiled_conditions: &HashMap<String, Box<dyn Fn(&str) -> bool>>,
 ) -> Result<(), sqlx::Error> {
-    let constraints_config =
-        configure_db(specials_config, tables_config, datatypes_config, rules_config, parser);
-    //println!("{:#?}", constraints_config);
+    let constraints_config = configure_db(
+        specials_config,
+        tables_config,
+        datatypes_config,
+        rules_config,
+        parser,
+        None,
+        None,
+    );
+    //eprintln!("{:#?}", constraints_config);
 
     Ok(())
 }
@@ -803,7 +835,7 @@ async fn configure_and_load_db(
 async fn main() -> Result<(), sqlx::Error> {
     let args: Vec<String> = env::args().collect();
     if args.len() != 3 {
-        println!("Usage: cmi-pb-terminology-rs table db_dir");
+        eprintln!("Usage: cmi-pb-terminology-rs table db_dir");
         process::exit(1);
     }
     let table = &args[1];
