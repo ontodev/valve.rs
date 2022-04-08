@@ -714,7 +714,7 @@ fn verify_table_deps_and_sort(
         String::from("table"),
         String::from("foreign_table"),
         String::from("prefix"),
-        String::from("rule"),
+        //String::from("rule"),
         String::from("column"),
         String::from("foobar"),
         String::from("import"),

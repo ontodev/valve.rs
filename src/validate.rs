@@ -1,6 +1,7 @@
 use itertools::Chunk;
 use serde_json::{
     json,
+    //to_string,
     // SerdeMap by default backed by BTreeMap (see https://docs.serde.rs/serde_json/map/index.html)
     Map as SerdeMap,
     Value as SerdeValue,
@@ -31,8 +32,17 @@ pub fn validate_rows_intra(
         let row: RowMap = row.unwrap().deserialize(Some(headers)).unwrap();
         let mut result_row: RowMap = SerdeMap::new();
         for (column, value) in row {
+            let string_value;
+            match value {
+                SerdeValue::String(_) => {
+                    string_value = value.clone();
+                }
+                _ => {
+                    string_value = SerdeValue::String(value.to_string());
+                }
+            };
             let result_cell = json!({
-                "value": value,
+                "value": string_value,
                 "valid": true,
                 "messages": [],
             });
@@ -85,6 +95,9 @@ pub fn validate_rows_intra(
     if multiprocessing {
         results.insert(chunk_number, SerdeValue::Array(result_rows.clone()));
     }
+    //for row in &result_rows {
+    //    println!("{}", to_string(row).unwrap());
+    //}
     result_rows
 }
 
