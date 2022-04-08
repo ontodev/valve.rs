@@ -40,7 +40,7 @@ lazy_static! {
 static CHUNK_SIZE: usize = 2;
 
 /// Use this function for "small" TSVs only, since it returns a vector.
-fn read_tsv(path: &String) -> Vec<SerdeMap<String, SerdeValue>> {
+fn read_tsv(path: &String) -> Vec<RowMap> {
     let mut rdr = csv::ReaderBuilder::new().delimiter(b'\t').from_reader(
         File::open(path).unwrap_or_else(|err| {
             panic!("Unable to open '{}': {}", path, err);
@@ -172,17 +172,17 @@ fn read_config_files(
     table_table_path: &String,
     parser: &StartParser,
 ) -> (
-    SerdeMap<String, SerdeValue>,
-    SerdeMap<String, SerdeValue>,
-    SerdeMap<String, SerdeValue>,
-    SerdeMap<String, SerdeValue>,
+    RowMap,
+    RowMap,
+    RowMap,
+    RowMap,
     HashMap<String, Expression>,
     HashMap<String, Box<dyn Fn(&str) -> bool>>,
 ) {
-    let mut specials_config: SerdeMap<String, SerdeValue> = SerdeMap::new();
-    let mut tables_config: SerdeMap<String, SerdeValue> = SerdeMap::new();
-    let mut datatypes_config: SerdeMap<String, SerdeValue> = SerdeMap::new();
-    let mut rules_config: SerdeMap<String, SerdeValue> = SerdeMap::new();
+    let mut specials_config: RowMap = SerdeMap::new();
+    let mut tables_config: RowMap = SerdeMap::new();
+    let mut datatypes_config: RowMap = SerdeMap::new();
+    let mut rules_config: RowMap = SerdeMap::new();
 
     let special_table_types = json!({
         "table": {"required": true},
@@ -479,18 +479,18 @@ fn read_config_files(
 }
 
 fn configure_db(
-    tables_config: &mut SerdeMap<String, SerdeValue>,
-    datatypes_config: &mut SerdeMap<String, SerdeValue>,
+    tables_config: &mut RowMap,
+    datatypes_config: &mut RowMap,
     parser: &StartParser,
     write_sql_to_stdout: Option<bool>,
     write_to_db: Option<bool>,
-) -> SerdeMap<String, SerdeValue> {
+) -> RowMap {
     // If the optional arguments have not been supplied, give them default values:
     let write_sql_to_stdout = write_sql_to_stdout.unwrap_or(false);
     let write_to_db = write_to_db.unwrap_or(false);
 
     // This is what we will return:
-    let mut constraints_config: SerdeMap<String, SerdeValue> = SerdeMap::new();
+    let mut constraints_config: RowMap = SerdeMap::new();
     constraints_config.insert(String::from("foreign"), SerdeValue::Object(SerdeMap::new()));
     constraints_config.insert(String::from("unique"), SerdeValue::Object(SerdeMap::new()));
     constraints_config.insert(String::from("primary"), SerdeValue::Object(SerdeMap::new()));
@@ -539,21 +539,32 @@ fn configure_db(
             panic!("No rows in '{}'", path);
         }
 
+        let mut all_columns: RowMap = RowMap::new();
         for column_name in &actual_columns {
+            let column;
             if !defined_columns.contains(&column_name.to_string()) {
-                let mut cmap: SerdeMap<String, SerdeValue> = SerdeMap::new();
+                let mut cmap: RowMap = SerdeMap::new();
                 cmap.insert(String::from("table"), SerdeValue::String(table_name.to_string()));
                 cmap.insert(String::from("column"), SerdeValue::String(column_name.to_string()));
                 cmap.insert(String::from("nulltype"), SerdeValue::String(String::from("empty")));
                 cmap.insert(String::from("datatype"), SerdeValue::String(String::from("text")));
-                let column = SerdeValue::Object(cmap);
-                tables_config
-                    .get_mut(&table_name)
-                    .and_then(|r| r.get_mut("column"))
-                    .and_then(|v| v.as_object_mut())
-                    .and_then(|o| o.insert(column_name.to_string(), column));
+                column = SerdeValue::Object(cmap);
+            } else {
+                column = tables_config
+                    .get(&table_name)
+                    .and_then(|r| r.get("column"))
+                    .and_then(|v| v.as_object())
+                    .and_then(|o| o.get(column_name))
+                    .unwrap()
+                    .clone();
             }
+            all_columns.insert(column_name.to_string(), column);
         }
+
+        tables_config
+            .get_mut(&table_name)
+            .and_then(|t| t.as_object_mut())
+            .and_then(|o| o.insert(String::from("column"), SerdeValue::Object(all_columns)));
 
         for table in vec![table_name.to_string(), format!("{}_conflict", table_name)] {
             let (table_sql, table_constraints) =
@@ -594,7 +605,7 @@ fn configure_db(
 }
 
 fn load_db(
-    config: &SerdeMap<String, SerdeValue>,
+    config: &RowMap,
     pool: &SqlitePool,
     parser: &StartParser,
     parsed_conditions: &HashMap<String, Expression>,
@@ -656,7 +667,7 @@ fn load_db(
 }
 
 fn validate_and_insert_chunks(
-    config: &SerdeMap<String, SerdeValue>,
+    config: &RowMap,
     pool: &SqlitePool,
     parser: &StartParser,
     parsed_conditions: &HashMap<String, Expression>,
@@ -693,7 +704,7 @@ fn verify_table_deps_and_sort(
     // Temporarily prefix these variables with an underscore to avoid compiler warnings about unused
     // variables (remove this later).
     _table_list: &Vec<String>,
-    _config_constraints: &SerdeMap<String, SerdeValue>,
+    _config_constraints: &RowMap,
 ) -> Vec<String> {
     // TODO: Implement this properly.
 
@@ -710,7 +721,7 @@ fn verify_table_deps_and_sort(
     ]
 }
 
-fn get_sql_type(dt_config: &SerdeMap<String, SerdeValue>, datatype: &String) -> Option<String> {
+fn get_sql_type(dt_config: &RowMap, datatype: &String) -> Option<String> {
     if !dt_config.contains_key(datatype) {
         return None;
     }
@@ -732,8 +743,8 @@ fn get_sql_type(dt_config: &SerdeMap<String, SerdeValue>, datatype: &String) -> 
 }
 
 fn create_table(
-    tables_config: &mut SerdeMap<String, SerdeValue>,
-    datatypes_config: &mut SerdeMap<String, SerdeValue>,
+    tables_config: &mut RowMap,
+    datatypes_config: &mut RowMap,
     parser: &StartParser,
     table_name: &String,
 ) -> (String, SerdeValue) {
@@ -869,6 +880,8 @@ fn create_table(
                 .and_then(|v| Some(v.is_empty()))
                 .unwrap()
         {
+            line.push_str("");
+        } else {
             line.push_str(",");
         }
         output.push(line);
@@ -913,6 +926,7 @@ fn create_table(
         ));
     }
     output.push(String::from(");"));
+
     // TODO: Create unique indexes corresponding to tree constraints here.
     // ...
 
@@ -927,19 +941,20 @@ fn create_table(
 }
 
 async fn configure_and_load_db(
-    specials_config: &mut SerdeMap<String, SerdeValue>,
-    tables_config: &mut SerdeMap<String, SerdeValue>,
-    datatypes_config: &mut SerdeMap<String, SerdeValue>,
-    rules_config: &mut SerdeMap<String, SerdeValue>,
+    specials_config: &mut RowMap,
+    tables_config: &mut RowMap,
+    datatypes_config: &mut RowMap,
+    rules_config: &mut RowMap,
     pool: &SqlitePool,
     parser: &StartParser,
     parsed_conditions: &HashMap<String, Expression>,
     compiled_conditions: &HashMap<String, Box<dyn Fn(&str) -> bool>>,
 ) -> Result<(), sqlx::Error> {
-    let constraints_config = configure_db(tables_config, datatypes_config, parser, None, None);
+    let constraints_config =
+        configure_db(tables_config, datatypes_config, parser, Some(true), Some(true));
 
     // Combine the individual configuration maps into one:
-    let mut config: SerdeMap<String, SerdeValue> = SerdeMap::new();
+    let mut config: RowMap = SerdeMap::new();
     config.insert(String::from("special"), SerdeValue::Object(specials_config.clone()));
     config.insert(String::from("table"), SerdeValue::Object(tables_config.clone()));
     config.insert(String::from("datatype"), SerdeValue::Object(datatypes_config.clone()));

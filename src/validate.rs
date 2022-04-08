@@ -1,6 +1,7 @@
 use itertools::Chunk;
 use serde_json::{
     json,
+    to_string,
     // SerdeMap by default backed by BTreeMap (see https://docs.serde.rs/serde_json/map/index.html)
     Map as SerdeMap,
     Value as SerdeValue,
@@ -14,7 +15,7 @@ use crate::cmi_pb_grammar::StartParser;
 type RowMap = SerdeMap<String, SerdeValue>;
 
 pub fn validate_rows_intra(
-    config: &SerdeMap<String, SerdeValue>,
+    config: &RowMap,
     pool: &SqlitePool,
     parser: &StartParser,
     parsed_conditions: &HashMap<String, Expression>,
@@ -29,7 +30,7 @@ pub fn validate_rows_intra(
     let mut result_rows: Vec<SerdeValue> = vec![];
     for row in rows {
         let row: RowMap = row.unwrap().deserialize(Some(headers)).unwrap();
-        let mut result_row: SerdeMap<String, SerdeValue> = SerdeMap::new();
+        let mut result_row: RowMap = SerdeMap::new();
         for (column, value) in row {
             let result_cell = json!({
                 "value": value,
@@ -85,11 +86,14 @@ pub fn validate_rows_intra(
     if multiprocessing {
         results.insert(chunk_number, SerdeValue::Array(result_rows.clone()));
     }
+    for row in &result_rows {
+        println!("{}", to_string(row).unwrap());
+    }
     result_rows
 }
 
 fn validate_cell_nulltype(
-    config: &SerdeMap<String, SerdeValue>,
+    config: &RowMap,
     // Temporarily prefix these variables with an underscore to avoid compiler warnings about unused
     // variables (remove this later).
     _pool: &SqlitePool,
@@ -98,8 +102,8 @@ fn validate_cell_nulltype(
     compiled_conditions: &HashMap<String, Box<dyn Fn(&str) -> bool>>,
     table_name: &String,
     column_name: &String,
-    cell: &SerdeMap<String, SerdeValue>,
-) -> SerdeMap<String, SerdeValue> {
+    cell: &RowMap,
+) -> RowMap {
     let mut cell = cell.clone();
 
     let column = config
@@ -123,7 +127,7 @@ fn validate_cell_nulltype(
 }
 
 fn validate_cell_datatype(
-    config: &SerdeMap<String, SerdeValue>,
+    config: &RowMap,
     // Temporarily prefix these variables with an underscore to avoid compiler warnings about unused
     // variables (remove this later).
     _pool: &SqlitePool,
@@ -132,14 +136,14 @@ fn validate_cell_datatype(
     compiled_conditions: &HashMap<String, Box<dyn Fn(&str) -> bool>>,
     table_name: &String,
     column_name: &String,
-    cell: &SerdeMap<String, SerdeValue>,
-) -> SerdeMap<String, SerdeValue> {
+    cell: &RowMap,
+) -> RowMap {
     fn get_datatypes_to_check(
-        config: &SerdeMap<String, SerdeValue>,
+        config: &RowMap,
         compiled_conditions: &HashMap<String, Box<dyn Fn(&str) -> bool>>,
         primary_dt_name: &str,
         dt_name: Option<String>,
-    ) -> Vec<SerdeMap<String, SerdeValue>> {
+    ) -> Vec<RowMap> {
         let mut datatypes = vec![];
         if let Some(dt_name) = dt_name {
             let datatype = config
@@ -226,15 +230,15 @@ fn validate_cell_datatype(
 fn validate_cell_rules(
     // Temporarily prefix these variables with an underscore to avoid compiler warnings about unused
     // variables (remove this later).
-    _config: &SerdeMap<String, SerdeValue>,
+    _config: &RowMap,
     _pool: &SqlitePool,
     _parser: &StartParser,
     _parsed_conditions: &HashMap<String, Expression>,
     _compiled_conditions: &HashMap<String, Box<dyn Fn(&str) -> bool>>,
     _table_name: &String,
     _column_name: &String,
-    _result_row: &SerdeMap<String, SerdeValue>,
-    cell: &SerdeMap<String, SerdeValue>,
-) -> SerdeMap<String, SerdeValue> {
+    _result_row: &RowMap,
+    cell: &RowMap,
+) -> RowMap {
     cell.clone()
 }
