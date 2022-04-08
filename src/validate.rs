@@ -98,6 +98,7 @@ pub fn validate_rows_intra(
     //for row in &result_rows {
     //    println!("{}", to_string(row).unwrap());
     //}
+    println!("Processed {} result rows.", result_rows.len());
     result_rows
 }
 

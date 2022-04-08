@@ -37,7 +37,7 @@ lazy_static! {
     static ref SQLITE_TYPES: Vec<&'static str> = vec!["text", "integer", "real", "blob"];
 }
 
-static CHUNK_SIZE: usize = 2;
+static CHUNK_SIZE: usize = 300;
 
 /// Use this function for "small" TSVs only, since it returns a vector.
 fn read_tsv(path: &String) -> Vec<RowMap> {
