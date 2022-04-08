@@ -3,8 +3,13 @@ extern crate lalrpop_util;
 extern crate lazy_static;
 
 mod ast;
+mod validate;
 
-use itertools::{Chunk, IntoChunks, Itertools};
+pub use crate::validate::validate_rows_intra;
+
+// provides `try_next` for sqlx:
+//use futures::TryStreamExt;
+use itertools::{IntoChunks, Itertools};
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde_json::{
@@ -13,21 +18,12 @@ use serde_json::{
     Map as SerdeMap,
     Value as SerdeValue,
 };
-
-use sqlx::{
-    sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions},
-    Row,
-};
-
-use std::str::FromStr;
-
-// provides `try_next` for sqlx:
-use futures::TryStreamExt;
-
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 use std::collections::HashMap;
 use std::env;
 use std::fs::File;
 use std::process;
+use std::str::FromStr;
 
 use ast::Expression;
 
@@ -38,20 +34,18 @@ use cmi_pb_grammar::StartParser;
 type RowMap = SerdeMap<String, SerdeValue>;
 
 lazy_static! {
-    static ref SQLITE_TYPES: Vec<&'static str> = { vec!["text", "integer", "real", "blob"] };
+    static ref SQLITE_TYPES: Vec<&'static str> = vec!["text", "integer", "real", "blob"];
 }
 
 static CHUNK_SIZE: usize = 2;
 
+/// Use this function for "small" TSVs only, since it returns a vector.
 fn read_tsv(path: &String) -> Vec<SerdeMap<String, SerdeValue>> {
-    /// Use this function for "small" TSVs only, since it returns a vector.
-    //eprintln!("Opening path: {}", path);
     let mut rdr = csv::ReaderBuilder::new().delimiter(b'\t').from_reader(
         File::open(path).unwrap_or_else(|err| {
             panic!("Unable to open '{}': {}", path, err);
         }),
     );
-    //eprintln!("Successfully opened path: {}", path);
 
     let rows: Vec<_> = rdr
         .deserialize()
@@ -71,7 +65,9 @@ fn read_tsv(path: &String) -> Vec<SerdeMap<String, SerdeValue>> {
 fn compile_condition(
     condition_option: Option<&str>,
     parser: &StartParser,
-    compiled_conditions: &HashMap<String, Box<dyn Fn(&str) -> bool>>,
+    // Temporarily prefix this variable with an underscore to avoid compiler warnings about unused
+    // variables (remove this later).
+    _compiled_conditions: &HashMap<String, Box<dyn Fn(&str) -> bool>>,
 ) -> (Expression, Box<dyn Fn(&str) -> bool>) {
     let unquoted_re = Regex::new(r#"^['"](?P<unquoted>.*)['"]$"#).unwrap();
     match condition_option {
@@ -298,7 +294,7 @@ fn read_config_files(
         let condition = row.get("condition").and_then(|c| c.as_str());
         let (parsed_condition, compiled_condition) =
             compile_condition(condition, parser, &compiled_conditions);
-        if let Some(c) = condition {
+        if let Some(_) = condition {
             parsed_conditions.insert(dt_name.to_string(), parsed_condition);
             compiled_conditions.insert(dt_name.to_string(), compiled_condition);
         }
@@ -483,10 +479,8 @@ fn read_config_files(
 }
 
 fn configure_db(
-    specials_config: &mut SerdeMap<String, SerdeValue>,
     tables_config: &mut SerdeMap<String, SerdeValue>,
     datatypes_config: &mut SerdeMap<String, SerdeValue>,
-    rules_config: &mut SerdeMap<String, SerdeValue>,
     parser: &StartParser,
     write_sql_to_stdout: Option<bool>,
     write_to_db: Option<bool>,
@@ -505,17 +499,17 @@ fn configure_db(
 
     let table_names: Vec<String> = tables_config.keys().cloned().collect();
     for table_name in table_names {
-        //eprintln!("TABLE: {}", table_name);
         let mut path = tables_config
             .get(&table_name)
             .and_then(|r| r.get("path"))
             .and_then(|p| Some(p.to_string()))
             .unwrap();
         // Remove enclosing quotes that are added as a side-effect of the to_string() conversion
+        // TODO: See if we can avoid having to do this here and elsewhere.
         path = path.split_off(1);
         path.truncate(path.len() - 1);
-        //eprintln!("PATH: {:?}", path);
-        // TODO: Double-check that this correctly handles empty files:
+        // Note that we set has_headers to false (even though the files have header rows) in order
+        // to explicitly read the headers
         let mut rdr = csv::ReaderBuilder::new().has_headers(false).delimiter(b'\t').from_reader(
             File::open(path.clone()).unwrap_or_else(|err| {
                 panic!("Unable to open '{}': {}", path.clone(), err);
@@ -538,6 +532,10 @@ fn configure_db(
         if let Some(result) = iter.next() {
             actual_columns = result.unwrap();
         } else {
+            panic!("'{}' is empty", path);
+        }
+        // Get the first row of data (just to verify that there is data in the file):
+        if let None = iter.next() {
             panic!("No rows in '{}'", path);
         }
 
@@ -549,7 +547,6 @@ fn configure_db(
                 cmap.insert(String::from("nulltype"), SerdeValue::String(String::from("empty")));
                 cmap.insert(String::from("datatype"), SerdeValue::String(String::from("text")));
                 let column = SerdeValue::Object(cmap);
-                //eprintln!("COLUMN: {}", column_name);
                 tables_config
                     .get_mut(&table_name)
                     .and_then(|r| r.get_mut("column"))
@@ -639,10 +636,10 @@ fn load_db(
         if let Some(result) = records.next() {
             headers = result.unwrap();
         } else {
-            panic!("No rows in '{}'", path);
+            panic!("'{}' is empty", path);
         }
 
-        let mut chunks = records.chunks(CHUNK_SIZE);
+        let chunks = records.chunks(CHUNK_SIZE);
         validate_and_insert_chunks(
             &config,
             &pool,
@@ -658,235 +655,6 @@ fn load_db(
     }
 }
 
-// TODO: Move this function to its own file: validate.rs
-fn validate_rows_intra(
-    config: &SerdeMap<String, SerdeValue>,
-    pool: &SqlitePool,
-    parser: &StartParser,
-    parsed_conditions: &HashMap<String, Expression>,
-    compiled_conditions: &HashMap<String, Box<dyn Fn(&str) -> bool>>,
-    table_name: &String,
-    headers: &csv::StringRecord,
-    rows: &mut Chunk<csv::StringRecordsIter<std::fs::File>>,
-    chunk_number: usize,
-    results: &mut HashMap<usize, SerdeValue>,
-    multiprocessing: bool,
-) -> Vec<SerdeValue> {
-    let mut result_rows: Vec<SerdeValue> = vec![];
-    for row in rows {
-        let row: RowMap = row.unwrap().deserialize(Some(headers)).unwrap();
-        //println!("CHUNK: {}, ROW: {:?}", chunk_number, row);
-        let mut result_row: SerdeMap<String, SerdeValue> = SerdeMap::new();
-        for (column, value) in row {
-            let result_cell = json!({
-                "value": value,
-                "valid": true,
-                "messages": [],
-            });
-            result_row.insert(column, result_cell);
-        }
-        //println!("RESULT ROW: {:#?}", result_row);
-
-        for (column_name, mut cell) in result_row.clone() {
-            let cell = validate_cell_nulltype(
-                config,
-                pool,
-                parser,
-                parsed_conditions,
-                compiled_conditions,
-                table_name,
-                &column_name,
-                cell.as_object().unwrap(),
-            );
-            result_row.insert(column_name.to_string(), SerdeValue::Object(cell));
-        }
-
-        for (column_name, cell) in result_row.clone() {
-            let mut cell = validate_cell_rules(
-                config,
-                pool,
-                parser,
-                parsed_conditions,
-                compiled_conditions,
-                table_name,
-                &column_name,
-                &result_row,
-                cell.as_object().unwrap(),
-            );
-            if !cell.contains_key("nulltype") {
-                cell = validate_cell_datatype(
-                    config,
-                    pool,
-                    parser,
-                    parsed_conditions,
-                    compiled_conditions,
-                    table_name,
-                    &column_name,
-                    &cell,
-                );
-            }
-            result_row.insert(column_name.to_string(), SerdeValue::Object(cell));
-        }
-        result_rows.push(SerdeValue::Object(result_row));
-    }
-
-    if multiprocessing {
-        results.insert(chunk_number, SerdeValue::Array(result_rows.clone()));
-    }
-    result_rows
-}
-
-// TODO: Move this function to its own file: validate.rs
-fn validate_cell_nulltype(
-    config: &SerdeMap<String, SerdeValue>,
-    pool: &SqlitePool,
-    parser: &StartParser,
-    parsed_conditions: &HashMap<String, Expression>,
-    compiled_conditions: &HashMap<String, Box<dyn Fn(&str) -> bool>>,
-    table_name: &String,
-    column_name: &String,
-    cell: &SerdeMap<String, SerdeValue>,
-) -> SerdeMap<String, SerdeValue> {
-    let mut cell = cell.clone();
-
-    let column = config
-        .get("table")
-        .and_then(|t| t.as_object())
-        .and_then(|o| o.get(table_name))
-        .and_then(|t| t.as_object())
-        .and_then(|o| o.get("column"))
-        .and_then(|c| c.as_object())
-        .and_then(|o| o.get(column_name))
-        .unwrap();
-    if let Some(SerdeValue::String(nt_name)) = column.get("nulltype") {
-        let nt_condition = compiled_conditions.get(nt_name).unwrap();
-        let value = cell.get("value").and_then(|v| v.as_str()).unwrap();
-        if nt_condition(value) {
-            cell.insert("nulltype".to_string(), SerdeValue::String(nt_name.to_string()));
-        }
-    }
-
-    cell
-}
-
-// TODO: Move this function to its own file: validate.rs
-fn validate_cell_datatype(
-    config: &SerdeMap<String, SerdeValue>,
-    pool: &SqlitePool,
-    parser: &StartParser,
-    parsed_conditions: &HashMap<String, Expression>,
-    compiled_conditions: &HashMap<String, Box<dyn Fn(&str) -> bool>>,
-    table_name: &String,
-    column_name: &String,
-    cell: &SerdeMap<String, SerdeValue>,
-) -> SerdeMap<String, SerdeValue> {
-    fn get_datatypes_to_check(
-        config: &SerdeMap<String, SerdeValue>,
-        compiled_conditions: &HashMap<String, Box<dyn Fn(&str) -> bool>>,
-        primary_dt_name: &str,
-        dt_name: Option<String>,
-    ) -> Vec<SerdeMap<String, SerdeValue>> {
-        let mut datatypes = vec![];
-        if let Some(dt_name) = dt_name {
-            let datatype = config
-                .get("datatype")
-                .and_then(|d| d.as_object())
-                .and_then(|o| o.get(&dt_name))
-                .and_then(|d| d.as_object())
-                .unwrap();
-            let dt_name = datatype.get("datatype").and_then(|d| d.as_str()).unwrap();
-            let dt_condition = compiled_conditions.get(dt_name);
-            let dt_parent = match datatype.get("parent") {
-                Some(SerdeValue::String(s)) => Some(s.clone()),
-                _ => None,
-            };
-            if dt_name != primary_dt_name {
-                if let Some(dt_condition) = dt_condition {
-                    datatypes.push(datatype.clone());
-                }
-            }
-            let mut more_datatypes =
-                get_datatypes_to_check(config, compiled_conditions, primary_dt_name, dt_parent);
-            datatypes.append(&mut more_datatypes);
-        }
-        datatypes
-    }
-
-    let cell_value = cell.get("value").and_then(|v| v.as_str()).unwrap();
-    let mut cell = cell.clone();
-    let column = config
-        .get("table")
-        .and_then(|t| t.as_object())
-        .and_then(|o| o.get(table_name))
-        .and_then(|t| t.as_object())
-        .and_then(|o| o.get("column"))
-        .and_then(|c| c.as_object())
-        .and_then(|o| o.get(column_name))
-        .unwrap();
-    let primary_dt_name = column.get("datatype").and_then(|d| d.as_str()).unwrap();
-    //eprintln!("PRIMARY DT NAME: {}", primary_dt_name);
-    let primary_datatype = config
-        .get("datatype")
-        .and_then(|d| d.as_object())
-        .and_then(|o| o.get(primary_dt_name))
-        .unwrap();
-    let primary_dt_description = primary_datatype.get("description").unwrap();
-    if let Some(primary_dt_condition_func) = compiled_conditions.get(primary_dt_name) {
-        if !primary_dt_condition_func(cell_value) {
-            cell.insert("valid".to_string(), SerdeValue::Bool(false));
-            let mut parent_datatypes = get_datatypes_to_check(
-                config,
-                compiled_conditions,
-                primary_dt_name,
-                Some(primary_dt_name.to_string()),
-            );
-            while !parent_datatypes.is_empty() {
-                let datatype = parent_datatypes.pop().unwrap();
-                let dt_name = datatype.get("datatype").and_then(|d| d.as_str()).unwrap();
-                let dt_description = datatype.get("description").and_then(|d| d.as_str()).unwrap();
-                let dt_condition = compiled_conditions.get(dt_name).unwrap();
-                if !dt_condition(cell_value) {
-                    let mut messages =
-                        cell.get_mut("messages").and_then(|m| m.as_array_mut()).unwrap();
-                    let message = json!({
-                        "rule": format!("datatype:{}", dt_name),
-                        "level": "error",
-                        "message": format!("{} should be {}", column_name, dt_description)
-                    });
-                    messages.push(message);
-                }
-            }
-            if primary_dt_description != "" {
-                let mut messages = cell.get_mut("messages").and_then(|m| m.as_array_mut()).unwrap();
-                let message = json!({
-                    "rule": format!("datatype:{}", primary_dt_name),
-                    "level": "error",
-                    "message": format!("{} should be {}", column_name, primary_dt_description)
-                });
-                messages.push(message);
-            }
-            eprintln!("Cell for {}.{} is: {:?}", table_name, column_name, cell);
-        }
-    }
-
-    cell
-}
-
-// TODO: Move this function to its own file: validate.rs
-fn validate_cell_rules(
-    config: &SerdeMap<String, SerdeValue>,
-    pool: &SqlitePool,
-    parser: &StartParser,
-    parsed_conditions: &HashMap<String, Expression>,
-    compiled_conditions: &HashMap<String, Box<dyn Fn(&str) -> bool>>,
-    table_name: &String,
-    column_name: &String,
-    result_row: &SerdeMap<String, SerdeValue>,
-    cell: &SerdeMap<String, SerdeValue>,
-) -> SerdeMap<String, SerdeValue> {
-    cell.clone()
-}
-
 fn validate_and_insert_chunks(
     config: &SerdeMap<String, SerdeValue>,
     pool: &SqlitePool,
@@ -900,7 +668,9 @@ fn validate_and_insert_chunks(
     let mut results: HashMap<usize, SerdeValue> = HashMap::new();
     let mut i = 1;
     for mut chunk in chunks {
-        let mut intra_results = validate_rows_intra(
+        // Temporarily prefix this variable with an underscore to avoid compiler warnings about unused
+        // variables (remove this later).
+        let mut _intra_results = validate_rows_intra(
             &config,
             &pool,
             &parser,
@@ -920,8 +690,10 @@ fn validate_and_insert_chunks(
 }
 
 fn verify_table_deps_and_sort(
-    table_list: &Vec<String>,
-    config_constraints: &SerdeMap<String, SerdeValue>,
+    // Temporarily prefix these variables with an underscore to avoid compiler warnings about unused
+    // variables (remove this later).
+    _table_list: &Vec<String>,
+    _config_constraints: &SerdeMap<String, SerdeValue>,
 ) -> Vec<String> {
     // TODO: Implement this properly.
 
@@ -938,14 +710,12 @@ fn verify_table_deps_and_sort(
     ]
 }
 
-fn get_SQL_type(dt_config: &SerdeMap<String, SerdeValue>, datatype: &String) -> Option<String> {
-    //eprintln!("DATATYPE: {}", datatype);
+fn get_sql_type(dt_config: &SerdeMap<String, SerdeValue>, datatype: &String) -> Option<String> {
     if !dt_config.contains_key(datatype) {
         return None;
     }
 
     if let Some(sql_type) = dt_config.get(datatype).and_then(|d| d.get("SQL type")) {
-        //eprintln!("RETURNING: {:?}", sql_type);
         return Some(sql_type.to_string());
     }
 
@@ -958,10 +728,7 @@ fn get_SQL_type(dt_config: &SerdeMap<String, SerdeValue>, datatype: &String) -> 
     // Remove enclosing quotes that are added as a side-effect of the to_string() conversion
     parent_datatype = parent_datatype.split_off(1);
     parent_datatype.truncate(parent_datatype.len() - 1);
-
-    //eprintln!("PARENT DATATYPE: {:?}", parent_datatype);
-
-    return get_SQL_type(dt_config, &parent_datatype);
+    return get_sql_type(dt_config, &parent_datatype);
 }
 
 fn create_table(
@@ -1003,7 +770,7 @@ fn create_table(
     let mut r = 0;
     for row in colvals {
         r += 1;
-        let mut sql_type = get_SQL_type(
+        let sql_type = get_sql_type(
             datatypes_config,
             &row.get("datatype")
                 .and_then(|d| d.as_str())
@@ -1013,6 +780,7 @@ fn create_table(
         .and_then(|mut s| {
             // Remove enclosing quotes that are added as a side-effect of the to_string()
             // conversion
+            // TODO: See if we can avoid having to do this here and elsewhere.
             s = s.split_off(1);
             s.truncate(s.len() - 1);
             Some(s)
@@ -1036,7 +804,7 @@ fn create_table(
                     match *expression {
                         Expression::Label(value) if value == "primary" => {
                             line.push_str(" PRIMARY KEY");
-                            let mut primary_keys = table_constraints
+                            let primary_keys = table_constraints
                                 .get_mut("primary")
                                 .and_then(|v| v.as_array_mut())
                                 .unwrap();
@@ -1044,7 +812,7 @@ fn create_table(
                         }
                         Expression::Label(value) if value == "unique" => {
                             line.push_str(" UNIQUE");
-                            let mut unique_constraints = table_constraints
+                            let unique_constraints = table_constraints
                                 .get_mut("unique")
                                 .and_then(|v| v.as_array_mut())
                                 .unwrap();
@@ -1056,7 +824,7 @@ fn create_table(
                             }
                             match &*args[0] {
                                 Expression::Field(ftable, fcolumn) => {
-                                    let mut foreign_keys = table_constraints
+                                    let foreign_keys = table_constraints
                                         .get_mut("foreign")
                                         .and_then(|v| v.as_array_mut())
                                         .unwrap();
@@ -1072,10 +840,14 @@ fn create_table(
                                 }
                             };
                         }
-                        Expression::Function(name, args) if name == "tree" => {
+                        // Temporarily prefix args with an underscore to avoid compiler warnings
+                        // about unused variables (remove this later).
+                        Expression::Function(name, _args) if name == "tree" => {
                             // TODO: to be implemented
                         }
-                        Expression::Function(name, args) if name == "under" => {
+                        // Temporarily prefix args with an underscore to avoid compiler warnings
+                        // about unused variables (remove this later).
+                        Expression::Function(name, _args) if name == "under" => {
                             // TODO: to be implemented
                         }
                         _ => panic!(
@@ -1164,17 +936,9 @@ async fn configure_and_load_db(
     parsed_conditions: &HashMap<String, Expression>,
     compiled_conditions: &HashMap<String, Box<dyn Fn(&str) -> bool>>,
 ) -> Result<(), sqlx::Error> {
-    let constraints_config = configure_db(
-        specials_config,
-        tables_config,
-        datatypes_config,
-        rules_config,
-        parser,
-        None,
-        None,
-    );
-    //eprintln!("{:#?}", constraints_config);
+    let constraints_config = configure_db(tables_config, datatypes_config, parser, None, None);
 
+    // Combine the individual configuration maps into one:
     let mut config: SerdeMap<String, SerdeValue> = SerdeMap::new();
     config.insert(String::from("special"), SerdeValue::Object(specials_config.clone()));
     config.insert(String::from("table"), SerdeValue::Object(tables_config.clone()));
@@ -1197,6 +961,7 @@ async fn main() -> Result<(), sqlx::Error> {
     let table = &args[1];
     let db_dir = &args[2];
     let parser = StartParser::new();
+
     let (
         mut specials_config,
         mut tables_config,
@@ -1207,7 +972,8 @@ async fn main() -> Result<(), sqlx::Error> {
     ) = read_config_files(table, &parser);
 
     let connection_options =
-        SqliteConnectOptions::from_str("sqlite://build/cmi-pb.db")?.create_if_missing(true);
+        SqliteConnectOptions::from_str(format!("sqlite://{}/cmi-pb.db", db_dir).as_str())?
+            .create_if_missing(true);
     let pool = SqlitePoolOptions::new().max_connections(5).connect_with(connection_options).await?;
     sqlx::query("PRAGMA foreign_keys = ON").execute(&pool).await?;
 
