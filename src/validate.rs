@@ -209,6 +209,7 @@ fn validate_cell_datatype(
                 }
             }
             if primary_dt_description != "" {
+                let primary_dt_description = primary_dt_description.as_str().unwrap();
                 let messages = cell.get_mut("messages").and_then(|m| m.as_array_mut()).unwrap();
                 let message = json!({
                     "rule": format!("datatype:{}", primary_dt_name),
