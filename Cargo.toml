@@ -11,8 +11,10 @@ version = "0.19.7"
 features = ["lexer"]
 
 [dependencies]
+crossbeam = "0.8.1"
 csv = "1.1"
 itertools = "0.10.3"
+num_cpus = "1.13.1"
 regex = "1"
 serde_json = { version = "1.0" }
 serde = { version = "1.0", features = ["derive"] }

@@ -9,6 +9,9 @@ pub use crate::validate::validate_rows_intra;
 
 // provides `try_next` for sqlx:
 //use futures::TryStreamExt;
+
+use crossbeam;
+use crossbeam::thread::ScopedJoinHandle;
 use itertools::{IntoChunks, Itertools};
 use lazy_static::lazy_static;
 use regex::Regex;
@@ -37,7 +40,7 @@ lazy_static! {
     static ref SQLITE_TYPES: Vec<&'static str> = vec!["text", "integer", "real", "blob"];
 }
 
-static CHUNK_SIZE: usize = 300;
+static CHUNK_SIZE: usize = 2500;
 pub static MULTIPROCESSING: bool = true;
 
 /// Use this function for "small" TSVs only, since it returns a vector.
@@ -68,8 +71,8 @@ fn compile_condition(
     parser: &StartParser,
     // Temporarily prefix this variable with an underscore to avoid compiler warnings about unused
     // variables (remove this later).
-    _compiled_conditions: &HashMap<String, Box<dyn Fn(&str) -> bool>>,
-) -> (Expression, Box<dyn Fn(&str) -> bool>) {
+    _compiled_conditions: &HashMap<String, Box<dyn Fn(&str) -> bool + Sync + Send>>,
+) -> (Expression, Box<dyn Fn(&str) -> bool + Sync + Send>) {
     let unquoted_re = Regex::new(r#"^['"](?P<unquoted>.*)['"]$"#).unwrap();
     match condition_option {
         // "null" and "not null" conditions do not get assigned a condition but are dealt with
@@ -178,7 +181,7 @@ fn read_config_files(
     RowMap,
     RowMap,
     HashMap<String, Expression>,
-    HashMap<String, Box<dyn Fn(&str) -> bool>>,
+    HashMap<String, Box<dyn Fn(&str) -> bool + Sync + Send>>,
 ) {
     let mut specials_config: RowMap = SerdeMap::new();
     let mut tables_config: RowMap = SerdeMap::new();
@@ -268,7 +271,8 @@ fn read_config_files(
     );
 
     let mut parsed_conditions: HashMap<String, Expression> = HashMap::new();
-    let mut compiled_conditions: HashMap<String, Box<dyn Fn(&str) -> bool>> = HashMap::new();
+    let mut compiled_conditions: HashMap<String, Box<dyn Fn(&str) -> bool + Sync + Send>> =
+        HashMap::new();
     let rows = read_tsv(&path.to_string());
     for mut row in rows {
         for column in vec!["datatype", "parent", "condition", "SQL type"] {
@@ -610,7 +614,7 @@ fn load_db(
     pool: &SqlitePool,
     parser: &StartParser,
     parsed_conditions: &HashMap<String, Expression>,
-    compiled_conditions: &HashMap<String, Box<dyn Fn(&str) -> bool>>,
+    compiled_conditions: &HashMap<String, Box<dyn Fn(&str) -> bool + Sync + Send>>,
 ) {
     let table_list: Vec<String> = config
         .get("table")
@@ -653,11 +657,11 @@ fn load_db(
 
         let chunks = records.chunks(CHUNK_SIZE);
         validate_and_insert_chunks(
-            &config,
-            &pool,
-            &parser,
-            &parsed_conditions,
-            &compiled_conditions,
+            config,
+            pool,
+            parser,
+            parsed_conditions,
+            compiled_conditions,
             &table_name,
             &chunks,
             &headers,
@@ -672,32 +676,76 @@ fn validate_and_insert_chunks(
     pool: &SqlitePool,
     parser: &StartParser,
     parsed_conditions: &HashMap<String, Expression>,
-    compiled_conditions: &HashMap<String, Box<dyn Fn(&str) -> bool>>,
+    compiled_conditions: &HashMap<String, Box<dyn Fn(&str) -> bool + Sync + Send>>,
     table_name: &String,
     chunks: &IntoChunks<csv::StringRecordsIter<std::fs::File>>,
     headers: &csv::StringRecord,
 ) {
-    let mut results: HashMap<usize, SerdeValue> = HashMap::new();
-    let mut i = 1;
-    for mut chunk in chunks {
-        // Temporarily prefix this variable with an underscore to avoid compiler warnings about unused
-        // variables (remove this later).
-        let mut _intra_results = validate_rows_intra(
-            &config,
-            &pool,
-            &parser,
-            &parsed_conditions,
-            &compiled_conditions,
-            &table_name,
-            &headers,
-            &mut chunk,
-            i,
-            &mut results,
-        );
-        // TODO: Call validate_rows_inter_and_insert() here.
-        // ...
-        i += 1;
+    if !MULTIPROCESSING {
+        for (chunk_number, chunk) in chunks.into_iter().enumerate() {
+            // enumerate() begins at 0 by default but we need to begin with 1:
+            let chunk_number = chunk_number + 1;
+            let mut rows: Vec<_> = chunk.collect();
+            let intra_validated_rows = validate_rows_intra(
+                config,
+                pool,
+                parser,
+                parsed_conditions,
+                compiled_conditions,
+                table_name,
+                headers,
+                &mut rows,
+            );
+            validate_rows_inter_and_insert(intra_validated_rows, chunk_number);
+        }
+    } else {
+        crossbeam::scope(|scope| {
+            fn wait_for_and_process_results(
+                mut chunk_number: usize,
+                handles: &mut Vec<ScopedJoinHandle<Vec<SerdeValue>>>,
+            ) {
+                while let Some(handle) = handles.pop() {
+                    let intra_validated_rows = handle.join().unwrap();
+                    validate_rows_inter_and_insert(intra_validated_rows, chunk_number);
+                    chunk_number += 1;
+                }
+            }
+
+            let num_cpus = num_cpus::get();
+            let mut handles = vec![];
+            let mut last_chunk_number = 0;
+            for (chunk_number, chunk) in chunks.into_iter().enumerate() {
+                // enumerate() begins at 0 by default but we need to begin with 1:
+                let chunk_number = chunk_number + 1;
+                let mut rows: Vec<_> = chunk.collect();
+                handles.push(scope.spawn(move |_| {
+                    validate_rows_intra(
+                        config,
+                        pool,
+                        parser,
+                        parsed_conditions,
+                        compiled_conditions,
+                        table_name,
+                        headers,
+                        &mut rows,
+                    )
+                }));
+                if chunk_number % num_cpus == 0 {
+                    wait_for_and_process_results(chunk_number - num_cpus + 1, &mut handles);
+                }
+                last_chunk_number = chunk_number;
+            }
+            let left_to_handle = last_chunk_number % num_cpus;
+            wait_for_and_process_results(last_chunk_number - left_to_handle + 1, &mut handles);
+        })
+        .expect("A child thread panicked");
     }
+}
+
+// Function args here are temporarily prefixed with underscores to avoid compiler warnings.
+fn validate_rows_inter_and_insert(_intra_validated_rows: Vec<SerdeValue>, _chunk_number: usize) {
+    // TO BE IMPLEMENTED ...
+    //println!("INTRA: {:?}", intra_validated_rows);
 }
 
 fn verify_table_deps_and_sort(
@@ -709,6 +757,9 @@ fn verify_table_deps_and_sort(
     // TODO: Implement this properly.
 
     // Return a hard-coded list for now:
+
+    // The list to use for my toy data:
+    /*
     vec![
         String::from("datatype"),
         String::from("table"),
@@ -718,6 +769,28 @@ fn verify_table_deps_and_sort(
         String::from("column"),
         String::from("foobar"),
         String::from("import"),
+    ]
+    */
+
+    // The list to use for James' sample data:
+    vec![
+        String::from("table"),
+        String::from("datatype"),
+        String::from("prefix"),
+        String::from("cell_type"),
+        String::from("gate"),
+        String::from("gene"),
+        String::from("olink_prot_info"),
+        String::from("protein"),
+        String::from("transcript"),
+        String::from("subject"),
+        String::from("column"),
+        String::from("import"),
+        String::from("specimen"),
+        String::from("live_cell_percentages"),
+        String::from("olink_prot_exp"),
+        String::from("ab_titer"),
+        String::from("rnaseq"),
     ]
 }
 
@@ -948,7 +1021,7 @@ async fn configure_and_load_db(
     pool: &SqlitePool,
     parser: &StartParser,
     parsed_conditions: &HashMap<String, Expression>,
-    compiled_conditions: &HashMap<String, Box<dyn Fn(&str) -> bool>>,
+    compiled_conditions: &HashMap<String, Box<dyn Fn(&str) -> bool + Sync + Send>>,
 ) -> Result<(), sqlx::Error> {
     let constraints_config =
         configure_db(tables_config, datatypes_config, parser, Some(false), Some(false));

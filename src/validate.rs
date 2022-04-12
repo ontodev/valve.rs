@@ -1,4 +1,3 @@
-use itertools::Chunk;
 use serde_json::{
     json,
     //to_string,
@@ -11,7 +10,6 @@ use std::collections::HashMap;
 
 use crate::ast::Expression;
 use crate::cmi_pb_grammar::StartParser;
-use crate::MULTIPROCESSING;
 
 type RowMap = SerdeMap<String, SerdeValue>;
 
@@ -20,63 +18,37 @@ pub fn validate_rows_intra(
     pool: &SqlitePool,
     parser: &StartParser,
     parsed_conditions: &HashMap<String, Expression>,
-    compiled_conditions: &HashMap<String, Box<dyn Fn(&str) -> bool>>,
+    compiled_conditions: &HashMap<String, Box<dyn Fn(&str) -> bool + Sync + Send>>,
     table_name: &String,
     headers: &csv::StringRecord,
-    rows: &mut Chunk<csv::StringRecordsIter<std::fs::File>>,
-    chunk_number: usize,
-    results: &mut HashMap<usize, SerdeValue>,
+    rows: &mut Vec<Result<csv::StringRecord, csv::Error>>,
 ) -> Vec<SerdeValue> {
     let mut result_rows: Vec<SerdeValue> = vec![];
+
     for row in rows {
-        let row: RowMap = row.unwrap().deserialize(Some(headers)).unwrap();
-        let mut result_row: RowMap = SerdeMap::new();
-        for (column, value) in row {
-            let string_value;
-            match value {
-                SerdeValue::String(_) => {
-                    string_value = value.clone();
-                }
-                _ => {
-                    string_value = SerdeValue::String(value.to_string());
-                }
-            };
-            let result_cell = json!({
-                "value": string_value,
-                "valid": true,
-                "messages": [],
-            });
-            result_row.insert(column, result_cell);
-        }
+        if let Ok(row) = row {
+            let row: RowMap = row.deserialize(Some(headers)).unwrap();
+            let mut result_row: RowMap = SerdeMap::new();
+            for (column, value) in row {
+                let string_value;
+                match value {
+                    SerdeValue::String(_) => {
+                        string_value = value.clone();
+                    }
+                    _ => {
+                        string_value = SerdeValue::String(value.to_string());
+                    }
+                };
+                let result_cell = json!({
+                    "value": string_value,
+                    "valid": true,
+                    "messages": [],
+                });
+                result_row.insert(column, result_cell);
+            }
 
-        for (column_name, cell) in result_row.clone() {
-            let cell = validate_cell_nulltype(
-                config,
-                pool,
-                parser,
-                parsed_conditions,
-                compiled_conditions,
-                table_name,
-                &column_name,
-                cell.as_object().unwrap(),
-            );
-            result_row.insert(column_name.to_string(), SerdeValue::Object(cell));
-        }
-
-        for (column_name, cell) in result_row.clone() {
-            let mut cell = validate_cell_rules(
-                config,
-                pool,
-                parser,
-                parsed_conditions,
-                compiled_conditions,
-                table_name,
-                &column_name,
-                &result_row,
-                cell.as_object().unwrap(),
-            );
-            if !cell.contains_key("nulltype") {
-                cell = validate_cell_datatype(
+            for (column_name, cell) in result_row.clone() {
+                let cell = validate_cell_nulltype(
                     config,
                     pool,
                     parser,
@@ -84,32 +56,57 @@ pub fn validate_rows_intra(
                     compiled_conditions,
                     table_name,
                     &column_name,
-                    &cell,
+                    cell.as_object().unwrap(),
                 );
+                result_row.insert(column_name.to_string(), SerdeValue::Object(cell));
             }
-            result_row.insert(column_name.to_string(), SerdeValue::Object(cell));
+
+            for (column_name, cell) in result_row.clone() {
+                let mut cell = validate_cell_rules(
+                    config,
+                    pool,
+                    parser,
+                    parsed_conditions,
+                    compiled_conditions,
+                    table_name,
+                    &column_name,
+                    &result_row,
+                    cell.as_object().unwrap(),
+                );
+                if !cell.contains_key("nulltype") {
+                    cell = validate_cell_datatype(
+                        config,
+                        pool,
+                        parser,
+                        parsed_conditions,
+                        compiled_conditions,
+                        table_name,
+                        &column_name,
+                        &cell,
+                    );
+                }
+                result_row.insert(column_name.to_string(), SerdeValue::Object(cell));
+            }
+            result_rows.push(SerdeValue::Object(result_row));
         }
-        result_rows.push(SerdeValue::Object(result_row));
     }
 
-    if MULTIPROCESSING {
-        results.insert(chunk_number, SerdeValue::Array(result_rows.clone()));
+    /*
+    for row in &result_rows {
+        for (key, val) in row.as_object().unwrap() {
+            for (subkey, subval) in val.as_object().unwrap() {
+                println!("{}: {}: {}: {}", table_name, key, subkey, {
+                    if let SerdeValue::String(s) = subval {
+                        format!("{}", s.as_str())
+                    } else {
+                        format!("{}", subval)
+                    }
+                });
+            }
+        }
+        //println!("{}: {}", table_name, to_string(row).unwrap());
     }
-    //for row in &result_rows {
-    //    for (key, val) in row.as_object().unwrap() {
-    //        for (subkey, subval) in val.as_object().unwrap() {
-    //            println!("{}: {}: {}: {}", table_name, key, subkey, {
-    //                if let SerdeValue::String(s) = subval {
-    //                    format!("{}", s.as_str())
-    //                } else {
-    //                    format!("{}", subval)
-    //                }
-    //            });
-    //        }
-    //    }
-    //    //println!("{}: {}", table_name, to_string(row).unwrap());
-    //}
-    //eprintln!("Processed {} result rows.", result_rows.len());
+    */
     result_rows
 }
 
@@ -120,7 +117,7 @@ fn validate_cell_nulltype(
     _pool: &SqlitePool,
     _parser: &StartParser,
     _parsed_conditions: &HashMap<String, Expression>,
-    compiled_conditions: &HashMap<String, Box<dyn Fn(&str) -> bool>>,
+    compiled_conditions: &HashMap<String, Box<dyn Fn(&str) -> bool + Sync + Send>>,
     table_name: &String,
     column_name: &String,
     cell: &RowMap,
@@ -154,14 +151,14 @@ fn validate_cell_datatype(
     _pool: &SqlitePool,
     _parser: &StartParser,
     _parsed_conditions: &HashMap<String, Expression>,
-    compiled_conditions: &HashMap<String, Box<dyn Fn(&str) -> bool>>,
+    compiled_conditions: &HashMap<String, Box<dyn Fn(&str) -> bool + Sync + Send>>,
     table_name: &String,
     column_name: &String,
     cell: &RowMap,
 ) -> RowMap {
     fn get_datatypes_to_check(
         config: &RowMap,
-        compiled_conditions: &HashMap<String, Box<dyn Fn(&str) -> bool>>,
+        compiled_conditions: &HashMap<String, Box<dyn Fn(&str) -> bool + Sync + Send>>,
         primary_dt_name: &str,
         dt_name: Option<String>,
     ) -> Vec<RowMap> {
@@ -256,7 +253,7 @@ fn validate_cell_rules(
     _pool: &SqlitePool,
     _parser: &StartParser,
     _parsed_conditions: &HashMap<String, Expression>,
-    _compiled_conditions: &HashMap<String, Box<dyn Fn(&str) -> bool>>,
+    _compiled_conditions: &HashMap<String, Box<dyn Fn(&str) -> bool + Sync + Send>>,
     _table_name: &String,
     _column_name: &String,
     _result_row: &RowMap,
