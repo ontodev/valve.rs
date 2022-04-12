@@ -38,6 +38,7 @@ lazy_static! {
 }
 
 static CHUNK_SIZE: usize = 300;
+pub static MULTIPROCESSING: bool = true;
 
 /// Use this function for "small" TSVs only, since it returns a vector.
 fn read_tsv(path: &String) -> Vec<RowMap> {
@@ -692,7 +693,6 @@ fn validate_and_insert_chunks(
             &mut chunk,
             i,
             &mut results,
-            false,
         );
         // TODO: Call validate_rows_inter_and_insert() here.
         // ...
@@ -951,7 +951,7 @@ async fn configure_and_load_db(
     compiled_conditions: &HashMap<String, Box<dyn Fn(&str) -> bool>>,
 ) -> Result<(), sqlx::Error> {
     let constraints_config =
-        configure_db(tables_config, datatypes_config, parser, Some(true), Some(true));
+        configure_db(tables_config, datatypes_config, parser, Some(false), Some(false));
 
     // Combine the individual configuration maps into one:
     let mut config: RowMap = SerdeMap::new();

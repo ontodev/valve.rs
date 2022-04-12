@@ -8,8 +8,13 @@ SHELL := bash
 build:
 	mkdir build
 
+.PHONY: run run_release
+
 run: src/table.tsv | build
 	cargo $@ $^ $|
+
+run_release: src/table.tsv | build
+	cargo $@ --release $^ $|
 
 clean:
 	rm -Rf build

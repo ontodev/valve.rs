@@ -11,6 +11,7 @@ use std::collections::HashMap;
 
 use crate::ast::Expression;
 use crate::cmi_pb_grammar::StartParser;
+use crate::MULTIPROCESSING;
 
 type RowMap = SerdeMap<String, SerdeValue>;
 
@@ -25,7 +26,6 @@ pub fn validate_rows_intra(
     rows: &mut Chunk<csv::StringRecordsIter<std::fs::File>>,
     chunk_number: usize,
     results: &mut HashMap<usize, SerdeValue>,
-    multiprocessing: bool,
 ) -> Vec<SerdeValue> {
     let mut result_rows: Vec<SerdeValue> = vec![];
     for row in rows {
@@ -92,13 +92,24 @@ pub fn validate_rows_intra(
         result_rows.push(SerdeValue::Object(result_row));
     }
 
-    if multiprocessing {
+    if MULTIPROCESSING {
         results.insert(chunk_number, SerdeValue::Array(result_rows.clone()));
     }
     //for row in &result_rows {
-    //    println!("{}", to_string(row).unwrap());
+    //    for (key, val) in row.as_object().unwrap() {
+    //        for (subkey, subval) in val.as_object().unwrap() {
+    //            println!("{}: {}: {}: {}", table_name, key, subkey, {
+    //                if let SerdeValue::String(s) = subval {
+    //                    format!("{}", s.as_str())
+    //                } else {
+    //                    format!("{}", subval)
+    //                }
+    //            });
+    //        }
+    //    }
+    //    //println!("{}: {}", table_name, to_string(row).unwrap());
     //}
-    println!("Processed {} result rows.", result_rows.len());
+    //eprintln!("Processed {} result rows.", result_rows.len());
     result_rows
 }
 
