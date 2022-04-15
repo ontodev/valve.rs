@@ -41,7 +41,7 @@ lazy_static! {
 }
 
 static CHUNK_SIZE: usize = 2500;
-pub static MULTIPROCESSING: bool = true;
+pub static MULTI_THREADED: bool = true;
 
 /// Use this function for "small" TSVs only, since it returns a vector.
 fn read_tsv(path: &String) -> Vec<RowMap> {
@@ -681,7 +681,7 @@ fn validate_and_insert_chunks(
     chunks: &IntoChunks<csv::StringRecordsIter<std::fs::File>>,
     headers: &csv::StringRecord,
 ) {
-    if !MULTIPROCESSING {
+    if !MULTI_THREADED {
         for (chunk_number, chunk) in chunks.into_iter().enumerate() {
             // enumerate() begins at 0 by default but we need to begin with 1:
             let chunk_number = chunk_number + 1;
