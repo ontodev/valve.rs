@@ -2,7 +2,7 @@ use serde_json::{
     json,
     //to_string,
     // SerdeMap by default backed by BTreeMap (see https://docs.serde.rs/serde_json/map/index.html)
-    Map as SerdeMap,
+    //Map as SerdeMap,
     Value as SerdeValue,
 };
 use sqlx::sqlite::SqlitePool;
@@ -10,8 +10,17 @@ use std::collections::HashMap;
 
 use crate::ast::Expression;
 use crate::cmi_pb_grammar::StartParser;
+use crate::InputRowMap;
 
-type InputRowMap = SerdeMap<String, SerdeValue>;
+#[derive(Clone)]
+pub struct ResultCell {
+    nulltype: Option<String>,
+    value: String,
+    valid: bool,
+    messages: Vec<SerdeValue>,
+}
+
+pub type ResultRow = HashMap<String, ResultCell>;
 
 pub fn validate_rows_intra(
     config: &InputRowMap,
@@ -22,33 +31,28 @@ pub fn validate_rows_intra(
     table_name: &String,
     headers: &csv::StringRecord,
     rows: &mut Vec<Result<csv::StringRecord, csv::Error>>,
-) -> Vec<SerdeValue> {
-    let mut result_rows: Vec<SerdeValue> = vec![];
-
+) -> Vec<ResultRow> {
+    let mut result_rows: Vec<ResultRow> = vec![];
     for row in rows {
         if let Ok(row) = row {
-            let row: InputRowMap = row.deserialize(Some(headers)).unwrap();
-            let mut result_row: InputRowMap = SerdeMap::new();
-            for (column, value) in row {
-                let string_value;
-                match value {
-                    SerdeValue::String(_) => {
-                        string_value = value.clone();
-                    }
-                    _ => {
-                        string_value = SerdeValue::String(value.to_string());
-                    }
+            let mut result_row: ResultRow = ResultRow::new();
+            for (i, value) in row.iter().enumerate() {
+                let result_cell = ResultCell {
+                    nulltype: None,
+                    value: String::from(value),
+                    valid: true,
+                    messages: vec![],
                 };
-                let result_cell = json!({
-                    "value": string_value,
-                    "valid": true,
-                    "messages": [],
-                });
-                result_row.insert(column, result_cell);
+                let column = headers.get(i).unwrap();
+                result_row.insert(column.to_string(), result_cell);
             }
 
-            for (column_name, cell) in result_row.clone() {
-                let cell = validate_cell_nulltype(
+            // We check all the cells for nulltype first, since the rules validation requires that we
+            // have this information for all cells.
+            let column_names: Vec<String> = result_row.keys().cloned().collect();
+            for column_name in &column_names {
+                let cell: &mut ResultCell = result_row.get_mut(column_name).unwrap();
+                validate_cell_nulltype(
                     config,
                     pool,
                     parser,
@@ -56,13 +60,14 @@ pub fn validate_rows_intra(
                     compiled_conditions,
                     table_name,
                     &column_name,
-                    cell.as_object().unwrap(),
+                    cell,
                 );
-                result_row.insert(column_name.to_string(), SerdeValue::Object(cell));
             }
 
-            for (column_name, cell) in result_row.clone() {
-                let mut cell = validate_cell_rules(
+            for column_name in &column_names {
+                let context = result_row.clone();
+                let cell: &mut ResultCell = result_row.get_mut(column_name).unwrap();
+                validate_cell_rules(
                     config,
                     pool,
                     parser,
@@ -70,11 +75,12 @@ pub fn validate_rows_intra(
                     compiled_conditions,
                     table_name,
                     &column_name,
-                    &result_row,
-                    cell.as_object().unwrap(),
+                    &context,
+                    cell,
                 );
-                if !cell.contains_key("nulltype") {
-                    cell = validate_cell_datatype(
+
+                if cell.nulltype == None {
+                    validate_cell_datatype(
                         config,
                         pool,
                         parser,
@@ -82,27 +88,25 @@ pub fn validate_rows_intra(
                         compiled_conditions,
                         table_name,
                         &column_name,
-                        &cell,
+                        cell,
                     );
                 }
-                result_row.insert(column_name.to_string(), SerdeValue::Object(cell));
             }
-            result_rows.push(SerdeValue::Object(result_row));
+            result_rows.push(result_row);
         }
     }
 
     /*
+    I am using this as a quick ad hoc unit test but eventually we should re-implemt the unit tests
+    in jamesaoverton/cmi-pb-terminology.git (on the `next` branch).
     for row in &result_rows {
-        for (key, val) in row.as_object().unwrap() {
-            for (subkey, subval) in val.as_object().unwrap() {
-                println!("{}: {}: {}: {}", table_name, key, subkey, {
-                    if let SerdeValue::String(s) = subval {
-                        format!("{}", s.as_str())
-                    } else {
-                        format!("{}", subval)
-                    }
-                });
+        for (column_name, cell) in row {
+            println!("{}: {}: messages: {:?}", table_name, column_name, cell.messages);
+            if let Some(nulltype) = &cell.nulltype {
+                println!("{}: {}: nulltype: {}", table_name, column_name, nulltype);
             }
+            println!("{}: {}: valid: {}", table_name, column_name, cell.valid);
+            println!("{}: {}: value: {}", table_name, column_name, cell.value);
         }
         //println!("{}: {}", table_name, to_string(row).unwrap());
     }
@@ -120,10 +124,8 @@ fn validate_cell_nulltype(
     compiled_conditions: &HashMap<String, Box<dyn Fn(&str) -> bool + Sync + Send>>,
     table_name: &String,
     column_name: &String,
-    cell: &InputRowMap,
-) -> InputRowMap {
-    let mut cell = cell.clone();
-
+    cell: &mut ResultCell,
+) {
     let column = config
         .get("table")
         .and_then(|t| t.as_object())
@@ -135,13 +137,11 @@ fn validate_cell_nulltype(
         .unwrap();
     if let Some(SerdeValue::String(nt_name)) = column.get("nulltype") {
         let nt_condition = compiled_conditions.get(nt_name).unwrap();
-        let value = cell.get("value").and_then(|v| v.as_str()).unwrap();
-        if nt_condition(value) {
-            cell.insert("nulltype".to_string(), SerdeValue::String(nt_name.to_string()));
+        let value = &cell.value;
+        if nt_condition(&value) {
+            cell.nulltype = Some(nt_name.to_string());
         }
     }
-
-    cell
 }
 
 fn validate_cell_datatype(
@@ -154,8 +154,8 @@ fn validate_cell_datatype(
     compiled_conditions: &HashMap<String, Box<dyn Fn(&str) -> bool + Sync + Send>>,
     table_name: &String,
     column_name: &String,
-    cell: &InputRowMap,
-) -> InputRowMap {
+    cell: &mut ResultCell,
+) {
     fn get_datatypes_to_check(
         config: &InputRowMap,
         compiled_conditions: &HashMap<String, Box<dyn Fn(&str) -> bool + Sync + Send>>,
@@ -188,8 +188,6 @@ fn validate_cell_datatype(
         datatypes
     }
 
-    let cell_value = cell.get("value").and_then(|v| v.as_str()).unwrap();
-    let mut cell = cell.clone();
     let column = config
         .get("table")
         .and_then(|t| t.as_object())
@@ -207,8 +205,8 @@ fn validate_cell_datatype(
         .unwrap();
     let primary_dt_description = primary_datatype.get("description").unwrap();
     if let Some(primary_dt_condition_func) = compiled_conditions.get(primary_dt_name) {
-        if !primary_dt_condition_func(cell_value) {
-            cell.insert("valid".to_string(), SerdeValue::Bool(false));
+        if !primary_dt_condition_func(&cell.value) {
+            cell.valid = false;
             let mut parent_datatypes = get_datatypes_to_check(
                 config,
                 compiled_conditions,
@@ -220,30 +218,26 @@ fn validate_cell_datatype(
                 let dt_name = datatype.get("datatype").and_then(|d| d.as_str()).unwrap();
                 let dt_description = datatype.get("description").and_then(|d| d.as_str()).unwrap();
                 let dt_condition = compiled_conditions.get(dt_name).unwrap();
-                if !dt_condition(cell_value) {
-                    let messages = cell.get_mut("messages").and_then(|m| m.as_array_mut()).unwrap();
+                if !dt_condition(&cell.value) {
                     let message = json!({
                         "rule": format!("datatype:{}", dt_name),
                         "level": "error",
                         "message": format!("{} should be {}", column_name, dt_description)
                     });
-                    messages.push(message);
+                    cell.messages.push(message);
                 }
             }
             if primary_dt_description != "" {
                 let primary_dt_description = primary_dt_description.as_str().unwrap();
-                let messages = cell.get_mut("messages").and_then(|m| m.as_array_mut()).unwrap();
                 let message = json!({
                     "rule": format!("datatype:{}", primary_dt_name),
                     "level": "error",
                     "message": format!("{} should be {}", column_name, primary_dt_description)
                 });
-                messages.push(message);
+                cell.messages.push(message);
             }
         }
     }
-
-    cell
 }
 
 fn validate_cell_rules(
@@ -256,8 +250,8 @@ fn validate_cell_rules(
     _compiled_conditions: &HashMap<String, Box<dyn Fn(&str) -> bool + Sync + Send>>,
     _table_name: &String,
     _column_name: &String,
-    _result_row: &InputRowMap,
-    cell: &InputRowMap,
-) -> InputRowMap {
-    cell.clone()
+    _context: &ResultRow,
+    _cell: &mut ResultCell,
+) {
+    // To be implemented
 }

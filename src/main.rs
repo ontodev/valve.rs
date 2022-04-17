@@ -5,7 +5,7 @@ extern crate lazy_static;
 mod ast;
 mod validate;
 
-pub use crate::validate::validate_rows_intra;
+pub use crate::validate::{validate_rows_intra, ResultCell, ResultRow};
 
 // provides `try_next` for sqlx:
 //use futures::TryStreamExt;
@@ -34,7 +34,7 @@ lalrpop_mod!(pub cmi_pb_grammar);
 
 use cmi_pb_grammar::StartParser;
 
-type InputRowMap = SerdeMap<String, SerdeValue>;
+pub type InputRowMap = SerdeMap<String, SerdeValue>;
 
 lazy_static! {
     static ref SQLITE_TYPES: Vec<&'static str> = vec!["text", "integer", "real", "blob"];
@@ -702,7 +702,7 @@ fn validate_and_insert_chunks(
         crossbeam::scope(|scope| {
             fn wait_for_and_process_results(
                 mut chunk_number: usize,
-                handles: &mut Vec<ScopedJoinHandle<Vec<SerdeValue>>>,
+                handles: &mut Vec<ScopedJoinHandle<Vec<ResultRow>>>,
             ) {
                 while let Some(handle) = handles.pop() {
                     let intra_validated_rows = handle.join().unwrap();
@@ -743,7 +743,7 @@ fn validate_and_insert_chunks(
 }
 
 // Function args here are temporarily prefixed with underscores to avoid compiler warnings.
-fn validate_rows_inter_and_insert(_intra_validated_rows: Vec<SerdeValue>, _chunk_number: usize) {
+fn validate_rows_inter_and_insert(_intra_validated_rows: Vec<ResultRow>, _chunk_number: usize) {
     // TO BE IMPLEMENTED ...
     //println!("INTRA: {:?}", intra_validated_rows);
 }
@@ -759,7 +759,6 @@ fn verify_table_deps_and_sort(
     // Return a hard-coded list for now:
 
     // The list to use for my toy data:
-    /*
     vec![
         String::from("datatype"),
         String::from("table"),
@@ -770,8 +769,8 @@ fn verify_table_deps_and_sort(
         String::from("foobar"),
         String::from("import"),
     ]
-    */
 
+    /*
     // The list to use for James' sample data:
     vec![
         String::from("table"),
@@ -792,6 +791,7 @@ fn verify_table_deps_and_sort(
         String::from("ab_titer"),
         String::from("rnaseq"),
     ]
+    */
 }
 
 fn get_sql_type(dt_config: &InputRowMap, datatype: &String) -> Option<String> {
