@@ -34,7 +34,7 @@ lalrpop_mod!(pub cmi_pb_grammar);
 
 use cmi_pb_grammar::StartParser;
 
-pub type InputRowMap = SerdeMap<String, SerdeValue>;
+pub type ConfigMap = SerdeMap<String, SerdeValue>;
 
 lazy_static! {
     static ref SQLITE_TYPES: Vec<&'static str> = vec!["text", "integer", "real", "blob"];
@@ -44,7 +44,7 @@ static CHUNK_SIZE: usize = 2500;
 pub static MULTI_THREADED: bool = true;
 
 /// Use this function for "small" TSVs only, since it returns a vector.
-fn read_tsv(path: &String) -> Vec<InputRowMap> {
+fn read_tsv(path: &String) -> Vec<ConfigMap> {
     let mut rdr = csv::ReaderBuilder::new().delimiter(b'\t').from_reader(
         File::open(path).unwrap_or_else(|err| {
             panic!("Unable to open '{}': {}", path, err);
@@ -54,7 +54,7 @@ fn read_tsv(path: &String) -> Vec<InputRowMap> {
     let rows: Vec<_> = rdr
         .deserialize()
         .map(|result| {
-            let row: InputRowMap = result.unwrap();
+            let row: ConfigMap = result.unwrap();
             row
         })
         .collect();
@@ -176,17 +176,17 @@ fn read_config_files(
     table_table_path: &String,
     parser: &StartParser,
 ) -> (
-    InputRowMap,
-    InputRowMap,
-    InputRowMap,
-    InputRowMap,
+    ConfigMap,
+    ConfigMap,
+    ConfigMap,
+    ConfigMap,
     HashMap<String, Expression>,
     HashMap<String, Box<dyn Fn(&str) -> bool + Sync + Send>>,
 ) {
-    let mut specials_config: InputRowMap = SerdeMap::new();
-    let mut tables_config: InputRowMap = SerdeMap::new();
-    let mut datatypes_config: InputRowMap = SerdeMap::new();
-    let mut rules_config: InputRowMap = SerdeMap::new();
+    let mut specials_config: ConfigMap = SerdeMap::new();
+    let mut tables_config: ConfigMap = SerdeMap::new();
+    let mut datatypes_config: ConfigMap = SerdeMap::new();
+    let mut rules_config: ConfigMap = SerdeMap::new();
 
     let special_table_types = json!({
         "table": {"required": true},
@@ -484,18 +484,18 @@ fn read_config_files(
 }
 
 fn configure_db(
-    tables_config: &mut InputRowMap,
-    datatypes_config: &mut InputRowMap,
+    tables_config: &mut ConfigMap,
+    datatypes_config: &mut ConfigMap,
     parser: &StartParser,
     write_sql_to_stdout: Option<bool>,
     write_to_db: Option<bool>,
-) -> InputRowMap {
+) -> ConfigMap {
     // If the optional arguments have not been supplied, give them default values:
     let write_sql_to_stdout = write_sql_to_stdout.unwrap_or(false);
     let write_to_db = write_to_db.unwrap_or(false);
 
     // This is what we will return:
-    let mut constraints_config: InputRowMap = SerdeMap::new();
+    let mut constraints_config: ConfigMap = SerdeMap::new();
     constraints_config.insert(String::from("foreign"), SerdeValue::Object(SerdeMap::new()));
     constraints_config.insert(String::from("unique"), SerdeValue::Object(SerdeMap::new()));
     constraints_config.insert(String::from("primary"), SerdeValue::Object(SerdeMap::new()));
@@ -544,11 +544,11 @@ fn configure_db(
             panic!("No rows in '{}'", path);
         }
 
-        let mut all_columns: InputRowMap = InputRowMap::new();
+        let mut all_columns: ConfigMap = ConfigMap::new();
         for column_name in &actual_columns {
             let column;
             if !defined_columns.contains(&column_name.to_string()) {
-                let mut cmap: InputRowMap = SerdeMap::new();
+                let mut cmap: ConfigMap = SerdeMap::new();
                 cmap.insert(String::from("table"), SerdeValue::String(table_name.to_string()));
                 cmap.insert(String::from("column"), SerdeValue::String(column_name.to_string()));
                 cmap.insert(String::from("nulltype"), SerdeValue::String(String::from("empty")));
@@ -610,7 +610,7 @@ fn configure_db(
 }
 
 fn load_db(
-    config: &InputRowMap,
+    config: &ConfigMap,
     pool: &SqlitePool,
     parser: &StartParser,
     parsed_conditions: &HashMap<String, Expression>,
@@ -672,7 +672,7 @@ fn load_db(
 }
 
 fn validate_and_insert_chunks(
-    config: &InputRowMap,
+    config: &ConfigMap,
     pool: &SqlitePool,
     parser: &StartParser,
     parsed_conditions: &HashMap<String, Expression>,
@@ -752,7 +752,7 @@ fn verify_table_deps_and_sort(
     // Temporarily prefix these variables with an underscore to avoid compiler warnings about unused
     // variables (remove this later).
     _table_list: &Vec<String>,
-    _config_constraints: &InputRowMap,
+    _config_constraints: &ConfigMap,
 ) -> Vec<String> {
     // TODO: Implement this properly.
 
@@ -794,7 +794,7 @@ fn verify_table_deps_and_sort(
     */
 }
 
-fn get_sql_type(dt_config: &InputRowMap, datatype: &String) -> Option<String> {
+fn get_sql_type(dt_config: &ConfigMap, datatype: &String) -> Option<String> {
     if !dt_config.contains_key(datatype) {
         return None;
     }
@@ -816,8 +816,8 @@ fn get_sql_type(dt_config: &InputRowMap, datatype: &String) -> Option<String> {
 }
 
 fn create_table(
-    tables_config: &mut InputRowMap,
-    datatypes_config: &mut InputRowMap,
+    tables_config: &mut ConfigMap,
+    datatypes_config: &mut ConfigMap,
     parser: &StartParser,
     table_name: &String,
 ) -> (String, SerdeValue) {
@@ -1014,10 +1014,10 @@ fn create_table(
 }
 
 async fn configure_and_load_db(
-    specials_config: &mut InputRowMap,
-    tables_config: &mut InputRowMap,
-    datatypes_config: &mut InputRowMap,
-    rules_config: &mut InputRowMap,
+    specials_config: &mut ConfigMap,
+    tables_config: &mut ConfigMap,
+    datatypes_config: &mut ConfigMap,
+    rules_config: &mut ConfigMap,
     pool: &SqlitePool,
     parser: &StartParser,
     parsed_conditions: &HashMap<String, Expression>,
@@ -1027,7 +1027,7 @@ async fn configure_and_load_db(
         configure_db(tables_config, datatypes_config, parser, Some(false), Some(false));
 
     // Combine the individual configuration maps into one:
-    let mut config: InputRowMap = SerdeMap::new();
+    let mut config: ConfigMap = SerdeMap::new();
     config.insert(String::from("special"), SerdeValue::Object(specials_config.clone()));
     config.insert(String::from("table"), SerdeValue::Object(tables_config.clone()));
     config.insert(String::from("datatype"), SerdeValue::Object(datatypes_config.clone()));

@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use crate::ast::Expression;
 use crate::cmi_pb_grammar::StartParser;
-use crate::InputRowMap;
+use crate::ConfigMap;
 
 #[derive(Clone)]
 pub struct ResultCell {
@@ -23,7 +23,7 @@ pub struct ResultCell {
 pub type ResultRow = HashMap<String, ResultCell>;
 
 pub fn validate_rows_intra(
-    config: &InputRowMap,
+    config: &ConfigMap,
     pool: &SqlitePool,
     parser: &StartParser,
     parsed_conditions: &HashMap<String, Expression>,
@@ -115,7 +115,7 @@ pub fn validate_rows_intra(
 }
 
 fn validate_cell_nulltype(
-    config: &InputRowMap,
+    config: &ConfigMap,
     // Temporarily prefix these variables with an underscore to avoid compiler warnings about unused
     // variables (remove this later).
     _pool: &SqlitePool,
@@ -145,7 +145,7 @@ fn validate_cell_nulltype(
 }
 
 fn validate_cell_datatype(
-    config: &InputRowMap,
+    config: &ConfigMap,
     // Temporarily prefix these variables with an underscore to avoid compiler warnings about unused
     // variables (remove this later).
     _pool: &SqlitePool,
@@ -157,11 +157,11 @@ fn validate_cell_datatype(
     cell: &mut ResultCell,
 ) {
     fn get_datatypes_to_check(
-        config: &InputRowMap,
+        config: &ConfigMap,
         compiled_conditions: &HashMap<String, Box<dyn Fn(&str) -> bool + Sync + Send>>,
         primary_dt_name: &str,
         dt_name: Option<String>,
-    ) -> Vec<InputRowMap> {
+    ) -> Vec<ConfigMap> {
         let mut datatypes = vec![];
         if let Some(dt_name) = dt_name {
             let datatype = config
@@ -243,7 +243,7 @@ fn validate_cell_datatype(
 fn validate_cell_rules(
     // Temporarily prefix these variables with an underscore to avoid compiler warnings about unused
     // variables (remove this later).
-    _config: &InputRowMap,
+    _config: &ConfigMap,
     _pool: &SqlitePool,
     _parser: &StartParser,
     _parsed_conditions: &HashMap<String, Expression>,
