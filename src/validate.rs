@@ -11,10 +11,10 @@ use std::collections::HashMap;
 use crate::ast::Expression;
 use crate::cmi_pb_grammar::StartParser;
 
-type RowMap = SerdeMap<String, SerdeValue>;
+type InputRowMap = SerdeMap<String, SerdeValue>;
 
 pub fn validate_rows_intra(
-    config: &RowMap,
+    config: &InputRowMap,
     pool: &SqlitePool,
     parser: &StartParser,
     parsed_conditions: &HashMap<String, Expression>,
@@ -27,8 +27,8 @@ pub fn validate_rows_intra(
 
     for row in rows {
         if let Ok(row) = row {
-            let row: RowMap = row.deserialize(Some(headers)).unwrap();
-            let mut result_row: RowMap = SerdeMap::new();
+            let row: InputRowMap = row.deserialize(Some(headers)).unwrap();
+            let mut result_row: InputRowMap = SerdeMap::new();
             for (column, value) in row {
                 let string_value;
                 match value {
@@ -111,7 +111,7 @@ pub fn validate_rows_intra(
 }
 
 fn validate_cell_nulltype(
-    config: &RowMap,
+    config: &InputRowMap,
     // Temporarily prefix these variables with an underscore to avoid compiler warnings about unused
     // variables (remove this later).
     _pool: &SqlitePool,
@@ -120,8 +120,8 @@ fn validate_cell_nulltype(
     compiled_conditions: &HashMap<String, Box<dyn Fn(&str) -> bool + Sync + Send>>,
     table_name: &String,
     column_name: &String,
-    cell: &RowMap,
-) -> RowMap {
+    cell: &InputRowMap,
+) -> InputRowMap {
     let mut cell = cell.clone();
 
     let column = config
@@ -145,7 +145,7 @@ fn validate_cell_nulltype(
 }
 
 fn validate_cell_datatype(
-    config: &RowMap,
+    config: &InputRowMap,
     // Temporarily prefix these variables with an underscore to avoid compiler warnings about unused
     // variables (remove this later).
     _pool: &SqlitePool,
@@ -154,14 +154,14 @@ fn validate_cell_datatype(
     compiled_conditions: &HashMap<String, Box<dyn Fn(&str) -> bool + Sync + Send>>,
     table_name: &String,
     column_name: &String,
-    cell: &RowMap,
-) -> RowMap {
+    cell: &InputRowMap,
+) -> InputRowMap {
     fn get_datatypes_to_check(
-        config: &RowMap,
+        config: &InputRowMap,
         compiled_conditions: &HashMap<String, Box<dyn Fn(&str) -> bool + Sync + Send>>,
         primary_dt_name: &str,
         dt_name: Option<String>,
-    ) -> Vec<RowMap> {
+    ) -> Vec<InputRowMap> {
         let mut datatypes = vec![];
         if let Some(dt_name) = dt_name {
             let datatype = config
@@ -249,15 +249,15 @@ fn validate_cell_datatype(
 fn validate_cell_rules(
     // Temporarily prefix these variables with an underscore to avoid compiler warnings about unused
     // variables (remove this later).
-    _config: &RowMap,
+    _config: &InputRowMap,
     _pool: &SqlitePool,
     _parser: &StartParser,
     _parsed_conditions: &HashMap<String, Expression>,
     _compiled_conditions: &HashMap<String, Box<dyn Fn(&str) -> bool + Sync + Send>>,
     _table_name: &String,
     _column_name: &String,
-    _result_row: &RowMap,
-    cell: &RowMap,
-) -> RowMap {
+    _result_row: &InputRowMap,
+    cell: &InputRowMap,
+) -> InputRowMap {
     cell.clone()
 }
