@@ -1022,7 +1022,7 @@ async fn configure_and_load_db(
     parser: &StartParser,
     parsed_conditions: &HashMap<String, Expression>,
     compiled_conditions: &HashMap<String, Box<dyn Fn(&str) -> bool + Sync + Send>>,
-) -> Result<(), sqlx::Error> {
+) -> Result<ConfigMap, sqlx::Error> {
     let constraints_config =
         configure_db(tables_config, datatypes_config, parser, Some(false), Some(false));
 
@@ -1036,7 +1036,7 @@ async fn configure_and_load_db(
 
     load_db(&config, pool, parser, parsed_conditions, compiled_conditions);
 
-    Ok(())
+    Ok(config)
 }
 
 #[async_std::main]
@@ -1065,7 +1065,8 @@ async fn main() -> Result<(), sqlx::Error> {
     let pool = SqlitePoolOptions::new().max_connections(5).connect_with(connection_options).await?;
     sqlx::query("PRAGMA foreign_keys = ON").execute(&pool).await?;
 
-    configure_and_load_db(
+    // Prefix the config map with an underscore since we don't actually use it:
+    let _config = configure_and_load_db(
         &mut specials_config,
         &mut tables_config,
         &mut datatypes_config,
@@ -1075,5 +1076,7 @@ async fn main() -> Result<(), sqlx::Error> {
         &parsed_conditions,
         &compiled_conditions,
     )
-    .await
+    .await;
+
+    Ok(())
 }
