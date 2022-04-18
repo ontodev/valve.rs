@@ -17,7 +17,7 @@ pub struct ResultCell {
     nulltype: Option<String>,
     value: String,
     valid: bool,
-    messages: Vec<SerdeValue>,
+    messages: SerdeValue,
 }
 
 pub type ResultRow = HashMap<String, ResultCell>;
@@ -41,15 +41,15 @@ pub fn validate_rows_intra(
                     nulltype: None,
                     value: String::from(value),
                     valid: true,
-                    messages: vec![],
+                    messages: SerdeValue::Array(vec![]),
                 };
                 let column = headers.get(i).unwrap();
                 result_row.insert(column.to_string(), result_cell);
             }
 
+            let column_names: Vec<String> = result_row.keys().cloned().collect();
             // We check all the cells for nulltype first, since the rules validation requires that we
             // have this information for all cells.
-            let column_names: Vec<String> = result_row.keys().cloned().collect();
             for column_name in &column_names {
                 let cell: &mut ResultCell = result_row.get_mut(column_name).unwrap();
                 validate_cell_nulltype(
@@ -224,7 +224,7 @@ fn validate_cell_datatype(
                         "level": "error",
                         "message": format!("{} should be {}", column_name, dt_description)
                     });
-                    cell.messages.push(message);
+                    cell.messages.as_array_mut().and_then(|a| Some(a.push(message)));
                 }
             }
             if primary_dt_description != "" {
@@ -234,7 +234,7 @@ fn validate_cell_datatype(
                     "level": "error",
                     "message": format!("{} should be {}", column_name, primary_dt_description)
                 });
-                cell.messages.push(message);
+                cell.messages.as_array_mut().and_then(|a| Some(a.push(message)));
             }
         }
     }
