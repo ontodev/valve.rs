@@ -1,20 +1,25 @@
 MAKEFLAGS += --warn-undefined-variables
 SHELL := bash
 .SHELLFLAGS := -eu -o pipefail -c
-.DEFAULT_GOAL := run
+.DEFAULT_GOAL := test
 .DELETE_ON_ERROR:
 .SUFFIXES:
 
 build:
 	mkdir build
 
-.PHONY: run run_release
+.PHONY: run time test
 
-run: src/table.tsv | build
-	cargo $@ $^ $|
+run:
+	cargo run src/table.tsv build
 
-run_release: src/table.tsv | build
-	cargo $@ --release $^ $|
+time:
+	cargo build --release
+	time cargo run --release TestData/build/table.tsv build
+
+test:
+	cargo run src/table.tsv build | sort > actual_output.txt && diff -q expected_output.txt actual_output.txt
+
 
 clean:
 	rm -Rf build

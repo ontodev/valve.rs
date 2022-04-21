@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use crate::ast::Expression;
 use crate::cmi_pb_grammar::StartParser;
-use crate::ConfigMap;
+use crate::{ColumnRule, CompiledCondition, ConfigMap, ParsedStructure};
 
 #[derive(Clone)]
 pub struct ResultCell {
@@ -26,8 +26,9 @@ pub fn validate_rows_intra(
     config: &ConfigMap,
     pool: &SqlitePool,
     parser: &StartParser,
-    parsed_conditions: &HashMap<String, Expression>,
-    compiled_conditions: &HashMap<String, Box<dyn Fn(&str) -> bool + Sync + Send>>,
+    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
+    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    parsed_structure_conditions: &HashMap<String, ParsedStructure>,
     table_name: &String,
     headers: &csv::StringRecord,
     rows: &mut Vec<Result<csv::StringRecord, csv::Error>>,
@@ -46,18 +47,19 @@ pub fn validate_rows_intra(
                 let column = headers.get(i).unwrap();
                 result_row.insert(column.to_string(), result_cell);
             }
+            let column_names: Vec<String> = result_row.keys().cloned().collect();
 
             // We check all the cells for nulltype first, since the rules validation requires that we
             // have this information for all cells.
-            let column_names: Vec<String> = result_row.keys().cloned().collect();
             for column_name in &column_names {
                 let cell: &mut ResultCell = result_row.get_mut(column_name).unwrap();
                 validate_cell_nulltype(
                     config,
                     pool,
                     parser,
-                    parsed_conditions,
-                    compiled_conditions,
+                    compiled_datatype_conditions,
+                    compiled_rule_conditions,
+                    parsed_structure_conditions,
                     table_name,
                     &column_name,
                     cell,
@@ -71,8 +73,9 @@ pub fn validate_rows_intra(
                     config,
                     pool,
                     parser,
-                    parsed_conditions,
-                    compiled_conditions,
+                    compiled_datatype_conditions,
+                    compiled_rule_conditions,
+                    parsed_structure_conditions,
                     table_name,
                     &column_name,
                     &context,
@@ -84,8 +87,9 @@ pub fn validate_rows_intra(
                         config,
                         pool,
                         parser,
-                        parsed_conditions,
-                        compiled_conditions,
+                        compiled_datatype_conditions,
+                        compiled_rule_conditions,
+                        parsed_structure_conditions,
                         table_name,
                         &column_name,
                         cell,
@@ -96,9 +100,8 @@ pub fn validate_rows_intra(
         }
     }
 
-    /*
-    I am using this as a quick ad hoc unit test but eventually we should re-implemt the unit tests
-    in jamesaoverton/cmi-pb-terminology.git (on the `next` branch).
+    //I am using this as a quick ad hoc unit test but eventually we should re-implemt the unit tests
+    //in jamesaoverton/cmi-pb-terminology.git (on the `next` branch).
     for row in &result_rows {
         for (column_name, cell) in row {
             println!("{}: {}: messages: {:?}", table_name, column_name, cell.messages);
@@ -110,7 +113,6 @@ pub fn validate_rows_intra(
         }
         //println!("{}: {}", table_name, to_string(row).unwrap());
     }
-    */
     result_rows
 }
 
@@ -120,8 +122,9 @@ fn validate_cell_nulltype(
     // variables (remove this later).
     _pool: &SqlitePool,
     _parser: &StartParser,
-    _parsed_conditions: &HashMap<String, Expression>,
-    compiled_conditions: &HashMap<String, Box<dyn Fn(&str) -> bool + Sync + Send>>,
+    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
+    _compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    _parsed_structure_conditions: &HashMap<String, ParsedStructure>,
     table_name: &String,
     column_name: &String,
     cell: &mut ResultCell,
@@ -136,7 +139,7 @@ fn validate_cell_nulltype(
         .and_then(|o| o.get(column_name))
         .unwrap();
     if let Some(SerdeValue::String(nt_name)) = column.get("nulltype") {
-        let nt_condition = compiled_conditions.get(nt_name).unwrap();
+        let nt_condition = &compiled_datatype_conditions.get(nt_name).unwrap().compiled;
         let value = &cell.value;
         if nt_condition(&value) {
             cell.nulltype = Some(nt_name.to_string());
@@ -150,15 +153,16 @@ fn validate_cell_datatype(
     // variables (remove this later).
     _pool: &SqlitePool,
     _parser: &StartParser,
-    _parsed_conditions: &HashMap<String, Expression>,
-    compiled_conditions: &HashMap<String, Box<dyn Fn(&str) -> bool + Sync + Send>>,
+    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
+    _compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    _parsed_structure_conditions: &HashMap<String, ParsedStructure>,
     table_name: &String,
     column_name: &String,
     cell: &mut ResultCell,
 ) {
     fn get_datatypes_to_check(
         config: &ConfigMap,
-        compiled_conditions: &HashMap<String, Box<dyn Fn(&str) -> bool + Sync + Send>>,
+        compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
         primary_dt_name: &str,
         dt_name: Option<String>,
     ) -> Vec<ConfigMap> {
@@ -171,7 +175,7 @@ fn validate_cell_datatype(
                 .and_then(|d| d.as_object())
                 .unwrap();
             let dt_name = datatype.get("datatype").and_then(|d| d.as_str()).unwrap();
-            let dt_condition = compiled_conditions.get(dt_name);
+            let dt_condition = compiled_datatype_conditions.get(dt_name);
             let dt_parent = match datatype.get("parent") {
                 Some(SerdeValue::String(s)) => Some(s.clone()),
                 _ => None,
@@ -181,8 +185,12 @@ fn validate_cell_datatype(
                     datatypes.push(datatype.clone());
                 }
             }
-            let mut more_datatypes =
-                get_datatypes_to_check(config, compiled_conditions, primary_dt_name, dt_parent);
+            let mut more_datatypes = get_datatypes_to_check(
+                config,
+                compiled_datatype_conditions,
+                primary_dt_name,
+                dt_parent,
+            );
             datatypes.append(&mut more_datatypes);
         }
         datatypes
@@ -204,12 +212,13 @@ fn validate_cell_datatype(
         .and_then(|o| o.get(primary_dt_name))
         .unwrap();
     let primary_dt_description = primary_datatype.get("description").unwrap();
-    if let Some(primary_dt_condition_func) = compiled_conditions.get(primary_dt_name) {
+    if let Some(primary_dt_condition_func) = compiled_datatype_conditions.get(primary_dt_name) {
+        let primary_dt_condition_func = &primary_dt_condition_func.compiled;
         if !primary_dt_condition_func(&cell.value) {
             cell.valid = false;
             let mut parent_datatypes = get_datatypes_to_check(
                 config,
-                compiled_conditions,
+                compiled_datatype_conditions,
                 primary_dt_name,
                 Some(primary_dt_name.to_string()),
             );
@@ -217,7 +226,7 @@ fn validate_cell_datatype(
                 let datatype = parent_datatypes.pop().unwrap();
                 let dt_name = datatype.get("datatype").and_then(|d| d.as_str()).unwrap();
                 let dt_description = datatype.get("description").and_then(|d| d.as_str()).unwrap();
-                let dt_condition = compiled_conditions.get(dt_name).unwrap();
+                let dt_condition = &compiled_datatype_conditions.get(dt_name).unwrap().compiled;
                 if !dt_condition(&cell.value) {
                     let message = json!({
                         "rule": format!("datatype:{}", dt_name),
@@ -246,8 +255,9 @@ fn validate_cell_rules(
     _config: &ConfigMap,
     _pool: &SqlitePool,
     _parser: &StartParser,
-    _parsed_conditions: &HashMap<String, Expression>,
-    _compiled_conditions: &HashMap<String, Box<dyn Fn(&str) -> bool + Sync + Send>>,
+    _compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
+    _compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    _parsed_structure_conditions: &HashMap<String, ParsedStructure>,
     _table_name: &String,
     _column_name: &String,
     _context: &ResultRow,

@@ -27,6 +27,7 @@ use std::env;
 use std::fs::File;
 use std::process;
 use std::str::FromStr;
+use std::sync::Arc;
 
 use ast::Expression;
 
@@ -42,6 +43,56 @@ lazy_static! {
 
 static CHUNK_SIZE: usize = 2500;
 pub static MULTI_THREADED: bool = true;
+
+/*
+compiled_rule_conditions = {
+    "my_table": {
+        "when_column_1": [
+            ColumnRule {
+                when: CompiledCondition {parsed, compiled},
+                then: CompiledCondition {parsed, compiled},
+            },
+            ColumnRule {
+                when: CompiledCondition {parsed, compiled},
+                then: CompiledCondition {parsed, compiled},
+            },
+            ...
+        ],
+    },
+    ...
+}
+*/
+
+pub struct ParsedStructure {
+    original: String,
+    parsed: Expression,
+}
+
+pub struct CompiledCondition {
+    original: String,
+    parsed: Expression,
+    compiled: Arc<dyn Fn(&str) -> bool + Sync + Send>,
+}
+
+impl std::fmt::Debug for CompiledCondition {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.debug_struct("CompiledCondition")
+            .field("original", &self.original)
+            .field("parsed", &self.parsed)
+            .finish()
+    }
+}
+
+pub struct ColumnRule {
+    when: CompiledCondition,
+    then: CompiledCondition,
+}
+
+impl std::fmt::Debug for ColumnRule {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.debug_struct("ColumnRule").field("when", &self.when).field("then", &self.then).finish()
+    }
+}
 
 /// Use this function for "small" TSVs only, since it returns a vector.
 fn read_tsv(path: &String) -> Vec<ConfigMap> {
@@ -69,15 +120,35 @@ fn read_tsv(path: &String) -> Vec<ConfigMap> {
 fn compile_condition(
     condition_option: Option<&str>,
     parser: &StartParser,
-    // Temporarily prefix this variable with an underscore to avoid compiler warnings about unused
-    // variables (remove this later).
-    _compiled_conditions: &HashMap<String, Box<dyn Fn(&str) -> bool + Sync + Send>>,
-) -> (Expression, Box<dyn Fn(&str) -> bool + Sync + Send>) {
+    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
+) -> CompiledCondition {
     let unquoted_re = Regex::new(r#"^['"](?P<unquoted>.*)['"]$"#).unwrap();
     match condition_option {
-        // "null" and "not null" conditions do not get assigned a condition but are dealt with
-        // specially. We also return Nulls if the incoming condition_option is None.
-        None | Some("null") | Some("not null") => return (Expression::Null, Box::new(|_| true)),
+        // The case of no condition, or a "null" or "not null" condition, will be treated specially
+        // later during the validation phase in a way that does not utilise the associated closure.
+        // Since we have to assign some closure in these cases, we use a constant closure that
+        // always returns true:
+        None => {
+            return CompiledCondition {
+                original: String::from(""),
+                parsed: Expression::None,
+                compiled: Arc::new(|_| true),
+            }
+        }
+        Some("null") => {
+            return CompiledCondition {
+                original: String::from("null"),
+                parsed: Expression::Null,
+                compiled: Arc::new(|_| true),
+            }
+        }
+        Some("not null") => {
+            return CompiledCondition {
+                original: String::from("not null"),
+                parsed: Expression::NotNull,
+                compiled: Arc::new(|_| true),
+            }
+        }
         Some(condition) => {
             let parsed_condition = parser.parse(condition);
             if let Err(_) = parsed_condition {
@@ -96,7 +167,11 @@ fn compile_condition(
                     if name == "equals" {
                         if let Expression::Label(label) = &*args[0] {
                             let label = String::from(unquoted_re.replace(label, "$unquoted"));
-                            return (*parsed_condition.clone(), Box::new(move |x| x == label));
+                            return CompiledCondition {
+                                original: condition.to_string(),
+                                parsed: *parsed_condition.clone(),
+                                compiled: Arc::new(move |x| x == label),
+                            };
                         } else {
                             panic!("ERROR: Invalid condition: {}", condition);
                         }
@@ -112,26 +187,29 @@ fn compile_condition(
                                 "exclude" => {
                                     pattern = format!("{}{}", flags, pattern);
                                     let re = Regex::new(pattern.as_str()).unwrap();
-                                    return (
-                                        *parsed_condition.clone(),
-                                        Box::new(move |x| !re.is_match(x)),
-                                    );
+                                    return CompiledCondition {
+                                        original: condition.to_string(),
+                                        parsed: *parsed_condition.clone(),
+                                        compiled: Arc::new(move |x| !re.is_match(x)),
+                                    };
                                 }
                                 "match" => {
                                     pattern = format!("^{}{}$", flags, pattern);
                                     let re = Regex::new(pattern.as_str()).unwrap();
-                                    return (
-                                        *parsed_condition.clone(),
-                                        Box::new(move |x| re.is_match(x)),
-                                    );
+                                    return CompiledCondition {
+                                        original: condition.to_string(),
+                                        parsed: *parsed_condition.clone(),
+                                        compiled: Arc::new(move |x| re.is_match(x)),
+                                    };
                                 }
                                 "search" => {
                                     pattern = format!("{}{}", flags, pattern);
                                     let re = Regex::new(pattern.as_str()).unwrap();
-                                    return (
-                                        *parsed_condition.clone(),
-                                        Box::new(move |x| re.is_match(x)),
-                                    );
+                                    return CompiledCondition {
+                                        original: condition.to_string(),
+                                        parsed: *parsed_condition.clone(),
+                                        compiled: Arc::new(move |x| re.is_match(x)),
+                                    };
                                 }
                                 _ => panic!("Unrecognized function name: {}", name),
                             };
@@ -155,15 +233,26 @@ fn compile_condition(
                                 );
                             }
                         }
-                        return (
-                            *parsed_condition.clone(),
-                            Box::new(move |x| alternatives.contains(&x.to_string())),
-                        );
+                        return CompiledCondition {
+                            original: condition.to_string(),
+                            parsed: *parsed_condition.clone(),
+                            compiled: Arc::new(move |x| alternatives.contains(&x.to_string())),
+                        };
                     } else {
                         panic!("Unrecognized function name: {}", name);
                     }
                 }
-                // TODO: Implement the rest ...
+                Expression::Label(value)
+                    if compiled_datatype_conditions.contains_key(&value.to_string()) =>
+                {
+                    let compiled_datatype_condition =
+                        compiled_datatype_conditions.get(&value.to_string()).unwrap();
+                    return CompiledCondition {
+                        original: compiled_datatype_condition.original.to_string(),
+                        parsed: compiled_datatype_condition.parsed.clone(),
+                        compiled: compiled_datatype_condition.compiled.clone(),
+                    };
+                }
                 _ => {
                     panic!("Unrecognized condition: {}", condition);
                 }
@@ -180,14 +269,10 @@ fn read_config_files(
     ConfigMap,
     ConfigMap,
     ConfigMap,
-    HashMap<String, Expression>,
-    HashMap<String, Box<dyn Fn(&str) -> bool + Sync + Send>>,
+    HashMap<String, CompiledCondition>,
+    HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    HashMap<String, ParsedStructure>,
 ) {
-    let mut specials_config: ConfigMap = SerdeMap::new();
-    let mut tables_config: ConfigMap = SerdeMap::new();
-    let mut datatypes_config: ConfigMap = SerdeMap::new();
-    let mut rules_config: ConfigMap = SerdeMap::new();
-
     let special_table_types = json!({
         "table": {"required": true},
         "column": {"required": true},
@@ -197,6 +282,7 @@ fn read_config_files(
     let special_table_types = special_table_types.as_object().unwrap();
 
     // Initialize the special table entries in the config map:
+    let mut specials_config: ConfigMap = SerdeMap::new();
     for t in special_table_types.keys() {
         specials_config.insert(t.to_string(), SerdeValue::Null);
     }
@@ -205,6 +291,7 @@ fn read_config_files(
     let rows = read_tsv(path);
 
     // Load table table
+    let mut tables_config: ConfigMap = SerdeMap::new();
     for mut row in rows {
         for column in vec!["table", "path", "type"] {
             if !row.contains_key(column) || row.get(column) == None {
@@ -265,14 +352,12 @@ fn read_config_files(
     }
 
     // Load datatype table
+    let mut datatypes_config: ConfigMap = SerdeMap::new();
+    let mut compiled_datatype_conditions: HashMap<String, CompiledCondition> = HashMap::new();
     let table_name = specials_config.get("datatype").and_then(|d| d.as_str()).unwrap();
     let path = String::from(
         tables_config.get(table_name).and_then(|t| t.get("path")).and_then(|p| p.as_str()).unwrap(),
     );
-
-    let mut parsed_conditions: HashMap<String, Expression> = HashMap::new();
-    let mut compiled_conditions: HashMap<String, Box<dyn Fn(&str) -> bool + Sync + Send>> =
-        HashMap::new();
     let rows = read_tsv(&path.to_string());
     for mut row in rows {
         for column in vec!["datatype", "parent", "condition", "SQL type"] {
@@ -297,11 +382,10 @@ fn read_config_files(
 
         let dt_name = row.get("datatype").and_then(|d| d.as_str()).unwrap();
         let condition = row.get("condition").and_then(|c| c.as_str());
-        let (parsed_condition, compiled_condition) =
-            compile_condition(condition, parser, &compiled_conditions);
+        let compiled_condition =
+            compile_condition(condition, parser, &compiled_datatype_conditions);
         if let Some(_) = condition {
-            parsed_conditions.insert(dt_name.to_string(), parsed_condition);
-            compiled_conditions.insert(dt_name.to_string(), compiled_condition);
+            compiled_datatype_conditions.insert(dt_name.to_string(), compiled_condition);
         }
         datatypes_config.insert(dt_name.to_string(), SerdeValue::Object(row));
     }
@@ -313,6 +397,7 @@ fn read_config_files(
     }
 
     // Load column table
+    let mut parsed_structure_conditions: HashMap<String, ParsedStructure> = HashMap::new();
     let table_name = specials_config.get("column").and_then(|d| d.as_str()).unwrap();
     let path = String::from(
         tables_config.get(table_name).and_then(|t| t.get("path")).and_then(|p| p.as_str()).unwrap(),
@@ -370,7 +455,11 @@ fn read_config_files(
             }
             let parsed_structure = parsed_structure.unwrap();
             let parsed_structure = &parsed_structure[0];
-            parsed_conditions.insert(structure.to_string(), *parsed_structure.clone());
+            let parsed_structure = ParsedStructure {
+                original: structure.to_string(),
+                parsed: *parsed_structure.clone(),
+            };
+            parsed_structure_conditions.insert(structure.to_string(), parsed_structure);
         }
 
         let row_table = row.get("table").and_then(|t| t.as_str()).unwrap();
@@ -388,6 +477,9 @@ fn read_config_files(
     }
 
     // Load rule table if it exists
+    let mut rules_config: ConfigMap = SerdeMap::new();
+    let mut compiled_rule_conditions: HashMap<String, HashMap<String, Vec<ColumnRule>>> =
+        HashMap::new();
     if let Some(SerdeValue::String(table_name)) = specials_config.get("rule") {
         let path = String::from(
             tables_config
@@ -422,8 +514,13 @@ fn read_config_files(
                 panic!("Undefined table '{}' reading '{}'", row_table, path);
             }
 
+            // Compile and collect the when and then conditions.
+            let mut column_rule_key = None;
             for column in vec!["when column", "then column"] {
                 let row_column = row.get(column).and_then(|c| c.as_str()).unwrap();
+                if column == "when column" {
+                    column_rule_key = Some(row_column.to_string());
+                }
                 if !tables_config
                     .get(row_table)
                     .and_then(|t| t.get("column"))
@@ -434,15 +531,34 @@ fn read_config_files(
                     panic!("Undefined column '{}.{}' reading '{}'", row_table, row_column, path);
                 }
             }
+            let column_rule_key = column_rule_key.unwrap();
 
+            let mut when_compiled = None;
+            let mut then_compiled = None;
             for column in vec!["when condition", "then condition"] {
-                let condition = row.get(column).and_then(|c| c.as_str());
-                if let Some(c) = condition {
-                    let (parsed_condition, compiled_condition) =
-                        compile_condition(condition, parser, &compiled_conditions);
-                    parsed_conditions.insert(c.to_string(), parsed_condition);
-                    compiled_conditions.insert(c.to_string(), compiled_condition);
+                let condition_option = row.get(column).and_then(|c| c.as_str());
+                if let Some(_) = condition_option {
+                    let compiled_condition =
+                        compile_condition(condition_option, parser, &compiled_datatype_conditions);
+                    if column == "when condition" {
+                        when_compiled = Some(compiled_condition);
+                    } else if column == "then condition" {
+                        then_compiled = Some(compiled_condition);
+                    }
                 }
+            }
+
+            if let (Some(when_compiled), Some(then_compiled)) = (when_compiled, then_compiled) {
+                if !compiled_rule_conditions.contains_key(row_table) {
+                    let table_rules: HashMap<String, Vec<ColumnRule>> = HashMap::new();
+                    compiled_rule_conditions.insert(row_table.to_string(), table_rules);
+                }
+                let table_rules = compiled_rule_conditions.get_mut(row_table).unwrap();
+                if !table_rules.contains_key(&column_rule_key) {
+                    table_rules.insert(column_rule_key.to_string(), vec![]);
+                }
+                let column_rules = table_rules.get_mut(&column_rule_key).unwrap();
+                column_rules.push(ColumnRule { when: when_compiled, then: then_compiled });
             }
 
             // Add the rule specified in the given row to the list of rules associated with the
@@ -478,8 +594,9 @@ fn read_config_files(
         tables_config,
         datatypes_config,
         rules_config,
-        parsed_conditions,
-        compiled_conditions,
+        compiled_datatype_conditions,
+        compiled_rule_conditions,
+        parsed_structure_conditions,
     )
 }
 
@@ -613,8 +730,9 @@ fn load_db(
     config: &ConfigMap,
     pool: &SqlitePool,
     parser: &StartParser,
-    parsed_conditions: &HashMap<String, Expression>,
-    compiled_conditions: &HashMap<String, Box<dyn Fn(&str) -> bool + Sync + Send>>,
+    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
+    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    parsed_structure_conditions: &HashMap<String, ParsedStructure>,
 ) {
     let table_list: Vec<String> = config
         .get("table")
@@ -660,8 +778,9 @@ fn load_db(
             config,
             pool,
             parser,
-            parsed_conditions,
-            compiled_conditions,
+            compiled_datatype_conditions,
+            compiled_rule_conditions,
+            parsed_structure_conditions,
             &table_name,
             &chunks,
             &headers,
@@ -675,8 +794,9 @@ fn validate_and_insert_chunks(
     config: &ConfigMap,
     pool: &SqlitePool,
     parser: &StartParser,
-    parsed_conditions: &HashMap<String, Expression>,
-    compiled_conditions: &HashMap<String, Box<dyn Fn(&str) -> bool + Sync + Send>>,
+    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
+    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    parsed_structure_conditions: &HashMap<String, ParsedStructure>,
     table_name: &String,
     chunks: &IntoChunks<csv::StringRecordsIter<std::fs::File>>,
     headers: &csv::StringRecord,
@@ -690,8 +810,9 @@ fn validate_and_insert_chunks(
                 config,
                 pool,
                 parser,
-                parsed_conditions,
-                compiled_conditions,
+                compiled_datatype_conditions,
+                compiled_rule_conditions,
+                parsed_structure_conditions,
                 table_name,
                 headers,
                 &mut rows,
@@ -723,8 +844,9 @@ fn validate_and_insert_chunks(
                         config,
                         pool,
                         parser,
-                        parsed_conditions,
-                        compiled_conditions,
+                        compiled_datatype_conditions,
+                        compiled_rule_conditions,
+                        parsed_structure_conditions,
                         table_name,
                         headers,
                         &mut rows,
@@ -1020,8 +1142,9 @@ async fn configure_and_load_db(
     rules_config: &mut ConfigMap,
     pool: &SqlitePool,
     parser: &StartParser,
-    parsed_conditions: &HashMap<String, Expression>,
-    compiled_conditions: &HashMap<String, Box<dyn Fn(&str) -> bool + Sync + Send>>,
+    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
+    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    parsed_structure_conditions: &HashMap<String, ParsedStructure>,
 ) -> Result<ConfigMap, sqlx::Error> {
     let constraints_config =
         configure_db(tables_config, datatypes_config, parser, Some(false), Some(false));
@@ -1034,7 +1157,14 @@ async fn configure_and_load_db(
     config.insert(String::from("rule"), SerdeValue::Object(rules_config.clone()));
     config.insert(String::from("constraints"), SerdeValue::Object(constraints_config.clone()));
 
-    load_db(&config, pool, parser, parsed_conditions, compiled_conditions);
+    load_db(
+        &config,
+        pool,
+        parser,
+        compiled_datatype_conditions,
+        compiled_rule_conditions,
+        parsed_structure_conditions,
+    );
 
     Ok(config)
 }
@@ -1055,9 +1185,13 @@ async fn main() -> Result<(), sqlx::Error> {
         mut tables_config,
         mut datatypes_config,
         mut rules_config,
-        parsed_conditions,
-        compiled_conditions,
+        compiled_datatype_conditions,
+        compiled_rule_conditions,
+        parsed_structure_conditions,
     ) = read_config_files(table, &parser);
+
+    //eprintln!("{:#?}", rules_config);
+    //eprintln!("{:#?}", compiled_rule_conditions);
 
     let connection_options =
         SqliteConnectOptions::from_str(format!("sqlite://{}/cmi-pb.db", db_dir).as_str())?
@@ -1073,8 +1207,9 @@ async fn main() -> Result<(), sqlx::Error> {
         &mut rules_config,
         &pool,
         &parser,
-        &parsed_conditions,
-        &compiled_conditions,
+        &compiled_datatype_conditions,
+        &compiled_rule_conditions,
+        &parsed_structure_conditions,
     )
     .await;
 
