@@ -11,17 +11,18 @@ version = "0.19.7"
 features = ["lexer"]
 
 [dependencies]
+async-std = { version = "1", features = [ "attributes" ] }
 crossbeam = "0.8.1"
 csv = "1.1"
-itertools = "0.10.3"
-num_cpus = "1.13.1"
-regex = "1"
-serde_json = { version = "1.0" }
-serde = { version = "1.0", features = ["derive"] }
-sqlx = { version = "0.5", features = [ "runtime-async-std-native-tls", "postgres", "sqlite" ] }
-async-std = { version = "1", features = [ "attributes" ] }
 futures = "0.3"
+itertools = "0.10.3"
 lazy_static = "1.4.0"
+num_cpus = "1.13.1"
+petgraph = "0.6.0"
+regex = "1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0" }
+sqlx = { version = "0.5", features = [ "runtime-async-std-native-tls", "postgres", "sqlite" ] }
 
 [dependencies.lalrpop-util]
 version = "0.19.7"

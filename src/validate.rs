@@ -8,7 +8,6 @@ use serde_json::{
 use sqlx::sqlite::SqlitePool;
 use std::collections::HashMap;
 
-use crate::ast::Expression;
 use crate::cmi_pb_grammar::StartParser;
 use crate::{ColumnRule, CompiledCondition, ConfigMap, ParsedStructure};
 

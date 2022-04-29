@@ -1,10 +1,13 @@
 #[macro_use]
 extern crate lalrpop_util;
-extern crate lazy_static;
 
 mod ast;
 mod validate;
 
+lalrpop_mod!(pub cmi_pb_grammar);
+
+use crate::ast::Expression;
+use crate::cmi_pb_grammar::StartParser;
 pub use crate::validate::{validate_rows_intra, ResultCell, ResultRow};
 
 // provides `try_next` for sqlx:
@@ -14,6 +17,9 @@ use crossbeam;
 use crossbeam::thread::ScopedJoinHandle;
 use itertools::{IntoChunks, Itertools};
 use lazy_static::lazy_static;
+use petgraph::algo::{all_simple_paths, toposort};
+use petgraph::graphmap::DiGraphMap;
+use petgraph::Direction;
 use regex::Regex;
 use serde_json::{
     json,
@@ -28,12 +34,6 @@ use std::fs::File;
 use std::process;
 use std::str::FromStr;
 use std::sync::Arc;
-
-use ast::Expression;
-
-lalrpop_mod!(pub cmi_pb_grammar);
-
-use cmi_pb_grammar::StartParser;
 
 pub type ConfigMap = SerdeMap<String, SerdeValue>;
 
@@ -701,7 +701,7 @@ fn configure_db(
                 }
             }
             if write_to_db {
-                // To be implemented.
+                // TODO: Implement this.
             }
             if write_sql_to_stdout {
                 println!("{}\n", table_sql);
@@ -719,7 +719,7 @@ fn configure_db(
             println!("{}", sql);
         }
         if write_to_db {
-            // To be implemented.
+            // TODO: Implement this.
         }
     }
 
@@ -870,50 +870,171 @@ fn validate_rows_inter_and_insert(_intra_validated_rows: Vec<ResultRow>, _chunk_
     //println!("INTRA: {:?}", intra_validated_rows);
 }
 
-fn verify_table_deps_and_sort(
-    // Temporarily prefix these variables with an underscore to avoid compiler warnings about unused
-    // variables (remove this later).
-    _table_list: &Vec<String>,
-    _config_constraints: &ConfigMap,
-) -> Vec<String> {
-    // TODO: Implement this properly.
+fn verify_table_deps_and_sort(table_list: &Vec<String>, constraints: &ConfigMap) -> Vec<String> {
+    fn get_cycles(g: &DiGraphMap<&str, ()>) -> Result<Vec<String>, Vec<Vec<String>>> {
+        let mut cycles = vec![];
+        match toposort(&g, None) {
+            Err(cycle) => {
+                let problem_node = cycle.node_id();
+                let neighbours = g.neighbors_directed(problem_node, Direction::Outgoing);
+                for neighbour in neighbours {
+                    let ways_to_problem_node =
+                        all_simple_paths::<Vec<_>, _>(&g, neighbour, problem_node, 0, None);
+                    for mut way in ways_to_problem_node {
+                        let mut cycle = vec![problem_node];
+                        cycle.append(&mut way);
+                        let cycle = cycle.iter().map(|&item| item.to_string()).collect::<Vec<_>>();
+                        cycles.push(cycle);
+                    }
+                }
+                Err(cycles)
+            }
+            Ok(sorted) => {
+                let sorted = sorted.iter().map(|&item| item.to_string()).collect::<Vec<_>>();
+                Ok(sorted)
+            }
+        }
+    }
 
-    // Return a hard-coded list for now:
+    let trees = constraints.get("tree").and_then(|t| t.as_object()).unwrap();
+    for table_name in table_list {
+        let mut dependency_graph = DiGraphMap::<&str, ()>::new();
+        let table_trees = trees.get(table_name).and_then(|t| t.as_array()).unwrap();
+        for tree in table_trees {
+            let tree = tree.as_object().unwrap();
+            let child = tree.get("child").and_then(|c| c.as_str()).unwrap();
+            let parent = tree.get("parent").and_then(|p| p.as_str()).unwrap();
+            let c_index = dependency_graph.add_node(child);
+            let p_index = dependency_graph.add_node(parent);
+            dependency_graph.add_edge(c_index, p_index, ());
+        }
+        match get_cycles(&dependency_graph) {
+            Ok(_) => (),
+            Err(cycles) => {
+                let mut message = String::new();
+                for cycle in cycles {
+                    message.push_str(
+                        format!("Cyclic dependency in table '{}': ", table_name).as_str(),
+                    );
+                    let end_index = cycle.len() - 1;
+                    for (i, child) in cycle.iter().enumerate() {
+                        if i < end_index {
+                            let dep = table_trees
+                                .iter()
+                                .find(|d| d.get("child").unwrap().as_str() == Some(child))
+                                .and_then(|d| d.as_object())
+                                .unwrap();
+                            let parent = dep.get("parent").unwrap();
+                            message.push_str(
+                                format!("tree({}) references {}", child, parent).as_str(),
+                            );
+                        }
+                        if i < (end_index - 1) {
+                            message.push_str(" and ");
+                        }
+                    }
+                    message.push_str(". ");
+                }
+                panic!("{}", message);
+            }
+        };
+    }
 
-    // The list to use for my toy data:
-    vec![
-        String::from("datatype"),
-        String::from("table"),
-        String::from("foreign_table"),
-        String::from("prefix"),
-        //String::from("rule"),
-        String::from("column"),
-        String::from("foobar"),
-        String::from("import"),
-    ]
+    let foreign_keys = constraints.get("foreign").and_then(|f| f.as_object()).unwrap();
+    let under_keys = constraints.get("under").and_then(|u| u.as_object()).unwrap();
+    let mut dependency_graph = DiGraphMap::<&str, ()>::new();
+    for table_name in table_list {
+        let t_index = dependency_graph.add_node(table_name);
+        let fkeys = foreign_keys.get(table_name).and_then(|f| f.as_array()).unwrap();
+        for fkey in fkeys {
+            let ftable = fkey.get("ftable").and_then(|f| f.as_str()).unwrap();
+            let f_index = dependency_graph.add_node(ftable);
+            dependency_graph.add_edge(t_index, f_index, ());
+        }
 
-    /*
-    // The list to use for James' sample data:
-    vec![
-        String::from("table"),
-        String::from("datatype"),
-        String::from("prefix"),
-        String::from("cell_type"),
-        String::from("gate"),
-        String::from("gene"),
-        String::from("olink_prot_info"),
-        String::from("protein"),
-        String::from("transcript"),
-        String::from("subject"),
-        String::from("column"),
-        String::from("import"),
-        String::from("specimen"),
-        String::from("live_cell_percentages"),
-        String::from("olink_prot_exp"),
-        String::from("ab_titer"),
-        String::from("rnaseq"),
-    ]
-    */
+        let ukeys = under_keys.get(table_name).and_then(|u| u.as_array()).unwrap();
+        for ukey in ukeys {
+            let ttable = ukey.get("ttable").and_then(|t| t.as_str()).unwrap();
+            let tcolumn = ukey.get("tcolumn").and_then(|t| t.as_str()).unwrap();
+            let value = ukey.get("value").and_then(|t| t.as_str()).unwrap();
+            if ttable != table_name {
+                let ttable_trees = trees.get(ttable).and_then(|t| t.as_array()).unwrap();
+                if ttable_trees
+                    .iter()
+                    .filter(|d| d.get("child").unwrap().as_str() == Some(tcolumn))
+                    .collect::<Vec<_>>()
+                    .is_empty()
+                {
+                    panic!(
+                        "under({}.{}, {}) refers to a non-existent tree",
+                        ttable, tcolumn, value
+                    );
+                }
+                let tt_index = dependency_graph.add_node(ttable);
+                dependency_graph.add_edge(t_index, tt_index, ());
+            }
+        }
+    }
+
+    match get_cycles(&dependency_graph) {
+        Ok(table_list) => {
+            return table_list;
+        }
+        Err(cycles) => {
+            let mut message = String::new();
+            for cycle in cycles {
+                message.push_str(
+                    format!("Cyclic dependency between tables {}: ", cycle.join(", ")).as_str(),
+                );
+                let end_index = cycle.len() - 1;
+                for (i, table) in cycle.iter().enumerate() {
+                    if i < end_index {
+                        let dep_name = cycle.get(i + 1).unwrap().as_str();
+                        let fkeys = foreign_keys.get(table).and_then(|f| f.as_array()).unwrap();
+                        let ukeys = under_keys.get(table).and_then(|u| u.as_array()).unwrap();
+                        let column;
+                        let ref_table;
+                        let ref_column;
+                        if let Some(dep) = fkeys
+                            .iter()
+                            .find(|d| d.get("ftable").unwrap().as_str() == Some(dep_name))
+                            .and_then(|d| d.as_object())
+                        {
+                            column = dep.get("column").unwrap();
+                            ref_table = dep.get("ftable").unwrap();
+                            ref_column = dep.get("fcolumn").unwrap();
+                        } else if let Some(dep) = ukeys
+                            .iter()
+                            .find(|d| d.get("ttable").unwrap().as_str() == Some(dep_name))
+                            .and_then(|d| d.as_object())
+                        {
+                            column = dep.get("column").unwrap();
+                            ref_table = dep.get("ttable").unwrap();
+                            ref_column = dep.get("tcolumn").unwrap();
+                        } else {
+                            panic!("{}. Unable to retrieve the details.", message);
+                        }
+
+                        message.push_str(
+                            format!(
+                                "{}.{} depends on {}.{}",
+                                table,
+                                column,
+                                ref_table,
+                                ref_column,
+                            )
+                            .as_str(),
+                        );
+                    }
+                    if i < (end_index - 1) {
+                        message.push_str(" and ");
+                    }
+                }
+                message.push_str(". ");
+            }
+            panic!("{}", message);
+        }
+    };
 }
 
 fn get_sql_type(dt_config: &ConfigMap, datatype: &String) -> Option<String> {
@@ -987,6 +1108,8 @@ fn create_table(
             // Remove enclosing quotes that are added as a side-effect of the to_string()
             // conversion
             // TODO: See if we can avoid having to do this here and elsewhere.
+            // See the code in the cyclic dependency check, which seems to successfully avoid
+            // this issue.
             s = s.split_off(1);
             s.truncate(s.len() - 1);
             Some(s)
@@ -1046,15 +1169,91 @@ fn create_table(
                                 }
                             };
                         }
-                        // Temporarily prefix args with an underscore to avoid compiler warnings
-                        // about unused variables (remove this later).
-                        Expression::Function(name, _args) if name == "tree" => {
-                            // TODO: to be implemented
+                        Expression::Function(name, args) if name == "tree" => {
+                            if args.len() != 1 {
+                                panic!(
+                                    "Invalid 'tree' constraint: {} for: {}",
+                                    structure, table_name
+                                );
+                            }
+                            match &*args[0] {
+                                Expression::Label(child) => {
+                                    let child_datatype = columns
+                                        .get(child)
+                                        .and_then(|c| c.get("datatype"))
+                                        .and_then(|d| d.as_str());
+                                    if let None = child_datatype {
+                                        panic!(
+                                            "Could not determine SQL datatype for {} of tree({})",
+                                            child, child
+                                        );
+                                    }
+                                    let child_datatype = child_datatype.unwrap();
+                                    let parent = column_name;
+                                    let child_sql_type =
+                                        get_sql_type(datatypes_config, &child_datatype.to_string())
+                                            .and_then(|mut s| {
+                                                // Remove enclosing quotes that are added as a
+                                                // side-effect of the to_string() conversion
+                                                // TODO: See if we can avoid having to do this here
+                                                // and elsewhere. See the code in the cyclic
+                                                // dependency check, which seems to successfully
+                                                // avoid this issue.
+                                                s = s.split_off(1);
+                                                s.truncate(s.len() - 1);
+                                                Some(s)
+                                            })
+                                            .unwrap();
+                                    if sql_type != child_sql_type {
+                                        panic!(
+                                            "SQL type '{}' of '{}' in 'tree({})' for table \
+                                             '{}' doe snot match SQL type: '{}' of parent: '{}'.",
+                                            child_sql_type,
+                                            child,
+                                            child,
+                                            table_name,
+                                            sql_type,
+                                            parent
+                                        );
+                                    }
+                                    let tree_constraints = table_constraints
+                                        .get_mut("tree")
+                                        .and_then(|t| t.as_array_mut())
+                                        .unwrap();
+                                    let entry = json!({"parent": column_name,
+                                                       "child": child});
+                                    tree_constraints.push(entry);
+                                }
+                                _ => {
+                                    panic!(
+                                        "Invalid 'tree' constraint: {} for: {}",
+                                        structure, table_name
+                                    );
+                                }
+                            };
                         }
-                        // Temporarily prefix args with an underscore to avoid compiler warnings
-                        // about unused variables (remove this later).
-                        Expression::Function(name, _args) if name == "under" => {
-                            // TODO: to be implemented
+                        Expression::Function(name, args) if name == "under" => {
+                            let generic_error = format!(
+                                "Invalid 'under' constraint: {} for: {}",
+                                structure, table_name
+                            );
+                            if args.len() != 2 {
+                                panic!("{}", generic_error);
+                            }
+                            match (&*args[0], &*args[1]) {
+                                (Expression::Field(ttable, tcolumn), Expression::Label(value)) => {
+                                    let under_constraints = table_constraints
+                                        .get_mut("under")
+                                        .and_then(|u| u.as_array_mut())
+                                        .unwrap();
+                                    let entry = json!({"column": column_name,
+                                                       "ttable": ttable,
+                                                       "tcolumn": tcolumn,
+                                                       "value": value});
+                                    under_constraints.push(entry);
+                                }
+                                (_, _) => panic!("{}", generic_error),
+                            };
                         }
                         _ => panic!(
                             "Unrecognized structure: {} for {}.{}",
@@ -1189,9 +1388,6 @@ async fn main() -> Result<(), sqlx::Error> {
         compiled_rule_conditions,
         parsed_structure_conditions,
     ) = read_config_files(table, &parser);
-
-    //eprintln!("{:#?}", rules_config);
-    //eprintln!("{:#?}", compiled_rule_conditions);
 
     let connection_options =
         SqliteConnectOptions::from_str(format!("sqlite://{}/cmi-pb.db", db_dir).as_str())?
