@@ -99,6 +99,7 @@ pub fn validate_rows_intra(
         }
     }
 
+    // TODO: Remove this ad hoc test.
     //I am using this as a quick ad hoc unit test but eventually we should re-implemt the unit tests
     //in jamesaoverton/cmi-pb-terminology.git (on the `next` branch).
     for row in &result_rows {
@@ -112,6 +113,8 @@ pub fn validate_rows_intra(
         }
         //println!("{}: {}", table_name, to_string(row).unwrap());
     }
+
+    // Finally return the result rows:
     result_rows
 }
 
@@ -119,6 +122,7 @@ fn validate_cell_nulltype(
     config: &ConfigMap,
     // Temporarily prefix these variables with an underscore to avoid compiler warnings about unused
     // variables (remove this later).
+    // TODO: Simply remove these underscored variables as we don't need them.
     _pool: &SqlitePool,
     _parser: &StartParser,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
@@ -150,6 +154,7 @@ fn validate_cell_datatype(
     config: &ConfigMap,
     // Temporarily prefix these variables with an underscore to avoid compiler warnings about unused
     // variables (remove this later).
+    // TODO: Simply remove these underscored variables as we don't need them.
     _pool: &SqlitePool,
     _parser: &StartParser,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
@@ -262,5 +267,5 @@ fn validate_cell_rules(
     _context: &ResultRow,
     _cell: &mut ResultCell,
 ) {
-    // To be implemented
+    // TODO: To be implemented
 }

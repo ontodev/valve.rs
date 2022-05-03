@@ -95,7 +95,7 @@ impl std::fmt::Debug for ColumnRule {
 }
 
 /// Use this function for "small" TSVs only, since it returns a vector.
-fn read_tsv(path: &String) -> Vec<ConfigMap> {
+fn read_tsv_into_vector(path: &String) -> Vec<ConfigMap> {
     let mut rdr = csv::ReaderBuilder::new().delimiter(b'\t').from_reader(
         File::open(path).unwrap_or_else(|err| {
             panic!("Unable to open '{}': {}", path, err);
@@ -184,6 +184,8 @@ fn compile_condition(
                                 flags = format!("(?{})", flags.as_str());
                             }
                             match name.as_str() {
+                                // TODO: Verify that the closures being used for exlude, match,
+                                // and search are correct.
                                 "exclude" => {
                                     pattern = format!("{}{}", flags, pattern);
                                     let re = Regex::new(pattern.as_str()).unwrap();
@@ -288,7 +290,7 @@ fn read_config_files(
     }
 
     let path = table_table_path;
-    let rows = read_tsv(path);
+    let rows = read_tsv_into_vector(path);
 
     // Load table table
     let mut tables_config: ConfigMap = SerdeMap::new();
@@ -358,7 +360,7 @@ fn read_config_files(
     let path = String::from(
         tables_config.get(table_name).and_then(|t| t.get("path")).and_then(|p| p.as_str()).unwrap(),
     );
-    let rows = read_tsv(&path.to_string());
+    let rows = read_tsv_into_vector(&path.to_string());
     for mut row in rows {
         for column in vec!["datatype", "parent", "condition", "SQL type"] {
             if !row.contains_key(column) || row.get(column) == None {
@@ -402,7 +404,7 @@ fn read_config_files(
     let path = String::from(
         tables_config.get(table_name).and_then(|t| t.get("path")).and_then(|p| p.as_str()).unwrap(),
     );
-    let rows = read_tsv(&path.to_string());
+    let rows = read_tsv_into_vector(&path.to_string());
 
     for mut row in rows {
         for column in vec!["table", "column", "nulltype", "datatype"] {
@@ -469,6 +471,8 @@ fn read_config_files(
         {
             columns_config.insert(column_name.to_string(), SerdeValue::Object(row));
         } else {
+            // TODO: Try and remove this panic! statement by using unwrap() above (or something
+            // like that).
             panic!(
                 "Programming error: Unable to find column config for column {}.{}",
                 row_table, column_name
@@ -488,7 +492,7 @@ fn read_config_files(
                 .and_then(|p| p.as_str())
                 .unwrap(),
         );
-        let rows = read_tsv(&path.to_string());
+        let rows = read_tsv_into_vector(&path.to_string());
         for row in rows {
             for column in vec![
                 "table",
@@ -786,7 +790,8 @@ fn load_db(
             &headers,
         );
 
-        // TODO: Implement the rest ...
+        // TODO: Call validate_tree_foreign_keys() and then use the returned records to update
+        // the database.
     }
 }
 
@@ -866,7 +871,7 @@ fn validate_and_insert_chunks(
 
 // Function args here are temporarily prefixed with underscores to avoid compiler warnings.
 fn validate_rows_inter_and_insert(_intra_validated_rows: Vec<ResultRow>, _chunk_number: usize) {
-    // TO BE IMPLEMENTED ...
+    // TODO: to be implemented ...
     //println!("INTRA: {:?}", intra_validated_rows);
 }
 
@@ -1321,10 +1326,22 @@ fn create_table(
     }
     output.push(String::from(");"));
 
-    // TODO: Create unique indexes corresponding to tree constraints here.
-    // ...
+    // Loop through the tree constraints and if any of their associated child columns do not already
+    // have an associated unique or primary index, create one implicitly here:
+    let tree_constraints = table_constraints.get("tree").and_then(|v| v.as_array()).unwrap();
+    for (i, tree) in tree_constraints.iter().enumerate() {
+        let unique_keys = table_constraints.get("unique").and_then(|v| v.as_array()).unwrap();
+        let primary_keys = table_constraints.get("primary").and_then(|v| v.as_array()).unwrap();
+        let tree_child = tree.get("child").unwrap();
+        if !unique_keys.contains(tree_child) && !primary_keys.contains(tree_child) {
+            output.push(format!(
+                r#"CREATE UNIQUE INDEX "{}_{}_idx" ON "{}"("{}")"#,
+                table_name, tree_child, table_name, tree_child
+            ));
+        }
+    }
 
-    // Create a unique index on row_number:
+    // Finally, create a further unique index on row_number:
     output.push(format!(
         r#"CREATE UNIQUE INDEX "{}_row_number_idx" ON "{}"("row_number");"#,
         table_name, table_name
