@@ -11,7 +11,7 @@ use crate::cmi_pb_grammar::StartParser;
 pub use crate::validate::{validate_rows_intra, ResultCell, ResultRow};
 
 // provides `try_next` for sqlx:
-//use futures::TryStreamExt;
+use futures::TryStreamExt;
 
 use crossbeam;
 use crossbeam::thread::ScopedJoinHandle;
@@ -28,6 +28,7 @@ use serde_json::{
     Value as SerdeValue,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
+use sqlx::Row;
 use std::collections::HashMap;
 use std::env;
 use std::fs::File;
@@ -64,8 +65,12 @@ compiled_rule_conditions = {
 */
 
 pub struct ParsedStructure {
-    original: String,
-    parsed: Expression,
+    // TODO: Remove the underscores from these variable names. Since the code currently never
+    // accesses these fields we will get a compiler warning unless they are underscored.
+    // Presumably, though, when the implementation is complete they will be accessed at some point
+    // and we can remove the underscores here.
+    _original: String,
+    _parsed: Expression,
 }
 
 pub struct CompiledCondition {
@@ -184,8 +189,6 @@ fn compile_condition(
                                 flags = format!("(?{})", flags.as_str());
                             }
                             match name.as_str() {
-                                // TODO: Verify that the closures being used for exlude, match,
-                                // and search are correct.
                                 "exclude" => {
                                     pattern = format!("{}{}", flags, pattern);
                                     let re = Regex::new(pattern.as_str()).unwrap();
@@ -250,7 +253,9 @@ fn compile_condition(
                     let compiled_datatype_condition =
                         compiled_datatype_conditions.get(&value.to_string()).unwrap();
                     return CompiledCondition {
-                        original: compiled_datatype_condition.original.to_string(),
+                        // TODO: remove this commented out code later:
+                        //original: compiled_datatype_condition.original.to_string(),
+                        original: value.to_string(),
                         parsed: compiled_datatype_condition.parsed.clone(),
                         compiled: compiled_datatype_condition.compiled.clone(),
                     };
@@ -458,8 +463,8 @@ fn read_config_files(
             let parsed_structure = parsed_structure.unwrap();
             let parsed_structure = &parsed_structure[0];
             let parsed_structure = ParsedStructure {
-                original: structure.to_string(),
-                parsed: *parsed_structure.clone(),
+                _original: structure.to_string(),
+                _parsed: *parsed_structure.clone(),
             };
             parsed_structure_conditions.insert(structure.to_string(), parsed_structure);
         }
@@ -604,13 +609,14 @@ fn read_config_files(
     )
 }
 
-fn configure_db(
+async fn configure_db(
     tables_config: &mut ConfigMap,
     datatypes_config: &mut ConfigMap,
+    pool: &SqlitePool,
     parser: &StartParser,
     write_sql_to_stdout: Option<bool>,
     write_to_db: Option<bool>,
-) -> ConfigMap {
+) -> Result<ConfigMap, sqlx::Error> {
     // If the optional arguments have not been supplied, give them default values:
     let write_sql_to_stdout = write_sql_to_stdout.unwrap_or(false);
     let write_to_db = write_to_db.unwrap_or(false);
@@ -705,7 +711,10 @@ fn configure_db(
                 }
             }
             if write_to_db {
-                // TODO: Implement this.
+                sqlx::query(&table_sql)
+                    .execute(pool)
+                    .await
+                    .expect(format!("The SQL statement: {} returned an error", table_sql).as_str());
             }
             if write_sql_to_stdout {
                 println!("{}\n", table_sql);
@@ -723,11 +732,14 @@ fn configure_db(
             println!("{}", sql);
         }
         if write_to_db {
-            // TODO: Implement this.
+            sqlx::query(&sql)
+                .execute(pool)
+                .await
+                .expect(format!("The SQL statement: {} returned an error", sql).as_str());
         }
     }
 
-    return constraints_config;
+    return Ok(constraints_config);
 }
 
 fn load_db(
@@ -1329,13 +1341,15 @@ fn create_table(
     // Loop through the tree constraints and if any of their associated child columns do not already
     // have an associated unique or primary index, create one implicitly here:
     let tree_constraints = table_constraints.get("tree").and_then(|v| v.as_array()).unwrap();
-    for (i, tree) in tree_constraints.iter().enumerate() {
+    for tree in tree_constraints {
         let unique_keys = table_constraints.get("unique").and_then(|v| v.as_array()).unwrap();
         let primary_keys = table_constraints.get("primary").and_then(|v| v.as_array()).unwrap();
-        let tree_child = tree.get("child").unwrap();
-        if !unique_keys.contains(tree_child) && !primary_keys.contains(tree_child) {
+        let tree_child = tree.get("child").and_then(|c| c.as_str()).unwrap();
+        if !unique_keys.contains(&SerdeValue::String(tree_child.to_string()))
+            && !primary_keys.contains(&SerdeValue::String(tree_child.to_string()))
+        {
             output.push(format!(
-                r#"CREATE UNIQUE INDEX "{}_{}_idx" ON "{}"("{}")"#,
+                r#"CREATE UNIQUE INDEX "{}_{}_idx" ON "{}"("{}");"#,
                 table_name, tree_child, table_name, tree_child
             ));
         }
@@ -1361,10 +1375,12 @@ async fn configure_and_load_db(
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     parsed_structure_conditions: &HashMap<String, ParsedStructure>,
-) -> Result<ConfigMap, sqlx::Error> {
+) -> Result<(), sqlx::Error> {
     let constraints_config =
-        configure_db(tables_config, datatypes_config, parser, Some(false), Some(false));
+        // TODO: set both of these flags to true
+        configure_db(tables_config, datatypes_config, pool, parser, Some(false), Some(true)).await?;
 
+    // TODO: Try (again) to do this combination step at the end of `configure_db()`.
     // Combine the individual configuration maps into one:
     let mut config: ConfigMap = SerdeMap::new();
     config.insert(String::from("special"), SerdeValue::Object(specials_config.clone()));
@@ -1382,7 +1398,7 @@ async fn configure_and_load_db(
         parsed_structure_conditions,
     );
 
-    Ok(config)
+    Ok(())
 }
 
 #[async_std::main]
@@ -1409,11 +1425,11 @@ async fn main() -> Result<(), sqlx::Error> {
     let connection_options =
         SqliteConnectOptions::from_str(format!("sqlite://{}/cmi-pb.db", db_dir).as_str())?
             .create_if_missing(true);
+
     let pool = SqlitePoolOptions::new().max_connections(5).connect_with(connection_options).await?;
     sqlx::query("PRAGMA foreign_keys = ON").execute(&pool).await?;
 
-    // Prefix the config map with an underscore since we don't actually use it:
-    let _config = configure_and_load_db(
+    configure_and_load_db(
         &mut specials_config,
         &mut tables_config,
         &mut datatypes_config,
@@ -1424,7 +1440,8 @@ async fn main() -> Result<(), sqlx::Error> {
         &compiled_rule_conditions,
         &parsed_structure_conditions,
     )
-    .await;
+    .await
+    .unwrap();
 
     Ok(())
 }

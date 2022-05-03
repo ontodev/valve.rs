@@ -1,9 +1,10 @@
-foreign_column
-a
-b
-c
-d
-e
-f
-g
-h
+foreign_column	other_foreign_column
+a	a
+b	b
+c	c
+d	d
+e	e
+f	f
+g	g
+h	h
+a	i

@@ -1,29 +1,13 @@
 prefix	base	ontology IRI	version IRI
+BFO	http://purl.obolibrary.org/obo/BFO_		
+COB	http://purl.obolibrary.org/obo/COB_	http://purl.obolibrary.org/obo/cob.owl	http://purl.obolibrary.org/obo/cob/releases/2021-09-13/cob-native.owl
+SCHMO	http://purl.obolibrary.org/obo/VO_		
+VO	http://purl.obolibrary.org/obo/SCHMO_		
+VO	http://purl.obolibrary.org/obo/VO_		
+dc	http://purl.org/dc/terms/		
+oio	http://www.geneontology.org/formats/oboInOwl#		
+owl	http://www.w3.org/2002/07/owl#		
+rdf	http://www.w3.org/1999/02/22-rdf-syntax-ns#		
 rdf	http://www.w3.org/1999/02/22-rdf-syntax-ns#		
 rdfs	http://www.w3.org/2000/01/rdf-schema#		
 xsd	http://www.w3.org/2001/XMLSchema#		
-owl	http://www.w3.org/2002/07/owl#		
-dc	http://purl.org/dc/terms/		
-oio	http://www.geneontology.org/formats/oboInOwl#		
-BFO	http://purl.obolibrary.org/obo/BFO_		
-CHEBI	http://purl.obolibrary.org/obo/CHEBI_		
-CL	http://purl.obolibrary.org/obo/CL_		
-COB	http://purl.obolibrary.org/obo/COB_	http://purl.obolibrary.org/obo/cob.owl	http://purl.obolibrary.org/obo/cob/releases/2021-09-13/cob-native.owl
-GO	http://purl.obolibrary.org/obo/GO_		
-IAO	http://purl.obolibrary.org/obo/IAO_		
-NCBITaxon	http://purl.obolibrary.org/obo/NCBITaxon_		
-NCIT	http://purl.obolibrary.org/obo/NCIT_		
-OBI	http://purl.obolibrary.org/obo/OBI_		
-PATO	http://purl.obolibrary.org/obo/PATO_		
-PR	http://purl.obolibrary.org/obo/PR_		
-SCHMO	http://purl.obolibrary.org/obo/SCHMO_		
-UO	http://purl.obolibrary.org/obo/UO_		
-VO	http://purl.obolibrary.org/obo/VO_		
-ONTIE	https://ontology.iedb.org/ontology/ONTIE_		
-faldo	http://biohackathon.org/resource/faldo#		
-uniprot	https://www.uniprot.org/uniprot/		
-uniprot_annotation	http://purl.uniprot.org/annotation/		
-uniprot_core	http://purl.uniprot.org/core/		
-uniprot_protein	http://purl.uniprot.org/uniprot/		
-skos	http://www.w3.org/2004/02/skos/core#		
-CMI-PB	http://example.com/cmi-pb/		

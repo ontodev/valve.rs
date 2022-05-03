@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use crate::cmi_pb_grammar::StartParser;
 use crate::{ColumnRule, CompiledCondition, ConfigMap, ParsedStructure};
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ResultCell {
     nulltype: Option<String>,
     value: String,
@@ -36,6 +36,7 @@ pub fn validate_rows_intra(
     for row in rows {
         if let Ok(row) = row {
             let mut result_row: ResultRow = ResultRow::new();
+            let mut column_names: Vec<String> = vec![];
             for (i, value) in row.iter().enumerate() {
                 let result_cell = ResultCell {
                     nulltype: None,
@@ -45,8 +46,8 @@ pub fn validate_rows_intra(
                 };
                 let column = headers.get(i).unwrap();
                 result_row.insert(column.to_string(), result_cell);
+                column_names.push(column.to_string());
             }
-            let column_names: Vec<String> = result_row.keys().cloned().collect();
 
             // We check all the cells for nulltype first, since the rules validation requires that we
             // have this information for all cells.
@@ -54,11 +55,7 @@ pub fn validate_rows_intra(
                 let cell: &mut ResultCell = result_row.get_mut(column_name).unwrap();
                 validate_cell_nulltype(
                     config,
-                    pool,
-                    parser,
                     compiled_datatype_conditions,
-                    compiled_rule_conditions,
-                    parsed_structure_conditions,
                     table_name,
                     &column_name,
                     cell,
@@ -70,11 +67,7 @@ pub fn validate_rows_intra(
                 let cell: &mut ResultCell = result_row.get_mut(column_name).unwrap();
                 validate_cell_rules(
                     config,
-                    pool,
-                    parser,
-                    compiled_datatype_conditions,
                     compiled_rule_conditions,
-                    parsed_structure_conditions,
                     table_name,
                     &column_name,
                     &context,
@@ -84,11 +77,7 @@ pub fn validate_rows_intra(
                 if cell.nulltype == None {
                     validate_cell_datatype(
                         config,
-                        pool,
-                        parser,
                         compiled_datatype_conditions,
-                        compiled_rule_conditions,
-                        parsed_structure_conditions,
                         table_name,
                         &column_name,
                         cell,
@@ -104,12 +93,18 @@ pub fn validate_rows_intra(
     //in jamesaoverton/cmi-pb-terminology.git (on the `next` branch).
     for row in &result_rows {
         for (column_name, cell) in row {
-            println!("{}: {}: messages: {:?}", table_name, column_name, cell.messages);
-            if let Some(nulltype) = &cell.nulltype {
-                println!("{}: {}: nulltype: {}", table_name, column_name, nulltype);
-            }
-            println!("{}: {}: valid: {}", table_name, column_name, cell.valid);
-            println!("{}: {}: value: {}", table_name, column_name, cell.value);
+            println!(
+                "{}: {}: nulltype: {}, value: {}, valid: {}, messages: {:?}",
+                table_name,
+                column_name,
+                match &cell.nulltype {
+                    Some(nulltype) => nulltype.as_str(),
+                    _ => "None",
+                },
+                cell.value,
+                cell.valid,
+                cell.messages
+            );
         }
         //println!("{}: {}", table_name, to_string(row).unwrap());
     }
@@ -120,14 +115,7 @@ pub fn validate_rows_intra(
 
 fn validate_cell_nulltype(
     config: &ConfigMap,
-    // Temporarily prefix these variables with an underscore to avoid compiler warnings about unused
-    // variables (remove this later).
-    // TODO: Simply remove these underscored variables as we don't need them.
-    _pool: &SqlitePool,
-    _parser: &StartParser,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
-    _compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
-    _parsed_structure_conditions: &HashMap<String, ParsedStructure>,
     table_name: &String,
     column_name: &String,
     cell: &mut ResultCell,
@@ -152,14 +140,7 @@ fn validate_cell_nulltype(
 
 fn validate_cell_datatype(
     config: &ConfigMap,
-    // Temporarily prefix these variables with an underscore to avoid compiler warnings about unused
-    // variables (remove this later).
-    // TODO: Simply remove these underscored variables as we don't need them.
-    _pool: &SqlitePool,
-    _parser: &StartParser,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
-    _compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
-    _parsed_structure_conditions: &HashMap<String, ParsedStructure>,
     table_name: &String,
     column_name: &String,
     cell: &mut ResultCell,
@@ -254,18 +235,82 @@ fn validate_cell_datatype(
 }
 
 fn validate_cell_rules(
-    // Temporarily prefix these variables with an underscore to avoid compiler warnings about unused
-    // variables (remove this later).
-    _config: &ConfigMap,
-    _pool: &SqlitePool,
-    _parser: &StartParser,
-    _compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
-    _compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
-    _parsed_structure_conditions: &HashMap<String, ParsedStructure>,
-    _table_name: &String,
-    _column_name: &String,
-    _context: &ResultRow,
-    _cell: &mut ResultCell,
+    config: &ConfigMap,
+    compiled_rules: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    table_name: &String,
+    column_name: &String,
+    context: &ResultRow,
+    cell: &mut ResultCell,
 ) {
-    // TODO: To be implemented
+    fn check_condition(
+        condition_type: &str,
+        cell: &ResultCell,
+        rule: &ConfigMap,
+        table_name: &String,
+        column_name: &String,
+        compiled_rules: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    ) -> bool {
+        let condition = rule
+            .get(format!("{} condition", condition_type).as_str())
+            .and_then(|c| c.as_str())
+            .unwrap();
+        if vec!["null", "not null"].contains(&condition) {
+            return (condition == "null" && cell.nulltype != None)
+                || (condition == "not null" && cell.nulltype == None);
+        } else {
+            let compiled_condition = compiled_rules
+                .get(table_name)
+                .and_then(|t| t.get(column_name))
+                .and_then(|v| {
+                    v.iter().find(|c| {
+                        if condition_type == "when" {
+                            c.when.original == condition
+                        } else {
+                            c.then.original == condition
+                        }
+                    })
+                })
+                .and_then(|c| {
+                    if condition_type == "when" {
+                        Some(c.when.compiled.clone())
+                    } else {
+                        Some(c.then.compiled.clone())
+                    }
+                })
+                .unwrap();
+            return compiled_condition(&cell.value);
+        }
+    }
+
+    let rules_config = config.get("rule").and_then(|r| r.as_object()).unwrap();
+    let applicable_rules;
+    match rules_config.get(table_name) {
+        Some(SerdeValue::Object(table_rules)) => {
+            match table_rules.get(column_name) {
+                Some(SerdeValue::Array(column_rules)) => {
+                    applicable_rules = column_rules;
+                }
+                _ => return,
+            };
+        }
+        _ => return,
+    };
+
+    for (rule_number, rule) in applicable_rules.iter().enumerate() {
+        // enumerate() begins at 0 by default but we need to begin with 1:
+        let rule_number = rule_number + 1;
+        let rule = rule.as_object().unwrap();
+        if check_condition("when", cell, rule, table_name, column_name, compiled_rules) {
+            let then_column = rule.get("then column").and_then(|c| c.as_str()).unwrap();
+            let then_cell = context.get(then_column).unwrap();
+            if !check_condition("then", then_cell, rule, table_name, column_name, compiled_rules) {
+                cell.valid = false;
+                cell.messages.push(json!({
+                    "rule": format!("rule:{}-{}", column_name, rule_number),
+                    "level": rule.get("level").unwrap(),
+                    "message": rule.get("description").unwrap(),
+                }));
+            }
+        }
+    }
 }
