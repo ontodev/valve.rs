@@ -8,7 +8,7 @@ lalrpop_mod!(pub cmi_pb_grammar);
 
 use crate::ast::Expression;
 use crate::cmi_pb_grammar::StartParser;
-pub use crate::validate::{validate_rows_intra, ResultCell, ResultRow};
+pub use crate::validate::{validate_rows_intra, validate_rows_trees, ResultCell, ResultRow};
 
 // provides `try_next` for sqlx:
 use futures::TryStreamExt;
@@ -27,8 +27,8 @@ use serde_json::{
     Map as SerdeMap,
     Value as SerdeValue,
 };
+use sqlx::query;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
-use sqlx::Row;
 use std::collections::HashMap;
 use std::env;
 use std::fs::File;
@@ -43,7 +43,7 @@ lazy_static! {
 }
 
 static CHUNK_SIZE: usize = 2500;
-pub static MULTI_THREADED: bool = true;
+pub static MULTI_THREADED: bool = false;
 
 /*
 compiled_rule_conditions = {
@@ -711,7 +711,7 @@ async fn configure_db(
                 }
             }
             if write_to_db {
-                sqlx::query(&table_sql)
+                query(&table_sql)
                     .execute(pool)
                     .await
                     .expect(format!("The SQL statement: {} returned an error", table_sql).as_str());
@@ -732,7 +732,7 @@ async fn configure_db(
             println!("{}", sql);
         }
         if write_to_db {
-            sqlx::query(&sql)
+            query(&sql)
                 .execute(pool)
                 .await
                 .expect(format!("The SQL statement: {} returned an error", sql).as_str());
@@ -742,14 +742,14 @@ async fn configure_db(
     return Ok(constraints_config);
 }
 
-fn load_db(
+async fn load_db(
     config: &ConfigMap,
     pool: &SqlitePool,
     parser: &StartParser,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     parsed_structure_conditions: &HashMap<String, ParsedStructure>,
-) {
+) -> Result<(), sqlx::Error> {
     let table_list: Vec<String> = config
         .get("table")
         .and_then(|t| t.as_object())
@@ -800,14 +800,17 @@ fn load_db(
             &table_name,
             &chunks,
             &headers,
-        );
+        )
+        .await?;
 
         // TODO: Call validate_tree_foreign_keys() and then use the returned records to update
         // the database.
     }
+
+    Ok(())
 }
 
-fn validate_and_insert_chunks(
+async fn validate_and_insert_chunks(
     config: &ConfigMap,
     pool: &SqlitePool,
     parser: &StartParser,
@@ -815,15 +818,15 @@ fn validate_and_insert_chunks(
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     parsed_structure_conditions: &HashMap<String, ParsedStructure>,
     table_name: &String,
-    chunks: &IntoChunks<csv::StringRecordsIter<std::fs::File>>,
+    chunks: &IntoChunks<csv::StringRecordsIter<'_, std::fs::File>>,
     headers: &csv::StringRecord,
-) {
+) -> Result<(), sqlx::Error> {
     if !MULTI_THREADED {
         for (chunk_number, chunk) in chunks.into_iter().enumerate() {
             // enumerate() begins at 0 by default but we need to begin with 1:
             let chunk_number = chunk_number + 1;
             let mut rows: Vec<_> = chunk.collect();
-            let intra_validated_rows = validate_rows_intra(
+            let mut intra_validated_rows = validate_rows_intra(
                 config,
                 pool,
                 parser,
@@ -834,17 +837,51 @@ fn validate_and_insert_chunks(
                 headers,
                 &mut rows,
             );
-            validate_rows_inter_and_insert(intra_validated_rows, chunk_number);
+            validate_rows_inter_and_insert(
+                config,
+                pool,
+                parser,
+                compiled_datatype_conditions,
+                compiled_rule_conditions,
+                parsed_structure_conditions,
+                table_name,
+                headers,
+                &mut intra_validated_rows,
+                chunk_number,
+            )
+            .await?;
         }
+        Ok(())
     } else {
+        panic!("Multiprocessing temporariy disabled because of async");
+        /*
         crossbeam::scope(|scope| {
             fn wait_for_and_process_results(
+                config: &ConfigMap,
+                pool: &SqlitePool,
+                parser: &StartParser,
+                compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
+                compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+                parsed_structure_conditions: &HashMap<String, ParsedStructure>,
+                table_name: &String,
+                headers: &csv::StringRecord,
                 mut chunk_number: usize,
                 handles: &mut Vec<ScopedJoinHandle<Vec<ResultRow>>>,
             ) {
                 while let Some(handle) = handles.pop() {
-                    let intra_validated_rows = handle.join().unwrap();
-                    validate_rows_inter_and_insert(intra_validated_rows, chunk_number);
+                    let mut intra_validated_rows = handle.join().unwrap();
+                    validate_rows_inter_and_insert(
+                        config,
+                        pool,
+                        parser,
+                        compiled_datatype_conditions,
+                        compiled_rule_conditions,
+                        parsed_structure_conditions,
+                        table_name,
+                        headers,
+                        &mut intra_validated_rows,
+                        chunk_number
+                    );
                     chunk_number += 1;
                 }
             }
@@ -870,21 +907,71 @@ fn validate_and_insert_chunks(
                     )
                 }));
                 if chunk_number % num_cpus == 0 {
-                    wait_for_and_process_results(chunk_number - num_cpus + 1, &mut handles);
+                    wait_for_and_process_results(
+                        config,
+                        pool,
+                        parser,
+                        compiled_datatype_conditions,
+                        compiled_rule_conditions,
+                        parsed_structure_conditions,
+                        table_name,
+                        headers,
+                        chunk_number - num_cpus + 1,
+                        &mut handles
+                    );
                 }
                 last_chunk_number = chunk_number;
             }
             let left_to_handle = last_chunk_number % num_cpus;
-            wait_for_and_process_results(last_chunk_number - left_to_handle + 1, &mut handles);
+            wait_for_and_process_results(
+                config,
+                pool,
+                parser,
+                compiled_datatype_conditions,
+                compiled_rule_conditions,
+                parsed_structure_conditions,
+                table_name,
+                headers,
+                last_chunk_number - left_to_handle + 1,
+                &mut handles
+            );
         })
         .expect("A child thread panicked");
+        */
     }
 }
 
-// Function args here are temporarily prefixed with underscores to avoid compiler warnings.
-fn validate_rows_inter_and_insert(_intra_validated_rows: Vec<ResultRow>, _chunk_number: usize) {
-    // TODO: to be implemented ...
-    //println!("INTRA: {:?}", intra_validated_rows);
+async fn validate_rows_inter_and_insert(
+    config: &ConfigMap,
+    pool: &SqlitePool,
+    parser: &StartParser,
+    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
+    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    parsed_structure_conditions: &HashMap<String, ParsedStructure>,
+    table_name: &String,
+    headers: &csv::StringRecord,
+    intra_validated_rows: &mut Vec<ResultRow>,
+    // TODO: Remove this underscore later
+    _chunk_number: usize,
+) -> Result<(), sqlx::Error> {
+    //eprintln!("ROWS BEFORE: {:#?}", intra_validated_rows);
+    validate_rows_trees(
+        config,
+        pool,
+        parser,
+        compiled_datatype_conditions,
+        compiled_rule_conditions,
+        parsed_structure_conditions,
+        table_name,
+        headers,
+        intra_validated_rows,
+    )
+    .await?;
+    //eprintln!("ROWS AFTER: {:#?}", intra_validated_rows);
+
+    // TODO: Implement the rest.
+
+    Ok(())
 }
 
 fn verify_table_deps_and_sort(table_list: &Vec<String>, constraints: &ConfigMap) -> Vec<String> {
@@ -1396,7 +1483,8 @@ async fn configure_and_load_db(
         compiled_datatype_conditions,
         compiled_rule_conditions,
         parsed_structure_conditions,
-    );
+    )
+    .await?;
 
     Ok(())
 }
@@ -1427,7 +1515,7 @@ async fn main() -> Result<(), sqlx::Error> {
             .create_if_missing(true);
 
     let pool = SqlitePoolOptions::new().max_connections(5).connect_with(connection_options).await?;
-    sqlx::query("PRAGMA foreign_keys = ON").execute(&pool).await?;
+    query("PRAGMA foreign_keys = ON").execute(&pool).await?;
 
     configure_and_load_db(
         &mut specials_config,

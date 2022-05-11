@@ -6,7 +6,11 @@ use serde_json::{
     Value as SerdeValue,
 };
 use sqlx::sqlite::SqlitePool;
+use sqlx::{query, Row};
 use std::collections::HashMap;
+
+// provides `try_next` for sqlx:
+use futures::TryStreamExt;
 
 use crate::cmi_pb_grammar::StartParser;
 use crate::{ColumnRule, CompiledCondition, ConfigMap, ParsedStructure};
@@ -21,13 +25,18 @@ pub struct ResultCell {
 
 pub type ResultRow = HashMap<String, ResultCell>;
 
+// TODO: remove this later
+pub static TEST: bool = true;
+
 pub fn validate_rows_intra(
     config: &ConfigMap,
-    pool: &SqlitePool,
-    parser: &StartParser,
+    // TODO: Remove these underscores later.
+    _pool: &SqlitePool,
+    _parser: &StartParser,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
-    parsed_structure_conditions: &HashMap<String, ParsedStructure>,
+    // TODO: Remove this underscore later
+    _parsed_structure_conditions: &HashMap<String, ParsedStructure>,
     table_name: &String,
     headers: &csv::StringRecord,
     rows: &mut Vec<Result<csv::StringRecord, csv::Error>>,
@@ -91,26 +100,248 @@ pub fn validate_rows_intra(
     // TODO: Remove this ad hoc test.
     //I am using this as a quick ad hoc unit test but eventually we should re-implemt the unit tests
     //in jamesaoverton/cmi-pb-terminology.git (on the `next` branch).
-    for row in &result_rows {
-        for (column_name, cell) in row {
-            println!(
-                "{}: {}: nulltype: {}, value: {}, valid: {}, messages: {:?}",
-                table_name,
-                column_name,
-                match &cell.nulltype {
-                    Some(nulltype) => nulltype.as_str(),
-                    _ => "None",
-                },
-                cell.value,
-                cell.valid,
-                cell.messages
-            );
+    if TEST {
+        for row in &result_rows {
+            for (column_name, cell) in row {
+                println!(
+                    "{}: {}: nulltype: {}, value: {}, valid: {}, messages: {:?}",
+                    table_name,
+                    column_name,
+                    match &cell.nulltype {
+                        Some(nulltype) => nulltype.as_str(),
+                        _ => "None",
+                    },
+                    cell.value,
+                    cell.valid,
+                    cell.messages
+                );
+            }
+            //println!("{}: {}", table_name, to_string(row).unwrap());
         }
-        //println!("{}: {}", table_name, to_string(row).unwrap());
     }
 
     // Finally return the result rows:
     result_rows
+}
+
+pub async fn validate_rows_trees(
+    config: &ConfigMap,
+    pool: &SqlitePool,
+    parser: &StartParser,
+    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
+    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    parsed_structure_conditions: &HashMap<String, ParsedStructure>,
+    table_name: &String,
+    headers: &csv::StringRecord,
+    rows: &mut Vec<ResultRow>,
+) -> Result<(), sqlx::Error> {
+    let mut result_rows = vec![];
+    for row in rows {
+        let mut result_row: ResultRow = ResultRow::new();
+        for column_name in row.keys().cloned().collect::<Vec<_>>() {
+            let context = row.clone();
+            let cell: &mut ResultCell = row.get_mut(&column_name).unwrap();
+            if cell.nulltype == None {
+                validate_cell_trees(
+                    config,
+                    pool,
+                    parser,
+                    compiled_datatype_conditions,
+                    compiled_rule_conditions,
+                    parsed_structure_conditions,
+                    table_name,
+                    headers,
+                    &column_name,
+                    cell,
+                    &context,
+                    &result_rows,
+                )
+                .await?;
+            }
+            result_row.insert(column_name.to_string(), cell.clone());
+        }
+        // Note that in this implementation, the result rows are never actually returned, but we
+        // still need them because the validate_cell_trees() function needs a list of previous
+        // results, and this then requires that we generate the result rows to play that role. The
+        // call to cell.clone() above is required to make rust's borrow checker happy.
+        result_rows.push(result_row);
+    }
+
+    Ok(())
+}
+
+async fn validate_cell_trees(
+    config: &ConfigMap,
+    pool: &SqlitePool,
+    // TODO: Remove these underscores later
+    _parser: &StartParser,
+    _compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
+    _compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    _parsed_structure_conditions: &HashMap<String, ParsedStructure>,
+    table_name: &String,
+    // TODO: Remove this underscore later
+    _headers: &csv::StringRecord,
+    column_name: &String,
+    cell: &mut ResultCell,
+    context: &ResultRow,
+    prev_results: &Vec<ResultRow>,
+) -> Result<(), sqlx::Error> {
+    let tkeys = config
+        .get("constraints")
+        .and_then(|c| c.as_object())
+        .and_then(|o| o.get("tree"))
+        .and_then(|t| t.as_object())
+        .and_then(|o| o.get(table_name))
+        .and_then(|t| t.as_array())
+        .unwrap()
+        .iter()
+        .filter(|t| {
+            t.as_object()
+                .and_then(|o| o.get("parent"))
+                .and_then(|p| Some(p == column_name))
+                .unwrap()
+        })
+        .map(|v| v.as_object().unwrap())
+        .collect::<Vec<_>>();
+    for tkey in tkeys {
+        let parent_col = column_name;
+        let child_col = tkey.get("child").and_then(|c| c.as_str()).unwrap();
+        let parent_val = cell.value.clone();
+        let child_val = context.get(child_col).and_then(|c| Some(c.value.clone())).unwrap();
+
+        let mut params = vec![];
+        // It would have been nice to use query_builder to build up the query dynamically
+        // (https://docs.rs/sqlx/latest/sqlx/query_builder/index.html), but unfortunately either
+        // the documentation is out of date or else there is something wrong in the crate, because
+        // when we try to: use sqlx::query_builder::QueryBuilder it tells us that this is not found
+        // in the crate.
+        let prev_selects = prev_results
+            .iter()
+            .filter(|p| p.get(child_col).unwrap().valid && p.get(parent_col).unwrap().valid)
+            .map(|p| {
+                params.push(p.get(child_col).unwrap().value.clone());
+                params.push(p.get(parent_col).unwrap().value.clone());
+                format!(r#"SELECT ? AS "{}", ? AS "{}""#, child_col, parent_col)
+            })
+            .collect::<Vec<_>>();
+        let prev_selects = prev_selects.join(" UNION ");
+
+        let table_name_ext;
+        let extra_clause;
+        if prev_selects.is_empty() {
+            table_name_ext = table_name.clone();
+            extra_clause = String::from("");
+        } else {
+            table_name_ext = format!("{}_ext", table_name);
+            extra_clause = format!(
+                r#"WITH "{}" AS (
+                       SELECT "{}", "{}"
+                           FROM "{}"
+                           UNION
+                       {}
+                   )"#,
+                table_name_ext, child_col, parent_col, table_name, prev_selects
+            );
+        }
+
+        let (tree_sql, mut tree_sql_params) =
+            with_tree_sql(&tkey, &table_name_ext, Some(parent_val.clone()), Some(extra_clause));
+        params.append(&mut tree_sql_params);
+        let sql = format!(r#"{} SELECT * FROM "tree""#, tree_sql,);
+        let mut my_query = query(&sql);
+        for param in &params {
+            my_query = my_query.bind(param);
+        }
+        let rows = my_query.fetch_all(pool).await?;
+
+        let cycle_detected = {
+            let cycle_row = rows.iter().find(|row| {
+                let parent: Result<&str, sqlx::Error> = row.try_get(parent_col.as_str());
+                if let Ok(parent) = parent {
+                    parent == child_val
+                } else {
+                    false
+                }
+            });
+            match cycle_row {
+                None => false,
+                _ => true,
+            }
+        };
+
+        if cycle_detected {
+            let mut cycle_legs = vec![];
+            for row in &rows {
+                let child: &str = row.try_get(child_col).unwrap();
+                let parent: &str = row.try_get(parent_col.as_str()).unwrap();
+                cycle_legs.push((child, parent));
+            }
+            cycle_legs.push((&child_val, &parent_val));
+
+            let mut cycle_msg = vec![];
+            for cycle in &cycle_legs {
+                cycle_msg
+                    .push(format!("({}: {}, {}: {})", child_col, cycle.0, parent_col, cycle.1));
+            }
+            let cycle_msg = cycle_msg.join(", ");
+            cell.valid = false;
+            cell.messages.push(json!({
+                "rule": "tree:cycle",
+                "level": "error",
+                "message": format!("Cyclic dependency: {} for tree({}) of {}",
+                                   cycle_msg, parent_col, child_col),
+            }));
+        }
+    }
+
+    Ok(())
+}
+
+fn with_tree_sql(
+    tree: &ConfigMap,
+    table_name: &String,
+    root: Option<String>,
+    extra_clause: Option<String>,
+    // TODO (maybe): Instead of a tuple, define a new strunct called SafeSql with two properties:
+    // text and bind_params. Then we could use this elsewhere as well.
+) -> (String, Vec<String>) {
+    let extra_clause = extra_clause.unwrap_or(String::new());
+    let child_col = tree.get("child").and_then(|c| c.as_str()).unwrap();
+    let parent_col = tree.get("parent").and_then(|c| c.as_str()).unwrap();
+
+    let mut params = vec![];
+    let under_sql;
+    if let Some(root) = root {
+        under_sql = format!(r#"WHERE "{}" = ?"#, child_col);
+        params.push(root.clone());
+    } else {
+        under_sql = String::new();
+    }
+
+    let sql = format!(
+        r#"WITH RECURSIVE "tree" AS (
+           {}
+               SELECT "{}", "{}" 
+                   FROM "{}" 
+                   {} 
+                   UNION ALL 
+               SELECT "t1"."{}", "t1"."{}" 
+                   FROM "{}" AS "t1" 
+                   JOIN "tree" AS "t2" ON "t2"."{}" = "t1"."{}"
+           )"#,
+        extra_clause,
+        child_col,
+        parent_col,
+        table_name,
+        under_sql,
+        child_col,
+        parent_col,
+        table_name,
+        parent_col,
+        child_col
+    );
+
+    (sql, params)
 }
 
 fn validate_cell_nulltype(
