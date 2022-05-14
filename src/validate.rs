@@ -167,7 +167,54 @@ pub async fn validate_rows_constraints(
     headers: &csv::StringRecord,
     rows: &mut Vec<ResultRow>,
 ) -> Result<(), sqlx::Error> {
-
+    //eprintln!("ROWS BEFORE:\n{:#?}", rows);
+    let mut result_rows = vec![];
+    for row in rows.iter_mut() {
+        let mut result_row = ResultRow { row_number: None, contents: HashMap::new() };
+        for column_name in row.contents.keys().cloned().collect::<Vec<_>>() {
+            let context = ResultRow { row_number: row.row_number, contents: row.contents.clone() };
+            let cell: &mut ResultCell = row.contents.get_mut(&column_name).unwrap();
+            if cell.nulltype == None {
+                validate_cell_foreign_constraints(
+                    config,
+                    pool,
+                    parser,
+                    compiled_datatype_conditions,
+                    compiled_rule_conditions,
+                    parsed_structure_conditions,
+                    table_name,
+                    headers,
+                    &column_name,
+                    cell,
+                    &context,
+                    &result_rows,
+                )
+                .await?;
+                validate_cell_unique_constraints(
+                    config,
+                    pool,
+                    parser,
+                    compiled_datatype_conditions,
+                    compiled_rule_conditions,
+                    parsed_structure_conditions,
+                    table_name,
+                    headers,
+                    &column_name,
+                    cell,
+                    &context,
+                    &result_rows,
+                )
+                .await?;
+            }
+            result_row.contents.insert(column_name.to_string(), cell.clone());
+        }
+        // Note that in this implementation, the result rows are never actually returned, but we
+        // still need them because the validate_cell_trees() function needs a list of previous
+        // results, and this then requires that we generate the result rows to play that role. The
+        // call to cell.clone() above is required to make rust's borrow checker happy.
+        result_rows.push(result_row);
+    }
+    //eprintln!("ROWS AFTER:\n{:#?}", rows);
     Ok(())
 }
 
@@ -241,6 +288,85 @@ fn validate_cell_nulltype(
             cell.nulltype = Some(nt_name.to_string());
         }
     }
+}
+
+async fn validate_cell_foreign_constraints(
+    config: &ConfigMap,
+    pool: &SqlitePool,
+    parser: &StartParser,
+    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
+    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    parsed_structure_conditions: &HashMap<String, ParsedStructure>,
+    table_name: &String,
+    headers: &csv::StringRecord,
+    column_name: &String,
+    cell: &mut ResultCell,
+    context: &ResultRow,
+    prev_results: &Vec<ResultRow>,
+) -> Result<(), sqlx::Error> {
+    let fkeys = config
+        .get("constraints")
+        .and_then(|c| c.as_object())
+        .and_then(|o| o.get("foreign"))
+        .and_then(|t| t.as_object())
+        .and_then(|o| o.get(table_name))
+        .and_then(|t| t.as_array())
+        .unwrap()
+        .iter()
+        .filter(|t| {
+            t.as_object()
+                .and_then(|o| o.get("column"))
+                .and_then(|p| Some(p == column_name))
+                .unwrap()
+        })
+        .map(|v| v.as_object().unwrap())
+        .collect::<Vec<_>>();
+
+    for fkey in fkeys {
+        let ftable = fkey.get("ftable").and_then(|t| t.as_str()).unwrap();
+        let fcolumn = fkey.get("fcolumn").and_then(|c| c.as_str()).unwrap();
+        let fsql = format!(r#"SELECT 1 FROM "{}" WHERE "{}" = ? LIMIT 1"#, ftable, fcolumn);
+        let mut frows = query(&fsql)
+            .bind(cell.value.clone())
+            .fetch_all(pool)
+            .await?;
+
+        if !frows.is_empty() {
+            cell.valid = false;
+            let mut message = json!({
+                "rule": "key:foreign",
+                "level": "error",
+            });
+
+            let fsql =
+                format!(r#"SELECT 1 FROM "{}_conflict" WHERE "{}" = ? LIMIT 1"#, ftable, fcolumn);
+            let mut frows = query(&fsql)
+                .bind(cell.value.clone())
+                .fetch_all(pool)
+                .await?;
+
+            if !frows.is_empty() {
+                message.as_object_mut().and_then(|m| m.insert(
+                    "message".to_string(),
+                    SerdeValue::String(
+                        format!("Value {} of column {} is not in {}.{}",
+                                cell.value, column_name, ftable, fcolumn)
+                    )
+                ));
+            } else {
+                message.as_object_mut().and_then(|m| m.insert(
+                    "message".to_string(),
+                    SerdeValue::String(
+                        format!("Value {} of column {} exists only in {}_conflict.{}",
+                                cell.value, column_name, ftable, fcolumn)
+                    )
+                ));
+            }
+            cell.messages.push(message);
+        }
+    }
+
+    Ok(())
 }
 
 async fn validate_cell_trees(
@@ -545,4 +671,22 @@ fn validate_cell_rules(
             }
         }
     }
+}
+
+async fn validate_cell_unique_constraints(
+    config: &ConfigMap,
+    pool: &SqlitePool,
+    parser: &StartParser,
+    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
+    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    parsed_structure_conditions: &HashMap<String, ParsedStructure>,
+    table_name: &String,
+    headers: &csv::StringRecord,
+    column_name: &String,
+    cell: &mut ResultCell,
+    context: &ResultRow,
+    prev_results: &Vec<ResultRow>,
+) -> Result<(), sqlx::Error> {
+
+    Ok(())
 }

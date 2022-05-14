@@ -1016,19 +1016,21 @@ async fn validate_rows_inter_and_insert(
             )
             .await?;
 
-            let mut main_query = query(&main_sql);
-            for param in &main_params {
-                main_query = main_query.bind(param);
-            }
-            let main_result = main_query.execute(pool).await?;
+            // TODO: This code should be good, but leave it commented out for now until
+            // validate_rows_constraints() has been fully implemented.
+            //let mut main_query = query(&main_sql);
+            //for param in &main_params {
+            //    main_query = main_query.bind(param);
+            //}
+            //let main_result = main_query.execute(pool).await?;
 
-            let mut conflict_query = query(&conflict_sql);
-            for param in &conflict_params {
-                conflict_query = conflict_query.bind(param);
-            }
-            conflict_query.execute(pool).await?;
-            println!("{}\n", main_sql);
-            println!("{}\n", conflict_sql);
+            //let mut conflict_query = query(&conflict_sql);
+            //for param in &conflict_params {
+            //    conflict_query = conflict_query.bind(param);
+            //}
+            //conflict_query.execute(pool).await?;
+            //println!("{}\n", main_sql);
+            //println!("{}\n", conflict_sql);
         },
     };
 
