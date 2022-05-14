@@ -468,7 +468,7 @@ import: label: nulltype: None, value: molecular dentity, valid: true, messages: 
 import: label: nulltype: None, value: molecular entity, valid: true, messages: []
 import: label: nulltype: None, value: vaccine, valid: true, messages: []
 import: label: nulltype: None, value: vaccine, valid: true, messages: []
-import: parent: nulltype: None, value: bar, valid: true, messages: []
+import: parent: nulltype: None, value: bar, valid: false, messages: [Object({"level": String("error"), "message": String("Cyclic dependency: (label: bar, parent: car), (label: car, parent: foo), (label: foo, parent: bar) for tree(parent) of label"), "rule": String("tree:cycle")})]
 import: parent: nulltype: None, value: car, valid: true, messages: []
 import: parent: nulltype: None, value: foo, valid: true, messages: []
 import: parent: nulltype: None, value: jafar, valid: true, messages: []

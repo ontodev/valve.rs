@@ -17,7 +17,7 @@ time:
 	cargo build --release
 	time cargo run --release TestData/build/table.tsv build
 
-test:
+test: clean | build
 	cargo run src/table.tsv build | sort > actual_output.txt && diff -q expected_output.txt actual_output.txt
 
 

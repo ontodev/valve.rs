@@ -17,16 +17,22 @@ use crate::{ColumnRule, CompiledCondition, ConfigMap, ParsedStructure};
 
 #[derive(Clone, Debug)]
 pub struct ResultCell {
-    nulltype: Option<String>,
-    value: String,
-    valid: bool,
-    messages: Vec<SerdeValue>,
+    // TODO: these pubs are only needed for the ad hoc unit test that will be removed later, so
+    // also remove these pubs at that time.
+    pub nulltype: Option<String>,
+    // NOTE: Unlike in the python version, a result cell will *always* have a value, so we need
+    // to look at the `valid` field to determine whether to use it or not.
+    pub value: String,
+    pub valid: bool,
+    pub messages: Vec<SerdeValue>,
 }
 
-pub type ResultRow = HashMap<String, ResultCell>;
-
-// TODO: remove this later
-pub static TEST: bool = true;
+#[derive(Clone, Debug)]
+pub struct ResultRow {
+    // TODO: make sure we really need to declare these as pub.
+    pub row_number: Option<usize>,
+    pub contents: HashMap<String, ResultCell>,
+}
 
 pub fn validate_rows_intra(
     config: &ConfigMap,
@@ -44,7 +50,7 @@ pub fn validate_rows_intra(
     let mut result_rows: Vec<ResultRow> = vec![];
     for row in rows {
         if let Ok(row) = row {
-            let mut result_row: ResultRow = ResultRow::new();
+            let mut result_row = ResultRow { row_number: None, contents: HashMap::new() };
             let mut column_names: Vec<String> = vec![];
             for (i, value) in row.iter().enumerate() {
                 let result_cell = ResultCell {
@@ -54,14 +60,14 @@ pub fn validate_rows_intra(
                     messages: vec![],
                 };
                 let column = headers.get(i).unwrap();
-                result_row.insert(column.to_string(), result_cell);
+                result_row.contents.insert(column.to_string(), result_cell);
                 column_names.push(column.to_string());
             }
 
             // We check all the cells for nulltype first, since the rules validation requires that we
             // have this information for all cells.
             for column_name in &column_names {
-                let cell: &mut ResultCell = result_row.get_mut(column_name).unwrap();
+                let cell: &mut ResultCell = result_row.contents.get_mut(column_name).unwrap();
                 validate_cell_nulltype(
                     config,
                     compiled_datatype_conditions,
@@ -72,8 +78,10 @@ pub fn validate_rows_intra(
             }
 
             for column_name in &column_names {
-                let context = result_row.clone();
-                let cell: &mut ResultCell = result_row.get_mut(column_name).unwrap();
+                //let context = result_row.clone();
+                let context = ResultRow { row_number: result_row.row_number,
+                                          contents: result_row.contents.clone() };
+                let cell: &mut ResultCell = result_row.contents.get_mut(column_name).unwrap();
                 validate_cell_rules(
                     config,
                     compiled_rule_conditions,
@@ -97,29 +105,6 @@ pub fn validate_rows_intra(
         }
     }
 
-    // TODO: Remove this ad hoc test.
-    //I am using this as a quick ad hoc unit test but eventually we should re-implemt the unit tests
-    //in jamesaoverton/cmi-pb-terminology.git (on the `next` branch).
-    if TEST {
-        for row in &result_rows {
-            for (column_name, cell) in row {
-                println!(
-                    "{}: {}: nulltype: {}, value: {}, valid: {}, messages: {:?}",
-                    table_name,
-                    column_name,
-                    match &cell.nulltype {
-                        Some(nulltype) => nulltype.as_str(),
-                        _ => "None",
-                    },
-                    cell.value,
-                    cell.valid,
-                    cell.messages
-                );
-            }
-            //println!("{}: {}", table_name, to_string(row).unwrap());
-        }
-    }
-
     // Finally return the result rows:
     result_rows
 }
@@ -137,10 +122,11 @@ pub async fn validate_rows_trees(
 ) -> Result<(), sqlx::Error> {
     let mut result_rows = vec![];
     for row in rows {
-        let mut result_row: ResultRow = ResultRow::new();
-        for column_name in row.keys().cloned().collect::<Vec<_>>() {
-            let context = row.clone();
-            let cell: &mut ResultCell = row.get_mut(&column_name).unwrap();
+        let mut result_row = ResultRow { row_number: None, contents: HashMap::new() };
+        for column_name in row.contents.keys().cloned().collect::<Vec<_>>() {
+            //let context = row.clone();
+            let context = ResultRow { row_number: row.row_number, contents: row.contents.clone() };
+            let cell: &mut ResultCell = row.contents.get_mut(&column_name).unwrap();
             if cell.nulltype == None {
                 validate_cell_trees(
                     config,
@@ -158,7 +144,7 @@ pub async fn validate_rows_trees(
                 )
                 .await?;
             }
-            result_row.insert(column_name.to_string(), cell.clone());
+            result_row.contents.insert(column_name.to_string(), cell.clone());
         }
         // Note that in this implementation, the result rows are never actually returned, but we
         // still need them because the validate_cell_trees() function needs a list of previous
@@ -168,6 +154,93 @@ pub async fn validate_rows_trees(
     }
 
     Ok(())
+}
+
+pub async fn validate_rows_constraints(
+    config: &ConfigMap,
+    pool: &SqlitePool,
+    parser: &StartParser,
+    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
+    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    parsed_structure_conditions: &HashMap<String, ParsedStructure>,
+    table_name: &String,
+    headers: &csv::StringRecord,
+    rows: &mut Vec<ResultRow>,
+) -> Result<(), sqlx::Error> {
+
+    Ok(())
+}
+
+fn with_tree_sql(
+    tree: &ConfigMap,
+    table_name: &String,
+    root: Option<String>,
+    extra_clause: Option<String>,
+    // TODO (maybe): Instead of a tuple, define a new struct called SafeSql with two properties:
+    // text and bind_params. Then we could use this elsewhere as well.
+) -> (String, Vec<String>) {
+    let extra_clause = extra_clause.unwrap_or(String::new());
+    let child_col = tree.get("child").and_then(|c| c.as_str()).unwrap();
+    let parent_col = tree.get("parent").and_then(|c| c.as_str()).unwrap();
+
+    let mut params = vec![];
+    let under_sql;
+    if let Some(root) = root {
+        under_sql = format!(r#"WHERE "{}" = ?"#, child_col);
+        params.push(root.clone());
+    } else {
+        under_sql = String::new();
+    }
+
+    let sql = format!(
+        r#"WITH RECURSIVE "tree" AS (
+           {}
+               SELECT "{}", "{}" 
+                   FROM "{}" 
+                   {} 
+                   UNION ALL 
+               SELECT "t1"."{}", "t1"."{}" 
+                   FROM "{}" AS "t1" 
+                   JOIN "tree" AS "t2" ON "t2"."{}" = "t1"."{}"
+           )"#,
+        extra_clause,
+        child_col,
+        parent_col,
+        table_name,
+        under_sql,
+        child_col,
+        parent_col,
+        table_name,
+        parent_col,
+        child_col
+    );
+
+    (sql, params)
+}
+
+fn validate_cell_nulltype(
+    config: &ConfigMap,
+    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
+    table_name: &String,
+    column_name: &String,
+    cell: &mut ResultCell,
+) {
+    let column = config
+        .get("table")
+        .and_then(|t| t.as_object())
+        .and_then(|o| o.get(table_name))
+        .and_then(|t| t.as_object())
+        .and_then(|o| o.get("column"))
+        .and_then(|c| c.as_object())
+        .and_then(|o| o.get(column_name))
+        .unwrap();
+    if let Some(SerdeValue::String(nt_name)) = column.get("nulltype") {
+        let nt_condition = &compiled_datatype_conditions.get(nt_name).unwrap().compiled;
+        let value = &cell.value;
+        if nt_condition(&value) {
+            cell.nulltype = Some(nt_name.to_string());
+        }
+    }
 }
 
 async fn validate_cell_trees(
@@ -207,7 +280,7 @@ async fn validate_cell_trees(
         let parent_col = column_name;
         let child_col = tkey.get("child").and_then(|c| c.as_str()).unwrap();
         let parent_val = cell.value.clone();
-        let child_val = context.get(child_col).and_then(|c| Some(c.value.clone())).unwrap();
+        let child_val = context.contents.get(child_col).and_then(|c| Some(c.value.clone())).unwrap();
 
         let mut params = vec![];
         // It would have been nice to use query_builder to build up the query dynamically
@@ -217,10 +290,10 @@ async fn validate_cell_trees(
         // in the crate.
         let prev_selects = prev_results
             .iter()
-            .filter(|p| p.get(child_col).unwrap().valid && p.get(parent_col).unwrap().valid)
+            .filter(|p| p.contents.get(child_col).unwrap().valid && p.contents.get(parent_col).unwrap().valid)
             .map(|p| {
-                params.push(p.get(child_col).unwrap().value.clone());
-                params.push(p.get(parent_col).unwrap().value.clone());
+                params.push(p.contents.get(child_col).unwrap().value.clone());
+                params.push(p.contents.get(parent_col).unwrap().value.clone());
                 format!(r#"SELECT ? AS "{}", ? AS "{}""#, child_col, parent_col)
             })
             .collect::<Vec<_>>();
@@ -295,78 +368,6 @@ async fn validate_cell_trees(
     }
 
     Ok(())
-}
-
-fn with_tree_sql(
-    tree: &ConfigMap,
-    table_name: &String,
-    root: Option<String>,
-    extra_clause: Option<String>,
-    // TODO (maybe): Instead of a tuple, define a new strunct called SafeSql with two properties:
-    // text and bind_params. Then we could use this elsewhere as well.
-) -> (String, Vec<String>) {
-    let extra_clause = extra_clause.unwrap_or(String::new());
-    let child_col = tree.get("child").and_then(|c| c.as_str()).unwrap();
-    let parent_col = tree.get("parent").and_then(|c| c.as_str()).unwrap();
-
-    let mut params = vec![];
-    let under_sql;
-    if let Some(root) = root {
-        under_sql = format!(r#"WHERE "{}" = ?"#, child_col);
-        params.push(root.clone());
-    } else {
-        under_sql = String::new();
-    }
-
-    let sql = format!(
-        r#"WITH RECURSIVE "tree" AS (
-           {}
-               SELECT "{}", "{}" 
-                   FROM "{}" 
-                   {} 
-                   UNION ALL 
-               SELECT "t1"."{}", "t1"."{}" 
-                   FROM "{}" AS "t1" 
-                   JOIN "tree" AS "t2" ON "t2"."{}" = "t1"."{}"
-           )"#,
-        extra_clause,
-        child_col,
-        parent_col,
-        table_name,
-        under_sql,
-        child_col,
-        parent_col,
-        table_name,
-        parent_col,
-        child_col
-    );
-
-    (sql, params)
-}
-
-fn validate_cell_nulltype(
-    config: &ConfigMap,
-    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
-    table_name: &String,
-    column_name: &String,
-    cell: &mut ResultCell,
-) {
-    let column = config
-        .get("table")
-        .and_then(|t| t.as_object())
-        .and_then(|o| o.get(table_name))
-        .and_then(|t| t.as_object())
-        .and_then(|o| o.get("column"))
-        .and_then(|c| c.as_object())
-        .and_then(|o| o.get(column_name))
-        .unwrap();
-    if let Some(SerdeValue::String(nt_name)) = column.get("nulltype") {
-        let nt_condition = &compiled_datatype_conditions.get(nt_name).unwrap().compiled;
-        let value = &cell.value;
-        if nt_condition(&value) {
-            cell.nulltype = Some(nt_name.to_string());
-        }
-    }
 }
 
 fn validate_cell_datatype(
@@ -533,7 +534,7 @@ fn validate_cell_rules(
         let rule = rule.as_object().unwrap();
         if check_condition("when", cell, rule, table_name, column_name, compiled_rules) {
             let then_column = rule.get("then column").and_then(|c| c.as_str()).unwrap();
-            let then_cell = context.get(then_column).unwrap();
+            let then_cell = context.contents.get(then_column).unwrap();
             if !check_condition("then", then_cell, rule, table_name, column_name, compiled_rules) {
                 cell.valid = false;
                 cell.messages.push(json!({

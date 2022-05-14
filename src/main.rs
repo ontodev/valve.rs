@@ -8,7 +8,8 @@ lalrpop_mod!(pub cmi_pb_grammar);
 
 use crate::ast::Expression;
 use crate::cmi_pb_grammar::StartParser;
-pub use crate::validate::{validate_rows_intra, validate_rows_trees, ResultCell, ResultRow};
+pub use crate::validate::{
+    validate_rows_intra, validate_rows_constraints, validate_rows_trees, ResultCell, ResultRow};
 
 // provides `try_next` for sqlx:
 use futures::TryStreamExt;
@@ -29,7 +30,7 @@ use serde_json::{
 };
 use sqlx::query;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
-use std::collections::HashMap;
+use std::collections::{HashMap, BTreeSet};
 use std::env;
 use std::fs::File;
 use std::process;
@@ -44,6 +45,9 @@ lazy_static! {
 
 static CHUNK_SIZE: usize = 2500;
 pub static MULTI_THREADED: bool = false;
+
+// TODO: remove this later
+pub static TEST: bool = true;
 
 /*
 compiled_rule_conditions = {
@@ -823,8 +827,6 @@ async fn validate_and_insert_chunks(
 ) -> Result<(), sqlx::Error> {
     if !MULTI_THREADED {
         for (chunk_number, chunk) in chunks.into_iter().enumerate() {
-            // enumerate() begins at 0 by default but we need to begin with 1:
-            let chunk_number = chunk_number + 1;
             let mut rows: Vec<_> = chunk.collect();
             let mut intra_validated_rows = validate_rows_intra(
                 config,
@@ -890,8 +892,6 @@ async fn validate_and_insert_chunks(
             let mut handles = vec![];
             let mut last_chunk_number = 0;
             for (chunk_number, chunk) in chunks.into_iter().enumerate() {
-                // enumerate() begins at 0 by default but we need to begin with 1:
-                let chunk_number = chunk_number + 1;
                 let mut rows: Vec<_> = chunk.collect();
                 handles.push(scope.spawn(move |_| {
                     validate_rows_intra(
@@ -950,11 +950,9 @@ async fn validate_rows_inter_and_insert(
     parsed_structure_conditions: &HashMap<String, ParsedStructure>,
     table_name: &String,
     headers: &csv::StringRecord,
-    intra_validated_rows: &mut Vec<ResultRow>,
-    // TODO: Remove this underscore later
-    _chunk_number: usize,
+    rows: &mut Vec<ResultRow>,
+    chunk_number: usize,
 ) -> Result<(), sqlx::Error> {
-    //eprintln!("ROWS BEFORE: {:#?}", intra_validated_rows);
     validate_rows_trees(
         config,
         pool,
@@ -964,14 +962,268 @@ async fn validate_rows_inter_and_insert(
         parsed_structure_conditions,
         table_name,
         headers,
-        intra_validated_rows,
+        rows,
     )
     .await?;
-    //eprintln!("ROWS AFTER: {:#?}", intra_validated_rows);
 
-    // TODO: Implement the rest.
+    // TODO: Instead of a tuple of tuples here, consider returning (from make_inserts) a tuple
+    // of two "SafeSql" structs.
+    let ((main_sql, main_params), (conflict_sql, conflict_params)) = make_inserts(
+        config,
+        pool,
+        parser,
+        compiled_datatype_conditions,
+        compiled_rule_conditions,
+        parsed_structure_conditions,
+        table_name,
+        headers,
+        rows,
+        chunk_number,
+    )
+    .await?;
+
+    let mut main_query = query(&main_sql);
+    for param in &main_params {
+        main_query = main_query.bind(param);
+    }
+    let main_result = main_query.execute(pool).await;
+    match main_result {
+        Ok(_) => (),
+        Err(_) => {
+            validate_rows_constraints(
+                config,
+                pool,
+                parser,
+                compiled_datatype_conditions,
+                compiled_rule_conditions,
+                parsed_structure_conditions,
+                table_name,
+                headers,
+                rows,
+            ).await?;
+
+            let ((main_sql, main_params), (conflict_sql, conflict_params)) = make_inserts(
+                config,
+                pool,
+                parser,
+                compiled_datatype_conditions,
+                compiled_rule_conditions,
+                parsed_structure_conditions,
+                table_name,
+                headers,
+                rows,
+                chunk_number,
+            )
+            .await?;
+
+            let mut main_query = query(&main_sql);
+            for param in &main_params {
+                main_query = main_query.bind(param);
+            }
+            let main_result = main_query.execute(pool).await?;
+
+            let mut conflict_query = query(&conflict_sql);
+            for param in &conflict_params {
+                conflict_query = conflict_query.bind(param);
+            }
+            conflict_query.execute(pool).await?;
+            println!("{}\n", main_sql);
+            println!("{}\n", conflict_sql);
+        },
+    };
+
+    // TODO: Remove this ad hoc test.
+    //I am using this as a quick ad hoc unit test but eventually we should re-implemt the unit tests
+    //in jamesaoverton/cmi-pb-terminology.git (on the `next` branch).
+    if TEST {
+        for row in rows.iter() {
+            for (column_name, cell) in &row.contents {
+                println!(
+                    "{}: {}: nulltype: {}, value: {}, valid: {}, messages: {:?}",
+                    table_name,
+                    column_name,
+                    match &cell.nulltype {
+                        Some(nulltype) => nulltype.as_str(),
+                        _ => "None",
+                    },
+                    cell.value,
+                    cell.valid,
+                    cell.messages
+                );
+            }
+            //println!("{}: {}", table_name, to_string(row).unwrap());
+        }
+    }
 
     Ok(())
+}
+
+async fn make_inserts(
+    config: &ConfigMap,
+    pool: &SqlitePool,
+    parser: &StartParser,
+    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
+    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    parsed_structure_conditions: &HashMap<String, ParsedStructure>,
+    table_name: &String,
+    headers: &csv::StringRecord,
+    rows: &mut Vec<ResultRow>,
+    chunk_number: usize,
+) -> Result<((String, Vec<String>), (String, Vec<String>)), sqlx::Error> {
+
+    let conflict_columns = {
+        let mut conflict_columns = vec![];
+        let primaries = config
+            .get("constraints")
+            .and_then(|c| c.as_object())
+            .and_then(|c| c.get("primary"))
+            .and_then(|t| t.as_object())
+            .and_then(|t| t.get(table_name))
+            .and_then(|t| t.as_array())
+            .unwrap();
+
+        let uniques = config
+            .get("constraints")
+            .and_then(|c| c.as_object())
+            .and_then(|c| c.get("unique"))
+            .and_then(|t| t.as_object())
+            .and_then(|t| t.get(table_name))
+            .and_then(|t| t.as_array())
+            .unwrap();
+
+        let trees = config
+            .get("constraints")
+            .and_then(|c| c.as_object())
+            .and_then(|o| o.get("tree"))
+            .and_then(|t| t.as_object())
+            .and_then(|o| o.get(table_name))
+            .and_then(|t| t.as_array())
+            .unwrap()
+            .iter()
+            .map(|v| v.as_object().unwrap())
+            .map(|v| v.get("child").unwrap().clone())
+            .collect::<Vec<_>>();
+
+        for key_columns in vec![primaries, uniques, &trees] {
+            for column in key_columns {
+                if !conflict_columns.contains(column) {
+                    conflict_columns.push(column.clone());
+                }
+            }
+        }
+
+        conflict_columns
+    };
+
+    fn generate_sql(table_name: &String, rows: &Vec<ResultRow>) -> (String, Vec<String>) {
+        let mut lines = vec![];
+        let mut params = vec![];
+        let mut column_names = vec![];
+        //eprintln!("TABLE NAME: {}", table_name);
+        for row in rows.iter() {
+            //eprintln!("  ROW #{}", row.row_number.unwrap());
+            let mut values = vec![format!("{}", row.row_number.unwrap())];
+            if column_names.is_empty() {
+                column_names = row.contents.keys().sorted().cloned().collect::<Vec<_>>();
+            }
+            for column in &column_names {
+                let cell = row.contents.get(column).unwrap();
+                //eprintln!("    COLUMN: {}", column);
+                let column = column.replace(" ", "_");
+                if cell.nulltype == None && cell.valid {
+                    values.push(String::from("?"));
+                    params.push(cell.value.clone());
+                } else {
+                    values.push(String::from("NULL"));
+                }
+                // If the cell value is valid and there is no extra information (e.g., nulltype),
+                // then just set the metadata to None, which can be taken to represent a "plain"
+                // valid cell:
+                if cell.valid && cell.nulltype == None {
+                    values.push(String::from("NULL"));
+                } else {
+                    // TODO: This will have to handled differently for postgres:
+                    values.push(String::from("JSON(?)"));
+                    let mut param = json!({
+                        "value": cell.value.clone(),
+                        "valid": cell.valid.clone(),
+                        "messages": cell.messages.clone(),
+                    });
+                    if cell.nulltype != None {
+                        param.as_object_mut().unwrap().insert(
+                            String::from("nulltype"),
+                            SerdeValue::String(cell.nulltype.clone().unwrap()),
+                        );
+                    }
+                    params.push(param.to_string());
+                }
+            }
+            let line = values.join(", ");
+            let line = format!("({})", line);
+            lines.push(line);
+        }
+        let mut output = String::from("");
+        if !lines.is_empty() {
+            output.push_str(
+                &format!(
+                    r#"INSERT INTO "{}" ("row_number", {}) VALUES"#,
+                    table_name,
+                    {
+                        let mut all_columns = vec![];
+                        for column_name in &column_names {
+                            let quoted_column_name = format!(r#""{}""#, column_name);
+                            let quoted_meta_column_name = format!(r#""{}_meta""#, column_name);
+                            //eprintln!("COL: {}, METACOL: {}", quoted_column_name,
+                            //          quoted_meta_column_name);
+                            all_columns.push(quoted_column_name);
+                            all_columns.push(quoted_meta_column_name);
+                        }
+                        //eprintln!("ALL COLUMNS FOR {}: {}", table_name, all_columns.join(", "));
+                        all_columns.join(", ")
+                    }
+                )
+            );
+            output.push_str("\n");
+            output.push_str(&lines.join(",\n"));
+            output.push_str(";");
+        }
+
+        //eprintln!("OUTPUT:\n{}", output);
+        //eprintln!("PARAMS: {:?}", params);
+        (output, params)
+    }
+
+    fn has_conflict(row: &ResultRow, conflict_columns: &Vec<SerdeValue>) -> bool {
+        for (column, cell) in &row.contents {
+            let column = SerdeValue::String(column.to_string());
+            if conflict_columns.contains(&column) && !cell.valid {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    let mut main_rows = vec![];
+    let mut conflict_rows = vec![];
+    for (i, row) in rows.iter_mut().enumerate() {
+        // enumerate begins at 0 but we need to begin at 1:
+        let i = i + 1;
+        row.row_number = Some(i + chunk_number * CHUNK_SIZE);
+        if has_conflict(&row, &conflict_columns) {
+            conflict_rows.push(row.clone());
+        } else {
+            main_rows.push(row.clone());
+        }
+    }
+
+    let (main_sql, main_params) =
+        generate_sql(&table_name, &main_rows);
+    let (conflict_sql, conflict_params) =
+        generate_sql(&format!("{}_conflict", table_name), &conflict_rows);
+
+    Ok(((main_sql, main_params),
+        (conflict_sql, conflict_params)))
+
 }
 
 fn verify_table_deps_and_sort(table_list: &Vec<String>, constraints: &ConfigMap) -> Vec<String> {
@@ -994,7 +1246,8 @@ fn verify_table_deps_and_sort(table_list: &Vec<String>, constraints: &ConfigMap)
                 Err(cycles)
             }
             Ok(sorted) => {
-                let sorted = sorted.iter().map(|&item| item.to_string()).collect::<Vec<_>>();
+                let mut sorted = sorted.iter().map(|&item| item.to_string()).collect::<Vec<_>>();
+                sorted.reverse();
                 Ok(sorted)
             }
         }
