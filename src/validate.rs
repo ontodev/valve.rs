@@ -6,7 +6,7 @@ use serde_json::{
     Value as SerdeValue,
 };
 use sqlx::sqlite::SqlitePool;
-use sqlx::{query, Row};
+use sqlx::{query as sqlx_query, Row};
 use std::collections::HashMap;
 
 // provides `try_next` for sqlx:
@@ -203,6 +203,8 @@ pub async fn validate_rows_constraints(
                     cell,
                     &context,
                     &result_rows,
+                    Some(false),
+                    None,
                 )
                 .await?;
             }
@@ -326,12 +328,12 @@ async fn validate_cell_foreign_constraints(
         let ftable = fkey.get("ftable").and_then(|t| t.as_str()).unwrap();
         let fcolumn = fkey.get("fcolumn").and_then(|c| c.as_str()).unwrap();
         let fsql = format!(r#"SELECT 1 FROM "{}" WHERE "{}" = ? LIMIT 1"#, ftable, fcolumn);
-        let mut frows = query(&fsql)
-            .bind(cell.value.clone())
+        let mut frows = sqlx_query(&fsql)
+            .bind(&cell.value)
             .fetch_all(pool)
             .await?;
 
-        if !frows.is_empty() {
+        if frows.is_empty() {
             cell.valid = false;
             let mut message = json!({
                 "rule": "key:foreign",
@@ -340,12 +342,12 @@ async fn validate_cell_foreign_constraints(
 
             let fsql =
                 format!(r#"SELECT 1 FROM "{}_conflict" WHERE "{}" = ? LIMIT 1"#, ftable, fcolumn);
-            let mut frows = query(&fsql)
+            let mut frows = sqlx_query(&fsql)
                 .bind(cell.value.clone())
                 .fetch_all(pool)
                 .await?;
 
-            if !frows.is_empty() {
+            if frows.is_empty() {
                 message.as_object_mut().and_then(|m| m.insert(
                     "message".to_string(),
                     SerdeValue::String(
@@ -447,11 +449,11 @@ async fn validate_cell_trees(
             with_tree_sql(&tkey, &table_name_ext, Some(parent_val.clone()), Some(extra_clause));
         params.append(&mut tree_sql_params);
         let sql = format!(r#"{} SELECT * FROM "tree""#, tree_sql,);
-        let mut my_query = query(&sql);
+        let mut query = sqlx_query(&sql);
         for param in &params {
-            my_query = my_query.bind(param);
+            query = query.bind(param);
         }
-        let rows = my_query.fetch_all(pool).await?;
+        let rows = query.fetch_all(pool).await?;
 
         let cycle_detected = {
             let cycle_row = rows.iter().find(|row| {
@@ -686,7 +688,97 @@ async fn validate_cell_unique_constraints(
     cell: &mut ResultCell,
     context: &ResultRow,
     prev_results: &Vec<ResultRow>,
+    existing_row: Option<bool>,
+    row_number: Option<u32>,
 ) -> Result<(), sqlx::Error> {
+    let existing_row = existing_row.unwrap_or(false);
+    let row_number = row_number.unwrap_or(0);
+    let primaries = config
+        .get("constraints")
+        .and_then(|c| c.as_object())
+        .and_then(|o| o.get("primary"))
+        .and_then(|t| t.as_object())
+        .and_then(|o| o.get(table_name))
+        .and_then(|t| t.as_array())
+        .unwrap();
+    let uniques = config
+        .get("constraints")
+        .and_then(|c| c.as_object())
+        .and_then(|o| o.get("unique"))
+        .and_then(|t| t.as_object())
+        .and_then(|o| o.get(table_name))
+        .and_then(|t| t.as_array())
+        .unwrap();
+    let trees = config
+        .get("constraints")
+        .and_then(|c| c.as_object())
+        .and_then(|o| o.get("tree"))
+        .and_then(|t| t.as_object())
+        .and_then(|o| o.get(table_name))
+        .and_then(|t| t.as_array())
+        .and_then(|a| Some(a.iter().map(|o| o.as_object().and_then(|o| o.get("child")).unwrap())))
+        .unwrap()
+        .collect::<Vec<_>>();
 
+    let is_primary = primaries.contains(&SerdeValue::String(column_name.to_string()));
+    let is_unique = !is_primary && uniques.contains(&SerdeValue::String(column_name.to_string()));
+    let is_tree_child = trees.contains(&&SerdeValue::String(column_name.to_string()));
+
+    fn make_error(rule: &str, column_name: &String) -> SerdeValue {
+        json!({
+            "rule": rule.to_string(),
+            "level": "error",
+            "message": format!("Values of {} must be unique", column_name.to_string()),
+        })
+    }
+
+    if is_primary || is_unique || is_tree_child {
+        let mut with_sql = String::new();
+        let except_table = format!("{}_exc", table_name);
+        if existing_row {
+            with_sql = format!(r#"WITH "{}" AS (
+                                    SELECT * FROM "{}"
+                                    WHERE "row_number" IS NOT ?
+                                  ) "#,
+                               except_table, table_name);
+        }
+
+        let query_table;
+        if !with_sql.is_empty() {
+            query_table = except_table;
+        } else {
+            query_table = table_name.to_string();
+        }
+
+        let sql = format!(
+            r#"{} SELECT 1 FROM "{}" WHERE "{}" = ? LIMIT 1"#,
+            with_sql, query_table, column_name,
+        );
+        let query = sqlx_query(&sql).bind(row_number).bind(&cell.value);
+
+        let contained_in_prev_results = !prev_results
+            .iter()
+            .filter(|p| p.contents.get(column_name).unwrap().value == cell.value &&
+                    p.contents.get(column_name).unwrap().valid)
+            .collect::<Vec<_>>()
+            .is_empty();
+
+        if contained_in_prev_results || !query.fetch_all(pool).await?.is_empty() {
+            cell.valid = false;
+            if is_primary || is_unique {
+                let error_message;
+                if is_primary {
+                    error_message = make_error("key:primary", column_name);
+                } else {
+                    error_message = make_error("key:unique", column_name);
+                }
+                cell.messages.push(error_message);
+            }
+            if is_tree_child {
+                let error_message = make_error("tree:child-unique", column_name);
+                cell.messages.push(error_message);
+            }
+        }
+    }
     Ok(())
 }
