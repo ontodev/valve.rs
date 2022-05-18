@@ -10,7 +10,7 @@ use crate::ast::Expression;
 use crate::cmi_pb_grammar::StartParser;
 pub use crate::validate::{
     validate_rows_constraints, validate_rows_intra, validate_rows_trees,
-    validate_tree_foreign_keys, ResultCell, ResultRow,
+    validate_tree_foreign_keys, validate_under, ResultCell, ResultRow,
 };
 
 // provides `try_next` for sqlx:
@@ -810,11 +810,9 @@ async fn load_db(
         )
         .await?;
 
-        // TODO: Add call to validate_under() as well:
-
-        let records_to_update = validate_tree_foreign_keys(config, pool, &table_name, None).await?;
-
-        eprintln!("{:#?}", records_to_update);
+        let mut recs_to_update =
+            validate_tree_foreign_keys(config, pool, &table_name, None).await?;
+        recs_to_update.append(&mut validate_under(config, pool, &table_name, None).await?);
 
         // TODO: Implement the rest.
     }

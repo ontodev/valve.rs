@@ -819,7 +819,190 @@ fn select_with_extra_row(extra_row: &ResultRow, table_name: &String) -> (String,
     (format!(r#"WITH "{}_ext" AS ({} UNION {})"#, table_name, first_select, second_select), params)
 }
 
-// TODO: Implement validate_under()
+pub async fn validate_under(
+    config: &ConfigMap,
+    pool: &SqlitePool,
+    table_name: &String,
+    extra_row: Option<ResultRow>,
+) -> Result<Vec<SerdeValue>, sqlx::Error> {
+    let mut results = vec![];
+    let ukeys = config
+        .get("constraints")
+        .and_then(|c| c.as_object())
+        .and_then(|o| o.get("under"))
+        .and_then(|t| t.as_object())
+        .and_then(|o| o.get(table_name))
+        .and_then(|t| t.as_array())
+        .unwrap();
+
+    for ukey in ukeys {
+        let ukey = ukey.as_object().unwrap();
+        let tree_table = ukey.get("ttable").and_then(|tt| tt.as_str()).unwrap();
+        let tree_child = ukey.get("tcolumn").and_then(|tc| tc.as_str()).unwrap();
+        let column = ukey.get("column").and_then(|c| c.as_str()).unwrap();
+        let tree = config
+            .get("constraints")
+            .and_then(|c| c.as_object())
+            .and_then(|o| o.get("tree"))
+            .and_then(|t| t.as_object())
+            .and_then(|o| o.get(tree_table))
+            .and_then(|t| t.as_array())
+            .unwrap()
+            .iter()
+            .find(|tkey| {
+                tkey.as_object()
+                    .and_then(|o| o.get("child"))
+                    .and_then(|c| Some(c == tree_child))
+                    .unwrap()
+            })
+            .and_then(|tree| Some(tree.as_object().unwrap()))
+            .unwrap();
+        let tree_parent = tree.get("parent").and_then(|p| p.as_str()).unwrap();
+        let mut extra_clause;
+        let params;
+        if let Some(ref extra_row) = extra_row {
+            (extra_clause, params) = select_with_extra_row(extra_row, table_name);
+        } else {
+            extra_clause = String::new();
+            params = vec![];
+        }
+
+        let effective_table;
+        if !extra_clause.is_empty() {
+            effective_table = format!("{}_ext", table_name);
+        } else {
+            effective_table = table_name.clone();
+        }
+
+        let effective_tree;
+        if tree_table == table_name {
+            effective_tree = effective_table.to_string();
+        } else {
+            effective_tree = tree_table.to_string();
+        }
+
+        let uval = ukey.get("value").and_then(|v| v.as_str()).unwrap().to_string();
+        let (tree_sql, params) = with_tree_sql(tree, &effective_tree, Some(uval.clone()), None);
+
+        if !extra_clause.is_empty() {
+            extra_clause = format!(", {}", &extra_clause[5..]);
+        }
+        let sql = format!(
+            r#"{} {}
+               SELECT
+                "row_number",
+                "{}"."{}",
+                CASE
+                  WHEN "{}"."{}_meta" IS NOT NULL
+                    THEN JSON("{}"."{}_meta")
+                   ELSE JSON('{{"valid": true, "messages": []}}')
+                END AS "{}_meta",
+                CASE
+                  WHEN "{}"."{}" IN (
+                    SELECT "{}" FROM "{}"
+                  )
+                  THEN 1 ELSE 0
+                END AS "is_in_tree",
+                CASE
+                  WHEN "{}"."{}" IN (
+                    SELECT "{}" FROM "tree"
+                  )
+                  THEN 0 ELSE 1
+                END AS "is_under"
+              FROM "{}""#,
+            tree_sql,
+            extra_clause,
+            effective_table,
+            column,
+            effective_table,
+            column,
+            effective_table,
+            column,
+            column,
+            effective_table,
+            column,
+            tree_child,
+            effective_tree,
+            effective_table,
+            column,
+            tree_parent,
+            effective_table,
+        );
+
+        let mut query = sqlx_query(&sql);
+        for param in &params {
+            query = query.bind(param);
+        }
+        let rows = query.fetch_all(pool).await?;
+        for row in rows {
+            let meta: &str = row.try_get(format!(r#"{}_meta"#, column).as_str()).unwrap();
+            let meta: SerdeValue = from_str(meta).unwrap();
+            let meta = meta.as_object().unwrap();
+            if meta.contains_key("nulltype") {
+                continue;
+            }
+
+            // TODO: This works, but it seems less than ideal that we have to access the row twice
+            // to get info about the same field (it's probably not that inefficient, but it seems
+            // inelegant). Need to look for some way to convert the return value of try_get_raw()
+            // to the actual value of the column (i.e., what is returned by try_get()).
+            let column_val_is_null = {
+                let raw_val = row.try_get_raw(format!(r#"{}"#, column).as_str()).unwrap();
+                raw_val.is_null()
+            };
+            let mut column_val: &str = row.try_get(format!(r#"{}"#, column).as_str()).unwrap();
+            if column_val_is_null {
+                column_val = meta.get("value").and_then(|v| v.as_str()).unwrap();
+            }
+
+            let is_in_tree: u32 = row.try_get("is_in_tree").unwrap();
+            let is_under: u32 = row.try_get("is_under").unwrap();
+            if is_in_tree == 0 {
+                let mut meta = meta.clone();
+                meta.insert("valid".to_string(), SerdeValue::Bool(false));
+                meta.insert("value".to_string(), SerdeValue::String(column_val.to_string()));
+                let message = json!({
+                    "rule": "under:not-in-tree",
+                    "level": "error",
+                    "message": format!("Value {} of column {} is not in {}.{}",
+                                       column_val, column, tree_table, tree_child).as_str(),
+                });
+                meta.get_mut("messages")
+                    .and_then(|m| m.as_array_mut())
+                    .and_then(|a| Some(a.push(message)));
+                let row_number: u32 = row.try_get("row_number").unwrap();
+                let result = json!({
+                    "row_number": row_number,
+                    "column": column,
+                    "meta": meta,
+                });
+                results.push(result);
+            } else if is_under == 0 {
+                let mut meta = meta.clone();
+                meta.insert("valid".to_string(), SerdeValue::Bool(false));
+                meta.insert("value".to_string(), SerdeValue::String(column_val.to_string()));
+                let message = json!({
+                    "rule": "under:not-under",
+                    "level": "error",
+                    "message": format!("Value '{}' of column {} is not under '{}'",
+                                       column_val, column, uval.clone()).as_str(),
+                });
+                meta.get_mut("messages")
+                    .and_then(|m| m.as_array_mut())
+                    .and_then(|a| Some(a.push(message)));
+                let row_number: u32 = row.try_get("row_number").unwrap();
+                let result = json!({
+                    "row_number": row_number,
+                    "column": column,
+                    "meta": meta,
+                });
+                results.push(result);
+            }
+        }
+    }
+
+    Ok(results)
+}
 
 pub async fn validate_tree_foreign_keys(
     config: &ConfigMap,
