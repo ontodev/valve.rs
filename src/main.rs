@@ -9,7 +9,9 @@ lalrpop_mod!(pub cmi_pb_grammar);
 use crate::ast::Expression;
 use crate::cmi_pb_grammar::StartParser;
 pub use crate::validate::{
-    validate_rows_intra, validate_rows_constraints, validate_rows_trees, ResultCell, ResultRow};
+    validate_rows_constraints, validate_rows_intra, validate_rows_trees,
+    validate_tree_foreign_keys, ResultCell, ResultRow,
+};
 
 // provides `try_next` for sqlx:
 use futures::TryStreamExt;
@@ -30,7 +32,7 @@ use serde_json::{
 };
 use sqlx::query;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
-use std::collections::{HashMap, BTreeSet};
+use std::collections::{BTreeSet, HashMap};
 use std::env;
 use std::fs::File;
 use std::process;
@@ -103,6 +105,8 @@ impl std::fmt::Debug for ColumnRule {
         f.debug_struct("ColumnRule").field("when", &self.when).field("then", &self.then).finish()
     }
 }
+
+// TODO: Add functions for update_row() and insert_new_row()
 
 /// Use this function for "small" TSVs only, since it returns a vector.
 fn read_tsv_into_vector(path: &String) -> Vec<ConfigMap> {
@@ -258,8 +262,6 @@ fn compile_condition(
                     let compiled_datatype_condition =
                         compiled_datatype_conditions.get(&value.to_string()).unwrap();
                     return CompiledCondition {
-                        // TODO: remove this commented out code later:
-                        //original: compiled_datatype_condition.original.to_string(),
                         original: value.to_string(),
                         parsed: compiled_datatype_condition.parsed.clone(),
                         compiled: compiled_datatype_condition.compiled.clone(),
@@ -808,8 +810,13 @@ async fn load_db(
         )
         .await?;
 
-        // TODO: Call validate_tree_foreign_keys() and then use the returned records to update
-        // the database.
+        // TODO: Add call to validate_under() as well:
+
+        let records_to_update = validate_tree_foreign_keys(config, pool, &table_name, None).await?;
+
+        eprintln!("{:#?}", records_to_update);
+
+        // TODO: Implement the rest.
     }
 
     Ok(())
@@ -856,6 +863,7 @@ async fn validate_and_insert_chunks(
         }
         Ok(())
     } else {
+        // TODO: Uncomment this code and get it to work with async.
         panic!("Multiprocessing temporariy disabled because of async");
         /*
         crossbeam::scope(|scope| {
@@ -1001,7 +1009,8 @@ async fn validate_rows_inter_and_insert(
                 table_name,
                 headers,
                 rows,
-            ).await?;
+            )
+            .await?;
 
             let ((main_sql, main_params), (conflict_sql, conflict_params)) = make_inserts(
                 config,
@@ -1031,7 +1040,7 @@ async fn validate_rows_inter_and_insert(
             // TODO: Uncomment these later.
             //println!("{}\n", main_sql);
             //println!("{}\n", conflict_sql);
-        },
+        }
     };
 
     // TODO: Remove this ad hoc test.
@@ -1072,7 +1081,6 @@ async fn make_inserts(
     rows: &mut Vec<ResultRow>,
     chunk_number: usize,
 ) -> Result<((String, Vec<String>), (String, Vec<String>)), sqlx::Error> {
-
     let conflict_columns = {
         let mut conflict_columns = vec![];
         let primaries = config
@@ -1166,25 +1174,23 @@ async fn make_inserts(
         }
         let mut output = String::from("");
         if !lines.is_empty() {
-            output.push_str(
-                &format!(
-                    r#"INSERT INTO "{}" ("row_number", {}) VALUES"#,
-                    table_name,
-                    {
-                        let mut all_columns = vec![];
-                        for column_name in &column_names {
-                            let quoted_column_name = format!(r#""{}""#, column_name);
-                            let quoted_meta_column_name = format!(r#""{}_meta""#, column_name);
-                            //eprintln!("COL: {}, METACOL: {}", quoted_column_name,
-                            //          quoted_meta_column_name);
-                            all_columns.push(quoted_column_name);
-                            all_columns.push(quoted_meta_column_name);
-                        }
-                        //eprintln!("ALL COLUMNS FOR {}: {}", table_name, all_columns.join(", "));
-                        all_columns.join(", ")
+            output.push_str(&format!(
+                r#"INSERT INTO "{}" ("row_number", {}) VALUES"#,
+                table_name,
+                {
+                    let mut all_columns = vec![];
+                    for column_name in &column_names {
+                        let quoted_column_name = format!(r#""{}""#, column_name);
+                        let quoted_meta_column_name = format!(r#""{}_meta""#, column_name);
+                        //eprintln!("COL: {}, METACOL: {}", quoted_column_name,
+                        //          quoted_meta_column_name);
+                        all_columns.push(quoted_column_name);
+                        all_columns.push(quoted_meta_column_name);
                     }
-                )
-            );
+                    //eprintln!("ALL COLUMNS FOR {}: {}", table_name, all_columns.join(", "));
+                    all_columns.join(", ")
+                }
+            ));
             output.push_str("\n");
             output.push_str(&lines.join(",\n"));
             output.push_str(";");
@@ -1218,14 +1224,11 @@ async fn make_inserts(
         }
     }
 
-    let (main_sql, main_params) =
-        generate_sql(&table_name, &main_rows);
+    let (main_sql, main_params) = generate_sql(&table_name, &main_rows);
     let (conflict_sql, conflict_params) =
         generate_sql(&format!("{}_conflict", table_name), &conflict_rows);
 
-    Ok(((main_sql, main_params),
-        (conflict_sql, conflict_params)))
-
+    Ok(((main_sql, main_params), (conflict_sql, conflict_params)))
 }
 
 fn verify_table_deps_and_sort(table_list: &Vec<String>, constraints: &ConfigMap) -> Vec<String> {

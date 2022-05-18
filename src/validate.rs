@@ -1,4 +1,5 @@
 use serde_json::{
+    from_str,
     json,
     //to_string,
     // SerdeMap by default backed by BTreeMap (see https://docs.serde.rs/serde_json/map/index.html)
@@ -6,6 +7,7 @@ use serde_json::{
     Value as SerdeValue,
 };
 use sqlx::sqlite::SqlitePool;
+use sqlx::ValueRef;
 use sqlx::{query as sqlx_query, Row};
 use std::collections::HashMap;
 
@@ -33,6 +35,8 @@ pub struct ResultRow {
     pub row_number: Option<usize>,
     pub contents: HashMap<String, ResultCell>,
 }
+
+// TODO: Implement the single row validation functions
 
 pub fn validate_rows_intra(
     config: &ConfigMap,
@@ -79,8 +83,10 @@ pub fn validate_rows_intra(
 
             for column_name in &column_names {
                 //let context = result_row.clone();
-                let context = ResultRow { row_number: result_row.row_number,
-                                          contents: result_row.contents.clone() };
+                let context = ResultRow {
+                    row_number: result_row.row_number,
+                    contents: result_row.contents.clone(),
+                };
                 let cell: &mut ResultCell = result_row.contents.get_mut(column_name).unwrap();
                 validate_cell_rules(
                     config,
@@ -328,10 +334,7 @@ async fn validate_cell_foreign_constraints(
         let ftable = fkey.get("ftable").and_then(|t| t.as_str()).unwrap();
         let fcolumn = fkey.get("fcolumn").and_then(|c| c.as_str()).unwrap();
         let fsql = format!(r#"SELECT 1 FROM "{}" WHERE "{}" = ? LIMIT 1"#, ftable, fcolumn);
-        let mut frows = sqlx_query(&fsql)
-            .bind(&cell.value)
-            .fetch_all(pool)
-            .await?;
+        let mut frows = sqlx_query(&fsql).bind(&cell.value).fetch_all(pool).await?;
 
         if frows.is_empty() {
             cell.valid = false;
@@ -342,27 +345,28 @@ async fn validate_cell_foreign_constraints(
 
             let fsql =
                 format!(r#"SELECT 1 FROM "{}_conflict" WHERE "{}" = ? LIMIT 1"#, ftable, fcolumn);
-            let mut frows = sqlx_query(&fsql)
-                .bind(cell.value.clone())
-                .fetch_all(pool)
-                .await?;
+            let mut frows = sqlx_query(&fsql).bind(cell.value.clone()).fetch_all(pool).await?;
 
             if frows.is_empty() {
-                message.as_object_mut().and_then(|m| m.insert(
-                    "message".to_string(),
-                    SerdeValue::String(
-                        format!("Value {} of column {} is not in {}.{}",
-                                cell.value, column_name, ftable, fcolumn)
+                message.as_object_mut().and_then(|m| {
+                    m.insert(
+                        "message".to_string(),
+                        SerdeValue::String(format!(
+                            "Value {} of column {} is not in {}.{}",
+                            cell.value, column_name, ftable, fcolumn
+                        )),
                     )
-                ));
+                });
             } else {
-                message.as_object_mut().and_then(|m| m.insert(
-                    "message".to_string(),
-                    SerdeValue::String(
-                        format!("Value {} of column {} exists only in {}_conflict.{}",
-                                cell.value, column_name, ftable, fcolumn)
+                message.as_object_mut().and_then(|m| {
+                    m.insert(
+                        "message".to_string(),
+                        SerdeValue::String(format!(
+                            "Value {} of column {} exists only in {}_conflict.{}",
+                            cell.value, column_name, ftable, fcolumn
+                        )),
                     )
-                ));
+                });
             }
             cell.messages.push(message);
         }
@@ -408,7 +412,8 @@ async fn validate_cell_trees(
         let parent_col = column_name;
         let child_col = tkey.get("child").and_then(|c| c.as_str()).unwrap();
         let parent_val = cell.value.clone();
-        let child_val = context.contents.get(child_col).and_then(|c| Some(c.value.clone())).unwrap();
+        let child_val =
+            context.contents.get(child_col).and_then(|c| Some(c.value.clone())).unwrap();
 
         let mut params = vec![];
         // It would have been nice to use query_builder to build up the query dynamically
@@ -418,7 +423,10 @@ async fn validate_cell_trees(
         // in the crate.
         let prev_selects = prev_results
             .iter()
-            .filter(|p| p.contents.get(child_col).unwrap().valid && p.contents.get(parent_col).unwrap().valid)
+            .filter(|p| {
+                p.contents.get(child_col).unwrap().valid
+                    && p.contents.get(parent_col).unwrap().valid
+            })
             .map(|p| {
                 params.push(p.contents.get(child_col).unwrap().value.clone());
                 params.push(p.contents.get(parent_col).unwrap().value.clone());
@@ -736,11 +744,13 @@ async fn validate_cell_unique_constraints(
         let mut with_sql = String::new();
         let except_table = format!("{}_exc", table_name);
         if existing_row {
-            with_sql = format!(r#"WITH "{}" AS (
+            with_sql = format!(
+                r#"WITH "{}" AS (
                                     SELECT * FROM "{}"
                                     WHERE "row_number" IS NOT ?
                                   ) "#,
-                               except_table, table_name);
+                except_table, table_name
+            );
         }
 
         let query_table;
@@ -758,8 +768,10 @@ async fn validate_cell_unique_constraints(
 
         let contained_in_prev_results = !prev_results
             .iter()
-            .filter(|p| p.contents.get(column_name).unwrap().value == cell.value &&
-                    p.contents.get(column_name).unwrap().valid)
+            .filter(|p| {
+                p.contents.get(column_name).unwrap().value == cell.value
+                    && p.contents.get(column_name).unwrap().valid
+            })
             .collect::<Vec<_>>()
             .is_empty();
 
@@ -781,4 +793,156 @@ async fn validate_cell_unique_constraints(
         }
     }
     Ok(())
+}
+
+fn select_with_extra_row(extra_row: &ResultRow, table_name: &String) -> (String, Vec<String>) {
+    let extra_row_len = extra_row.contents.keys().len();
+    let mut params = vec![];
+    let mut first_select =
+        String::from(format!(r#"SELECT {} AS "row_number", "#, extra_row.row_number.unwrap()));
+    let mut second_select = String::from(r#"SELECT "row_number", "#);
+    for (i, (key, content)) in extra_row.contents.iter().enumerate() {
+        // enumerate() begins from 0 but we need to begin at 1:
+        let i = i + 1;
+        first_select.push_str(format!(r#"? AS "{}", "#, key).as_str());
+        params.push(content.value.to_string());
+        first_select.push_str(format!(r#"NULL AS "{}_meta""#, key).as_str());
+        second_select.push_str(format!(r#""{}", "{}_meta""#, key, key).as_str());
+        if i < extra_row_len {
+            first_select.push_str(", ");
+            second_select.push_str(", ");
+        } else {
+            second_select.push_str(format!(r#" FROM "{}""#, table_name).as_str());
+        }
+    }
+
+    (format!(r#"WITH "{}_ext" AS ({} UNION {})"#, table_name, first_select, second_select), params)
+}
+
+// TODO: Implement validate_under()
+
+pub async fn validate_tree_foreign_keys(
+    config: &ConfigMap,
+    pool: &SqlitePool,
+    table_name: &String,
+    extra_row: Option<ResultRow>,
+) -> Result<Vec<SerdeValue>, sqlx::Error> {
+    let tkeys = config
+        .get("constraints")
+        .and_then(|c| c.as_object())
+        .and_then(|o| o.get("tree"))
+        .and_then(|t| t.as_object())
+        .and_then(|o| o.get(table_name))
+        .and_then(|t| t.as_array())
+        .unwrap();
+
+    let mut results = vec![];
+    for tkey in tkeys {
+        let tkey = tkey.as_object().unwrap();
+        let child_col = tkey.get("child").and_then(|c| c.as_str()).unwrap();
+        let parent_col = tkey.get("parent").and_then(|p| p.as_str()).unwrap();
+        let with_clause;
+        let params;
+        if let Some(ref extra_row) = extra_row {
+            (with_clause, params) = select_with_extra_row(extra_row, table_name);
+        } else {
+            with_clause = String::new();
+            params = vec![];
+        }
+        let effective_table_name;
+        if !with_clause.is_empty() {
+            effective_table_name = format!("{}_ext", table_name);
+        } else {
+            effective_table_name = table_name.clone();
+        }
+
+        let sql = format!(
+            r#"{}
+               SELECT
+                 t1."row_number", t1."{}",
+                 CASE
+                   WHEN t1."{}_meta" IS NOT NULL
+                     THEN JSON(t1."{}_meta")
+                   ELSE JSON('{{"valid": true, "messages": []}}')
+                 END AS "{}_meta"
+               FROM "{}" t1
+               WHERE NOT EXISTS (
+                 SELECT 1
+                 FROM "{}" t2
+                 WHERE t2."{}" = t1."{}"
+               )"#,
+            with_clause,
+            parent_col,
+            parent_col,
+            parent_col,
+            parent_col,
+            effective_table_name,
+            effective_table_name,
+            child_col,
+            parent_col
+        );
+
+        //eprintln!("WITH CLAUSE: {}", with_clause);
+        //eprintln!("SQL: {}", sql);
+        //eprintln!("PARAMS: {:?}", params);
+        //eprintln!("-----------------------------------");
+
+        let mut query = sqlx_query(&sql);
+        for param in &params {
+            query = query.bind(param);
+        }
+        let rows = query.fetch_all(pool).await?;
+        for row in rows {
+            let meta: &str = row.try_get(format!(r#"{}_meta"#, parent_col).as_str()).unwrap();
+            let meta: SerdeValue = from_str(meta).unwrap();
+            let meta = meta.as_object().unwrap();
+            //eprintln!("META: {:?}", meta);
+            if meta.contains_key("nulltype") {
+                continue;
+            }
+
+            // TODO: This works, but it seems less than ideal that we have to access the row twice
+            // to get info about the same field (it's probably not that inefficient, but it seems
+            // inelegant). Need to look for some way to convert the return value of try_get_raw()
+            // to the actual value of the column (i.e., what is returned by try_get()).
+            let parent_val_is_null = {
+                let raw_val = row.try_get_raw(format!(r#"{}"#, parent_col).as_str()).unwrap();
+                raw_val.is_null()
+            };
+            let mut parent_val: &str = row.try_get(format!(r#"{}"#, parent_col).as_str()).unwrap();
+            if parent_val_is_null {
+                parent_val = meta.get("value").and_then(|v| v.as_str()).unwrap();
+                let sql =
+                    format!(r#"SELECT 1 FROM "{}" WHERE "{}" = ? LIMIT 1"#, table_name, child_col);
+                let mut query = sqlx_query(&sql).bind(parent_val);
+                let rows = query.fetch_all(pool).await?;
+                if rows.len() > 0 {
+                    continue;
+                }
+            }
+            let mut meta = meta.clone();
+            meta.insert("valid".to_string(), SerdeValue::Bool(false));
+            meta.insert("value".to_string(), SerdeValue::String(parent_val.to_string()));
+            let message = json!({
+                "rule": "tree:foreign",
+                "level": "error",
+                "message": format!("Value {} of column {} is not in column {}",
+                                   parent_val, parent_col, child_col).as_str(),
+            });
+            meta.get_mut("messages")
+                .and_then(|m| m.as_array_mut())
+                .and_then(|a| Some(a.push(message)));
+
+            let row_number: u32 = row.try_get("row_number").unwrap();
+
+            let result = json!({
+                "row_number": row_number,
+                "column": parent_col,
+                "meta": meta,
+            });
+            results.push(result);
+        }
+    }
+
+    Ok(results)
 }
