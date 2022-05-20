@@ -30,7 +30,7 @@ use serde_json::{
     Map as SerdeMap,
     Value as SerdeValue,
 };
-use sqlx::query;
+use sqlx::query as sqlx_query;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 use std::collections::{BTreeSet, HashMap};
 use std::env;
@@ -718,7 +718,7 @@ async fn configure_db(
                 }
             }
             if write_to_db {
-                query(&table_sql)
+                sqlx_query(&table_sql)
                     .execute(pool)
                     .await
                     .expect(format!("The SQL statement: {} returned an error", table_sql).as_str());
@@ -739,7 +739,7 @@ async fn configure_db(
             println!("{}", sql);
         }
         if write_to_db {
-            query(&sql)
+            sqlx_query(&sql)
                 .execute(pool)
                 .await
                 .expect(format!("The SQL statement: {} returned an error", sql).as_str());
@@ -814,7 +814,18 @@ async fn load_db(
             validate_tree_foreign_keys(config, pool, &table_name, None).await?;
         recs_to_update.append(&mut validate_under(config, pool, &table_name, None).await?);
 
-        // TODO: Implement the rest.
+        for record in recs_to_update {
+            let column_name = record.get("column").and_then(|c| c.as_str()).unwrap();
+            let meta_name = format!("{}_meta", column_name);
+            let row_number = record.get("row_number").unwrap();
+            let meta = record.get("meta").unwrap();
+            let sql = format!(
+                r#"UPDATE "{}" SET "{}" = NULL, "{}" = JSON(?) WHERE "row_number" = {}"#,
+                table_name, column_name, meta_name, row_number
+            );
+            let mut query = sqlx_query(&sql).bind(meta);
+            query.execute(pool).await?;
+        }
     }
 
     Ok(())
@@ -989,7 +1000,7 @@ async fn validate_rows_inter_and_insert(
     )
     .await?;
 
-    let mut main_query = query(&main_sql);
+    let mut main_query = sqlx_query(&main_sql);
     for param in &main_params {
         main_query = main_query.bind(param);
     }
@@ -1024,13 +1035,13 @@ async fn validate_rows_inter_and_insert(
             )
             .await?;
 
-            let mut main_query = query(&main_sql);
+            let mut main_query = sqlx_query(&main_sql);
             for param in &main_params {
                 main_query = main_query.bind(param);
             }
             let main_result = main_query.execute(pool).await?;
 
-            let mut conflict_query = query(&conflict_sql);
+            let mut conflict_query = sqlx_query(&conflict_sql);
             for param in &conflict_params {
                 conflict_query = conflict_query.bind(param);
             }
@@ -1771,7 +1782,7 @@ async fn main() -> Result<(), sqlx::Error> {
             .create_if_missing(true);
 
     let pool = SqlitePoolOptions::new().max_connections(5).connect_with(connection_options).await?;
-    query("PRAGMA foreign_keys = ON").execute(&pool).await?;
+    sqlx_query("PRAGMA foreign_keys = ON").execute(&pool).await?;
 
     configure_and_load_db(
         &mut specials_config,
