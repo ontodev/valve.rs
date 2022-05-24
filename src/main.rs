@@ -14,10 +14,9 @@ pub use crate::validate::{
 };
 
 // provides `try_next` for sqlx:
-use futures::TryStreamExt;
+//use futures::TryStreamExt;
 
 use crossbeam;
-use crossbeam::thread::ScopedJoinHandle;
 use itertools::{IntoChunks, Itertools};
 use lazy_static::lazy_static;
 use petgraph::algo::{all_simple_paths, toposort};
@@ -32,7 +31,7 @@ use serde_json::{
 };
 use sqlx::query as sqlx_query;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 use std::env;
 use std::fs::File;
 use std::process;
@@ -46,9 +45,8 @@ lazy_static! {
 }
 
 // TODO: Make sure to test with very small chunk sizes
-static CHUNK_SIZE: usize = 2500;
-pub static MULTI_THREADED: bool = false;
-
+static CHUNK_SIZE: usize = 2;
+pub static MULTI_THREADED: bool = true;
 // TODO: remove this later
 pub static TEST: bool = true;
 
@@ -823,7 +821,7 @@ async fn load_db(
                 r#"UPDATE "{}" SET "{}" = NULL, "{}" = JSON(?) WHERE "row_number" = {}"#,
                 table_name, column_name, meta_name, row_number
             );
-            let mut query = sqlx_query(&sql).bind(meta);
+            let query = sqlx_query(&sql).bind(meta);
             query.execute(pool).await?;
         }
     }
@@ -872,90 +870,55 @@ async fn validate_and_insert_chunks(
         }
         Ok(())
     } else {
-        // TODO: Uncomment this code and get it to work with async.
-        panic!("Multiprocessing temporariy disabled because of async");
-        /*
-        crossbeam::scope(|scope| {
-            fn wait_for_and_process_results(
-                config: &ConfigMap,
-                pool: &SqlitePool,
-                parser: &StartParser,
-                compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
-                compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
-                parsed_structure_conditions: &HashMap<String, ParsedStructure>,
-                table_name: &String,
-                headers: &csv::StringRecord,
-                mut chunk_number: usize,
-                handles: &mut Vec<ScopedJoinHandle<Vec<ResultRow>>>,
-            ) {
-                while let Some(handle) = handles.pop() {
-                    let mut intra_validated_rows = handle.join().unwrap();
-                    validate_rows_inter_and_insert(
-                        config,
-                        pool,
-                        parser,
-                        compiled_datatype_conditions,
-                        compiled_rule_conditions,
-                        parsed_structure_conditions,
-                        table_name,
-                        headers,
-                        &mut intra_validated_rows,
-                        chunk_number
-                    );
+        let num_cpus = num_cpus::get();
+        let chunk_blocks = chunks.into_iter().chunks(num_cpus);
+        let mut chunk_number = 0;
+        for chunk_block in chunk_blocks.into_iter() {
+            let mut results = BTreeMap::new();
+            crossbeam::scope(|scope| {
+                let mut procs = vec![];
+                for chunk in chunk_block.into_iter() {
+                    let mut rows: Vec<_> = chunk.collect();
+                    procs.push(scope.spawn(move |_| {
+                        validate_rows_intra(
+                            config,
+                            pool,
+                            parser,
+                            compiled_datatype_conditions,
+                            compiled_rule_conditions,
+                            parsed_structure_conditions,
+                            table_name,
+                            headers,
+                            &mut rows,
+                        )
+                    }));
+                }
+
+                for proc in procs {
+                    let result = proc.join().unwrap();
+                    results.insert(chunk_number, result);
                     chunk_number += 1;
                 }
-            }
+            })
+            .expect("A child thread panicked");
 
-            let num_cpus = num_cpus::get();
-            let mut handles = vec![];
-            let mut last_chunk_number = 0;
-            for (chunk_number, chunk) in chunks.into_iter().enumerate() {
-                let mut rows: Vec<_> = chunk.collect();
-                handles.push(scope.spawn(move |_| {
-                    validate_rows_intra(
-                        config,
-                        pool,
-                        parser,
-                        compiled_datatype_conditions,
-                        compiled_rule_conditions,
-                        parsed_structure_conditions,
-                        table_name,
-                        headers,
-                        &mut rows,
-                    )
-                }));
-                if chunk_number % num_cpus == 0 {
-                    wait_for_and_process_results(
-                        config,
-                        pool,
-                        parser,
-                        compiled_datatype_conditions,
-                        compiled_rule_conditions,
-                        parsed_structure_conditions,
-                        table_name,
-                        headers,
-                        chunk_number - num_cpus + 1,
-                        &mut handles
-                    );
-                }
-                last_chunk_number = chunk_number;
+            for (chunk_number, mut intra_validated_rows) in results {
+                validate_rows_inter_and_insert(
+                    config,
+                    pool,
+                    parser,
+                    compiled_datatype_conditions,
+                    compiled_rule_conditions,
+                    parsed_structure_conditions,
+                    table_name,
+                    headers,
+                    &mut intra_validated_rows,
+                    chunk_number
+                ).await?;
             }
-            let left_to_handle = last_chunk_number % num_cpus;
-            wait_for_and_process_results(
-                config,
-                pool,
-                parser,
-                compiled_datatype_conditions,
-                compiled_rule_conditions,
-                parsed_structure_conditions,
-                table_name,
-                headers,
-                last_chunk_number - left_to_handle + 1,
-                &mut handles
-            );
-        })
-        .expect("A child thread panicked");
-        */
+        }
+
+        Ok(())
     }
 }
 
@@ -984,9 +947,10 @@ async fn validate_rows_inter_and_insert(
     )
     .await?;
 
+    //eprintln!("Inserting to {} with rows {:#?} ...", table_name, rows);
     // TODO: Instead of a tuple of tuples here, consider returning (from make_inserts) a tuple
     // of two "SafeSql" structs.
-    let ((main_sql, main_params), (conflict_sql, conflict_params)) = make_inserts(
+    let ((main_sql, main_params), (_, _)) = make_inserts(
         config,
         pool,
         parser,
@@ -1008,6 +972,7 @@ async fn validate_rows_inter_and_insert(
     match main_result {
         Ok(_) => (),
         Err(_) => {
+            //eprintln!("Got an error trying to insert to {}. Validating rows constraints ...", table_name);
             validate_rows_constraints(
                 config,
                 pool,
@@ -1021,6 +986,7 @@ async fn validate_rows_inter_and_insert(
             )
             .await?;
 
+            //eprintln!("Retrying insert to {} with rows: {:#?}", table_name, rows);
             let ((main_sql, main_params), (conflict_sql, conflict_params)) = make_inserts(
                 config,
                 pool,
@@ -1039,7 +1005,7 @@ async fn validate_rows_inter_and_insert(
             for param in &main_params {
                 main_query = main_query.bind(param);
             }
-            let main_result = main_query.execute(pool).await?;
+            main_query.execute(pool).await?;
 
             let mut conflict_query = sqlx_query(&conflict_sql);
             for param in &conflict_params {
@@ -1051,6 +1017,8 @@ async fn validate_rows_inter_and_insert(
             //println!("{}\n", conflict_sql);
         }
     };
+
+    //eprintln!("====================================================");
 
     // TODO: Remove this ad hoc test.
     //I am using this as a quick ad hoc unit test but eventually we should re-implemt the unit tests
@@ -1079,14 +1047,15 @@ async fn validate_rows_inter_and_insert(
 }
 
 async fn make_inserts(
+    // TODO: Remove underscored parameters later
     config: &ConfigMap,
-    pool: &SqlitePool,
-    parser: &StartParser,
-    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
-    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
-    parsed_structure_conditions: &HashMap<String, ParsedStructure>,
+    _pool: &SqlitePool,
+    _parser: &StartParser,
+    _compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
+    _compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    _parsed_structure_conditions: &HashMap<String, ParsedStructure>,
     table_name: &String,
-    headers: &csv::StringRecord,
+    _headers: &csv::StringRecord,
     rows: &mut Vec<ResultRow>,
     chunk_number: usize,
 ) -> Result<((String, Vec<String>), (String, Vec<String>)), sqlx::Error> {
@@ -1147,8 +1116,6 @@ async fn make_inserts(
             }
             for column in &column_names {
                 let cell = row.contents.get(column).unwrap();
-                //eprintln!("    COLUMN: {}", column);
-                let column = column.replace(" ", "_");
                 if cell.nulltype == None && cell.valid {
                     values.push(String::from("?"));
                     params.push(cell.value.clone());

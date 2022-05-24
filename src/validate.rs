@@ -12,7 +12,7 @@ use sqlx::{query as sqlx_query, Row};
 use std::collections::HashMap;
 
 // provides `try_next` for sqlx:
-use futures::TryStreamExt;
+//use futures::TryStreamExt;
 
 use crate::cmi_pb_grammar::StartParser;
 use crate::{ColumnRule, CompiledCondition, ConfigMap, ParsedStructure};
@@ -49,7 +49,7 @@ pub fn validate_rows_intra(
     _parsed_structure_conditions: &HashMap<String, ParsedStructure>,
     table_name: &String,
     headers: &csv::StringRecord,
-    rows: &mut Vec<Result<csv::StringRecord, csv::Error>>,
+    rows: &Vec<Result<csv::StringRecord, csv::Error>>,
 ) -> Vec<ResultRow> {
     let mut result_rows: Vec<ResultRow> = vec![];
     for row in rows {
@@ -126,6 +126,7 @@ pub async fn validate_rows_trees(
     headers: &csv::StringRecord,
     rows: &mut Vec<ResultRow>,
 ) -> Result<(), sqlx::Error> {
+    //eprintln!("Validating {} rows trees for {} ...", rows.len(), table_name);
     let mut result_rows = vec![];
     for row in rows {
         let mut result_row = ResultRow { row_number: None, contents: HashMap::new() };
@@ -149,6 +150,9 @@ pub async fn validate_rows_trees(
                     &result_rows,
                 )
                 .await?;
+            } else {
+                //eprintln!("Not validating cell trees for {} because nulltype of this cell is None",
+                //          table_name);
             }
             result_row.contents.insert(column_name.to_string(), cell.clone());
         }
@@ -157,6 +161,7 @@ pub async fn validate_rows_trees(
         // results, and this then requires that we generate the result rows to play that role. The
         // call to cell.clone() above is required to make rust's borrow checker happy.
         result_rows.push(result_row);
+        //eprintln!("------------------------------------------");
     }
 
     Ok(())
@@ -173,7 +178,7 @@ pub async fn validate_rows_constraints(
     headers: &csv::StringRecord,
     rows: &mut Vec<ResultRow>,
 ) -> Result<(), sqlx::Error> {
-    //eprintln!("ROWS BEFORE:\n{:#?}", rows);
+    //eprintln!("Validating {} rows constraints for {} ...", rows.len(), table_name);
     let mut result_rows = vec![];
     for row in rows.iter_mut() {
         let mut result_row = ResultRow { row_number: None, contents: HashMap::new() };
@@ -213,6 +218,9 @@ pub async fn validate_rows_constraints(
                     None,
                 )
                 .await?;
+            } else {
+                //eprintln!("Not validating cell trees for {} because nulltype of this cell is None",
+                //          table_name);
             }
             result_row.contents.insert(column_name.to_string(), cell.clone());
         }
@@ -299,19 +307,21 @@ fn validate_cell_nulltype(
 }
 
 async fn validate_cell_foreign_constraints(
+    // TODO: Remove underscored parameters later
     config: &ConfigMap,
     pool: &SqlitePool,
-    parser: &StartParser,
-    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
-    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
-    parsed_structure_conditions: &HashMap<String, ParsedStructure>,
+    _parser: &StartParser,
+    _compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
+    _compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    _parsed_structure_conditions: &HashMap<String, ParsedStructure>,
     table_name: &String,
-    headers: &csv::StringRecord,
+    _headers: &csv::StringRecord,
     column_name: &String,
     cell: &mut ResultCell,
-    context: &ResultRow,
-    prev_results: &Vec<ResultRow>,
+    _context: &ResultRow,
+    _prev_results: &Vec<ResultRow>,
 ) -> Result<(), sqlx::Error> {
+    //eprintln!("Validating cell foreigns for {} with previous results: {:#?}", table_name, _prev_results);
     let fkeys = config
         .get("constraints")
         .and_then(|c| c.as_object())
@@ -334,7 +344,7 @@ async fn validate_cell_foreign_constraints(
         let ftable = fkey.get("ftable").and_then(|t| t.as_str()).unwrap();
         let fcolumn = fkey.get("fcolumn").and_then(|c| c.as_str()).unwrap();
         let fsql = format!(r#"SELECT 1 FROM "{}" WHERE "{}" = ? LIMIT 1"#, ftable, fcolumn);
-        let mut frows = sqlx_query(&fsql).bind(&cell.value).fetch_all(pool).await?;
+        let frows = sqlx_query(&fsql).bind(&cell.value).fetch_all(pool).await?;
 
         if frows.is_empty() {
             cell.valid = false;
@@ -345,7 +355,7 @@ async fn validate_cell_foreign_constraints(
 
             let fsql =
                 format!(r#"SELECT 1 FROM "{}_conflict" WHERE "{}" = ? LIMIT 1"#, ftable, fcolumn);
-            let mut frows = sqlx_query(&fsql).bind(cell.value.clone()).fetch_all(pool).await?;
+            let frows = sqlx_query(&fsql).bind(cell.value.clone()).fetch_all(pool).await?;
 
             if frows.is_empty() {
                 message.as_object_mut().and_then(|m| {
@@ -391,6 +401,8 @@ async fn validate_cell_trees(
     context: &ResultRow,
     prev_results: &Vec<ResultRow>,
 ) -> Result<(), sqlx::Error> {
+    //eprintln!("Validating cell trees for {} with previous results: {:#?}", table_name, prev_results);
+
     let tkeys = config
         .get("constraints")
         .and_then(|c| c.as_object())
@@ -684,21 +696,25 @@ fn validate_cell_rules(
 }
 
 async fn validate_cell_unique_constraints(
+    // TODO: Remove underscored parameters later.
     config: &ConfigMap,
     pool: &SqlitePool,
-    parser: &StartParser,
-    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
-    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
-    parsed_structure_conditions: &HashMap<String, ParsedStructure>,
+    _parser: &StartParser,
+    _compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
+    _compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    _parsed_structure_conditions: &HashMap<String, ParsedStructure>,
     table_name: &String,
-    headers: &csv::StringRecord,
+    _headers: &csv::StringRecord,
     column_name: &String,
     cell: &mut ResultCell,
-    context: &ResultRow,
+    _context: &ResultRow,
     prev_results: &Vec<ResultRow>,
     existing_row: Option<bool>,
     row_number: Option<u32>,
 ) -> Result<(), sqlx::Error> {
+    //eprintln!("Validating unique constraints for cell {:#?} for {}.{} with previous results: {:#?}",
+    //          cell, table_name, column_name, prev_results);
+    //eprintln!("----------");
     let existing_row = existing_row.unwrap_or(false);
     let row_number = row_number.unwrap_or(0);
     let primaries = config
@@ -747,9 +763,9 @@ async fn validate_cell_unique_constraints(
             with_sql = format!(
                 r#"WITH "{}" AS (
                                     SELECT * FROM "{}"
-                                    WHERE "row_number" IS NOT ?
+                                    WHERE "row_number" IS NOT {}
                                   ) "#,
-                except_table, table_name
+                except_table, table_name, row_number
             );
         }
 
@@ -764,7 +780,8 @@ async fn validate_cell_unique_constraints(
             r#"{} SELECT 1 FROM "{}" WHERE "{}" = ? LIMIT 1"#,
             with_sql, query_table, column_name,
         );
-        let query = sqlx_query(&sql).bind(row_number).bind(&cell.value);
+        let query = sqlx_query(&sql).bind(&cell.value);
+        //eprintln!("Running SQL query: {} with params: [{}, {}]", sql, row_number, cell.value);
 
         let contained_in_prev_results = !prev_results
             .iter()
@@ -859,7 +876,7 @@ pub async fn validate_under(
             .unwrap();
         let tree_parent = tree.get("parent").and_then(|p| p.as_str()).unwrap();
         let mut extra_clause;
-        let params;
+        let mut params;
         if let Some(ref extra_row) = extra_row {
             (extra_clause, params) = select_with_extra_row(extra_row, table_name);
         } else {
@@ -882,7 +899,9 @@ pub async fn validate_under(
         }
 
         let uval = ukey.get("value").and_then(|v| v.as_str()).unwrap().to_string();
-        let (tree_sql, params) = with_tree_sql(tree, &effective_tree, Some(uval.clone()), None);
+        let (tree_sql, mut tree_params) =
+            with_tree_sql(tree, &effective_tree, Some(uval.clone()), None);
+        params.append(&mut tree_params);
 
         if !extra_clause.is_empty() {
             extra_clause = format!(", {}", &extra_clause[5..]);
@@ -1097,7 +1116,7 @@ pub async fn validate_tree_foreign_keys(
                 parent_val = meta.get("value").and_then(|v| v.as_str()).unwrap();
                 let sql =
                     format!(r#"SELECT 1 FROM "{}" WHERE "{}" = ? LIMIT 1"#, table_name, child_col);
-                let mut query = sqlx_query(&sql).bind(parent_val);
+                let query = sqlx_query(&sql).bind(parent_val);
                 let rows = query.fetch_all(pool).await?;
                 if rows.len() > 0 {
                     continue;
