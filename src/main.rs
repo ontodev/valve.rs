@@ -48,7 +48,7 @@ lazy_static! {
 static CHUNK_SIZE: usize = 2;
 pub static MULTI_THREADED: bool = true;
 // TODO: remove this later
-pub static TEST: bool = true;
+pub static TEST: bool = false;
 
 /*
 compiled_rule_conditions = {
@@ -1015,9 +1015,8 @@ async fn validate_rows_inter_and_insert(
                 conflict_query = conflict_query.bind(param);
             }
             conflict_query.execute(pool).await?;
-            // TODO: Uncomment these later.
-            //println!("{}\n", main_sql);
-            //println!("{}\n", conflict_sql);
+            println!("{}\n", main_sql);
+            println!("{}\n", conflict_sql);
         }
     };
 
@@ -1733,8 +1732,7 @@ async fn configure_and_load_db(
     parsed_structure_conditions: &HashMap<String, ParsedStructure>,
 ) -> Result<(), sqlx::Error> {
     let constraints_config =
-        // TODO: set both of these flags to true
-        configure_db(tables_config, datatypes_config, pool, parser, Some(false), Some(true)).await?;
+        configure_db(tables_config, datatypes_config, pool, parser, Some(true), Some(true)).await?;
 
     // TODO: Try (again) to do this combination step at the end of `configure_db()`.
     // Combine the individual configuration maps into one:

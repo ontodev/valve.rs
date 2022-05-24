@@ -17,9 +17,15 @@ time:
 	cargo build --release
 	time cargo run --release TestData/build/table.tsv build
 
-test: clean | build
-	cargo run src/table.tsv build | sort > actual_output.txt && diff -q expected_output.txt actual_output.txt
+test/output:
+	mkdir -p test/output
+
+test: clean | build test/output
+	cargo run test/src/table.tsv build > /dev/null
+	test/test_round_trip.sh
+	scripts/export.py messages build/cmi-pb.db test/output/ column datatype prefix rule table foobar foreign_table import
+	diff -q test/expected_messages.tsv test/output/messages.tsv
 
 
 clean:
-	rm -Rf build
+	rm -Rf build test/output

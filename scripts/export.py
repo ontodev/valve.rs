@@ -80,6 +80,7 @@ def export_data(args):
     output_dir = os.path.normpath(args["output_dir"])
     tables = args["tables"]
     raw = bool(args.get("raw"))
+    nosort = bool(args.get("nosort"))
 
     with sqlite3.connect(db) as conn:
         for table in tables:
@@ -103,7 +104,10 @@ def export_data(args):
                         )
                 select = ", ".join(select)
 
-                order_by = ["row_number"] if raw else list(map(lambda x: f"`{x}`", sorted_columns))
+                if raw or nosort:
+                    order_by = ["row_number"]
+                else:
+                    order_by = list(map(lambda x: f"`{x}`", sorted_columns))
                 order_by = ", ".join(order_by)
 
                 # Fetch the rows from the table and write them to a corresponding TSV file in the
@@ -261,6 +265,7 @@ if __name__ == "__main__":
     sub1.add_argument(
         "--raw", action="store_true", help="Include _meta columns in table data export"
     )
+    sub1.add_argument("--nosort", action="store_true", help="Do not sort the data by primary key")
     sub1.set_defaults(func=export_data)
 
     sub2 = sub_parsers.add_parser(

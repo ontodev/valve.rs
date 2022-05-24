@@ -1,9 +1,0 @@
-table	path	description	type
-column	src/column.tsv	Columns for all of the tables.	column
-datatype	src/datatype.tsv	Datatypes for all of the columns	datatype
-foreign_table	src/ontology/foreign_table.tsv		
-import	src/ontology/import.tsv	Terms imported from other ontologies	
-prefix	src/prefix.tsv	Prefixes and source ontologies.	
-rule	src/rule.tsv	More complex "when" rules	rule
-table	src/table.tsv	All of the user-editable tables in this project.	table
-foobar	src/ontology/foobar.tsv		
