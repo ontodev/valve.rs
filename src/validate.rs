@@ -55,7 +55,6 @@ pub fn validate_rows_intra(
     for row in rows {
         if let Ok(row) = row {
             let mut result_row = ResultRow { row_number: None, contents: HashMap::new() };
-            let mut column_names: Vec<String> = vec![];
             for (i, value) in row.iter().enumerate() {
                 let result_cell = ResultCell {
                     nulltype: None,
@@ -65,8 +64,16 @@ pub fn validate_rows_intra(
                 };
                 let column = headers.get(i).unwrap();
                 result_row.contents.insert(column.to_string(), result_cell);
-                column_names.push(column.to_string());
             }
+
+            let column_names = config.get("table")
+                .and_then(|t| t.get(table_name))
+                .and_then(|t| t.get("column_order"))
+                .and_then(|c| c.as_array())
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap().to_string())
+                .collect::<Vec<_>>();
 
             // We check all the cells for nulltype first, since the rules validation requires that we
             // have this information for all cells.
@@ -127,13 +134,23 @@ pub async fn validate_rows_trees(
     rows: &mut Vec<ResultRow>,
 ) -> Result<(), sqlx::Error> {
     //eprintln!("Validating {} rows trees for {} ...", rows.len(), table_name);
+
+    let column_names = config.get("table")
+        .and_then(|t| t.get(table_name))
+        .and_then(|t| t.get("column_order"))
+        .and_then(|c| c.as_array())
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+
     let mut result_rows = vec![];
     for row in rows {
         let mut result_row = ResultRow { row_number: None, contents: HashMap::new() };
-        for column_name in row.contents.keys().cloned().collect::<Vec<_>>() {
+        for column_name in &column_names {
             //let context = row.clone();
             let context = ResultRow { row_number: row.row_number, contents: row.contents.clone() };
-            let cell: &mut ResultCell = row.contents.get_mut(&column_name).unwrap();
+            let cell: &mut ResultCell = row.contents.get_mut(column_name).unwrap();
             if cell.nulltype == None {
                 validate_cell_trees(
                     config,
@@ -179,12 +196,22 @@ pub async fn validate_rows_constraints(
     rows: &mut Vec<ResultRow>,
 ) -> Result<(), sqlx::Error> {
     //eprintln!("Validating {} rows constraints for {} ...", rows.len(), table_name);
+
+    let column_names = config.get("table")
+        .and_then(|t| t.get(table_name))
+        .and_then(|t| t.get("column_order"))
+        .and_then(|c| c.as_array())
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+
     let mut result_rows = vec![];
     for row in rows.iter_mut() {
         let mut result_row = ResultRow { row_number: None, contents: HashMap::new() };
-        for column_name in row.contents.keys().cloned().collect::<Vec<_>>() {
+        for column_name in &column_names {
             let context = ResultRow { row_number: row.row_number, contents: row.contents.clone() };
-            let cell: &mut ResultCell = row.contents.get_mut(&column_name).unwrap();
+            let cell: &mut ResultCell = row.contents.get_mut(column_name).unwrap();
             if cell.nulltype == None {
                 validate_cell_foreign_constraints(
                     config,

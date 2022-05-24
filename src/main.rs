@@ -676,6 +676,7 @@ async fn configure_db(
             panic!("No rows in '{}'", path);
         }
 
+        let mut column_order = vec![];
         let mut all_columns: ConfigMap = ConfigMap::new();
         for column_name in &actual_columns {
             let column;
@@ -695,13 +696,14 @@ async fn configure_db(
                     .unwrap()
                     .clone();
             }
+            column_order.push(SerdeValue::String(column_name.to_string()));
             all_columns.insert(column_name.to_string(), column);
         }
 
-        tables_config
-            .get_mut(&table_name)
-            .and_then(|t| t.as_object_mut())
-            .and_then(|o| o.insert(String::from("column"), SerdeValue::Object(all_columns)));
+        tables_config.get_mut(&table_name).and_then(|t| t.as_object_mut()).and_then(|o| {
+            o.insert(String::from("column"), SerdeValue::Object(all_columns));
+            o.insert(String::from("column_order"), SerdeValue::Array(column_order))
+        });
 
         for table in vec![table_name.to_string(), format!("{}_conflict", table_name)] {
             let (table_sql, table_constraints) =
@@ -913,8 +915,9 @@ async fn validate_and_insert_chunks(
                     table_name,
                     headers,
                     &mut intra_validated_rows,
-                    chunk_number
-                ).await?;
+                    chunk_number,
+                )
+                .await?;
             }
         }
 
@@ -1103,18 +1106,19 @@ async fn make_inserts(
         conflict_columns
     };
 
-    fn generate_sql(table_name: &String, rows: &Vec<ResultRow>) -> (String, Vec<String>) {
+    fn generate_sql(
+        table_name: &String,
+        column_names: &Vec<String>,
+        rows: &Vec<ResultRow>,
+    ) -> (String, Vec<String>) {
         let mut lines = vec![];
         let mut params = vec![];
-        let mut column_names = vec![];
         //eprintln!("TABLE NAME: {}", table_name);
+        //eprintln!("COLUMN NAMES FOR {}: {:?}", table_name, column_names);
         for row in rows.iter() {
             //eprintln!("  ROW #{}", row.row_number.unwrap());
             let mut values = vec![format!("{}", row.row_number.unwrap())];
-            if column_names.is_empty() {
-                column_names = row.contents.keys().sorted().cloned().collect::<Vec<_>>();
-            }
-            for column in &column_names {
+            for column in column_names {
                 let cell = row.contents.get(column).unwrap();
                 if cell.nulltype == None && cell.valid {
                     values.push(String::from("?"));
@@ -1155,7 +1159,7 @@ async fn make_inserts(
                 table_name,
                 {
                     let mut all_columns = vec![];
-                    for column_name in &column_names {
+                    for column_name in column_names {
                         let quoted_column_name = format!(r#""{}""#, column_name);
                         let quoted_meta_column_name = format!(r#""{}_meta""#, column_name);
                         //eprintln!("COL: {}, METACOL: {}", quoted_column_name,
@@ -1200,9 +1204,19 @@ async fn make_inserts(
         }
     }
 
-    let (main_sql, main_params) = generate_sql(&table_name, &main_rows);
+    let column_names = config
+        .get("table")
+        .and_then(|t| t.get(table_name))
+        .and_then(|t| t.get("column_order"))
+        .and_then(|c| c.as_array())
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+
+    let (main_sql, main_params) = generate_sql(&table_name, &column_names, &main_rows);
     let (conflict_sql, conflict_params) =
-        generate_sql(&format!("{}_conflict", table_name), &conflict_rows);
+        generate_sql(&format!("{}_conflict", table_name), &column_names, &conflict_rows);
 
     Ok(((main_sql, main_params), (conflict_sql, conflict_params)))
 }
@@ -1415,6 +1429,15 @@ fn create_table(
         normal_table_name = table_name.to_string();
     }
 
+    let column_names = tables_config
+        .get(&normal_table_name)
+        .and_then(|t| t.get("column_order"))
+        .and_then(|c| c.as_array())
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+
     let columns = tables_config
         .get(normal_table_name.as_str())
         .and_then(|c| c.as_object())
@@ -1430,7 +1453,19 @@ fn create_table(
         "under": [],
     });
 
-    let colvals = columns.values();
+    let mut colvals: Vec<ConfigMap> = vec![];
+    for column_name in &column_names {
+        let column = tables_config
+            .get(normal_table_name.as_str())
+            .and_then(|c| c.as_object())
+            .and_then(|o| o.get("column"))
+            .and_then(|c| c.as_object())
+            .and_then(|c| c.get(column_name))
+            .and_then(|c| c.as_object())
+            .unwrap();
+        colvals.push(column.clone());
+    }
+
     let c = colvals.len();
     let mut r = 0;
     for row in colvals {
@@ -1743,6 +1778,8 @@ async fn main() -> Result<(), sqlx::Error> {
         compiled_rule_conditions,
         parsed_structure_conditions,
     ) = read_config_files(table, &parser);
+
+    //eprintln!("{:#?}", tables_config);
 
     let connection_options =
         SqliteConnectOptions::from_str(format!("sqlite://{}/cmi-pb.db", db_dir).as_str())?
