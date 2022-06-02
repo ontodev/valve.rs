@@ -6,7 +6,7 @@ use serde_json::{
     //Map as SerdeMap,
     Value as SerdeValue,
 };
-use sqlx::sqlite::SqlitePool;
+use sqlx::any::AnyPool;
 use sqlx::ValueRef;
 use sqlx::{query as sqlx_query, Row};
 use std::collections::HashMap;
@@ -41,7 +41,7 @@ pub struct ResultRow {
 pub fn validate_rows_intra(
     config: &ConfigMap,
     // TODO: Remove these underscores later.
-    _pool: &SqlitePool,
+    _pool: &AnyPool,
     _parser: &StartParser,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
@@ -66,7 +66,8 @@ pub fn validate_rows_intra(
                 result_row.contents.insert(column.to_string(), result_cell);
             }
 
-            let column_names = config.get("table")
+            let column_names = config
+                .get("table")
                 .and_then(|t| t.get(table_name))
                 .and_then(|t| t.get("column_order"))
                 .and_then(|c| c.as_array())
@@ -124,7 +125,7 @@ pub fn validate_rows_intra(
 
 pub async fn validate_rows_trees(
     config: &ConfigMap,
-    pool: &SqlitePool,
+    pool: &AnyPool,
     parser: &StartParser,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
@@ -135,7 +136,8 @@ pub async fn validate_rows_trees(
 ) -> Result<(), sqlx::Error> {
     //eprintln!("Validating {} rows trees for {} ...", rows.len(), table_name);
 
-    let column_names = config.get("table")
+    let column_names = config
+        .get("table")
         .and_then(|t| t.get(table_name))
         .and_then(|t| t.get("column_order"))
         .and_then(|c| c.as_array())
@@ -186,7 +188,7 @@ pub async fn validate_rows_trees(
 
 pub async fn validate_rows_constraints(
     config: &ConfigMap,
-    pool: &SqlitePool,
+    pool: &AnyPool,
     parser: &StartParser,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
@@ -197,7 +199,8 @@ pub async fn validate_rows_constraints(
 ) -> Result<(), sqlx::Error> {
     //eprintln!("Validating {} rows constraints for {} ...", rows.len(), table_name);
 
-    let column_names = config.get("table")
+    let column_names = config
+        .get("table")
         .and_then(|t| t.get(table_name))
         .and_then(|t| t.get("column_order"))
         .and_then(|c| c.as_array())
@@ -336,7 +339,7 @@ fn validate_cell_nulltype(
 async fn validate_cell_foreign_constraints(
     // TODO: Remove underscored parameters later
     config: &ConfigMap,
-    pool: &SqlitePool,
+    pool: &AnyPool,
     _parser: &StartParser,
     _compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     _compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
@@ -414,7 +417,7 @@ async fn validate_cell_foreign_constraints(
 
 async fn validate_cell_trees(
     config: &ConfigMap,
-    pool: &SqlitePool,
+    pool: &AnyPool,
     // TODO: Remove these underscores later
     _parser: &StartParser,
     _compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
@@ -725,7 +728,7 @@ fn validate_cell_rules(
 async fn validate_cell_unique_constraints(
     // TODO: Remove underscored parameters later.
     config: &ConfigMap,
-    pool: &SqlitePool,
+    pool: &AnyPool,
     _parser: &StartParser,
     _compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     _compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
@@ -865,7 +868,7 @@ fn select_with_extra_row(extra_row: &ResultRow, table_name: &String) -> (String,
 
 pub async fn validate_under(
     config: &ConfigMap,
-    pool: &SqlitePool,
+    pool: &AnyPool,
     table_name: &String,
     extra_row: Option<ResultRow>,
 ) -> Result<Vec<SerdeValue>, sqlx::Error> {
@@ -1001,8 +1004,10 @@ pub async fn validate_under(
                 column_val = meta.get("value").and_then(|v| v.as_str()).unwrap();
             }
 
-            let is_in_tree: u32 = row.try_get("is_in_tree").unwrap();
-            let is_under: u32 = row.try_get("is_under").unwrap();
+            let is_in_tree: f32 = row.get_unchecked("is_in_tree");
+            let is_in_tree: u32 = is_in_tree as u32;
+            let is_under: f32 = row.get_unchecked("is_under");
+            let is_under: u32 = is_under as u32;
             if is_in_tree == 0 {
                 let mut meta = meta.clone();
                 meta.insert("valid".to_string(), SerdeValue::Bool(false));
@@ -1016,7 +1021,8 @@ pub async fn validate_under(
                 meta.get_mut("messages")
                     .and_then(|m| m.as_array_mut())
                     .and_then(|a| Some(a.push(message)));
-                let row_number: u32 = row.try_get("row_number").unwrap();
+                let row_number: f32 = row.get_unchecked("row_number");
+                let row_number = row_number as u32;
                 let result = json!({
                     "row_number": row_number,
                     "column": column,
@@ -1036,7 +1042,8 @@ pub async fn validate_under(
                 meta.get_mut("messages")
                     .and_then(|m| m.as_array_mut())
                     .and_then(|a| Some(a.push(message)));
-                let row_number: u32 = row.try_get("row_number").unwrap();
+                let row_number: f32 = row.get_unchecked("row_number");
+                let row_number = row_number as u32;
                 let result = json!({
                     "row_number": row_number,
                     "column": column,
@@ -1052,7 +1059,7 @@ pub async fn validate_under(
 
 pub async fn validate_tree_foreign_keys(
     config: &ConfigMap,
-    pool: &SqlitePool,
+    pool: &AnyPool,
     table_name: &String,
     extra_row: Option<ResultRow>,
 ) -> Result<Vec<SerdeValue>, sqlx::Error> {
@@ -1162,7 +1169,8 @@ pub async fn validate_tree_foreign_keys(
                 .and_then(|m| m.as_array_mut())
                 .and_then(|a| Some(a.push(message)));
 
-            let row_number: u32 = row.try_get("row_number").unwrap();
+            let row_number: f32 = row.get_unchecked("row_number");
+            let row_number = row_number as u32;
 
             let result = json!({
                 "row_number": row_number,

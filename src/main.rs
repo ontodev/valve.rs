@@ -29,8 +29,8 @@ use serde_json::{
     Map as SerdeMap,
     Value as SerdeValue,
 };
+use sqlx::any::{AnyConnectOptions, AnyPool, AnyPoolOptions};
 use sqlx::query as sqlx_query;
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 use std::collections::{BTreeMap, HashMap};
 use std::env;
 use std::fs::File;
@@ -41,7 +41,7 @@ use std::sync::Arc;
 pub type ConfigMap = SerdeMap<String, SerdeValue>;
 
 lazy_static! {
-    static ref SQLITE_TYPES: Vec<&'static str> = vec!["text", "integer", "real", "blob"];
+    static ref SQL_TYPES: Vec<&'static str> = vec!["text", "integer", "real", "blob"];
 }
 
 // TODO: Make sure to test with very small chunk sizes
@@ -617,7 +617,7 @@ fn read_config_files(
 async fn configure_db(
     tables_config: &mut ConfigMap,
     datatypes_config: &mut ConfigMap,
-    pool: &SqlitePool,
+    pool: &AnyPool,
     parser: &StartParser,
     write_sql_to_stdout: Option<bool>,
     write_to_db: Option<bool>,
@@ -751,7 +751,7 @@ async fn configure_db(
 
 async fn load_db(
     config: &ConfigMap,
-    pool: &SqlitePool,
+    pool: &AnyPool,
     parser: &StartParser,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
@@ -819,6 +819,7 @@ async fn load_db(
             let meta_name = format!("{}_meta", column_name);
             let row_number = record.get("row_number").unwrap();
             let meta = record.get("meta").unwrap();
+            let meta = format!("{}", meta);
             let sql = format!(
                 r#"UPDATE "{}" SET "{}" = NULL, "{}" = JSON(?) WHERE "row_number" = {}"#,
                 table_name, column_name, meta_name, row_number
@@ -833,7 +834,7 @@ async fn load_db(
 
 async fn validate_and_insert_chunks(
     config: &ConfigMap,
-    pool: &SqlitePool,
+    pool: &AnyPool,
     parser: &StartParser,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
@@ -927,7 +928,7 @@ async fn validate_and_insert_chunks(
 
 async fn validate_rows_inter_and_insert(
     config: &ConfigMap,
-    pool: &SqlitePool,
+    pool: &AnyPool,
     parser: &StartParser,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
@@ -1051,7 +1052,7 @@ async fn validate_rows_inter_and_insert(
 async fn make_inserts(
     // TODO: Remove underscored parameters later
     config: &ConfigMap,
-    _pool: &SqlitePool,
+    _pool: &AnyPool,
     _parser: &StartParser,
     _compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     _compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
@@ -1491,7 +1492,7 @@ fn create_table(
             panic!("Missing SQL type for {}", row.get("datatype").unwrap());
         }
         let sql_type = sql_type.unwrap();
-        if !SQLITE_TYPES.contains(&sql_type.to_lowercase().as_str()) {
+        if !SQL_TYPES.contains(&sql_type.to_lowercase().as_str()) {
             panic!("Unrecognized SQL type '{}' for {}", sql_type, row.get("datatype").unwrap());
         }
 
@@ -1725,7 +1726,7 @@ async fn configure_and_load_db(
     tables_config: &mut ConfigMap,
     datatypes_config: &mut ConfigMap,
     rules_config: &mut ConfigMap,
-    pool: &SqlitePool,
+    pool: &AnyPool,
     parser: &StartParser,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
@@ -1780,10 +1781,9 @@ async fn main() -> Result<(), sqlx::Error> {
     //eprintln!("{:#?}", tables_config);
 
     let connection_options =
-        SqliteConnectOptions::from_str(format!("sqlite://{}/cmi-pb.db", db_dir).as_str())?
-            .create_if_missing(true);
+        AnyConnectOptions::from_str(format!("sqlite://{}/cmi-pb.db?mode=rwc", db_dir).as_str())?;
 
-    let pool = SqlitePoolOptions::new().max_connections(5).connect_with(connection_options).await?;
+    let pool = AnyPoolOptions::new().max_connections(5).connect_with(connection_options).await?;
     sqlx_query("PRAGMA foreign_keys = ON").execute(&pool).await?;
 
     configure_and_load_db(
