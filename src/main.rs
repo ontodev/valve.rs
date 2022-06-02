@@ -6,78 +6,60 @@ mod validate;
 
 lalrpop_mod!(pub cmi_pb_grammar);
 
-use crate::ast::Expression;
-use crate::cmi_pb_grammar::StartParser;
 pub use crate::validate::{
     validate_rows_constraints, validate_rows_intra, validate_rows_trees,
     validate_tree_foreign_keys, validate_under, ResultCell, ResultRow,
 };
-
-// provides `try_next` for sqlx:
-//use futures::TryStreamExt;
-
+use crate::{ast::Expression, cmi_pb_grammar::StartParser};
 use crossbeam;
 use itertools::{IntoChunks, Itertools};
 use lazy_static::lazy_static;
-use petgraph::algo::{all_simple_paths, toposort};
-use petgraph::graphmap::DiGraphMap;
-use petgraph::Direction;
-use regex::Regex;
-use serde_json::{
-    json,
-    // SerdeMap by default backed by BTreeMap (see https://docs.serde.rs/serde_json/map/index.html)
-    Map as SerdeMap,
-    Value as SerdeValue,
+use petgraph::{
+    algo::{all_simple_paths, toposort},
+    graphmap::DiGraphMap,
+    Direction,
 };
-use sqlx::any::{AnyConnectOptions, AnyPool, AnyPoolOptions};
-use sqlx::query as sqlx_query;
-use std::collections::{BTreeMap, HashMap};
-use std::env;
-use std::fs::File;
-use std::process;
-use std::str::FromStr;
-use std::sync::Arc;
+use regex::Regex;
+use serde_json::{json, Value as SerdeValue};
+use sqlx::{
+    any::{AnyConnectOptions, AnyPool, AnyPoolOptions},
+    query as sqlx_query,
+};
+use std::{
+    collections::{BTreeMap, HashMap},
+    env,
+    fs::File,
+    process,
+    str::FromStr,
+    sync::Arc,
+};
 
-pub type ConfigMap = SerdeMap<String, SerdeValue>;
+// Note: serde_json::Map is backed by a BTreeMap by default
+// (see https://docs.serde.rs/serde_json/map/index.html)
+pub type ConfigMap = serde_json::Map<String, SerdeValue>;
 
 lazy_static! {
+    // TODO: include synonyms?
     static ref SQL_TYPES: Vec<&'static str> = vec!["text", "integer", "real", "blob"];
 }
 
-// TODO: Make sure to test with very small chunk sizes
-static CHUNK_SIZE: usize = 2;
+static CHUNK_SIZE: usize = 2500;
 pub static MULTI_THREADED: bool = true;
-// TODO: remove this later
-pub static TEST: bool = false;
 
-/*
-compiled_rule_conditions = {
-    "my_table": {
-        "when_column_1": [
-            ColumnRule {
-                when: CompiledCondition {parsed, compiled},
-                then: CompiledCondition {parsed, compiled},
-            },
-            ColumnRule {
-                when: CompiledCondition {parsed, compiled},
-                then: CompiledCondition {parsed, compiled},
-            },
-            ...
-        ],
-    },
-    ...
-}
-*/
-
+/// Represents a structure such as those found in the `structure` column of the `column` table in
+/// both its parsed format (i.e., as an Expression) as well as in its original format (i.e., as a
+/// plain string).
 pub struct ParsedStructure {
     // TODO: Remove the underscores from these variable names. Since the code currently never
     // accesses these fields we will get a compiler warning unless they are underscored.
-    // Presumably, though, when the implementation is complete they will be accessed at some point
-    // and we can remove the underscores here.
+    // Once the function `get_matching_values()`, which needs to access these fields, is
+    // implemented, these warnings will go away and we can remove the underscores.
     _original: String,
     _parsed: Expression,
 }
 
+/// Represents a condition in three different ways: in String format, as a parsed Expression,
+/// and as a pre-compiled regular expression.
 pub struct CompiledCondition {
     original: String,
     parsed: Expression,
@@ -93,6 +75,8 @@ impl std::fmt::Debug for CompiledCondition {
     }
 }
 
+/// Represents a 'when-then' condition, as found in the `rule` table, as CompiledConditions
+/// corresponding to the when and then parts of the given rule.
 pub struct ColumnRule {
     when: CompiledCondition,
     then: CompiledCondition,
@@ -106,7 +90,9 @@ impl std::fmt::Debug for ColumnRule {
 
 // TODO: Add functions for update_row() and insert_new_row()
 
-/// Use this function for "small" TSVs only, since it returns a vector.
+/// Given a path, read a TSV file and return a vector of rows represented as ConfigMaps.
+/// Note: Use this function to read "small" TSVs only. In particular, use this for the special
+/// configuration tables.
 fn read_tsv_into_vector(path: &String) -> Vec<ConfigMap> {
     let mut rdr = csv::ReaderBuilder::new().delimiter(b'\t').from_reader(
         File::open(path).unwrap_or_else(|err| {
@@ -129,6 +115,10 @@ fn read_tsv_into_vector(path: &String) -> Vec<ConfigMap> {
     rows
 }
 
+/// Given a condition on a datatype, if the condition is a Function, then parse it using
+/// StartParser, create a corresponding CompiledCondition, and return it. If the condition is a
+/// Label, then look for the CompiledCondition corresponding to it in compiled_datatype_conditions
+// and return it.
 fn compile_condition(
     condition_option: Option<&str>,
     parser: &StartParser,
@@ -138,7 +128,7 @@ fn compile_condition(
     match condition_option {
         // The case of no condition, or a "null" or "not null" condition, will be treated specially
         // later during the validation phase in a way that does not utilise the associated closure.
-        // Since we have to assign some closure in these cases, we use a constant closure that
+        // Since we still have to assign some closure in these cases, we use a constant closure that
         // always returns true:
         None => {
             return CompiledCondition {
@@ -273,6 +263,9 @@ fn compile_condition(
     };
 }
 
+/// Given the path to a table TSV file, load and check the 'table', 'column', and 'datatype'
+/// tables, and return ConfigMaps corresponding to specials, tables, datatypes, and rules, as well
+/// as HashMaps for compiled datatype and rule conditions and for parsed structure conditions.
 fn read_config_files(
     table_table_path: &String,
     parser: &StartParser,
@@ -293,8 +286,8 @@ fn read_config_files(
     });
     let special_table_types = special_table_types.as_object().unwrap();
 
-    // Initialize the special table entries in the config map:
-    let mut specials_config: ConfigMap = SerdeMap::new();
+    // Initialize the special table entries in the specials config map:
+    let mut specials_config = ConfigMap::new();
     for t in special_table_types.keys() {
         specials_config.insert(t.to_string(), SerdeValue::Null);
     }
@@ -303,7 +296,7 @@ fn read_config_files(
     let rows = read_tsv_into_vector(path);
 
     // Load table table
-    let mut tables_config: ConfigMap = SerdeMap::new();
+    let mut tables_config = ConfigMap::new();
     for mut row in rows {
         for column in vec!["table", "path", "type"] {
             if !row.contains_key(column) || row.get(column) == None {
@@ -349,7 +342,7 @@ fn read_config_files(
             }
         }
 
-        row.insert(String::from("column"), SerdeValue::Object(SerdeMap::new()));
+        row.insert(String::from("column"), SerdeValue::Object(ConfigMap::new()));
         let row_table = row.get("table").and_then(|t| t.as_str()).unwrap();
         tables_config.insert(row_table.to_string(), SerdeValue::Object(row));
     }
@@ -364,7 +357,7 @@ fn read_config_files(
     }
 
     // Load datatype table
-    let mut datatypes_config: ConfigMap = SerdeMap::new();
+    let mut datatypes_config = ConfigMap::new();
     let mut compiled_datatype_conditions: HashMap<String, CompiledCondition> = HashMap::new();
     let table_name = specials_config.get("datatype").and_then(|d| d.as_str()).unwrap();
     let path = String::from(
@@ -409,7 +402,7 @@ fn read_config_files(
     }
 
     // Load column table
-    let mut parsed_structure_conditions: HashMap<String, ParsedStructure> = HashMap::new();
+    let mut parsed_structure_conditions = HashMap::new();
     let table_name = specials_config.get("column").and_then(|d| d.as_str()).unwrap();
     let path = String::from(
         tables_config.get(table_name).and_then(|t| t.get("path")).and_then(|p| p.as_str()).unwrap(),
@@ -476,24 +469,18 @@ fn read_config_files(
 
         let row_table = row.get("table").and_then(|t| t.as_str()).unwrap();
         let column_name = row.get("column").and_then(|c| c.as_str()).unwrap();
-        if let Some(SerdeValue::Object(columns_config)) =
-            tables_config.get_mut(row_table).and_then(|t| t.get_mut("column"))
-        {
-            columns_config.insert(column_name.to_string(), SerdeValue::Object(row));
-        } else {
-            // TODO: Try and remove this panic! statement by using unwrap() above (or something
-            // like that).
-            panic!(
-                "Programming error: Unable to find column config for column {}.{}",
-                row_table, column_name
-            );
-        }
+
+        let columns_config = tables_config
+            .get_mut(row_table)
+            .and_then(|t| t.get_mut("column"))
+            .and_then(|c| c.as_object_mut())
+            .unwrap();
+        columns_config.insert(column_name.to_string(), SerdeValue::Object(row));
     }
 
     // Load rule table if it exists
-    let mut rules_config: ConfigMap = SerdeMap::new();
-    let mut compiled_rule_conditions: HashMap<String, HashMap<String, Vec<ColumnRule>>> =
-        HashMap::new();
+    let mut rules_config = ConfigMap::new();
+    let mut compiled_rule_conditions = HashMap::new();
     if let Some(SerdeValue::String(table_name)) = specials_config.get("rule") {
         let path = String::from(
             tables_config
@@ -564,7 +551,7 @@ fn read_config_files(
 
             if let (Some(when_compiled), Some(then_compiled)) = (when_compiled, then_compiled) {
                 if !compiled_rule_conditions.contains_key(row_table) {
-                    let table_rules: HashMap<String, Vec<ColumnRule>> = HashMap::new();
+                    let table_rules = HashMap::new();
                     compiled_rule_conditions.insert(row_table.to_string(), table_rules);
                 }
                 let table_rules = compiled_rule_conditions.get_mut(row_table).unwrap();
@@ -579,27 +566,19 @@ fn read_config_files(
             // value of the when column:
             let row_when_column = row.get("when column").and_then(|c| c.as_str()).unwrap();
             if !rules_config.contains_key(row_table) {
-                rules_config.insert(String::from(row_table), SerdeValue::Object(SerdeMap::new()));
+                rules_config.insert(String::from(row_table), SerdeValue::Object(ConfigMap::new()));
             }
 
-            if let Some(SerdeValue::Object(table_rule_config)) = rules_config.get_mut(row_table) {
-                if !table_rule_config.contains_key(row_when_column) {
-                    table_rule_config
-                        .insert(String::from(row_when_column), SerdeValue::Array(vec![]));
-                }
-                if let Some(SerdeValue::Array(column_rule_config)) =
-                    table_rule_config.get_mut(&row_when_column.to_string())
-                {
-                    column_rule_config.push(SerdeValue::Object(row));
-                } else {
-                    panic!(
-                        "Programming error: No '{}' key in rule config for table '{}'",
-                        row_when_column, row_table
-                    );
-                }
-            } else {
-                panic!("Programming error: No 'when column' key in rule config.")
+            let table_rule_config =
+                rules_config.get_mut(row_table).and_then(|t| t.as_object_mut()).unwrap();
+            if !table_rule_config.contains_key(row_when_column) {
+                table_rule_config.insert(String::from(row_when_column), SerdeValue::Array(vec![]));
             }
+            let column_rule_config = table_rule_config
+                .get_mut(&row_when_column.to_string())
+                .and_then(|w| w.as_array_mut())
+                .unwrap();
+            column_rule_config.push(SerdeValue::Object(row));
         }
     }
 
@@ -614,6 +593,12 @@ fn read_config_files(
     )
 }
 
+/// Given config maps for tables and datatypes, a database connection pool, and a StartParser,
+/// read in the TSV files corresponding to the tables defined in the tables config, and use that
+/// information to fill in constraints information into a new config map that is then returned. If
+/// the flag `write_sql_to_stdout` is set to true, emit SQL to create the database schema to STDOUT.
+/// If the flag `write_to_db` is set to true, execute the SQL in the database using the given
+/// connection pool.
 async fn configure_db(
     tables_config: &mut ConfigMap,
     datatypes_config: &mut ConfigMap,
@@ -622,36 +607,28 @@ async fn configure_db(
     write_sql_to_stdout: Option<bool>,
     write_to_db: Option<bool>,
 ) -> Result<ConfigMap, sqlx::Error> {
-    // If the optional arguments have not been supplied, give them default values:
+    // If the optional arguments are set to None, give them default values:
     let write_sql_to_stdout = write_sql_to_stdout.unwrap_or(false);
     let write_to_db = write_to_db.unwrap_or(false);
 
     // This is what we will return:
-    let mut constraints_config: ConfigMap = SerdeMap::new();
-    constraints_config.insert(String::from("foreign"), SerdeValue::Object(SerdeMap::new()));
-    constraints_config.insert(String::from("unique"), SerdeValue::Object(SerdeMap::new()));
-    constraints_config.insert(String::from("primary"), SerdeValue::Object(SerdeMap::new()));
-    constraints_config.insert(String::from("tree"), SerdeValue::Object(SerdeMap::new()));
-    constraints_config.insert(String::from("under"), SerdeValue::Object(SerdeMap::new()));
+    let mut constraints_config = ConfigMap::new();
+    constraints_config.insert(String::from("foreign"), SerdeValue::Object(ConfigMap::new()));
+    constraints_config.insert(String::from("unique"), SerdeValue::Object(ConfigMap::new()));
+    constraints_config.insert(String::from("primary"), SerdeValue::Object(ConfigMap::new()));
+    constraints_config.insert(String::from("tree"), SerdeValue::Object(ConfigMap::new()));
+    constraints_config.insert(String::from("under"), SerdeValue::Object(ConfigMap::new()));
 
+    // Begin by reading in the TSV files corresponding to the tables defined in tables_config, and
+    // use that information to create the associated database tables, while saving constraint
+    // information to constrains_config.
     let table_names: Vec<String> = tables_config.keys().cloned().collect();
     for table_name in table_names {
-        let mut path = tables_config
+        let path = tables_config
             .get(&table_name)
             .and_then(|r| r.get("path"))
-            .and_then(|p| Some(p.to_string()))
+            .and_then(|p| p.as_str())
             .unwrap();
-        // Remove enclosing quotes that are added as a side-effect of the to_string() conversion
-        // TODO: See if we can avoid having to do this here and elsewhere.
-        path = path.split_off(1);
-        path.truncate(path.len() - 1);
-        // Note that we set has_headers to false (even though the files have header rows) in order
-        // to explicitly read the headers
-        let mut rdr = csv::ReaderBuilder::new().has_headers(false).delimiter(b'\t').from_reader(
-            File::open(path.clone()).unwrap_or_else(|err| {
-                panic!("Unable to open '{}': {}", path.clone(), err);
-            }),
-        );
 
         // Get the columns that have been previously configured:
         let defined_columns: Vec<String> = tables_config
@@ -663,7 +640,13 @@ async fn configure_db(
             .and_then(|k| Some(k.collect()))
             .unwrap();
 
-        // Get the actual columns from the data itself:
+        // Get the actual columns from the data itself. Note that we set has_headers to false
+        // (even though the files have header rows) in order to explicitly read the header row.
+        let mut rdr = csv::ReaderBuilder::new().has_headers(false).delimiter(b'\t').from_reader(
+            File::open(path.clone()).unwrap_or_else(|err| {
+                panic!("Unable to open '{}': {}", path.clone(), err);
+            }),
+        );
         let mut iter = rdr.records();
         let actual_columns;
         if let Some(result) = iter.next() {
@@ -676,12 +659,14 @@ async fn configure_db(
             panic!("No rows in '{}'", path);
         }
 
+        // We use column_order to explicitly indicate the order in which the columns should appear
+        // in the table, for later reference.
         let mut column_order = vec![];
         let mut all_columns: ConfigMap = ConfigMap::new();
         for column_name in &actual_columns {
             let column;
             if !defined_columns.contains(&column_name.to_string()) {
-                let mut cmap: ConfigMap = SerdeMap::new();
+                let mut cmap = ConfigMap::new();
                 cmap.insert(String::from("table"), SerdeValue::String(table_name.to_string()));
                 cmap.insert(String::from("column"), SerdeValue::String(column_name.to_string()));
                 cmap.insert(String::from("nulltype"), SerdeValue::String(String::from("empty")));
@@ -705,6 +690,7 @@ async fn configure_db(
             o.insert(String::from("column_order"), SerdeValue::Array(column_order))
         });
 
+        // Create the table and its corresponding conflict table:
         for table in vec![table_name.to_string(), format!("{}_conflict", table_name)] {
             let (table_sql, table_constraints) =
                 create_table(tables_config, datatypes_config, parser, &table);
@@ -728,6 +714,7 @@ async fn configure_db(
             }
         }
 
+        // Create a view as the union of the regular and conflict versions of the table:
         let drop_view_sql = format!(r#"DROP VIEW IF EXISTS "{}_view";"#, table_name);
         let create_view_sql = format!(
             r#"CREATE VIEW "{t}_view" AS SELECT * FROM "{t}" UNION SELECT * FROM "{t}_conflict";"#,
@@ -749,14 +736,18 @@ async fn configure_db(
     return Ok(constraints_config);
 }
 
+/// Given a configuration map, a database connection pool, a parser, HashMaps representing
+/// compiled datatype and rule conditions, and a HashMap representing parsed structure conditions,
+/// read in the data TSV files corresponding to each configured table, then validate and load all of
+/// the corresponding data rows.
 async fn load_db(
     config: &ConfigMap,
     pool: &AnyPool,
-    parser: &StartParser,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
-    parsed_structure_conditions: &HashMap<String, ParsedStructure>,
 ) -> Result<(), sqlx::Error> {
+    // Sort the tables according to their foreign key dependencies so that tables are always loaded
+    // after the tables they depend on:
     let table_list: Vec<String> = config
         .get("table")
         .and_then(|t| t.as_object())
@@ -771,6 +762,7 @@ async fn load_db(
         })
         .unwrap();
 
+    // Now load the rows:
     for table_name in table_list {
         let path = String::from(
             config
@@ -796,20 +788,25 @@ async fn load_db(
             panic!("'{}' is empty", path);
         }
 
+        // Split the data into chunks of size CHUNK_SIZE before passing them to the validation
+        // logic:
         let chunks = records.chunks(CHUNK_SIZE);
         validate_and_insert_chunks(
             config,
             pool,
-            parser,
             compiled_datatype_conditions,
             compiled_rule_conditions,
-            parsed_structure_conditions,
             &table_name,
             &chunks,
             &headers,
         )
         .await?;
 
+        // We need to wait until all of the rows for a table have been loaded before validating the
+        // "foreign" constraints on a table's trees, since this checks if the values of one column
+        // (the tree's parent) are all contained in another column (the tree's child):
+        // We also need to wait before validating a table's "under" constraints. Although the tree
+        // associated with such a constraint need not be defined on the same table, it can be.
         let mut recs_to_update =
             validate_tree_foreign_keys(config, pool, &table_name, None).await?;
         recs_to_update.append(&mut validate_under(config, pool, &table_name, None).await?);
@@ -818,8 +815,7 @@ async fn load_db(
             let column_name = record.get("column").and_then(|c| c.as_str()).unwrap();
             let meta_name = format!("{}_meta", column_name);
             let row_number = record.get("row_number").unwrap();
-            let meta = record.get("meta").unwrap();
-            let meta = format!("{}", meta);
+            let meta = format!("{}", record.get("meta").unwrap());
             let sql = format!(
                 r#"UPDATE "{}" SET "{}" = NULL, "{}" = JSON(?) WHERE "row_number" = {}"#,
                 table_name, column_name, meta_name, row_number
@@ -832,13 +828,15 @@ async fn load_db(
     Ok(())
 }
 
+/// Given a configuration map, a database connection pool, maps for compiled datatype and rule
+/// conditions, a table name, a number of chunks of rows to insert into the table in the database,
+/// and the headers of the rows to be inserted, validate each chunk and insert the validated rows
+/// to the table.
 async fn validate_and_insert_chunks(
     config: &ConfigMap,
     pool: &AnyPool,
-    parser: &StartParser,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
-    parsed_structure_conditions: &HashMap<String, ParsedStructure>,
     table_name: &String,
     chunks: &IntoChunks<csv::StringRecordsIter<'_, std::fs::File>>,
     headers: &csv::StringRecord,
@@ -848,11 +846,8 @@ async fn validate_and_insert_chunks(
             let mut rows: Vec<_> = chunk.collect();
             let mut intra_validated_rows = validate_rows_intra(
                 config,
-                pool,
-                parser,
                 compiled_datatype_conditions,
                 compiled_rule_conditions,
-                parsed_structure_conditions,
                 table_name,
                 headers,
                 &mut rows,
@@ -860,12 +855,7 @@ async fn validate_and_insert_chunks(
             validate_rows_inter_and_insert(
                 config,
                 pool,
-                parser,
-                compiled_datatype_conditions,
-                compiled_rule_conditions,
-                parsed_structure_conditions,
                 table_name,
-                headers,
                 &mut intra_validated_rows,
                 chunk_number,
             )
@@ -873,23 +863,29 @@ async fn validate_and_insert_chunks(
         }
         Ok(())
     } else {
+        // Here is how this works. First of all note that we are given a number of chunks of rows,
+        // where the number of rows in each chunk is determined by CHUNK_SIZE (defined above). We
+        // then divide the chunks into batches, where the number of chunks in each batch is
+        // determined by the number of CPUs present on the system. We then iterate over the
+        // batches one by one, assigning each chunk in a given batch to a worker thread whose
+        // job is to perform intra-row validation on that chunk. The workers work in parallel, one
+        // per CPU, and after all the workers have completed and their results have been collected,
+        // we then perform inter-row validation on the chunks in the batch, this time serially.
+        // Once this is done, we move on to the next batch and continue in this fashion.
         let num_cpus = num_cpus::get();
-        let chunk_blocks = chunks.into_iter().chunks(num_cpus);
+        let batches = chunks.into_iter().chunks(num_cpus);
         let mut chunk_number = 0;
-        for chunk_block in chunk_blocks.into_iter() {
+        for batch in batches.into_iter() {
             let mut results = BTreeMap::new();
             crossbeam::scope(|scope| {
-                let mut procs = vec![];
-                for chunk in chunk_block.into_iter() {
+                let mut workers = vec![];
+                for chunk in batch.into_iter() {
                     let mut rows: Vec<_> = chunk.collect();
-                    procs.push(scope.spawn(move |_| {
+                    workers.push(scope.spawn(move |_| {
                         validate_rows_intra(
                             config,
-                            pool,
-                            parser,
                             compiled_datatype_conditions,
                             compiled_rule_conditions,
-                            parsed_structure_conditions,
                             table_name,
                             headers,
                             &mut rows,
@@ -897,8 +893,8 @@ async fn validate_and_insert_chunks(
                     }));
                 }
 
-                for proc in procs {
-                    let result = proc.join().unwrap();
+                for worker in workers {
+                    let result = worker.join().unwrap();
                     results.insert(chunk_number, result);
                     chunk_number += 1;
                 }
@@ -909,12 +905,7 @@ async fn validate_and_insert_chunks(
                 validate_rows_inter_and_insert(
                     config,
                     pool,
-                    parser,
-                    compiled_datatype_conditions,
-                    compiled_rule_conditions,
-                    parsed_structure_conditions,
                     table_name,
-                    headers,
                     &mut intra_validated_rows,
                     chunk_number,
                 )
@@ -926,47 +917,24 @@ async fn validate_and_insert_chunks(
     }
 }
 
+/// Given a configuration map, a database connection pool, a table name, some rows to validate,
+/// and the chunk number corresponding to the rows, do inter-row validation on the rows and insert
+/// them to the table.
 async fn validate_rows_inter_and_insert(
     config: &ConfigMap,
     pool: &AnyPool,
-    parser: &StartParser,
-    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
-    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
-    parsed_structure_conditions: &HashMap<String, ParsedStructure>,
     table_name: &String,
-    headers: &csv::StringRecord,
     rows: &mut Vec<ResultRow>,
     chunk_number: usize,
 ) -> Result<(), sqlx::Error> {
-    validate_rows_trees(
-        config,
-        pool,
-        parser,
-        compiled_datatype_conditions,
-        compiled_rule_conditions,
-        parsed_structure_conditions,
-        table_name,
-        headers,
-        rows,
-    )
-    .await?;
+    // First, do the tree validation:
+    validate_rows_trees(config, pool, table_name, rows).await?;
 
-    //eprintln!("Inserting to {} with rows {:#?} ...", table_name, rows);
-    // TODO: Instead of a tuple of tuples here, consider returning (from make_inserts) a tuple
-    // of two "SafeSql" structs.
-    let ((main_sql, main_params), (_, _)) = make_inserts(
-        config,
-        pool,
-        parser,
-        compiled_datatype_conditions,
-        compiled_rule_conditions,
-        parsed_structure_conditions,
-        table_name,
-        headers,
-        rows,
-        chunk_number,
-    )
-    .await?;
+    // Try to insert the rows to the db first without validating unique and foreign constraints.
+    // If there are constraint violations this will cause a database error, in which case we then
+    // explicitly do the constraint validation and insert the resulting rows:
+    let ((main_sql, main_params), (_, _)) =
+        make_inserts(config, table_name, rows, chunk_number).await?;
 
     let mut main_query = sqlx_query(&main_sql);
     for param in &main_params {
@@ -976,34 +944,10 @@ async fn validate_rows_inter_and_insert(
     match main_result {
         Ok(_) => (),
         Err(_) => {
-            //eprintln!("Got an error trying to insert to {}. Validating rows constraints ...", table_name);
-            validate_rows_constraints(
-                config,
-                pool,
-                parser,
-                compiled_datatype_conditions,
-                compiled_rule_conditions,
-                parsed_structure_conditions,
-                table_name,
-                headers,
-                rows,
-            )
-            .await?;
+            validate_rows_constraints(config, pool, table_name, rows).await?;
 
-            //eprintln!("Retrying insert to {} with rows: {:#?}", table_name, rows);
-            let ((main_sql, main_params), (conflict_sql, conflict_params)) = make_inserts(
-                config,
-                pool,
-                parser,
-                compiled_datatype_conditions,
-                compiled_rule_conditions,
-                parsed_structure_conditions,
-                table_name,
-                headers,
-                rows,
-                chunk_number,
-            )
-            .await?;
+            let ((main_sql, main_params), (conflict_sql, conflict_params)) =
+                make_inserts(config, table_name, rows, chunk_number).await?;
 
             let mut main_query = sqlx_query(&main_sql);
             for param in &main_params {
@@ -1021,44 +965,15 @@ async fn validate_rows_inter_and_insert(
         }
     };
 
-    //eprintln!("====================================================");
-
-    // TODO: Remove this ad hoc test.
-    //I am using this as a quick ad hoc unit test but eventually we should re-implemt the unit tests
-    //in jamesaoverton/cmi-pb-terminology.git (on the `next` branch).
-    if TEST {
-        for row in rows.iter() {
-            for (column_name, cell) in &row.contents {
-                println!(
-                    "{}: {}: nulltype: {}, value: {}, valid: {}, messages: {:?}",
-                    table_name,
-                    column_name,
-                    match &cell.nulltype {
-                        Some(nulltype) => nulltype.as_str(),
-                        _ => "None",
-                    },
-                    cell.value,
-                    cell.valid,
-                    cell.messages
-                );
-            }
-            //println!("{}: {}", table_name, to_string(row).unwrap());
-        }
-    }
-
     Ok(())
 }
 
+/// Given a configuration map, a table name, a number of rows, and their corresponding chunk number,
+/// return a two-place tuple containing SQL strings and params for INSERT statements with VALUES for
+/// all the rows in the normal and conflict versions of the table, respectively.
 async fn make_inserts(
-    // TODO: Remove underscored parameters later
     config: &ConfigMap,
-    _pool: &AnyPool,
-    _parser: &StartParser,
-    _compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
-    _compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
-    _parsed_structure_conditions: &HashMap<String, ParsedStructure>,
     table_name: &String,
-    _headers: &csv::StringRecord,
     rows: &mut Vec<ResultRow>,
     chunk_number: usize,
 ) -> Result<((String, Vec<String>), (String, Vec<String>)), sqlx::Error> {
@@ -1113,13 +1028,12 @@ async fn make_inserts(
     ) -> (String, Vec<String>) {
         let mut lines = vec![];
         let mut params = vec![];
-        //eprintln!("TABLE NAME: {}", table_name);
-        //eprintln!("COLUMN NAMES FOR {}: {:?}", table_name, column_names);
         for row in rows.iter() {
-            //eprintln!("  ROW #{}", row.row_number.unwrap());
             let mut values = vec![format!("{}", row.row_number.unwrap())];
             for column in column_names {
                 let cell = row.contents.get(column).unwrap();
+                // Insert the value of the cell into the column unless it is invalid, in which case
+                // insert NULL:
                 if cell.nulltype == None && cell.valid {
                     values.push(String::from("?"));
                     params.push(cell.value.clone());
@@ -1128,7 +1042,9 @@ async fn make_inserts(
                 }
                 // If the cell value is valid and there is no extra information (e.g., nulltype),
                 // then just set the metadata to None, which can be taken to represent a "plain"
-                // valid cell:
+                // valid cell. Note that the only possible "extra information" is nulltype, but it's
+                // possible that in the future we may add further fields to ResultCell, so it's best
+                // to keep this if/else clause separate rather than merge it with the one above.
                 if cell.valid && cell.nulltype == None {
                     values.push(String::from("NULL"));
                 } else {
@@ -1162,12 +1078,9 @@ async fn make_inserts(
                     for column_name in column_names {
                         let quoted_column_name = format!(r#""{}""#, column_name);
                         let quoted_meta_column_name = format!(r#""{}_meta""#, column_name);
-                        //eprintln!("COL: {}, METACOL: {}", quoted_column_name,
-                        //          quoted_meta_column_name);
                         all_columns.push(quoted_column_name);
                         all_columns.push(quoted_meta_column_name);
                     }
-                    //eprintln!("ALL COLUMNS FOR {}: {}", table_name, all_columns.join(", "));
                     all_columns.join(", ")
                 }
             ));
@@ -1176,8 +1089,6 @@ async fn make_inserts(
             output.push_str(";");
         }
 
-        //eprintln!("OUTPUT:\n{}", output);
-        //eprintln!("PARAMS: {:?}", params);
         (output, params)
     }
 
@@ -1204,6 +1115,8 @@ async fn make_inserts(
         }
     }
 
+    // Use the "column_order" field of the table config for this table to retrieve the column names
+    // in the correct order:
     let column_names = config
         .get("table")
         .and_then(|t| t.get(table_name))
@@ -1221,6 +1134,11 @@ async fn make_inserts(
     Ok(((main_sql, main_params), (conflict_sql, conflict_params)))
 }
 
+/// Takes as arguments a list of tables and a configuration map describing all of the constraints
+/// between tables. After validating that there are no cycles amongst the foreign, tree, and
+/// under dependencies, returns the list of tables sorted according to their foreign key
+/// dependencies, such that if table_a depends on table_b, then table_b comes before table_a in the
+/// list that is returned.
 fn verify_table_deps_and_sort(table_list: &Vec<String>, constraints: &ConfigMap) -> Vec<String> {
     fn get_cycles(g: &DiGraphMap<&str, ()>) -> Result<Vec<String>, Vec<Vec<String>>> {
         let mut cycles = vec![];
@@ -1389,27 +1307,26 @@ fn verify_table_deps_and_sort(table_list: &Vec<String>, constraints: &ConfigMap)
     };
 }
 
+/// Given the config map and the name of a datatype, climb the datatype tree (as required),
+/// and return the first 'SQL type' found.
 fn get_sql_type(dt_config: &ConfigMap, datatype: &String) -> Option<String> {
     if !dt_config.contains_key(datatype) {
         return None;
     }
 
     if let Some(sql_type) = dt_config.get(datatype).and_then(|d| d.get("SQL type")) {
-        return Some(sql_type.to_string());
+        return Some(sql_type.as_str().and_then(|s| Some(s.to_string())).unwrap());
     }
 
-    let mut parent_datatype = dt_config
-        .get(datatype)
-        .and_then(|d| d.get("parent"))
-        .and_then(|s| Some(s.to_string()))
-        .unwrap();
+    let parent_datatype =
+        dt_config.get(datatype).and_then(|d| d.get("parent")).and_then(|p| p.as_str()).unwrap();
 
-    // Remove enclosing quotes that are added as a side-effect of the to_string() conversion
-    parent_datatype = parent_datatype.split_off(1);
-    parent_datatype.truncate(parent_datatype.len() - 1);
-    return get_sql_type(dt_config, &parent_datatype);
+    return get_sql_type(dt_config, &parent_datatype.to_string());
 }
 
+/// Given the config maps for tables and datatypes, and a table name, generate a SQL schema string,
+/// including each column C and its matching C_meta column, then return the schema string as well as
+/// a list of the table's constraints.
 fn create_table(
     tables_config: &mut ConfigMap,
     datatypes_config: &mut ConfigMap,
@@ -1476,17 +1393,7 @@ fn create_table(
                 .and_then(|d| d.as_str())
                 .and_then(|s| Some(s.to_string()))
                 .unwrap(),
-        )
-        .and_then(|mut s| {
-            // Remove enclosing quotes that are added as a side-effect of the to_string()
-            // conversion
-            // TODO: See if we can avoid having to do this here and elsewhere.
-            // See the code in the cyclic dependency check, which seems to successfully avoid
-            // this issue.
-            s = s.split_off(1);
-            s.truncate(s.len() - 1);
-            Some(s)
-        });
+        );
 
         if let None = sql_type {
             panic!("Missing SQL type for {}", row.get("datatype").unwrap());
@@ -1565,17 +1472,6 @@ fn create_table(
                                     let parent = column_name;
                                     let child_sql_type =
                                         get_sql_type(datatypes_config, &child_datatype.to_string())
-                                            .and_then(|mut s| {
-                                                // Remove enclosing quotes that are added as a
-                                                // side-effect of the to_string() conversion
-                                                // TODO: See if we can avoid having to do this here
-                                                // and elsewhere. See the code in the cyclic
-                                                // dependency check, which seems to successfully
-                                                // avoid this issue.
-                                                s = s.split_off(1);
-                                                s.truncate(s.len() - 1);
-                                                Some(s)
-                                            })
                                             .unwrap();
                                     if sql_type != child_sql_type {
                                         panic!(
@@ -1659,36 +1555,9 @@ fn create_table(
     for (i, fkey) in foreign_keys.iter().enumerate() {
         output.push(format!(
             r#"  FOREIGN KEY ("{}") REFERENCES "{}"("{}"){}"#,
-            fkey.get("column")
-                .and_then(|s| Some(s.to_string()))
-                .and_then(|mut s| {
-                    // Remove enclosing quotes that are added as a side-effect of the to_string()
-                    // conversion
-                    s = s.split_off(1);
-                    s.truncate(s.len() - 1);
-                    Some(s)
-                })
-                .unwrap(),
-            fkey.get("ftable")
-                .and_then(|s| Some(s.to_string()))
-                .and_then(|mut s| {
-                    // Remove enclosing quotes that are added as a side-effect of the to_string()
-                    // conversion
-                    s = s.split_off(1);
-                    s.truncate(s.len() - 1);
-                    Some(s)
-                })
-                .unwrap(),
-            fkey.get("fcolumn")
-                .and_then(|s| Some(s.to_string()))
-                .and_then(|mut s| {
-                    // Remove enclosing quotes that are added as a side-effect of the to_string()
-                    // conversion
-                    s = s.split_off(1);
-                    s.truncate(s.len() - 1);
-                    Some(s)
-                })
-                .unwrap(),
+            fkey.get("column").and_then(|s| s.as_str()).unwrap(),
+            fkey.get("ftable").and_then(|s| s.as_str()).unwrap(),
+            fkey.get("fcolumn").and_then(|s| s.as_str()).unwrap(),
             if i < (num_fkeys - 1) { "," } else { "" }
         ));
     }
@@ -1721,6 +1590,11 @@ fn create_table(
     return (output, table_constraints);
 }
 
+/// Given configuration maps for specials, tables, datatypes, and rules, a database connection pool,
+/// a grammar parser, compiled datatype and rule conditions, and parsed structure conditions, read
+/// the TSVs corresponding to the various defined tables, then create a database containing those
+/// tables and write the data from the TSVs to them, all the while writing the SQL strings used to
+/// generate the database to STDOUT.
 async fn configure_and_load_db(
     specials_config: &mut ConfigMap,
     tables_config: &mut ConfigMap,
@@ -1730,29 +1604,23 @@ async fn configure_and_load_db(
     parser: &StartParser,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
-    parsed_structure_conditions: &HashMap<String, ParsedStructure>,
+    // TODO: Decide what to do with this underscore. Note that we probably need this for the
+    // single row validation functions.
+    _parsed_structure_conditions: &HashMap<String, ParsedStructure>,
 ) -> Result<(), sqlx::Error> {
     let constraints_config =
         configure_db(tables_config, datatypes_config, pool, parser, Some(true), Some(true)).await?;
 
     // TODO: Try (again) to do this combination step at the end of `configure_db()`.
     // Combine the individual configuration maps into one:
-    let mut config: ConfigMap = SerdeMap::new();
+    let mut config = ConfigMap::new();
     config.insert(String::from("special"), SerdeValue::Object(specials_config.clone()));
     config.insert(String::from("table"), SerdeValue::Object(tables_config.clone()));
     config.insert(String::from("datatype"), SerdeValue::Object(datatypes_config.clone()));
     config.insert(String::from("rule"), SerdeValue::Object(rules_config.clone()));
     config.insert(String::from("constraints"), SerdeValue::Object(constraints_config.clone()));
 
-    load_db(
-        &config,
-        pool,
-        parser,
-        compiled_datatype_conditions,
-        compiled_rule_conditions,
-        parsed_structure_conditions,
-    )
-    .await?;
+    load_db(&config, pool, compiled_datatype_conditions, compiled_rule_conditions).await?;
 
     Ok(())
 }
@@ -1777,8 +1645,6 @@ async fn main() -> Result<(), sqlx::Error> {
         compiled_rule_conditions,
         parsed_structure_conditions,
     ) = read_config_files(table, &parser);
-
-    //eprintln!("{:#?}", tables_config);
 
     let connection_options =
         AnyConnectOptions::from_str(format!("sqlite://{}/cmi-pb.db?mode=rwc", db_dir).as_str())?;

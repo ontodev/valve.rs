@@ -13,7 +13,7 @@ build:
 run:
 	cargo run src/table.tsv build
 
-time:
+time: clean | build
 	cargo build --release
 	time cargo run --release TestData/build/table.tsv build
 

@@ -1,57 +1,41 @@
-use serde_json::{
-    from_str,
-    json,
-    //to_string,
-    // SerdeMap by default backed by BTreeMap (see https://docs.serde.rs/serde_json/map/index.html)
-    //Map as SerdeMap,
-    Value as SerdeValue,
-};
+use serde_json::{from_str, json, Value as SerdeValue};
 use sqlx::any::AnyPool;
 use sqlx::ValueRef;
 use sqlx::{query as sqlx_query, Row};
 use std::collections::HashMap;
 
-// provides `try_next` for sqlx:
-//use futures::TryStreamExt;
+use crate::{ColumnRule, CompiledCondition, ConfigMap};
 
-use crate::cmi_pb_grammar::StartParser;
-use crate::{ColumnRule, CompiledCondition, ConfigMap, ParsedStructure};
-
-#[derive(Clone, Debug)]
+/// Represents a particular cell in a particular row of data with vaildation results.
+#[derive(Clone)]
 pub struct ResultCell {
-    // TODO: these pubs are only needed for the ad hoc unit test that will be removed later, so
-    // also remove these pubs at that time.
     pub nulltype: Option<String>,
-    // NOTE: Unlike in the python version, a result cell will *always* have a value, so we need
-    // to look at the `valid` field to determine whether to use it or not.
     pub value: String,
     pub valid: bool,
     pub messages: Vec<SerdeValue>,
 }
 
-#[derive(Clone, Debug)]
+/// Represents a particular row of data with validation results.
+#[derive(Clone)]
 pub struct ResultRow {
-    // TODO: make sure we really need to declare these as pub.
     pub row_number: Option<usize>,
     pub contents: HashMap<String, ResultCell>,
 }
 
 // TODO: Implement the single row validation functions
 
+/// Given a config map, compiled datatype and rule conditions, a table name, the headers for the
+/// table, and a number of rows to validate, validate all of the rows and return the validated
+/// versions.
 pub fn validate_rows_intra(
     config: &ConfigMap,
-    // TODO: Remove these underscores later.
-    _pool: &AnyPool,
-    _parser: &StartParser,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
-    // TODO: Remove this underscore later
-    _parsed_structure_conditions: &HashMap<String, ParsedStructure>,
     table_name: &String,
     headers: &csv::StringRecord,
     rows: &Vec<Result<csv::StringRecord, csv::Error>>,
 ) -> Vec<ResultRow> {
-    let mut result_rows: Vec<ResultRow> = vec![];
+    let mut result_rows = vec![];
     for row in rows {
         if let Ok(row) = row {
             let mut result_row = ResultRow { row_number: None, contents: HashMap::new() };
@@ -76,10 +60,10 @@ pub fn validate_rows_intra(
                 .map(|v| v.as_str().unwrap().to_string())
                 .collect::<Vec<_>>();
 
-            // We check all the cells for nulltype first, since the rules validation requires that we
-            // have this information for all cells.
+            // We begin by determining the nulltype of all of the cells, since the rules validation
+            // step requires that all cells have this information.
             for column_name in &column_names {
-                let cell: &mut ResultCell = result_row.contents.get_mut(column_name).unwrap();
+                let cell = result_row.contents.get_mut(column_name).unwrap();
                 validate_cell_nulltype(
                     config,
                     compiled_datatype_conditions,
@@ -90,12 +74,8 @@ pub fn validate_rows_intra(
             }
 
             for column_name in &column_names {
-                //let context = result_row.clone();
-                let context = ResultRow {
-                    row_number: result_row.row_number,
-                    contents: result_row.contents.clone(),
-                };
-                let cell: &mut ResultCell = result_row.contents.get_mut(column_name).unwrap();
+                let context = result_row.clone();
+                let cell = result_row.contents.get_mut(column_name).unwrap();
                 validate_cell_rules(
                     config,
                     compiled_rule_conditions,
@@ -123,19 +103,14 @@ pub fn validate_rows_intra(
     result_rows
 }
 
+/// Given a config map, a database connection pool, a table name, and a number of rows to validate,
+/// perform tree validation on the rows and return the validated results.
 pub async fn validate_rows_trees(
     config: &ConfigMap,
     pool: &AnyPool,
-    parser: &StartParser,
-    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
-    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
-    parsed_structure_conditions: &HashMap<String, ParsedStructure>,
     table_name: &String,
-    headers: &csv::StringRecord,
     rows: &mut Vec<ResultRow>,
 ) -> Result<(), sqlx::Error> {
-    //eprintln!("Validating {} rows trees for {} ...", rows.len(), table_name);
-
     let column_names = config
         .get("table")
         .and_then(|t| t.get(table_name))
@@ -150,28 +125,19 @@ pub async fn validate_rows_trees(
     for row in rows {
         let mut result_row = ResultRow { row_number: None, contents: HashMap::new() };
         for column_name in &column_names {
-            //let context = row.clone();
-            let context = ResultRow { row_number: row.row_number, contents: row.contents.clone() };
-            let cell: &mut ResultCell = row.contents.get_mut(column_name).unwrap();
+            let context = row.clone();
+            let cell = row.contents.get_mut(column_name).unwrap();
             if cell.nulltype == None {
                 validate_cell_trees(
                     config,
                     pool,
-                    parser,
-                    compiled_datatype_conditions,
-                    compiled_rule_conditions,
-                    parsed_structure_conditions,
                     table_name,
-                    headers,
                     &column_name,
                     cell,
                     &context,
                     &result_rows,
                 )
                 .await?;
-            } else {
-                //eprintln!("Not validating cell trees for {} because nulltype of this cell is None",
-                //          table_name);
             }
             result_row.contents.insert(column_name.to_string(), cell.clone());
         }
@@ -180,25 +146,20 @@ pub async fn validate_rows_trees(
         // results, and this then requires that we generate the result rows to play that role. The
         // call to cell.clone() above is required to make rust's borrow checker happy.
         result_rows.push(result_row);
-        //eprintln!("------------------------------------------");
     }
 
     Ok(())
 }
 
+/// Given a config map, a database connection pool, a table name, and a number of rows to validate,
+/// validate foreign and unique constraints, where the latter include primary and "tree child" keys
+/// (which imply unique constraints) and return the validated results.
 pub async fn validate_rows_constraints(
     config: &ConfigMap,
     pool: &AnyPool,
-    parser: &StartParser,
-    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
-    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
-    parsed_structure_conditions: &HashMap<String, ParsedStructure>,
     table_name: &String,
-    headers: &csv::StringRecord,
     rows: &mut Vec<ResultRow>,
 ) -> Result<(), sqlx::Error> {
-    //eprintln!("Validating {} rows constraints for {} ...", rows.len(), table_name);
-
     let column_names = config
         .get("table")
         .and_then(|t| t.get(table_name))
@@ -213,64 +174,43 @@ pub async fn validate_rows_constraints(
     for row in rows.iter_mut() {
         let mut result_row = ResultRow { row_number: None, contents: HashMap::new() };
         for column_name in &column_names {
-            let context = ResultRow { row_number: row.row_number, contents: row.contents.clone() };
-            let cell: &mut ResultCell = row.contents.get_mut(column_name).unwrap();
+            let cell = row.contents.get_mut(column_name).unwrap();
             if cell.nulltype == None {
-                validate_cell_foreign_constraints(
-                    config,
-                    pool,
-                    parser,
-                    compiled_datatype_conditions,
-                    compiled_rule_conditions,
-                    parsed_structure_conditions,
-                    table_name,
-                    headers,
-                    &column_name,
-                    cell,
-                    &context,
-                    &result_rows,
-                )
-                .await?;
+                validate_cell_foreign_constraints(config, pool, table_name, &column_name, cell)
+                    .await?;
+
                 validate_cell_unique_constraints(
                     config,
                     pool,
-                    parser,
-                    compiled_datatype_conditions,
-                    compiled_rule_conditions,
-                    parsed_structure_conditions,
                     table_name,
-                    headers,
                     &column_name,
                     cell,
-                    &context,
                     &result_rows,
                     Some(false),
                     None,
                 )
                 .await?;
-            } else {
-                //eprintln!("Not validating cell trees for {} because nulltype of this cell is None",
-                //          table_name);
             }
             result_row.contents.insert(column_name.to_string(), cell.clone());
         }
         // Note that in this implementation, the result rows are never actually returned, but we
-        // still need them because the validate_cell_trees() function needs a list of previous
-        // results, and this then requires that we generate the result rows to play that role. The
-        // call to cell.clone() above is required to make rust's borrow checker happy.
+        // still need them because the validate_cell_unique_constraints() function needs a list of
+        // previous results, and this then requires that we generate the result rows to play that
+        // role. The call to cell.clone() above is required to make rust's borrow checker happy.
         result_rows.push(result_row);
     }
-    //eprintln!("ROWS AFTER:\n{:#?}", rows);
+
     Ok(())
 }
 
+/// Given a map representing a tree constraint, a table name, a root from which to generate a
+/// sub-tree of the tree, and an extra SQL clause, generate the SQL for a WITH clause representing
+/// the sub-tree.
 fn with_tree_sql(
     tree: &ConfigMap,
     table_name: &String,
     root: Option<String>,
     extra_clause: Option<String>,
-    // TODO (maybe): Instead of a tuple, define a new struct called SafeSql with two properties:
-    // text and bind_params. Then we could use this elsewhere as well.
 ) -> (String, Vec<String>) {
     let extra_clause = extra_clause.unwrap_or(String::new());
     let child_col = tree.get("child").and_then(|c| c.as_str()).unwrap();
@@ -311,6 +251,10 @@ fn with_tree_sql(
     (sql, params)
 }
 
+/// Given a config map, compiled datatype conditions, a table name, a column name, and a cell to
+/// validate, validate the cell's nulltype condition. If the cell's value is one of the allowable
+/// nulltype values for this column, then fill in the cell's nulltype value before returning the
+/// cell.
 fn validate_cell_nulltype(
     config: &ConfigMap,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
@@ -336,22 +280,16 @@ fn validate_cell_nulltype(
     }
 }
 
+/// Given a config map, a db connection pool, a table name, a column name, and a cell to validate,
+/// check the cell value against any foreign keys that have been defined for the column. If there is
+/// a violation, indicate it with an error message attached to the cell.
 async fn validate_cell_foreign_constraints(
-    // TODO: Remove underscored parameters later
     config: &ConfigMap,
     pool: &AnyPool,
-    _parser: &StartParser,
-    _compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
-    _compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
-    _parsed_structure_conditions: &HashMap<String, ParsedStructure>,
     table_name: &String,
-    _headers: &csv::StringRecord,
     column_name: &String,
     cell: &mut ResultCell,
-    _context: &ResultRow,
-    _prev_results: &Vec<ResultRow>,
 ) -> Result<(), sqlx::Error> {
-    //eprintln!("Validating cell foreigns for {} with previous results: {:#?}", table_name, _prev_results);
     let fkeys = config
         .get("constraints")
         .and_then(|c| c.as_object())
@@ -415,24 +353,21 @@ async fn validate_cell_foreign_constraints(
     Ok(())
 }
 
+/// Given a config map, a db connection pool, a table name, a column name, a cell to validate,
+/// the row, `context`, to which the cell belongs, and a list of previously validated rows,
+/// validate that none of the "tree" constraints on the column are violated, and indicate any
+/// violations by attaching error messages to the cell.
 async fn validate_cell_trees(
     config: &ConfigMap,
     pool: &AnyPool,
-    // TODO: Remove these underscores later
-    _parser: &StartParser,
-    _compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
-    _compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
-    _parsed_structure_conditions: &HashMap<String, ParsedStructure>,
     table_name: &String,
-    // TODO: Remove this underscore later
-    _headers: &csv::StringRecord,
     column_name: &String,
     cell: &mut ResultCell,
     context: &ResultRow,
     prev_results: &Vec<ResultRow>,
 ) -> Result<(), sqlx::Error> {
-    //eprintln!("Validating cell trees for {} with previous results: {:#?}", table_name, prev_results);
-
+    // If the current column is the parent column of a tree, validate that adding the current value
+    // will not result in a cycle between this and the parent column:
     let tkeys = config
         .get("constraints")
         .and_then(|c| c.as_object())
@@ -457,12 +392,10 @@ async fn validate_cell_trees(
         let child_val =
             context.contents.get(child_col).and_then(|c| Some(c.value.clone())).unwrap();
 
+        // In order to check if the current row will cause a dependency cycle, we need to query
+        // against all previously validated rows. Since previously validated rows belonging to the
+        // current batch will not have been inserted to the db yet, we explicitly add them in:
         let mut params = vec![];
-        // It would have been nice to use query_builder to build up the query dynamically
-        // (https://docs.rs/sqlx/latest/sqlx/query_builder/index.html), but unfortunately either
-        // the documentation is out of date or else there is something wrong in the crate, because
-        // when we try to: use sqlx::query_builder::QueryBuilder it tells us that this is not found
-        // in the crate.
         let prev_selects = prev_results
             .iter()
             .filter(|p| {
@@ -498,13 +431,15 @@ async fn validate_cell_trees(
         let (tree_sql, mut tree_sql_params) =
             with_tree_sql(&tkey, &table_name_ext, Some(parent_val.clone()), Some(extra_clause));
         params.append(&mut tree_sql_params);
-        let sql = format!(r#"{} SELECT * FROM "tree""#, tree_sql,);
+        let sql = format!(r#"{} SELECT * FROM "tree""#, tree_sql);
         let mut query = sqlx_query(&sql);
         for param in &params {
             query = query.bind(param);
         }
         let rows = query.fetch_all(pool).await?;
 
+        // If there is a row in the tree whose parent is the to-be-inserted child, then inserting
+        // the new row would result in a cycle.
         let cycle_detected = {
             let cycle_row = rows.iter().find(|row| {
                 let parent: Result<&str, sqlx::Error> = row.try_get(parent_col.as_str());
@@ -523,8 +458,8 @@ async fn validate_cell_trees(
         if cycle_detected {
             let mut cycle_legs = vec![];
             for row in &rows {
-                let child: &str = row.try_get(child_col).unwrap();
-                let parent: &str = row.try_get(parent_col.as_str()).unwrap();
+                let child: &str = row.get(child_col);
+                let parent: &str = row.get(parent_col.as_str());
                 cycle_legs.push((child, parent));
             }
             cycle_legs.push((&child_val, &parent_val));
@@ -548,6 +483,8 @@ async fn validate_cell_trees(
     Ok(())
 }
 
+/// Given a config map, compiled datatype conditions, a table name, a column name, and a cell to
+/// validate, validate the cell's datatype and return the validated cell.
 fn validate_cell_datatype(
     config: &ConfigMap,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
@@ -617,6 +554,9 @@ fn validate_cell_datatype(
                 primary_dt_name,
                 Some(primary_dt_name.to_string()),
             );
+            // If this datatype has any parents, check them beginning from the most general to the
+            // most specific. We use while and pop instead of a for loop so as to check the
+            // conditions in LIFO order.
             while !parent_datatypes.is_empty() {
                 let datatype = parent_datatypes.pop().unwrap();
                 let dt_name = datatype.get("datatype").and_then(|d| d.as_str()).unwrap();
@@ -644,6 +584,9 @@ fn validate_cell_datatype(
     }
 }
 
+/// Given a config map, compiled rule conditions, a table name, a column name, the row context,
+/// and the cell to validate, look in the rule table (if it exists) and validate the cell according
+/// to any applicable rules.
 fn validate_cell_rules(
     config: &ConfigMap,
     compiled_rules: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
@@ -710,6 +653,7 @@ fn validate_cell_rules(
         // enumerate() begins at 0 by default but we need to begin with 1:
         let rule_number = rule_number + 1;
         let rule = rule.as_object().unwrap();
+        // Check the then condition only if the when condition is satisfied:
         if check_condition("when", cell, rule, table_name, column_name, compiled_rules) {
             let then_column = rule.get("then column").and_then(|c| c.as_str()).unwrap();
             let then_cell = context.contents.get(then_column).unwrap();
@@ -725,26 +669,26 @@ fn validate_cell_rules(
     }
 }
 
+/// Given a config map, a db connection pool, a table name, a column name, a cell to validate,
+/// the row, `context`, to which the cell belongs, and a list of previously validated rows,
+/// check the cell value against any unique-type keys that have been defined for the column.
+/// If there is a violation, indicate it with an error message attached to the cell. If
+/// the `existing_row` flag is set to True, then checks will be made as if the given `row_number`
+/// does not exist in the table.
 async fn validate_cell_unique_constraints(
-    // TODO: Remove underscored parameters later.
     config: &ConfigMap,
     pool: &AnyPool,
-    _parser: &StartParser,
-    _compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
-    _compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
-    _parsed_structure_conditions: &HashMap<String, ParsedStructure>,
     table_name: &String,
-    _headers: &csv::StringRecord,
     column_name: &String,
     cell: &mut ResultCell,
-    _context: &ResultRow,
     prev_results: &Vec<ResultRow>,
     existing_row: Option<bool>,
     row_number: Option<u32>,
 ) -> Result<(), sqlx::Error> {
-    //eprintln!("Validating unique constraints for cell {:#?} for {}.{} with previous results: {:#?}",
-    //          cell, table_name, column_name, prev_results);
-    //eprintln!("----------");
+    // If the column has a primary or unique key constraint, or if it is the child associated with
+    // a tree, then if the value of the cell is a duplicate either of one of the previously
+    // validated rows in the batch, or a duplicate of a validated row that has already been inserted
+    // into the table, mark it with the corresponding error:
     let existing_row = existing_row.unwrap_or(false);
     let row_number = row_number.unwrap_or(0);
     let primaries = config
@@ -792,9 +736,9 @@ async fn validate_cell_unique_constraints(
         if existing_row {
             with_sql = format!(
                 r#"WITH "{}" AS (
-                                    SELECT * FROM "{}"
-                                    WHERE "row_number" IS NOT {}
-                                  ) "#,
+                       SELECT * FROM "{}"
+                       WHERE "row_number" IS NOT {}
+                   ) "#,
                 except_table, table_name, row_number
             );
         }
@@ -811,7 +755,6 @@ async fn validate_cell_unique_constraints(
             with_sql, query_table, column_name,
         );
         let query = sqlx_query(&sql).bind(&cell.value);
-        //eprintln!("Running SQL query: {} with params: [{}, {}]", sql, row_number, cell.value);
 
         let contained_in_prev_results = !prev_results
             .iter()
@@ -842,11 +785,12 @@ async fn validate_cell_unique_constraints(
     Ok(())
 }
 
+/// Generate a SQL Select clause that is a union of: (a) the literal values of the given extra row,
+/// and (b) a Select statement over `table_name` of all the fields in the extra row.
 fn select_with_extra_row(extra_row: &ResultRow, table_name: &String) -> (String, Vec<String>) {
     let extra_row_len = extra_row.contents.keys().len();
     let mut params = vec![];
-    let mut first_select =
-        String::from(format!(r#"SELECT {} AS "row_number", "#, extra_row.row_number.unwrap()));
+    let mut first_select = format!(r#"SELECT {} AS "row_number", "#, extra_row.row_number.unwrap());
     let mut second_select = String::from(r#"SELECT "row_number", "#);
     for (i, (key, content)) in extra_row.contents.iter().enumerate() {
         // enumerate() begins from 0 but we need to begin at 1:
@@ -866,6 +810,8 @@ fn select_with_extra_row(extra_row: &ResultRow, table_name: &String) -> (String,
     (format!(r#"WITH "{}_ext" AS ({} UNION {})"#, table_name, first_select, second_select), params)
 }
 
+/// Given a config map, a db connection pool, a table name, and an optional extra row, validate
+/// any associated under constraints for the current column.
 pub async fn validate_under(
     config: &ConfigMap,
     pool: &AnyPool,
@@ -914,6 +860,16 @@ pub async fn validate_under(
             params = vec![];
         }
 
+        // For each value of the column to be checked:
+        // (1) Determine whether it is in the tree's child column.
+        // (2) Create a sub-tree of the given tree whose root is the given "under value"
+        //     (i.e., ukey["value"]). Now on the one hand, if the value to be checked is in the
+        //     parent column of that sub-tree, then it follows that that value is _not_ under the
+        //     under value, but above it. On the other hand, if the value to be checked is not in
+        //     the parent column of the sub-tree, then if condition (1) is also satisfied it follows
+        //     that it _is_ under the under_value.
+        //     Note that "under" is interpreted in the inclusive sense; i.e., values are trivially
+        //     understood to be under themselves.
         let effective_table;
         if !extra_clause.is_empty() {
             effective_table = format!("{}_ext", table_name);
@@ -933,6 +889,8 @@ pub async fn validate_under(
             with_tree_sql(tree, &effective_tree, Some(uval.clone()), None);
         params.append(&mut tree_params);
 
+        // Remove the 'WITH' part of the extra clause since it is redundant given the tree sql and
+        // will therefore result in a syntax error:
         if !extra_clause.is_empty() {
             extra_clause = format!(", {}", &extra_clause[5..]);
         }
@@ -984,24 +942,23 @@ pub async fn validate_under(
         }
         let rows = query.fetch_all(pool).await?;
         for row in rows {
-            let meta: &str = row.try_get(format!(r#"{}_meta"#, column).as_str()).unwrap();
+            let meta: &str = row.get(format!(r#"{}_meta"#, column).as_str());
             let meta: SerdeValue = from_str(meta).unwrap();
             let meta = meta.as_object().unwrap();
+            // If the value in the parent column is legitimately empty, then just skip this row:
             if meta.contains_key("nulltype") {
                 continue;
             }
 
-            // TODO: This works, but it seems less than ideal that we have to access the row twice
-            // to get info about the same field (it's probably not that inefficient, but it seems
-            // inelegant). Need to look for some way to convert the return value of try_get_raw()
-            // to the actual value of the column (i.e., what is returned by try_get()).
-            let column_val_is_null = {
-                let raw_val = row.try_get_raw(format!(r#"{}"#, column).as_str()).unwrap();
-                raw_val.is_null()
-            };
-            let mut column_val: &str = row.try_get(format!(r#"{}"#, column).as_str()).unwrap();
-            if column_val_is_null {
+            // If the value in the column already contains a different error, its value will be null
+            // and it will be returned by the above query regardless of whether it is valid or
+            // invalid. So we need to check the value from the meta column instead.
+            let raw_column_val = row.try_get_raw(format!(r#"{}"#, column).as_str()).unwrap();
+            let column_val;
+            if raw_column_val.is_null() {
                 column_val = meta.get("value").and_then(|v| v.as_str()).unwrap();
+            } else {
+                column_val = row.get(format!(r#"{}"#, column).as_str());
             }
 
             let is_in_tree: f32 = row.get_unchecked("is_in_tree");
@@ -1057,6 +1014,10 @@ pub async fn validate_under(
     Ok(results)
 }
 
+/// Given a config map, a db connection pool, and a table name, validate whether there is a
+/// 'foreign key' violation for any of the table's trees; i.e., for a given tree: tree(child) which
+/// has a given parent column, validate that all of the values in the parent column are in the child
+/// column.
 pub async fn validate_tree_foreign_keys(
     config: &ConfigMap,
     pool: &AnyPool,
@@ -1118,11 +1079,6 @@ pub async fn validate_tree_foreign_keys(
             parent_col
         );
 
-        //eprintln!("WITH CLAUSE: {}", with_clause);
-        //eprintln!("SQL: {}", sql);
-        //eprintln!("PARAMS: {:?}", params);
-        //eprintln!("-----------------------------------");
-
         let mut query = sqlx_query(&sql);
         for param in &params {
             query = query.bind(param);
@@ -1132,21 +1088,19 @@ pub async fn validate_tree_foreign_keys(
             let meta: &str = row.try_get(format!(r#"{}_meta"#, parent_col).as_str()).unwrap();
             let meta: SerdeValue = from_str(meta).unwrap();
             let meta = meta.as_object().unwrap();
-            //eprintln!("META: {:?}", meta);
+            // If the value in the parent column is legitimately empty, then just skip this row:
             if meta.contains_key("nulltype") {
                 continue;
             }
 
-            // TODO: This works, but it seems less than ideal that we have to access the row twice
-            // to get info about the same field (it's probably not that inefficient, but it seems
-            // inelegant). Need to look for some way to convert the return value of try_get_raw()
-            // to the actual value of the column (i.e., what is returned by try_get()).
-            let parent_val_is_null = {
-                let raw_val = row.try_get_raw(format!(r#"{}"#, parent_col).as_str()).unwrap();
-                raw_val.is_null()
-            };
-            let mut parent_val: &str = row.try_get(format!(r#"{}"#, parent_col).as_str()).unwrap();
-            if parent_val_is_null {
+            // If the parent column already contains a different error, its value will be null and
+            // it will be returned by the above query regardless of whether it actually violates the
+            // tree's foreign constraint. So we check the value from the meta column instead.
+            let raw_parent_val = row.try_get_raw(format!(r#"{}"#, parent_col).as_str()).unwrap();
+            let parent_val;
+            if !raw_parent_val.is_null() {
+                parent_val = row.get(format!(r#"{}"#, parent_col).as_str());
+            } else {
                 parent_val = meta.get("value").and_then(|v| v.as_str()).unwrap();
                 let sql =
                     format!(r#"SELECT 1 FROM "{}" WHERE "{}" = ? LIMIT 1"#, table_name, child_col);
@@ -1156,6 +1110,7 @@ pub async fn validate_tree_foreign_keys(
                     continue;
                 }
             }
+
             let mut meta = meta.clone();
             meta.insert("valid".to_string(), SerdeValue::Bool(false));
             meta.insert("value".to_string(), SerdeValue::String(parent_val.to_string()));
@@ -1171,7 +1126,6 @@ pub async fn validate_tree_foreign_keys(
 
             let row_number: f32 = row.get_unchecked("row_number");
             let row_number = row_number as u32;
-
             let result = json!({
                 "row_number": row_number,
                 "column": parent_col,
