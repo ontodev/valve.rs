@@ -88,8 +88,6 @@ impl std::fmt::Debug for ColumnRule {
     }
 }
 
-// TODO: Add functions for update_row() and insert_new_row()
-
 /// Given a path, read a TSV file and return a vector of rows represented as ConfigMaps.
 /// Note: Use this function to read "small" TSVs only. In particular, use this for the special
 /// configuration tables.
@@ -1621,6 +1619,82 @@ async fn configure_and_load_db(
     config.insert(String::from("constraints"), SerdeValue::Object(constraints_config.clone()));
 
     load_db(&config, pool, compiled_datatype_conditions, compiled_rule_conditions).await?;
+
+    ////////////////////////////////////////////////////////////////////////////////////////
+    // TODO: Remove these statements later. We just need them to test the update_row() and
+    // insert_new_row() functions during dev.
+
+    /* commented out for now
+    let mut row = json!({
+        "child": {"messages": [], "valid": true, "value": "a"},
+        "parent": {"messages": [], "valid": true, "value": "f"},
+        "xyzzy": {"messages": [], "valid": true, "value": "w"},
+        "foo": {"messages": [], "valid": true, "value": "", "nulltype": "empty"},
+        "bar": {
+            "messages": [
+                {"level": "error", "message": "An unrelated error", "rule": "custom:unrelated"}
+            ],
+            "valid": false,
+            "value": "B",
+        },
+    });
+
+    update_row(pool, "foobar", row.as_object_mut().unwrap(), 1).await?;
+    */
+
+    ////////////////////////////////////////////////////////////////////////////////////////
+
+    Ok(())
+}
+
+/// Given a database connection pool, a table name, a row, and the row number to update, update the
+/// corresponding row in the database with new values as specified by `row`.
+pub async fn update_row(
+    pool: &AnyPool,
+    table_name: &str,
+    row: &ConfigMap,
+    row_number: u32,
+) -> Result<(), sqlx::Error> {
+    let mut assignments = vec![];
+    let mut params = vec![];
+    for (column, cell) in row.iter() {
+        let cell = cell.as_object().unwrap();
+        let cell_valid = cell.get("valid").and_then(|v| v.as_bool()).unwrap();
+        let mut cell_copy = cell.clone();
+        if cell_valid {
+            let value = cell.get("value").and_then(|v| v.as_str()).unwrap();
+            cell_copy.remove("value");
+            assignments.push(format!(r#""{}" = ?"#, column));
+            params.push(String::from(value));
+        } else {
+            assignments.push(format!(r#""{}" = NULL"#, column));
+        }
+
+        if cell_valid && cell.keys().collect::<Vec<_>>() == vec!["messages", "valid", "value"] {
+            assignments.push(format!(r#""{}_meta" = NULL"#, column));
+        } else {
+            assignments.push(format!(r#""{}_meta" = JSON(?)"#, column));
+            let cell = SerdeValue::Object(cell.clone());
+            params.push(format!("{}", cell));
+        }
+    }
+
+    let mut update_stmt = format!(r#"UPDATE "{}" SET "#, table_name);
+    update_stmt.push_str(&assignments.join(", "));
+    update_stmt.push_str(&format!(r#" WHERE "row_number" = {}"#, row_number));
+
+    let mut query = sqlx_query(&update_stmt);
+    for param in &params {
+        query = query.bind(param);
+    }
+    query.execute(pool).await?;
+
+    Ok(())
+}
+
+/// TODO: Add docstring here
+async fn insert_new_row() -> Result<(), sqlx::Error> {
+    // TODO: to be implemented
 
     Ok(())
 }

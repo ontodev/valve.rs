@@ -22,11 +22,22 @@ pub struct ResultRow {
     pub contents: HashMap<String, ResultCell>,
 }
 
-// TODO: Implement the single row validation functions
+/// TODO: Add docstring
+pub fn validate_row() {
+    // TODO: To be implemented
+
+}
+
+/// TODO: Add doctring
+pub fn get_matching_values() {
+    // TODO: To be implemented
+
+}
 
 /// Given a config map, compiled datatype and rule conditions, a table name, the headers for the
 /// table, and a number of rows to validate, validate all of the rows and return the validated
 /// versions.
+
 pub fn validate_rows_intra(
     config: &ConfigMap,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
