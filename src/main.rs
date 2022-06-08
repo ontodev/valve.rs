@@ -23,7 +23,7 @@ use regex::Regex;
 use serde_json::{json, Value as SerdeValue};
 use sqlx::{
     any::{AnyConnectOptions, AnyPool, AnyPoolOptions},
-    query as sqlx_query,
+    query as sqlx_query, Row, ValueRef,
 };
 use std::{
     collections::{BTreeMap, HashMap},
@@ -1640,11 +1640,95 @@ async fn configure_and_load_db(
     });
 
     update_row(pool, "foobar", row.as_object_mut().unwrap(), 1).await?;
+     */
+
+    /* commented out for now
+    let row = json!({
+        "id": {"messages": [], "valid": true, "value": "BFO:0000027"},
+        "label": {"messages": [], "valid": true, "value": "czar"},
+        "parent": {
+            "messages": [
+                {"level": "error", "message": "An unrelated error", "rule": "custom:unrelated"}
+            ],
+            "valid": true,
+            "value": "barrie",
+        },
+        "source": {"messages": [], "valid": true, "value": "BFO"},
+        "type": {"messages": [], "valid": true, "value": "owl:Class"},
+    });
+
+    let new_row_num = insert_new_row(pool, "import", row.as_object().unwrap()).await?;
     */
 
     ////////////////////////////////////////////////////////////////////////////////////////
 
     Ok(())
+}
+
+/// Given a database connection pool, a table name, and a row, assign a new row number to the row
+/// and insert it to the database, then return the new row number.
+pub async fn insert_new_row(
+    pool: &AnyPool,
+    table_name: &str,
+    row: &ConfigMap,
+) -> Result<u32, sqlx::Error> {
+    let sql = format!(r#"SELECT MAX("row_number") AS "row_number" FROM "{}""#, table_name);
+    let query = sqlx_query(&sql);
+    let result_row = query.fetch_one(pool).await?;
+    let result = result_row.try_get_raw("row_number").unwrap();
+    let new_row_number: f32;
+    if result.is_null() {
+        new_row_number = 1.0;
+    } else {
+        new_row_number = result_row.get_unchecked("row_number");
+    }
+    let new_row_number = new_row_number as u32 + 1;
+
+    let mut insert_columns = vec![];
+    let mut insert_values = vec![];
+    let mut insert_params = vec![];
+    for (column, cell) in row.iter() {
+        let cell = cell.as_object().unwrap();
+        let cell_valid = cell.get("valid").and_then(|v| v.as_bool()).unwrap();
+        let mut cell_for_insert = cell.clone();
+        insert_columns
+            .append(&mut vec![format!(r#""{}""#, column), format!(r#""{}_meta""#, column)]);
+
+        // Normal column:
+        if cell_valid {
+            let value = cell.get("value").and_then(|v| v.as_str()).unwrap();
+            cell_for_insert.remove("value");
+            insert_values.push(String::from("?"));
+            insert_params.push(String::from(value));
+        } else {
+            insert_values.push(String::from("NULL"));
+        }
+
+        // Meta column:
+        if cell_valid && cell.keys().collect::<Vec<_>>() == vec!["messages", "valid", "value"] {
+            insert_values.push(String::from("NULL"));
+        } else {
+            insert_values.push(String::from("JSON(?)"));
+            let cell_for_insert = SerdeValue::Object(cell_for_insert.clone());
+            insert_params.push(format!("{}", cell_for_insert));
+        }
+    }
+
+    let insert_stmt = format!(
+        r#"INSERT INTO "{}" ("row_number", {}) VALUES ({}, {})"#,
+        table_name,
+        insert_columns.join(", "),
+        new_row_number,
+        insert_values.join(", "),
+    );
+
+    let mut query = sqlx_query(&insert_stmt);
+    for param in &insert_params {
+        query = query.bind(param);
+    }
+    query.execute(pool).await?;
+
+    Ok(new_row_number)
 }
 
 /// Given a database connection pool, a table name, a row, and the row number to update, update the
@@ -1660,10 +1744,10 @@ pub async fn update_row(
     for (column, cell) in row.iter() {
         let cell = cell.as_object().unwrap();
         let cell_valid = cell.get("valid").and_then(|v| v.as_bool()).unwrap();
-        let mut cell_copy = cell.clone();
+        let mut cell_for_insert = cell.clone();
         if cell_valid {
             let value = cell.get("value").and_then(|v| v.as_str()).unwrap();
-            cell_copy.remove("value");
+            cell_for_insert.remove("value");
             assignments.push(format!(r#""{}" = ?"#, column));
             params.push(String::from(value));
         } else {
@@ -1674,8 +1758,8 @@ pub async fn update_row(
             assignments.push(format!(r#""{}_meta" = NULL"#, column));
         } else {
             assignments.push(format!(r#""{}_meta" = JSON(?)"#, column));
-            let cell = SerdeValue::Object(cell.clone());
-            params.push(format!("{}", cell));
+            let cell_for_insert = SerdeValue::Object(cell_for_insert.clone());
+            params.push(format!("{}", cell_for_insert));
         }
     }
 
@@ -1688,13 +1772,6 @@ pub async fn update_row(
         query = query.bind(param);
     }
     query.execute(pool).await?;
-
-    Ok(())
-}
-
-/// TODO: Add docstring here
-async fn insert_new_row() -> Result<(), sqlx::Error> {
-    // TODO: to be implemented
 
     Ok(())
 }
