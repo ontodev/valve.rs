@@ -7,8 +7,8 @@ mod validate;
 lalrpop_mod!(pub cmi_pb_grammar);
 
 pub use crate::validate::{
-    validate_rows_constraints, validate_rows_intra, validate_rows_trees,
-    validate_tree_foreign_keys, validate_under, ResultCell, ResultRow,
+    get_matching_values, validate_row, validate_rows_constraints, validate_rows_intra,
+    validate_rows_trees, validate_tree_foreign_keys, validate_under, ResultCell, ResultRow,
 };
 use crate::{ast::Expression, cmi_pb_grammar::StartParser};
 use crossbeam;
@@ -1105,7 +1105,7 @@ async fn make_inserts(
     for (i, row) in rows.iter_mut().enumerate() {
         // enumerate begins at 0 but we need to begin at 1:
         let i = i + 1;
-        row.row_number = Some(i + chunk_number * CHUNK_SIZE);
+        row.row_number = Some(i as u32 + chunk_number as u32 * CHUNK_SIZE as u32);
         if has_conflict(&row, &conflict_columns) {
             conflict_rows.push(row.clone());
         } else {
@@ -1624,12 +1624,11 @@ async fn configure_and_load_db(
     // TODO: Remove these statements later. We just need them to test the update_row() and
     // insert_new_row() functions during dev.
 
-    /* commented out for now
     let mut row = json!({
-        "child": {"messages": [], "valid": true, "value": "a"},
+        "child": {"messages": [], "valid": true, "value": "b"},
         "parent": {"messages": [], "valid": true, "value": "f"},
         "xyzzy": {"messages": [], "valid": true, "value": "w"},
-        "foo": {"messages": [], "valid": true, "value": "", "nulltype": "empty"},
+        "foo": {"messages": [], "valid": true, "value": "A"},
         "bar": {
             "messages": [
                 {"level": "error", "message": "An unrelated error", "rule": "custom:unrelated"}
@@ -1639,8 +1638,21 @@ async fn configure_and_load_db(
         },
     });
 
-    update_row(pool, "foobar", row.as_object_mut().unwrap(), 1).await?;
-     */
+    let result_row = validate_row(
+        &config,
+        compiled_datatype_conditions,
+        compiled_rule_conditions,
+        pool,
+        "foobar",
+        row.as_object_mut().unwrap(),
+        true,
+        Some(2),
+    )
+    .await?;
+
+    //eprintln!("RESULT ROW: {:#?}", result_row);
+
+    //update_row(pool, "foobar", row.as_object_mut().unwrap(), 1).await?;
 
     /* commented out for now
     let row = json!({

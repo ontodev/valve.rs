@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use crate::{ColumnRule, CompiledCondition, ConfigMap};
 
 /// Represents a particular cell in a particular row of data with vaildation results.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ResultCell {
     pub nulltype: Option<String>,
     pub value: String,
@@ -16,22 +16,148 @@ pub struct ResultCell {
 }
 
 /// Represents a particular row of data with validation results.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ResultRow {
-    pub row_number: Option<usize>,
+    pub row_number: Option<u32>,
     pub contents: HashMap<String, ResultCell>,
 }
 
-/// TODO: Add docstring
-pub fn validate_row() {
-    // TODO: To be implemented
+/// Given a config map, maps of compiled datatype and rule conditions, a database connection
+/// pool, a table name, a row to validate, and a row number in case the row already exists,
+/// perform both intra- and inter-row validation and return the validated row.
+pub async fn validate_row(
+    config: &ConfigMap,
+    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
+    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    pool: &AnyPool,
+    table_name: &str,
+    row: &ConfigMap,
+    existing_row: bool,
+    row_number: Option<u32>,
+) -> Result<ResultRow, sqlx::Error> {
+    // If existing_row is set to false, override any given row number with the row number we
+    // we would assign to this row if we were to insert it as a new row:
+    let mut row_number = row_number.clone();
+    if !existing_row {
+        let sql = format!(r#"SELECT MAX("row_number") AS "row_number" FROM "{}""#, table_name);
+        let query = sqlx_query(&sql);
+        let result_row = query.fetch_one(pool).await?;
+        let result = result_row.try_get_raw("row_number").unwrap();
+        let new_row_number: f32;
+        if result.is_null() {
+            new_row_number = 1.0;
+        } else {
+            new_row_number = result_row.get_unchecked("row_number");
+        }
+        row_number = Some(new_row_number as u32 + 1);
+    }
+    // Initialize the result row with the values from the given row:
+    let mut result_row = ResultRow { row_number: row_number, contents: HashMap::new() };
+    for (column, cell) in row.iter() {
+        let result_cell = ResultCell {
+            nulltype: cell
+                .get("nulltype")
+                .and_then(|n| Some(n.as_str().unwrap()))
+                .and_then(|n| Some(n.to_string())),
+            value: cell.get("value").and_then(|v| v.as_str()).unwrap().to_string(),
+            valid: cell.get("valid").and_then(|v| v.as_bool()).unwrap(),
+            messages: cell.get("messages").and_then(|m| m.as_array()).unwrap().to_vec(),
+        };
+        result_row.contents.insert(column.to_string(), result_cell);
+    }
 
+    // We check all the cells for nulltype first, since the rules validation requires that we
+    // have this information for all cells.
+    for (column_name, cell) in result_row.contents.iter_mut() {
+        validate_cell_nulltype(
+            config,
+            compiled_datatype_conditions,
+            &table_name.to_string(),
+            column_name,
+            cell,
+        );
+    }
+
+    let context = result_row.clone();
+    for (column_name, cell) in result_row.contents.iter_mut() {
+        validate_cell_rules(
+            config,
+            compiled_rule_conditions,
+            &table_name.to_string(),
+            column_name,
+            &context,
+            cell,
+        );
+
+        if cell.nulltype == None {
+            validate_cell_datatype(
+                config,
+                compiled_datatype_conditions,
+                &table_name.to_string(),
+                column_name,
+                cell,
+            );
+            validate_cell_trees(
+                config,
+                pool,
+                &table_name.to_string(),
+                column_name,
+                cell,
+                &context,
+                &vec![],
+            )
+            .await?;
+            validate_cell_foreign_constraints(
+                config,
+                pool,
+                &table_name.to_string(),
+                column_name,
+                cell,
+            )
+            .await?;
+            validate_cell_unique_constraints(
+                config,
+                pool,
+                &table_name.to_string(),
+                column_name,
+                cell,
+                &vec![],
+                Some(existing_row),
+                row_number,
+            )
+            .await?;
+        }
+    }
+
+    let mut violations =
+        validate_tree_foreign_keys(config, pool, &table_name.to_string(), Some(context.clone()))
+            .await?;
+    violations.append(
+        &mut validate_under(config, pool, &table_name.to_string(), Some(context.clone())).await?,
+    );
+    for violation in violations.iter_mut() {
+        let vrow_number = violation.get("row_number").unwrap().as_u64().unwrap() as u32;
+        if Some(vrow_number) == row_number {
+            let column = violation.get("column").and_then(|c| c.as_str()).unwrap().to_string();
+            let column_meta = violation.get_mut("meta").unwrap();
+            // If there were any previous error messages for this cell, add them to the meta info
+            // that we just received:
+            let result_cell = &mut result_row.contents.get_mut(&column).unwrap();
+            let column_meta_messages =
+                column_meta.get_mut("messages").and_then(|m| m.as_array_mut()).unwrap();
+            result_cell.messages.append(column_meta_messages);
+            if result_cell.messages.len() > 0 {
+                result_cell.valid = false;
+            }
+        }
+    }
+
+    Ok(result_row)
 }
 
 /// TODO: Add doctring
 pub fn get_matching_values() {
     // TODO: To be implemented
-
 }
 
 /// Given a config map, compiled datatype and rule conditions, a table name, the headers for the
@@ -1057,6 +1183,7 @@ pub async fn validate_tree_foreign_keys(
             with_clause = String::new();
             params = vec![];
         }
+
         let effective_table_name;
         if !with_clause.is_empty() {
             effective_table_name = format!("{}_ext", table_name);
