@@ -1,10 +1,11 @@
+use enquote::unquote;
 use serde_json::{from_str, json, Value as SerdeValue};
 use sqlx::any::AnyPool;
 use sqlx::ValueRef;
 use sqlx::{query as sqlx_query, Row};
 use std::collections::HashMap;
 
-use crate::{ColumnRule, CompiledCondition, ConfigMap};
+use crate::{ast::Expression, ColumnRule, CompiledCondition, ConfigMap, ParsedStructure};
 
 /// Represents a particular cell in a particular row of data with vaildation results.
 #[derive(Clone, Debug)]
@@ -155,15 +156,172 @@ pub async fn validate_row(
     Ok(result_row)
 }
 
-/// TODO: Add doctring
-pub fn get_matching_values() {
-    // TODO: To be implemented
+/// Given a config map, a map of compiled datatype conditions, a database connection pool, a table
+/// name, a column name, and (optionally) a string to match, return a JSON array of possible valid
+/// values for the given column which contain the matching string as a substring (or all of them if
+/// no matching string is given). The JSON array returned is formatted for Typeahead, i.e., it takes
+/// the form: [{"id": id, "label": label, "order": order}, ...].
+/// This function may throw a `ValidationException` if the structure used to fetch the matching
+/// values refers to a tree that does not exist.
+pub async fn get_matching_values(
+    config: &ConfigMap,
+    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
+    parsed_structure_conditions: &HashMap<String, ParsedStructure>,
+    pool: &AnyPool,
+    table_name: &str,
+    column_name: &str,
+    matching_string: Option<&str>,
+) -> Result<SerdeValue, sqlx::Error> {
+    let dt_name = config
+        .get("table")
+        .and_then(|t| t.as_object())
+        .and_then(|t| t.get(table_name))
+        .and_then(|t| t.as_object())
+        .and_then(|t| t.get("column"))
+        .and_then(|c| c.as_object())
+        .and_then(|c| c.get(column_name))
+        .and_then(|c| c.as_object())
+        .and_then(|c| c.get("datatype"))
+        .and_then(|d| d.as_str())
+        .unwrap();
+
+    let dt_condition =
+        compiled_datatype_conditions.get(dt_name).and_then(|d| Some(d.parsed.clone())).unwrap();
+
+    let mut values = vec![];
+    match dt_condition {
+        Expression::Function(name, args) if name == "in" => {
+            for arg in args {
+                if let Expression::Label(arg) = *arg {
+                    // Remove the enclosing quotes from the values being returned:
+                    let label = unquote(&arg).unwrap_or(arg);
+                    if let Some(s) = matching_string {
+                        if label.contains(s) {
+                            values.push(label);
+                        }
+                    }
+                }
+            }
+        }
+        _ => {
+            // If the datatype for the column does not correspond to an `in(...)` function, then we
+            // check the column's structure constraints. If they include a
+            // `from(foreign_table.foreign_column)` condition, then the values are taken from the
+            // foreign column. Otherwise if the structure includes an
+            // `under(tree_table.tree_column, value)` condition, then get the values from the tree
+            // column that are under `value`
+            //let structure_name = ;
+            let structure = parsed_structure_conditions
+                .get(
+                    config
+                        .get("table")
+                        .and_then(|t| t.as_object())
+                        .and_then(|t| t.get(table_name))
+                        .and_then(|t| t.as_object())
+                        .and_then(|t| t.get("column"))
+                        .and_then(|c| c.as_object())
+                        .and_then(|c| c.get(column_name))
+                        .and_then(|c| c.as_object())
+                        .and_then(|c| c.get("structure"))
+                        .and_then(|d| d.as_str())
+                        .unwrap(),
+                )
+                .unwrap();
+
+            let matching_string = {
+                match matching_string {
+                    None => "%".to_string(),
+                    Some(s) => format!("%{}%", s),
+                }
+            };
+
+            match &structure.parsed {
+                Expression::Function(name, args) if name == "from" => {
+                    let foreign_key = &args[0];
+                    if let Expression::Field(ftable, fcolumn) = &**foreign_key {
+                        let sql = format!(
+                            r#"SELECT "{}" FROM "{}" WHERE "{}" LIKE ?"#,
+                            fcolumn, ftable, fcolumn
+                        );
+                        let rows = sqlx_query(&sql).bind(&matching_string).fetch_all(pool).await?;
+                        for row in rows.iter() {
+                            let value: &str = row.get(&**fcolumn);
+                            values.push(value.to_string());
+                        }
+                    }
+                }
+                Expression::Function(name, args) if name == "under" || name == "tree" => {
+                    let mut tree_col = "not set";
+                    let mut under_val = Some("not set".to_string());
+                    if name == "under" {
+                        if let Expression::Field(_, column) = &**&args[0] {
+                            tree_col = column;
+                        }
+                        if let Expression::Label(label) = &**&args[1] {
+                            under_val = Some(label.to_string());
+                        }
+                    } else {
+                        let tree_key = &args[0];
+                        if let Expression::Label(label) = &**tree_key {
+                            tree_col = label;
+                            under_val = None;
+                        }
+                    }
+
+                    let tree = config
+                        .get("constraints")
+                        .and_then(|c| c.as_object())
+                        .and_then(|c| c.get("tree"))
+                        .and_then(|t| t.as_object())
+                        .and_then(|t| t.get(table_name))
+                        .and_then(|t| t.as_array())
+                        .and_then(|t| t.iter().find(|o| o.get("child").unwrap() == tree_col))
+                        .expect(format!("No tree: '{}.{}' found", table_name, tree_col).as_str())
+                        .as_object()
+                        .unwrap();
+                    let child_column = tree.get("child").and_then(|c| c.as_str()).unwrap();
+
+                    let (tree_sql, mut params) =
+                        with_tree_sql(tree, &table_name.to_string(), under_val, None);
+                    let sql = format!(
+                        r#"{} SELECT "{}" FROM "tree" WHERE "{}" LIKE ?"#,
+                        tree_sql, child_column, child_column
+                    );
+                    params.push(matching_string);
+
+                    let mut query = sqlx_query(&sql);
+                    for param in &params {
+                        query = query.bind(param);
+                    }
+
+                    let rows = query.fetch_all(pool).await?;
+                    for row in rows.iter() {
+                        let value: &str = row.get(child_column);
+                        values.push(value.to_string());
+                    }
+                }
+                _ => panic!("Unrecognised structure: {}", structure.original),
+            };
+        }
+    };
+
+    let mut typeahead_values = vec![];
+    for (i, v) in values.iter().enumerate() {
+        // enumerate() begins at 0 but we need to begin at 1:
+        let i = i + 1;
+        typeahead_values.push(json!({
+            "id": v,
+            "label": v,
+            "order": i,
+        }));
+    }
+
+    Ok(json!(typeahead_values))
 }
 
 /// Given a config map, compiled datatype and rule conditions, a table name, the headers for the
 /// table, and a number of rows to validate, validate all of the rows and return the validated
 /// versions.
-
 pub fn validate_rows_intra(
     config: &ConfigMap,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,

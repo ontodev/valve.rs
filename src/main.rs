@@ -49,13 +49,10 @@ pub static MULTI_THREADED: bool = true;
 /// Represents a structure such as those found in the `structure` column of the `column` table in
 /// both its parsed format (i.e., as an Expression) as well as in its original format (i.e., as a
 /// plain string).
+#[derive(Clone, Debug)]
 pub struct ParsedStructure {
-    // TODO: Remove the underscores from these variable names. Since the code currently never
-    // accesses these fields we will get a compiler warning unless they are underscored.
-    // Once the function `get_matching_values()`, which needs to access these fields, is
-    // implemented, these warnings will go away and we can remove the underscores.
-    _original: String,
-    _parsed: Expression,
+    original: String,
+    parsed: Expression,
 }
 
 /// Represents a condition in three different ways: in String format, as a parsed Expression,
@@ -459,8 +456,8 @@ fn read_config_files(
             let parsed_structure = parsed_structure.unwrap();
             let parsed_structure = &parsed_structure[0];
             let parsed_structure = ParsedStructure {
-                _original: structure.to_string(),
-                _parsed: *parsed_structure.clone(),
+                original: structure.to_string(),
+                parsed: *parsed_structure.clone(),
             };
             parsed_structure_conditions.insert(structure.to_string(), parsed_structure);
         }
@@ -1602,9 +1599,7 @@ async fn configure_and_load_db(
     parser: &StartParser,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
-    // TODO: Decide what to do with this underscore. Note that we probably need this for the
-    // single row validation functions.
-    _parsed_structure_conditions: &HashMap<String, ParsedStructure>,
+    parsed_structure_conditions: &HashMap<String, ParsedStructure>,
 ) -> Result<(), sqlx::Error> {
     let constraints_config =
         configure_db(tables_config, datatypes_config, pool, parser, Some(true), Some(true)).await?;
@@ -1624,6 +1619,19 @@ async fn configure_and_load_db(
     // TODO: Remove these statements later. We just need them to test the update_row() and
     // insert_new_row() functions during dev.
 
+    let matching_values = get_matching_values(
+        &config,
+        compiled_datatype_conditions,
+        parsed_structure_conditions,
+        pool,
+        "foobar",
+        "child",
+        None,
+    )
+    .await?;
+    eprintln!("MATCHING VALUES: {}", matching_values);
+
+    /* commented out for now
     let mut row = json!({
         "child": {"messages": [], "valid": true, "value": "b"},
         "parent": {"messages": [], "valid": true, "value": "f"},
@@ -1651,6 +1659,7 @@ async fn configure_and_load_db(
     .await?;
 
     //eprintln!("RESULT ROW: {:#?}", result_row);
+    */
 
     //update_row(pool, "foobar", row.as_object_mut().unwrap(), 1).await?;
 
