@@ -1599,8 +1599,7 @@ async fn configure_and_load_db(
     parser: &StartParser,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
-    parsed_structure_conditions: &HashMap<String, ParsedStructure>,
-) -> Result<(), sqlx::Error> {
+) -> Result<ConfigMap, sqlx::Error> {
     let constraints_config =
         configure_db(tables_config, datatypes_config, pool, parser, Some(true), Some(true)).await?;
 
@@ -1615,79 +1614,7 @@ async fn configure_and_load_db(
 
     load_db(&config, pool, compiled_datatype_conditions, compiled_rule_conditions).await?;
 
-    ////////////////////////////////////////////////////////////////////////////////////////
-    // TODO: Remove these statements later. We just need them to test the update_row() and
-    // insert_new_row() functions during dev.
-
-    let matching_values = get_matching_values(
-        &config,
-        compiled_datatype_conditions,
-        parsed_structure_conditions,
-        pool,
-        "foobar",
-        "child",
-        None,
-    )
-    .await?;
-    eprintln!("MATCHING VALUES: {}", matching_values);
-
-    let row = json!({
-        "child": {"messages": [], "valid": true, "value": "b"},
-        "parent": {"messages": [], "valid": true, "value": "f"},
-        "xyzzy": {"messages": [], "valid": true, "value": "w"},
-        "foo": {"messages": [], "valid": true, "value": "A"},
-        "bar": {
-            "messages": [
-                {"level": "error", "message": "An unrelated error", "rule": "custom:unrelated"}
-            ],
-            "valid": false,
-            "value": "B",
-        },
-    });
-
-    let result_row = validate_row(
-        &config,
-        compiled_datatype_conditions,
-        compiled_rule_conditions,
-        pool,
-        "foobar",
-        row.as_object().unwrap(),
-        true,
-        Some(1),
-    )
-    .await?;
-    update_row(pool, "foobar", &result_row, 1).await?;
-
-    let row = json!({
-        "id": {"messages": [], "valid": true, "value": "BFO:0000027"},
-        "label": {"messages": [], "valid": true, "value": "car"},
-        "parent": {
-            "messages": [
-                {"level": "error", "message": "An unrelated error", "rule": "custom:unrelated"}
-            ],
-            "valid": false,
-            "value": "barrie",
-        },
-        "source": {"messages": [], "valid": true, "value": "BFOBBER"},
-        "type": {"messages": [], "valid": true, "value": "owl:Class"},
-    });
-
-    let result_row = validate_row(
-        &config,
-        compiled_datatype_conditions,
-        compiled_rule_conditions,
-        pool,
-        "import",
-        row.as_object().unwrap(),
-        false,
-        None,
-    )
-    .await?;
-    let new_row_num = insert_new_row(pool, "import", &result_row).await?;
-
-    ////////////////////////////////////////////////////////////////////////////////////////
-
-    Ok(())
+    Ok(config)
 }
 
 /// Given a database connection pool, a table name, and a row, assign a new row number to the row
@@ -1801,15 +1728,115 @@ pub async fn update_row(
     Ok(())
 }
 
+async fn run_tests(
+    config: &ConfigMap,
+    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
+    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    parsed_structure_conditions: &HashMap<String, ParsedStructure>,
+    pool: &AnyPool,
+) -> Result<(), sqlx::Error> {
+    let matching_values = get_matching_values(
+        config,
+        compiled_datatype_conditions,
+        parsed_structure_conditions,
+        pool,
+        "foobar",
+        "child",
+        None,
+    )
+    .await?;
+    assert_eq!(
+        matching_values,
+        json!([
+            {"id":"a","label":"a","order":1},
+            {"id":"b","label":"b","order":2},
+            {"id":"c","label":"c","order":3},
+            {"id":"d","label":"d","order":4},
+            {"id":"e","label":"e","order":5},
+            {"id":"f","label":"f","order":6},
+            {"id":"g","label":"g","order":7},
+            {"id":"h","label":"h","order":8}
+        ])
+    );
+
+    // NOTE: No validation of the validate/insert/update functions is done below. You must use an
+    // external script to fetch the data from the database and run a diff against a known good
+    // sample.
+    let row = json!({
+        "child": {"messages": [], "valid": true, "value": "b"},
+        "parent": {"messages": [], "valid": true, "value": "f"},
+        "xyzzy": {"messages": [], "valid": true, "value": "w"},
+        "foo": {"messages": [], "valid": true, "value": "A"},
+        "bar": {
+            "messages": [
+                {"level": "error", "message": "An unrelated error", "rule": "custom:unrelated"}
+            ],
+            "valid": false,
+            "value": "B",
+        },
+    });
+
+    let result_row = validate_row(
+        config,
+        compiled_datatype_conditions,
+        compiled_rule_conditions,
+        pool,
+        "foobar",
+        row.as_object().unwrap(),
+        true,
+        Some(1),
+    )
+    .await?;
+    update_row(pool, "foobar", &result_row, 1).await?;
+
+    let row = json!({
+        "id": {"messages": [], "valid": true, "value": "BFO:0000027"},
+        "label": {"messages": [], "valid": true, "value": "car"},
+        "parent": {
+            "messages": [
+                {"level": "error", "message": "An unrelated error", "rule": "custom:unrelated"}
+            ],
+            "valid": false,
+            "value": "barrie",
+        },
+        "source": {"messages": [], "valid": true, "value": "BFOBBER"},
+        "type": {"messages": [], "valid": true, "value": "owl:Class"},
+    });
+
+    let result_row = validate_row(
+        config,
+        compiled_datatype_conditions,
+        compiled_rule_conditions,
+        pool,
+        "import",
+        row.as_object().unwrap(),
+        false,
+        None,
+    )
+    .await?;
+    let _new_row_num = insert_new_row(pool, "import", &result_row).await?;
+
+    Ok(())
+}
+
 #[async_std::main]
 async fn main() -> Result<(), sqlx::Error> {
     let args: Vec<String> = env::args().collect();
-    if args.len() != 3 {
-        eprintln!("Usage: cmi-pb-terminology-rs table db_dir");
+    let test;
+    let table;
+    let db_dir;
+    if args.len() == 3 {
+        test = false;
+        table = &args[1];
+        db_dir = &args[2];
+    } else if args.len() == 4 && &args[1] == "--test" {
+        test = true;
+        table = &args[2];
+        db_dir = &args[3];
+    } else {
+        eprintln!("Usage: cmi-pb-terminology-rs [--test] table db_dir");
         process::exit(1);
     }
-    let table = &args[1];
-    let db_dir = &args[2];
     let parser = StartParser::new();
 
     let (
@@ -1825,10 +1852,14 @@ async fn main() -> Result<(), sqlx::Error> {
     let connection_options =
         AnyConnectOptions::from_str(format!("sqlite://{}/cmi-pb.db?mode=rwc", db_dir).as_str())?;
 
+    // To connect to a postgresql database listening to a unix domain socket:
+    // let connection_options =
+    //     AnyConnectOptions::from_str("postgres:///testdb?host=/var/run/postgresql")?;
+
     let pool = AnyPoolOptions::new().max_connections(5).connect_with(connection_options).await?;
     sqlx_query("PRAGMA foreign_keys = ON").execute(&pool).await?;
 
-    configure_and_load_db(
+    let config = configure_and_load_db(
         &mut specials_config,
         &mut tables_config,
         &mut datatypes_config,
@@ -1837,10 +1868,20 @@ async fn main() -> Result<(), sqlx::Error> {
         &parser,
         &compiled_datatype_conditions,
         &compiled_rule_conditions,
-        &parsed_structure_conditions,
     )
     .await
     .unwrap();
+
+    if test {
+        run_tests(
+            &config,
+            &compiled_datatype_conditions,
+            &compiled_rule_conditions,
+            &parsed_structure_conditions,
+            &pool,
+        )
+        .await?;
+    }
 
     Ok(())
 }
