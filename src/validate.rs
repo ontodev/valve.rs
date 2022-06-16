@@ -23,6 +23,21 @@ pub struct ResultRow {
     pub contents: HashMap<String, ResultCell>,
 }
 
+fn result_row_to_config_map(incoming: &ResultRow) -> ConfigMap {
+    let mut outgoing = ConfigMap::new();
+    for (column, cell) in incoming.contents.iter() {
+        let mut cell_map = ConfigMap::new();
+        if let Some(nulltype) = &cell.nulltype {
+            cell_map.insert("nulltype".to_string(), SerdeValue::String(nulltype.to_string()));
+        }
+        cell_map.insert("value".to_string(), SerdeValue::String(cell.value.to_string()));
+        cell_map.insert("valid".to_string(), SerdeValue::Bool(cell.valid));
+        cell_map.insert("messages".to_string(), SerdeValue::Array(cell.messages.clone()));
+        outgoing.insert(column.to_string(), SerdeValue::Object(cell_map));
+    }
+    outgoing
+}
+
 /// Given a config map, maps of compiled datatype and rule conditions, a database connection
 /// pool, a table name, a row to validate, and a row number in case the row already exists,
 /// perform both intra- and inter-row validation and return the validated row.
@@ -35,23 +50,13 @@ pub async fn validate_row(
     row: &ConfigMap,
     existing_row: bool,
     row_number: Option<u32>,
-) -> Result<ResultRow, sqlx::Error> {
-    // If existing_row is set to false, override any given row number with the row number we
-    // we would assign to this row if we were to insert it as a new row:
+) -> Result<ConfigMap, sqlx::Error> {
+    // If existing_row is false, then override any row number provided with None:
     let mut row_number = row_number.clone();
     if !existing_row {
-        let sql = format!(r#"SELECT MAX("row_number") AS "row_number" FROM "{}""#, table_name);
-        let query = sqlx_query(&sql);
-        let result_row = query.fetch_one(pool).await?;
-        let result = result_row.try_get_raw("row_number").unwrap();
-        let new_row_number: f32;
-        if result.is_null() {
-            new_row_number = 1.0;
-        } else {
-            new_row_number = result_row.get_unchecked("row_number");
-        }
-        row_number = Some(new_row_number as u32 + 1);
+        row_number = None;
     }
+
     // Initialize the result row with the values from the given row:
     let mut result_row = ResultRow { row_number: row_number, contents: HashMap::new() };
     for (column, cell) in row.iter() {
@@ -123,7 +128,7 @@ pub async fn validate_row(
                 column_name,
                 cell,
                 &vec![],
-                Some(existing_row),
+                existing_row,
                 row_number,
             )
             .await?;
@@ -136,9 +141,10 @@ pub async fn validate_row(
     violations.append(
         &mut validate_under(config, pool, &table_name.to_string(), Some(context.clone())).await?,
     );
+
     for violation in violations.iter_mut() {
         let vrow_number = violation.get("row_number").unwrap().as_u64().unwrap() as u32;
-        if Some(vrow_number) == row_number {
+        if Some(vrow_number) == row_number || (row_number == None && Some(vrow_number) == Some(0)) {
             let column = violation.get("column").and_then(|c| c.as_str()).unwrap().to_string();
             let column_meta = violation.get_mut("meta").unwrap();
             // If there were any previous error messages for this cell, add them to the meta info
@@ -152,6 +158,8 @@ pub async fn validate_row(
             }
         }
     }
+
+    let result_row = result_row_to_config_map(&result_row);
 
     Ok(result_row)
 }
@@ -481,7 +489,7 @@ pub async fn validate_rows_constraints(
                     &column_name,
                     cell,
                     &result_rows,
-                    Some(false),
+                    false,
                     None,
                 )
                 .await?;
@@ -977,15 +985,18 @@ async fn validate_cell_unique_constraints(
     column_name: &String,
     cell: &mut ResultCell,
     prev_results: &Vec<ResultRow>,
-    existing_row: Option<bool>,
+    existing_row: bool,
     row_number: Option<u32>,
 ) -> Result<(), sqlx::Error> {
+    // If existing_row is false, then override any row number provided with None:
+    let mut row_number = row_number.clone();
+    if !existing_row {
+        row_number = None;
+    }
     // If the column has a primary or unique key constraint, or if it is the child associated with
     // a tree, then if the value of the cell is a duplicate either of one of the previously
     // validated rows in the batch, or a duplicate of a validated row that has already been inserted
     // into the table, mark it with the corresponding error:
-    let existing_row = existing_row.unwrap_or(false);
-    let row_number = row_number.unwrap_or(0);
     let primaries = config
         .get("constraints")
         .and_then(|c| c.as_object())
@@ -1034,7 +1045,9 @@ async fn validate_cell_unique_constraints(
                        SELECT * FROM "{}"
                        WHERE "row_number" IS NOT {}
                    ) "#,
-                except_table, table_name, row_number
+                except_table,
+                table_name,
+                row_number.unwrap()
             );
         }
 
@@ -1085,7 +1098,12 @@ async fn validate_cell_unique_constraints(
 fn select_with_extra_row(extra_row: &ResultRow, table_name: &String) -> (String, Vec<String>) {
     let extra_row_len = extra_row.contents.keys().len();
     let mut params = vec![];
-    let mut first_select = format!(r#"SELECT {} AS "row_number", "#, extra_row.row_number.unwrap());
+    let mut first_select;
+    match extra_row.row_number {
+        Some(rn) => first_select = format!(r#"SELECT {} AS "row_number", "#, rn),
+        _ => first_select = String::from(r#"SELECT NULL AS "row_number", "#),
+    };
+
     let mut second_select = String::from(r#"SELECT "row_number", "#);
     for (i, (key, content)) in extra_row.contents.iter().enumerate() {
         // enumerate() begins from 0 but we need to begin at 1:
@@ -1182,7 +1200,9 @@ pub async fn validate_under(
         let uval = ukey.get("value").and_then(|v| v.as_str()).unwrap().to_string();
         let (tree_sql, mut tree_params) =
             with_tree_sql(tree, &effective_tree, Some(uval.clone()), None);
-        params.append(&mut tree_params);
+        // Add the tree params to the beginning of the parameter list:
+        tree_params.append(&mut params);
+        params = tree_params;
 
         // Remove the 'WITH' part of the extra clause since it is redundant given the tree sql and
         // will therefore result in a syntax error:

@@ -1631,8 +1631,7 @@ async fn configure_and_load_db(
     .await?;
     eprintln!("MATCHING VALUES: {}", matching_values);
 
-    /* commented out for now
-    let mut row = json!({
+    let row = json!({
         "child": {"messages": [], "valid": true, "value": "b"},
         "parent": {"messages": [], "valid": true, "value": "f"},
         "xyzzy": {"messages": [], "valid": true, "value": "w"},
@@ -1652,34 +1651,39 @@ async fn configure_and_load_db(
         compiled_rule_conditions,
         pool,
         "foobar",
-        row.as_object_mut().unwrap(),
+        row.as_object().unwrap(),
         true,
-        Some(2),
+        Some(1),
     )
     .await?;
+    update_row(pool, "foobar", &result_row, 1).await?;
 
-    //eprintln!("RESULT ROW: {:#?}", result_row);
-    */
-
-    //update_row(pool, "foobar", row.as_object_mut().unwrap(), 1).await?;
-
-    /* commented out for now
     let row = json!({
         "id": {"messages": [], "valid": true, "value": "BFO:0000027"},
-        "label": {"messages": [], "valid": true, "value": "czar"},
+        "label": {"messages": [], "valid": true, "value": "car"},
         "parent": {
             "messages": [
                 {"level": "error", "message": "An unrelated error", "rule": "custom:unrelated"}
             ],
-            "valid": true,
+            "valid": false,
             "value": "barrie",
         },
-        "source": {"messages": [], "valid": true, "value": "BFO"},
+        "source": {"messages": [], "valid": true, "value": "BFOBBER"},
         "type": {"messages": [], "valid": true, "value": "owl:Class"},
     });
 
-    let new_row_num = insert_new_row(pool, "import", row.as_object().unwrap()).await?;
-    */
+    let result_row = validate_row(
+        &config,
+        compiled_datatype_conditions,
+        compiled_rule_conditions,
+        pool,
+        "import",
+        row.as_object().unwrap(),
+        false,
+        None,
+    )
+    .await?;
+    let new_row_num = insert_new_row(pool, "import", &result_row).await?;
 
     ////////////////////////////////////////////////////////////////////////////////////////
 
