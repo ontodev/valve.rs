@@ -1851,13 +1851,17 @@ async fn main() -> Result<(), sqlx::Error> {
 
     let connection_options =
         AnyConnectOptions::from_str(format!("sqlite://{}/cmi-pb.db?mode=rwc", db_dir).as_str())?;
-
-    // To connect to a postgresql database listening to a unix domain socket:
-    // let connection_options =
-    //     AnyConnectOptions::from_str("postgres:///testdb?host=/var/run/postgresql")?;
-
     let pool = AnyPoolOptions::new().max_connections(5).connect_with(connection_options).await?;
     sqlx_query("PRAGMA foreign_keys = ON").execute(&pool).await?;
+
+    // To connect to a postgresql database listening to a unix domain socket:
+    // ----------------------------------------------------------------------
+    // let connection_options =
+    //     AnyConnectOptions::from_str("postgres:///testdb?host=/var/run/postgresql")?;
+    //
+    // To query the connection type at runtime via the pool:
+    // -----------------------------------------------------
+    // let db_type = pool.any_kind();
 
     let config = configure_and_load_db(
         &mut specials_config,
