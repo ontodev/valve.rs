@@ -3,7 +3,7 @@
 pwd=$(dirname $(readlink -f $0))
 table_defs=$pwd/src/table.tsv
 export_script=$pwd/../scripts/export.py
-db=$pwd/../build/cmi-pb.db
+db=$pwd/../build/valve.db
 output_dir=$pwd/output
 
 num_tables=$(expr $(cat $table_defs | wc -l) - 1)

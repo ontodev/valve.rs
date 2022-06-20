@@ -23,7 +23,7 @@ test/output:
 test: clean | build test/output
 	cargo run test/src/table.tsv build > /dev/null
 	test/test_round_trip.sh
-	scripts/export.py messages build/cmi-pb.db test/output/ column datatype prefix rule table foobar foreign_table import
+	scripts/export.py messages build/valve.db test/output/ column datatype prefix rule table foobar foreign_table import
 	diff -q test/expected/messages.tsv test/output/messages.tsv
 	cargo run -- --test test/src/table.tsv build > /dev/null
 	test/test_insert_update.sh

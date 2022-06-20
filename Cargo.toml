@@ -1,5 +1,5 @@
 [package]
-name = "cmi-pb-terminology-rs"
+name = "valve"
 version = "0.1.0"
 # Because of this issue: https://github.com/lalrpop/lalrpop/issues/650 we need to use the 2018
 # edition of rust for now.

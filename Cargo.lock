@@ -326,28 +326,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "baf1de4339761588bc0619e3cbc0120ee582ebb74b53b4efbf79117bd2da40fd"
 
 [[package]]
-name = "cmi-pb-terminology-rs"
-version = "0.1.0"
-dependencies = [
- "async-scoped",
- "async-std",
- "crossbeam",
- "csv",
- "enquote",
- "futures",
- "itertools",
- "lalrpop",
- "lalrpop-util",
- "lazy_static",
- "num_cpus",
- "petgraph 0.6.0",
- "regex",
- "serde",
- "serde_json",
- "sqlx",
-]
-
-[[package]]
 name = "concurrent-queue"
 version = "1.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1815,6 +1793,28 @@ checksum = "79923f7731dc61ebfba3633098bf3ac533bbd35ccd8c57e7088d9a5eebe0263f"
 dependencies = [
  "ctor",
  "version_check",
+]
+
+[[package]]
+name = "valve"
+version = "0.1.0"
+dependencies = [
+ "async-scoped",
+ "async-std",
+ "crossbeam",
+ "csv",
+ "enquote",
+ "futures",
+ "itertools",
+ "lalrpop",
+ "lalrpop-util",
+ "lazy_static",
+ "num_cpus",
+ "petgraph 0.6.0",
+ "regex",
+ "serde",
+ "serde_json",
+ "sqlx",
 ]
 
 [[package]]

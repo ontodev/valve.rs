@@ -4,13 +4,13 @@ extern crate lalrpop_util;
 mod ast;
 mod validate;
 
-lalrpop_mod!(pub cmi_pb_grammar);
+lalrpop_mod!(pub valve_grammar);
 
 pub use crate::validate::{
     get_matching_values, validate_row, validate_rows_constraints, validate_rows_intra,
     validate_rows_trees, validate_tree_foreign_keys, validate_under, ResultCell, ResultRow,
 };
-use crate::{ast::Expression, cmi_pb_grammar::StartParser};
+use crate::{ast::Expression, valve_grammar::StartParser};
 use crossbeam;
 use itertools::{IntoChunks, Itertools};
 use lazy_static::lazy_static;
@@ -1839,7 +1839,7 @@ async fn main() -> Result<(), sqlx::Error> {
         table = &args[2];
         db_dir = &args[3];
     } else {
-        eprintln!("Usage: cmi-pb-terminology-rs [--test] table db_dir");
+        eprintln!("Usage: valve [--test] table db_dir");
         process::exit(1);
     }
     let parser = StartParser::new();
@@ -1855,7 +1855,7 @@ async fn main() -> Result<(), sqlx::Error> {
     ) = read_config_files(table, &parser);
 
     let connection_options =
-        AnyConnectOptions::from_str(format!("sqlite://{}/cmi-pb.db?mode=rwc", db_dir).as_str())?;
+        AnyConnectOptions::from_str(format!("sqlite://{}/valve.db?mode=rwc", db_dir).as_str())?;
     let pool = AnyPoolOptions::new().max_connections(5).connect_with(connection_options).await?;
     sqlx_query("PRAGMA foreign_keys = ON").execute(&pool).await?;
 
