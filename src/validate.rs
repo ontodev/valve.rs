@@ -23,6 +23,8 @@ pub struct ResultRow {
     pub contents: HashMap<String, ResultCell>,
 }
 
+/// Given a result row, convert it to a ConfigMap (an alias for serde_json::Value) and return it.
+/// Note that if the incoming result row has an associated row_number, this is ignored.
 fn result_row_to_config_map(incoming: &ResultRow) -> ConfigMap {
     let mut outgoing = ConfigMap::new();
     for (column, cell) in incoming.contents.iter() {
