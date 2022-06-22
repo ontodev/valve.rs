@@ -6,6 +6,10 @@ version = "0.1.0"
 edition = "2018"
 build = "build.rs"
 
+[lib]
+name = "valve"
+crate-type = ["cdylib", "lib"]
+
 [build-dependencies.lalrpop]
 version = "0.19.7"
 features = ["lexer"]
@@ -13,7 +17,6 @@ features = ["lexer"]
 [dependencies]
 async-std = { version = "1", features = [ "attributes" ] }
 async-scoped = { version = "0.7.0", features = [ "use-async-std" ] }
-# TODO: Remove the crossbeam dependency if we end up not using it:
 crossbeam = "0.8.1"
 csv = "1.1"
 enquote = "1.1.0"
@@ -29,5 +32,10 @@ sqlx = { version = "0.5", features = [ "runtime-async-std-native-tls", "any", "p
 
 [dependencies.lalrpop-util]
 version = "0.19.7"
+
+[dependencies.pyo3]
+version = "0.16.5"
+# "extension-module" tells pyo3 we want to build an extension module (skips linking against libpython.so)
+features = ["extension-module"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

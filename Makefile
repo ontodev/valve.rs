@@ -28,6 +28,14 @@ test: clean | build test/output
 	cargo run -- --test test/src/table.tsv build > /dev/null
 	test/test_insert_update.sh
 
+# For python bindings to work, make sure that you are in a virtualenv that has `maturin` installed:
+# python3 -m venv .venv
+# source .venv/bin/activate
+# pip install -U pip maturin
+python: clean | build
+	cargo build
+	maturin develop
+	python3 run_python.py
 
 clean:
 	rm -Rf build test/output
