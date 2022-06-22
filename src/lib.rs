@@ -20,7 +20,7 @@ use petgraph::{
     graphmap::DiGraphMap,
     Direction,
 };
-use pyo3::prelude::{pyclass, pyfunction, pymodule, wrap_pyfunction, PyModule, PyResult, Python};
+use pyo3::prelude::{pyfunction, pymodule, wrap_pyfunction, PyModule, PyResult, Python};
 use regex::Regex;
 use serde_json::{json, Value as SerdeValue};
 use sqlx::{
@@ -264,6 +264,8 @@ fn compile_condition(
 pub fn read_config_files(
     table_table_path: &String,
     parser: &StartParser,
+    // TODO: Think about refactoring this function so that there are separate functions to get
+    // the compiled conditions and parsed structures.
 ) -> (
     ConfigMap,
     ConfigMap,
@@ -1790,13 +1792,8 @@ pub async fn run_tests(
     Ok(())
 }
 
-#[pyclass]
-pub struct ValveConfig {
-    pub specials: ConfigMap,
-}
-
 #[pyfunction]
-fn py_configure(table_table_path: &str, db_dir: &str) -> PyResult<String> {
+fn py_configure_and_or_load(table_table_path: &str, db_dir: &str, load: bool) -> PyResult<String> {
     let parser = StartParser::new();
 
     let (
@@ -1804,10 +1801,10 @@ fn py_configure(table_table_path: &str, db_dir: &str) -> PyResult<String> {
         mut tables_config,
         mut datatypes_config,
         rules_config,
-        // TODO: Remove these underscores at such time as these get used:
-        _compiled_datatype_conditions,
-        _compiled_rule_conditions,
-        _parsed_structure_conditions,
+        compiled_datatype_conditions,
+        compiled_rule_conditions,
+        // We don't need the parsed structure conditions here so just use a placeholder:
+        _,
     ) = read_config_files(&table_table_path.to_string(), &parser);
 
     let connection_options =
@@ -1835,12 +1832,17 @@ fn py_configure(table_table_path: &str, db_dir: &str) -> PyResult<String> {
     config.insert(String::from("rule"), SerdeValue::Object(rules_config.clone()));
     config.insert(String::from("constraints"), SerdeValue::Object(constraints_config.clone()));
 
+    if load {
+        block_on(load_db(&config, &pool, &compiled_datatype_conditions, &compiled_rule_conditions))
+            .unwrap();
+    }
+
     let config = SerdeValue::Object(config);
     Ok(config.to_string())
 }
 
 #[pymodule]
 fn valve(_py: Python, m: &PyModule) -> PyResult<()> {
-    m.add_function(wrap_pyfunction!(py_configure, m)?)?;
+    m.add_function(wrap_pyfunction!(py_configure_and_or_load, m)?)?;
     Ok(())
 }

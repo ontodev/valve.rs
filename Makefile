@@ -35,7 +35,7 @@ test: clean | build test/output
 python: clean | build
 	cargo build
 	maturin develop
-	python3 run_python.py
+	python3 run_python.py > /dev/null
 
 clean:
 	rm -Rf build test/output
