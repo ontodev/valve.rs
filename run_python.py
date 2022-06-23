@@ -28,3 +28,25 @@ log("-----")
 matching_values = valve.py_get_matching_values(json.dumps(config), "build", "foobar", "child", "b")
 matching_values = json.loads(matching_values)
 log(pformat(matching_values))
+
+log("-----")
+
+row = {
+    "child": {"messages": [], "valid": True, "value": "b"},
+    "parent": {"messages": [], "valid": True, "value": "f"},
+    "xyzzy": {"messages": [], "valid": True, "value": "w"},
+    "foo": {"messages": [], "valid": True, "value": "A"},
+    "bar": {
+        "messages": [
+            {"level": "error", "message": "An unrelated error", "rule": "custom:unrelated"}
+        ],
+        "valid": False,
+        "value": "B",
+    },
+}
+
+result_row = valve.py_validate_row(json.dumps(config), "build", "foobar", json.dumps(row), True, 1)
+result_row = json.loads(result_row)
+log(pformat(result_row))
+
+log("-----")
