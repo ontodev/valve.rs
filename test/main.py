@@ -48,6 +48,10 @@ if __name__ == "__main__":
             {"id": "h", "label": "h", "order": 8},
         ]
 
+        # NOTE: No validation of the validate/insert/update functions is done below. You must use an
+        # external script to fetch the data from the database and run a diff against a known good
+        # sample.
+
         row = {
             "child": {"messages": [], "valid": True, "value": "b"},
             "parent": {"messages": [], "valid": True, "value": "f"},
