@@ -52,3 +52,27 @@ log(pformat(result_row))
 valve.py_update_row("build", "foobar", json.dumps(result_row), 1)
 
 log("-----")
+
+row = {
+    "id": {"messages": [], "valid": True, "value": "BFO:0000027"},
+    "label": {"messages": [], "valid": True, "value": "car"},
+    "parent": {
+        "messages": [
+            {"level": "error", "message": "An unrelated error", "rule": "custom:unrelated"}
+        ],
+        "valid": False,
+        "value": "barrie",
+    },
+    "source": {"messages": [], "valid": True, "value": "BFOBBER"},
+    "type": {"messages": [], "valid": True, "value": "owl:Class"},
+}
+
+result_row = valve.py_validate_row(json.dumps(config), "build", "import", json.dumps(row), False)
+result_row = json.loads(result_row)
+log(pformat(result_row))
+
+new_row_num = valve.py_insert_new_row("build", "import", json.dumps(result_row))
+
+log(f"New row number: {new_row_num}")
+
+log("-----")

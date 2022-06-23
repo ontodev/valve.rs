@@ -1893,11 +1893,30 @@ fn py_update_row(db_dir: &str, table_name: &str, row: &str, row_number: u32) -> 
     Ok(())
 }
 
+/// TODO: Add docstring here.
+#[pyfunction]
+fn py_insert_new_row(db_dir: &str, table_name: &str, row: &str) -> PyResult<u32> {
+    let row: SerdeValue = serde_json::from_str(row).unwrap();
+    let row = row.as_object().unwrap();
+
+    // Note that we use mode=rw here instead of mode=rwc
+    let connection_options =
+        AnyConnectOptions::from_str(format!("sqlite://{}/valve.db?mode=rw", db_dir).as_str())
+            .unwrap();
+    let pool = AnyPoolOptions::new().max_connections(5).connect_with(connection_options);
+    let pool = block_on(pool).unwrap();
+    block_on(sqlx_query("PRAGMA foreign_keys = ON").execute(&pool)).unwrap();
+
+    let new_row_number = block_on(insert_new_row(&pool, table_name, &row)).unwrap();
+    Ok(new_row_number)
+}
+
 #[pymodule]
 fn valve(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_configure_and_or_load, m)?)?;
     m.add_function(wrap_pyfunction!(py_get_matching_values, m)?)?;
     m.add_function(wrap_pyfunction!(py_validate_row, m)?)?;
     m.add_function(wrap_pyfunction!(py_update_row, m)?)?;
+    m.add_function(wrap_pyfunction!(py_insert_new_row, m)?)?;
     Ok(())
 }
