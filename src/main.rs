@@ -4,7 +4,9 @@ use sqlx::{
 };
 use std::{env, process, str::FromStr};
 use valve::{
-    configure_db, load_db, read_config_files, run_tests, valve_grammar::StartParser, ConfigMap,
+    configure_db, get_compiled_datatype_conditions, get_compiled_rule_conditions,
+    get_parsed_structure_conditions, load_db, read_config_files, run_tests,
+    valve_grammar::StartParser, ConfigMap,
 };
 
 use serde_json::Value as SerdeValue;
@@ -29,15 +31,8 @@ async fn main() -> Result<(), sqlx::Error> {
     }
     let parser = StartParser::new();
 
-    let (
-        specials_config,
-        mut tables_config,
-        mut datatypes_config,
-        rules_config,
-        compiled_datatype_conditions,
-        compiled_rule_conditions,
-        parsed_structure_conditions,
-    ) = read_config_files(table, &parser);
+    let (specials_config, mut tables_config, mut datatypes_config, rules_config) =
+        read_config_files(table);
 
     let connection_options =
         AnyConnectOptions::from_str(format!("sqlite://{}/valve.db?mode=rwc", db_dir).as_str())?;
@@ -70,9 +65,14 @@ async fn main() -> Result<(), sqlx::Error> {
     config.insert(String::from("rule"), SerdeValue::Object(rules_config.clone()));
     config.insert(String::from("constraints"), SerdeValue::Object(constraints_config.clone()));
 
+    let compiled_datatype_conditions = get_compiled_datatype_conditions(&config, &parser);
+    let compiled_rule_conditions =
+        get_compiled_rule_conditions(&config, compiled_datatype_conditions.clone(), &parser);
+
     load_db(&config, &pool, &compiled_datatype_conditions, &compiled_rule_conditions).await?;
 
     if test {
+        let parsed_structure_conditions = get_parsed_structure_conditions(&config, &parser);
         run_tests(
             &config,
             &compiled_datatype_conditions,

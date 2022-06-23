@@ -57,6 +57,7 @@ pub struct ParsedStructure {
 
 /// Represents a condition in three different ways: in String format, as a parsed Expression,
 /// and as a pre-compiled regular expression.
+#[derive(Clone)]
 pub struct CompiledCondition {
     original: String,
     parsed: Expression,
@@ -258,23 +259,9 @@ fn compile_condition(
     };
 }
 
-/// Given the path to a table TSV file, load and check the 'table', 'column', and 'datatype'
-/// tables, and return ConfigMaps corresponding to specials, tables, datatypes, and rules, as well
-/// as HashMaps for compiled datatype and rule conditions and for parsed structure conditions.
-pub fn read_config_files(
-    table_table_path: &String,
-    parser: &StartParser,
-    // TODO: Think about refactoring this function so that there are separate functions to get
-    // the compiled conditions and parsed structures.
-) -> (
-    ConfigMap,
-    ConfigMap,
-    ConfigMap,
-    ConfigMap,
-    HashMap<String, CompiledCondition>,
-    HashMap<String, HashMap<String, Vec<ColumnRule>>>,
-    HashMap<String, ParsedStructure>,
-) {
+/// Given the path to a table.tsv file, load and check the 'table', 'column', and 'datatype'
+/// tables, and return ConfigMaps corresponding to specials, tables, datatypes, and rules.
+pub fn read_config_files(path: &String) -> (ConfigMap, ConfigMap, ConfigMap, ConfigMap) {
     let special_table_types = json!({
         "table": {"required": true},
         "column": {"required": true},
@@ -289,11 +276,9 @@ pub fn read_config_files(
         specials_config.insert(t.to_string(), SerdeValue::Null);
     }
 
-    let path = table_table_path;
-    let rows = read_tsv_into_vector(path);
-
-    // Load table table
+    // Load the table table from the given path:
     let mut tables_config = ConfigMap::new();
+    let rows = read_tsv_into_vector(path);
     for mut row in rows {
         for column in vec!["table", "path", "type"] {
             if !row.contains_key(column) || row.get(column) == None {
@@ -355,7 +340,6 @@ pub fn read_config_files(
 
     // Load datatype table
     let mut datatypes_config = ConfigMap::new();
-    let mut compiled_datatype_conditions: HashMap<String, CompiledCondition> = HashMap::new();
     let table_name = specials_config.get("datatype").and_then(|d| d.as_str()).unwrap();
     let path = String::from(
         tables_config.get(table_name).and_then(|t| t.get("path")).and_then(|p| p.as_str()).unwrap(),
@@ -383,12 +367,6 @@ pub fn read_config_files(
         }
 
         let dt_name = row.get("datatype").and_then(|d| d.as_str()).unwrap();
-        let condition = row.get("condition").and_then(|c| c.as_str());
-        let compiled_condition =
-            compile_condition(condition, parser, &compiled_datatype_conditions);
-        if let Some(_) = condition {
-            compiled_datatype_conditions.insert(dt_name.to_string(), compiled_condition);
-        }
         datatypes_config.insert(dt_name.to_string(), SerdeValue::Object(row));
     }
 
@@ -399,13 +377,11 @@ pub fn read_config_files(
     }
 
     // Load column table
-    let mut parsed_structure_conditions = HashMap::new();
     let table_name = specials_config.get("column").and_then(|d| d.as_str()).unwrap();
     let path = String::from(
         tables_config.get(table_name).and_then(|t| t.get("path")).and_then(|p| p.as_str()).unwrap(),
     );
     let rows = read_tsv_into_vector(&path.to_string());
-
     for mut row in rows {
         for column in vec!["table", "column", "nulltype", "datatype"] {
             if !row.contains_key(column) || row.get(column) == None {
@@ -443,27 +419,6 @@ pub fn read_config_files(
             panic!("Undefined datatype '{}' reading '{}'", datatype, path);
         }
 
-        let structure = row.get("structure").and_then(|s| s.as_str()).unwrap();
-        if structure != "" {
-            let parsed_structure = parser.parse(structure);
-            if let Err(e) = parsed_structure {
-                panic!(
-                    "While parsing structure: '{}' for column: '{}.{}' got error:\n{}",
-                    structure,
-                    row_table,
-                    row.get("table").and_then(|t| t.as_str()).unwrap(),
-                    e
-                );
-            }
-            let parsed_structure = parsed_structure.unwrap();
-            let parsed_structure = &parsed_structure[0];
-            let parsed_structure = ParsedStructure {
-                original: structure.to_string(),
-                parsed: *parsed_structure.clone(),
-            };
-            parsed_structure_conditions.insert(structure.to_string(), parsed_structure);
-        }
-
         let row_table = row.get("table").and_then(|t| t.as_str()).unwrap();
         let column_name = row.get("column").and_then(|c| c.as_str()).unwrap();
 
@@ -477,7 +432,6 @@ pub fn read_config_files(
 
     // Load rule table if it exists
     let mut rules_config = ConfigMap::new();
-    let mut compiled_rule_conditions = HashMap::new();
     if let Some(SerdeValue::String(table_name)) = specials_config.get("rule") {
         let path = String::from(
             tables_config
@@ -512,53 +466,6 @@ pub fn read_config_files(
                 panic!("Undefined table '{}' reading '{}'", row_table, path);
             }
 
-            // Compile and collect the when and then conditions.
-            let mut column_rule_key = None;
-            for column in vec!["when column", "then column"] {
-                let row_column = row.get(column).and_then(|c| c.as_str()).unwrap();
-                if column == "when column" {
-                    column_rule_key = Some(row_column.to_string());
-                }
-                if !tables_config
-                    .get(row_table)
-                    .and_then(|t| t.get("column"))
-                    .and_then(|c| c.as_object())
-                    .and_then(|c| Some(c.contains_key(row_column)))
-                    .unwrap()
-                {
-                    panic!("Undefined column '{}.{}' reading '{}'", row_table, row_column, path);
-                }
-            }
-            let column_rule_key = column_rule_key.unwrap();
-
-            let mut when_compiled = None;
-            let mut then_compiled = None;
-            for column in vec!["when condition", "then condition"] {
-                let condition_option = row.get(column).and_then(|c| c.as_str());
-                if let Some(_) = condition_option {
-                    let compiled_condition =
-                        compile_condition(condition_option, parser, &compiled_datatype_conditions);
-                    if column == "when condition" {
-                        when_compiled = Some(compiled_condition);
-                    } else if column == "then condition" {
-                        then_compiled = Some(compiled_condition);
-                    }
-                }
-            }
-
-            if let (Some(when_compiled), Some(then_compiled)) = (when_compiled, then_compiled) {
-                if !compiled_rule_conditions.contains_key(row_table) {
-                    let table_rules = HashMap::new();
-                    compiled_rule_conditions.insert(row_table.to_string(), table_rules);
-                }
-                let table_rules = compiled_rule_conditions.get_mut(row_table).unwrap();
-                if !table_rules.contains_key(&column_rule_key) {
-                    table_rules.insert(column_rule_key.to_string(), vec![]);
-                }
-                let column_rules = table_rules.get_mut(&column_rule_key).unwrap();
-                column_rules.push(ColumnRule { when: when_compiled, then: then_compiled });
-            }
-
             // Add the rule specified in the given row to the list of rules associated with the
             // value of the when column:
             let row_when_column = row.get("when column").and_then(|c| c.as_str()).unwrap();
@@ -579,15 +486,152 @@ pub fn read_config_files(
         }
     }
 
-    (
-        specials_config,
-        tables_config,
-        datatypes_config,
-        rules_config,
-        compiled_datatype_conditions,
-        compiled_rule_conditions,
-        parsed_structure_conditions,
-    )
+    // Finally, return all the configs:
+    (specials_config, tables_config, datatypes_config, rules_config)
+}
+
+/// Given the global configuration map and a parser, compile all of the datatype conditions,
+/// add them to a hash map whose keys are the text versions of the conditions and whose values
+/// are the compiled conditions, and then finally return the hash map.
+pub fn get_compiled_datatype_conditions(
+    config: &ConfigMap,
+    parser: &StartParser,
+) -> HashMap<String, CompiledCondition> {
+    let mut compiled_datatype_conditions: HashMap<String, CompiledCondition> = HashMap::new();
+    let datatypes_config = config.get("datatype").and_then(|t| t.as_object()).unwrap();
+    for (_, row) in datatypes_config.iter() {
+        let row = row.as_object().unwrap();
+        let dt_name = row.get("datatype").and_then(|d| d.as_str()).unwrap();
+        let condition = row.get("condition").and_then(|c| c.as_str());
+        let compiled_condition =
+            compile_condition(condition, parser, &compiled_datatype_conditions);
+        if let Some(_) = condition {
+            compiled_datatype_conditions.insert(dt_name.to_string(), compiled_condition);
+        }
+    }
+
+    compiled_datatype_conditions
+}
+
+/// Given the global config map, a hash map of compiled datatype conditions (indexed by the text
+/// version of the conditions), and a parser, compile all of the rule conditions, add them to a
+/// hash which has the following structure:
+/// {
+///      table_1: {
+///          when_column_1: [rule_1, rule_2, ...],
+///          ...
+///      },
+///      ...
+/// }
+pub fn get_compiled_rule_conditions(
+    config: &ConfigMap,
+    compiled_datatype_conditions: HashMap<String, CompiledCondition>,
+    parser: &StartParser,
+) -> HashMap<String, HashMap<String, Vec<ColumnRule>>> {
+    let mut compiled_rule_conditions = HashMap::new();
+    let tables_config = config.get("table").and_then(|t| t.as_object()).unwrap();
+    let rules_config = config.get("rule").and_then(|t| t.as_object()).unwrap();
+    for (rules_table, table_rules) in rules_config.iter() {
+        let table_rules = table_rules.as_object().unwrap();
+        for (_, column_rules) in table_rules.iter() {
+            let column_rules = column_rules.as_array().unwrap();
+            for row in column_rules {
+                // Compile and collect the when and then conditions.
+                let mut column_rule_key = None;
+                for column in vec!["when column", "then column"] {
+                    let row_column = row.get(column).and_then(|c| c.as_str()).unwrap();
+                    if column == "when column" {
+                        column_rule_key = Some(row_column.to_string());
+                    }
+                    if !tables_config
+                        .get(rules_table)
+                        .and_then(|t| t.get("column"))
+                        .and_then(|c| c.as_object())
+                        .and_then(|c| Some(c.contains_key(row_column)))
+                        .unwrap()
+                    {
+                        panic!("Undefined column '{}.{}' in rules table", rules_table, row_column);
+                    }
+                }
+                let column_rule_key = column_rule_key.unwrap();
+
+                let mut when_compiled = None;
+                let mut then_compiled = None;
+                for column in vec!["when condition", "then condition"] {
+                    let condition_option = row.get(column).and_then(|c| c.as_str());
+                    if let Some(_) = condition_option {
+                        let compiled_condition = compile_condition(
+                            condition_option,
+                            parser,
+                            &compiled_datatype_conditions,
+                        );
+                        if column == "when condition" {
+                            when_compiled = Some(compiled_condition);
+                        } else if column == "then condition" {
+                            then_compiled = Some(compiled_condition);
+                        }
+                    }
+                }
+
+                if let (Some(when_compiled), Some(then_compiled)) = (when_compiled, then_compiled) {
+                    if !compiled_rule_conditions.contains_key(rules_table) {
+                        let table_rules = HashMap::new();
+                        compiled_rule_conditions.insert(rules_table.to_string(), table_rules);
+                    }
+                    let table_rules = compiled_rule_conditions.get_mut(rules_table).unwrap();
+                    if !table_rules.contains_key(&column_rule_key) {
+                        table_rules.insert(column_rule_key.to_string(), vec![]);
+                    }
+                    let column_rules = table_rules.get_mut(&column_rule_key).unwrap();
+                    column_rules.push(ColumnRule { when: when_compiled, then: then_compiled });
+                }
+            }
+        }
+    }
+
+    compiled_rule_conditions
+}
+
+/// Given the global config map and a parser, parse all of the structure conditions, add them to
+/// a hash map whose keys are given by the text versions of the conditions and whose values are
+/// given by the parsed versions, and finally return the hashmap.
+pub fn get_parsed_structure_conditions(
+    config: &ConfigMap,
+    parser: &StartParser,
+) -> HashMap<String, ParsedStructure> {
+    let mut parsed_structure_conditions = HashMap::new();
+    let tables_config = config.get("table").and_then(|t| t.as_object()).unwrap();
+    for (table, table_config) in tables_config.iter() {
+        let columns_config = table_config.get("column").and_then(|c| c.as_object()).unwrap();
+        for (_, row) in columns_config.iter() {
+            let row_table = table;
+            let structure = row.get("structure").and_then(|s| s.as_str());
+            match structure {
+                Some(structure) if structure != "" => {
+                    let parsed_structure = parser.parse(structure);
+                    if let Err(e) = parsed_structure {
+                        panic!(
+                            "While parsing structure: '{}' for column: '{}.{}' got error:\n{}",
+                            structure,
+                            row_table,
+                            row.get("table").and_then(|t| t.as_str()).unwrap(),
+                            e
+                        );
+                    }
+                    let parsed_structure = parsed_structure.unwrap();
+                    let parsed_structure = &parsed_structure[0];
+                    let parsed_structure = ParsedStructure {
+                        original: structure.to_string(),
+                        parsed: *parsed_structure.clone(),
+                    };
+                    parsed_structure_conditions.insert(structure.to_string(), parsed_structure);
+                }
+                _ => (),
+            };
+        }
+    }
+
+    parsed_structure_conditions
 }
 
 /// Given config maps for tables and datatypes, a database connection pool, and a StartParser,
@@ -1793,25 +1837,17 @@ pub async fn run_tests(
 }
 
 #[pyfunction]
-fn py_configure_and_or_load(table_table_path: &str, db_dir: &str, load: bool) -> PyResult<String> {
+fn py_configure_and_or_load(table_table: &str, db_dir: &str, load: bool) -> PyResult<String> {
     let parser = StartParser::new();
 
-    let (
-        specials_config,
-        mut tables_config,
-        mut datatypes_config,
-        rules_config,
-        compiled_datatype_conditions,
-        compiled_rule_conditions,
-        // We don't need the parsed structure conditions here so just use a placeholder:
-        _,
-    ) = read_config_files(&table_table_path.to_string(), &parser);
+    let (specials_config, mut tables_config, mut datatypes_config, rules_config) =
+        read_config_files(&table_table.to_string());
 
     let connection_options =
         AnyConnectOptions::from_str(format!("sqlite://{}/valve.db?mode=rwc", db_dir).as_str())
             .unwrap();
 
-    let pool = AnyPoolOptions::new().max_connections(5).connect_with(connection_options); //.await?;
+    let pool = AnyPoolOptions::new().max_connections(5).connect_with(connection_options);
     let pool = block_on(pool).unwrap();
     block_on(sqlx_query("PRAGMA foreign_keys = ON").execute(&pool)).unwrap();
 
@@ -1831,6 +1867,10 @@ fn py_configure_and_or_load(table_table_path: &str, db_dir: &str, load: bool) ->
     config.insert(String::from("datatype"), SerdeValue::Object(datatypes_config.clone()));
     config.insert(String::from("rule"), SerdeValue::Object(rules_config.clone()));
     config.insert(String::from("constraints"), SerdeValue::Object(constraints_config.clone()));
+
+    let compiled_datatype_conditions = get_compiled_datatype_conditions(&config, &parser);
+    let compiled_rule_conditions =
+        get_compiled_rule_conditions(&config, compiled_datatype_conditions.clone(), &parser);
 
     if load {
         block_on(load_db(&config, &pool, &compiled_datatype_conditions, &compiled_rule_conditions))

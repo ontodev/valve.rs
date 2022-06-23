@@ -219,8 +219,7 @@ pub async fn get_matching_values(
             // `from(foreign_table.foreign_column)` condition, then the values are taken from the
             // foreign column. Otherwise if the structure includes an
             // `under(tree_table.tree_column, value)` condition, then get the values from the tree
-            // column that are under `value`
-            //let structure_name = ;
+            // column that are under `value`.
             let structure = parsed_structure_conditions
                 .get(
                     config
