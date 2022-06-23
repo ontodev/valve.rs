@@ -2,13 +2,13 @@
 extern crate lalrpop_util;
 
 mod ast;
-mod validate;
+pub mod validate;
 
 lalrpop_mod!(pub valve_grammar);
 
 use crate::validate::{
-    get_matching_values, validate_row, validate_rows_constraints, validate_rows_intra,
-    validate_rows_trees, validate_tree_foreign_keys, validate_under, ResultRow,
+    get_matching_values, validate_rows_constraints, validate_rows_intra, validate_rows_trees,
+    validate_tree_foreign_keys, validate_under, ResultRow,
 };
 use crate::{ast::Expression, valve_grammar::StartParser};
 use crossbeam;
@@ -1745,97 +1745,6 @@ pub async fn update_row(
     Ok(())
 }
 
-pub async fn run_tests(
-    config: &ConfigMap,
-    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
-    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
-    parsed_structure_conditions: &HashMap<String, ParsedStructure>,
-    pool: &AnyPool,
-) -> Result<(), sqlx::Error> {
-    let matching_values = get_matching_values(
-        config,
-        compiled_datatype_conditions,
-        parsed_structure_conditions,
-        pool,
-        "foobar",
-        "child",
-        None,
-    )
-    .await?;
-    assert_eq!(
-        matching_values,
-        json!([
-            {"id":"a","label":"a","order":1},
-            {"id":"b","label":"b","order":2},
-            {"id":"c","label":"c","order":3},
-            {"id":"d","label":"d","order":4},
-            {"id":"e","label":"e","order":5},
-            {"id":"f","label":"f","order":6},
-            {"id":"g","label":"g","order":7},
-            {"id":"h","label":"h","order":8}
-        ])
-    );
-
-    // NOTE: No validation of the validate/insert/update functions is done below. You must use an
-    // external script to fetch the data from the database and run a diff against a known good
-    // sample.
-    let row = json!({
-        "child": {"messages": [], "valid": true, "value": "b"},
-        "parent": {"messages": [], "valid": true, "value": "f"},
-        "xyzzy": {"messages": [], "valid": true, "value": "w"},
-        "foo": {"messages": [], "valid": true, "value": "A"},
-        "bar": {
-            "messages": [
-                {"level": "error", "message": "An unrelated error", "rule": "custom:unrelated"}
-            ],
-            "valid": false,
-            "value": "B",
-        },
-    });
-
-    let result_row = validate_row(
-        config,
-        compiled_datatype_conditions,
-        compiled_rule_conditions,
-        pool,
-        "foobar",
-        row.as_object().unwrap(),
-        true,
-        Some(1),
-    )
-    .await?;
-    update_row(pool, "foobar", &result_row, 1).await?;
-
-    let row = json!({
-        "id": {"messages": [], "valid": true, "value": "BFO:0000027"},
-        "label": {"messages": [], "valid": true, "value": "car"},
-        "parent": {
-            "messages": [
-                {"level": "error", "message": "An unrelated error", "rule": "custom:unrelated"}
-            ],
-            "valid": false,
-            "value": "barrie",
-        },
-        "source": {"messages": [], "valid": true, "value": "BFOBBER"},
-        "type": {"messages": [], "valid": true, "value": "owl:Class"},
-    });
-
-    let result_row = validate_row(
-        config,
-        compiled_datatype_conditions,
-        compiled_rule_conditions,
-        pool,
-        "import",
-        row.as_object().unwrap(),
-        false,
-        None,
-    )
-    .await?;
-    let _new_row_num = insert_new_row(pool, "import", &result_row).await?;
-
-    Ok(())
-}
-
 #[pyfunction]
 fn py_configure_and_or_load(table_table: &str, db_dir: &str, load: bool) -> PyResult<String> {
     let parser = StartParser::new();
@@ -1881,8 +1790,47 @@ fn py_configure_and_or_load(table_table: &str, db_dir: &str, load: bool) -> PyRe
     Ok(config.to_string())
 }
 
+#[pyfunction]
+fn py_get_matching_values(
+    json_config: &str,
+    db_dir: &str,
+    table_name: &str,
+    column_name: &str,
+    matching_string: Option<&str>,
+) -> PyResult<String> {
+    let config: SerdeValue = serde_json::from_str(json_config).unwrap();
+    let config = config.as_object().unwrap();
+
+    // Note that we use mode=rw here instead of mode=rwc
+    let connection_options =
+        AnyConnectOptions::from_str(format!("sqlite://{}/valve.db?mode=rw", db_dir).as_str())
+            .unwrap();
+
+    let pool = AnyPoolOptions::new().max_connections(5).connect_with(connection_options);
+    let pool = block_on(pool).unwrap();
+    block_on(sqlx_query("PRAGMA foreign_keys = ON").execute(&pool)).unwrap();
+
+    let parser = StartParser::new();
+    let compiled_datatype_conditions = get_compiled_datatype_conditions(&config, &parser);
+    let parsed_structure_conditions = get_parsed_structure_conditions(&config, &parser);
+
+    let matching_values = block_on(get_matching_values(
+        &config,
+        &compiled_datatype_conditions,
+        &parsed_structure_conditions,
+        &pool,
+        table_name,
+        column_name,
+        matching_string,
+    ))
+    .unwrap();
+
+    Ok(matching_values.to_string())
+}
+
 #[pymodule]
 fn valve(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_configure_and_or_load, m)?)?;
+    m.add_function(wrap_pyfunction!(py_get_matching_values, m)?)?;
     Ok(())
 }

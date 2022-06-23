@@ -1,5 +1,5 @@
 use enquote::unquote;
-use serde_json::{from_str, json, Value as SerdeValue};
+use serde_json::{json, Value as SerdeValue};
 use sqlx::any::AnyPool;
 use sqlx::ValueRef;
 use sqlx::{query as sqlx_query, Row};
@@ -1259,7 +1259,7 @@ pub async fn validate_under(
         let rows = query.fetch_all(pool).await?;
         for row in rows {
             let meta: &str = row.get(format!(r#"{}_meta"#, column).as_str());
-            let meta: SerdeValue = from_str(meta).unwrap();
+            let meta: SerdeValue = serde_json::from_str(meta).unwrap();
             let meta = meta.as_object().unwrap();
             // If the value in the parent column is legitimately empty, then just skip this row:
             if meta.contains_key("nulltype") {
@@ -1403,7 +1403,7 @@ pub async fn validate_tree_foreign_keys(
         let rows = query.fetch_all(pool).await?;
         for row in rows {
             let meta: &str = row.try_get(format!(r#"{}_meta"#, parent_col).as_str()).unwrap();
-            let meta: SerdeValue = from_str(meta).unwrap();
+            let meta: SerdeValue = serde_json::from_str(meta).unwrap();
             let meta = meta.as_object().unwrap();
             // If the value in the parent column is legitimately empty, then just skip this row:
             if meta.contains_key("nulltype") {
