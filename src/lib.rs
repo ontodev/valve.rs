@@ -1765,13 +1765,22 @@ fn py_configure_and_or_load(table_table: &str, db_dir: &str, load: bool) -> PyRe
     let pool = block_on(pool).unwrap();
     block_on(sqlx_query("PRAGMA foreign_keys = ON").execute(&pool)).unwrap();
 
+    let write_sql_to_stdout;
+    let write_to_db;
+    if load {
+        write_sql_to_stdout = true;
+        write_to_db = true;
+    } else {
+        write_sql_to_stdout = false;
+        write_to_db = false;
+    }
     let constraints_config = block_on(configure_db(
         &mut tables_config,
         &mut datatypes_config,
         &pool,
         &parser,
-        Some(true),
-        Some(true),
+        Some(write_sql_to_stdout),
+        Some(write_to_db),
     ))
     .unwrap();
 
