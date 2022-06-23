@@ -7,8 +7,8 @@ pub mod validate;
 lalrpop_mod!(pub valve_grammar);
 
 use crate::validate::{
-    get_matching_values, validate_rows_constraints, validate_rows_intra, validate_rows_trees,
-    validate_row, validate_tree_foreign_keys, validate_under, ResultRow,
+    get_matching_values, validate_row, validate_rows_constraints, validate_rows_intra,
+    validate_rows_trees, validate_tree_foreign_keys, validate_under, ResultRow,
 };
 use crate::{ast::Expression, valve_grammar::StartParser};
 use crossbeam;
@@ -1745,6 +1745,10 @@ pub async fn update_row(
     Ok(())
 }
 
+////////////////////////////////////////////////////////////////////////////////////////////////////
+// Python wrappers
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
 /// TODO: Add docstring here.
 #[pyfunction]
 fn py_configure_and_or_load(table_table: &str, db_dir: &str, load: bool) -> PyResult<String> {
@@ -1836,14 +1840,14 @@ fn py_validate_row(
     table_name: &str,
     row: &str,
     existing_row: bool,
-    row_number: Option<u32>
+    row_number: Option<u32>,
 ) -> PyResult<String> {
     let config: SerdeValue = serde_json::from_str(config).unwrap();
     let config = config.as_object().unwrap();
     let row: SerdeValue = serde_json::from_str(row).unwrap();
     let row = row.as_object().unwrap();
 
-    // Note that we use mode=r here instead of mode=rwc
+    // Note that we use mode=ro here instead of mode=rwc
     let connection_options =
         AnyConnectOptions::from_str(format!("sqlite://{}/valve.db?mode=ro", db_dir).as_str())
             .unwrap();
@@ -1864,9 +1868,29 @@ fn py_validate_row(
         &row,
         existing_row,
         row_number,
-    )).unwrap();
+    ))
+    .unwrap();
 
     Ok(SerdeValue::Object(result_row).to_string())
+}
+
+/// TODO: Add docstring here.
+#[pyfunction]
+fn py_update_row(db_dir: &str, table_name: &str, row: &str, row_number: u32) -> PyResult<()> {
+    let row: SerdeValue = serde_json::from_str(row).unwrap();
+    let row = row.as_object().unwrap();
+
+    // Note that we use mode=rw here instead of mode=rwc
+    let connection_options =
+        AnyConnectOptions::from_str(format!("sqlite://{}/valve.db?mode=rw", db_dir).as_str())
+            .unwrap();
+    let pool = AnyPoolOptions::new().max_connections(5).connect_with(connection_options);
+    let pool = block_on(pool).unwrap();
+    block_on(sqlx_query("PRAGMA foreign_keys = ON").execute(&pool)).unwrap();
+
+    block_on(update_row(&pool, table_name, &row, row_number)).unwrap();
+
+    Ok(())
 }
 
 #[pymodule]
@@ -1874,5 +1898,6 @@ fn valve(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_configure_and_or_load, m)?)?;
     m.add_function(wrap_pyfunction!(py_get_matching_values, m)?)?;
     m.add_function(wrap_pyfunction!(py_validate_row, m)?)?;
+    m.add_function(wrap_pyfunction!(py_update_row, m)?)?;
     Ok(())
 }

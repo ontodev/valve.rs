@@ -49,4 +49,6 @@ result_row = valve.py_validate_row(json.dumps(config), "build", "foobar", json.d
 result_row = json.loads(result_row)
 log(pformat(result_row))
 
+valve.py_update_row("build", "foobar", json.dumps(result_row), 1)
+
 log("-----")
