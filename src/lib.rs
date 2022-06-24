@@ -1744,7 +1744,7 @@ pub async fn update_row(
 /// and optionally load it if the `load` flag is set to true.
 pub async fn configure_and_or_load(
     table_table: &str,
-    db_dir: &str,
+    db_path: &str,
     load: bool,
 ) -> Result<String, sqlx::Error> {
     let parser = StartParser::new();
@@ -1753,10 +1753,19 @@ pub async fn configure_and_or_load(
         read_config_files(&table_table.to_string());
 
     let connection_options =
-        AnyConnectOptions::from_str(format!("sqlite://{}/valve.db?mode=rwc", db_dir).as_str())
+        AnyConnectOptions::from_str(format!("sqlite://{}?mode=rwc", db_path).as_str())
             .unwrap();
     let pool = AnyPoolOptions::new().max_connections(5).connect_with(connection_options).await?;
     sqlx_query("PRAGMA foreign_keys = ON").execute(&pool).await?;
+
+    // To connect to a postgresql database listening to a unix domain socket:
+    // ----------------------------------------------------------------------
+    // let connection_options =
+    //     AnyConnectOptions::from_str("postgres:///testdb?host=/var/run/postgresql")?;
+    //
+    // To query the connection type at runtime via the pool:
+    // -----------------------------------------------------
+    // let db_type = pool.any_kind();
 
     let write_sql_to_stdout;
     let write_to_db;
