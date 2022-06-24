@@ -3,7 +3,7 @@ extern crate lalrpop_util;
 
 mod ast;
 pub mod validate;
-pub mod python_bindings;
+mod python_bindings;
 
 lalrpop_mod!(pub valve_grammar);
 
