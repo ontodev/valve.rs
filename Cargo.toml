@@ -13,11 +13,9 @@ features = ["lexer"]
 [dependencies]
 async-std = { version = "1", features = [ "attributes" ] }
 async-scoped = { version = "0.7.0", features = [ "use-async-std" ] }
-# TODO: Remove the crossbeam dependency if we end up not using it:
 crossbeam = "0.8.1"
 csv = "1.1"
 enquote = "1.1.0"
-futures = "0.3"
 itertools = "0.10.3"
 lazy_static = "1.4.0"
 num_cpus = "1.13.1"

@@ -20,14 +20,15 @@ time: clean | build
 test/output:
 	mkdir -p test/output
 
-test: clean | build test/output
+target/debug/valve: src/*.rs src/*.lalrpop
+	cargo build
+	maturin develop
+
+test: clean target/debug/valve | build test/output
 	cargo run test/src/table.tsv build > /dev/null
-	test/test_round_trip.sh
+	test/round_trip.sh
 	scripts/export.py messages build/valve.db test/output/ column datatype prefix rule table foobar foreign_table import
 	diff -q test/expected/messages.tsv test/output/messages.tsv
-	cargo run -- --test test/src/table.tsv build > /dev/null
-	test/test_insert_update.sh
-
 
 clean:
 	rm -Rf build test/output
