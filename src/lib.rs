@@ -1827,9 +1827,9 @@ fn py_get_matching_values(
     let config: SerdeValue = serde_json::from_str(config).unwrap();
     let config = config.as_object().unwrap();
 
-    // Note that we use mode=rw here instead of mode=rwc
+    // Note that we use mode=ro here instead of mode=rwc
     let connection_options =
-        AnyConnectOptions::from_str(format!("sqlite://{}/valve.db?mode=rw", db_dir).as_str())
+        AnyConnectOptions::from_str(format!("sqlite://{}/valve.db?mode=ro", db_dir).as_str())
             .unwrap();
     let pool = AnyPoolOptions::new().max_connections(5).connect_with(connection_options);
     let pool = block_on(pool).unwrap();
