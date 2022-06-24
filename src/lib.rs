@@ -3,13 +3,12 @@ extern crate lalrpop_util;
 
 mod ast;
 pub mod validate;
-mod python_bindings;
 
 lalrpop_mod!(pub valve_grammar);
 
 use crate::validate::{
-    get_matching_values, validate_row, validate_rows_constraints, validate_rows_intra,
-    validate_rows_trees, validate_tree_foreign_keys, validate_under, ResultRow,
+    validate_rows_constraints, validate_rows_intra, validate_rows_trees,
+    validate_tree_foreign_keys, validate_under, ResultRow,
 };
 use crate::{ast::Expression, valve_grammar::StartParser};
 use crossbeam;
