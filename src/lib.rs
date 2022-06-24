@@ -645,13 +645,9 @@ pub async fn configure_db(
     datatypes_config: &mut ConfigMap,
     pool: &AnyPool,
     parser: &StartParser,
-    write_sql_to_stdout: Option<bool>,
-    write_to_db: Option<bool>,
+    write_sql_to_stdout: bool,
+    write_to_db: bool,
 ) -> Result<ConfigMap, sqlx::Error> {
-    // If the optional arguments are set to None, give them default values:
-    let write_sql_to_stdout = write_sql_to_stdout.unwrap_or(false);
-    let write_to_db = write_to_db.unwrap_or(false);
-
     // This is what we will return:
     let mut constraints_config = ConfigMap::new();
     constraints_config.insert(String::from("foreign"), SerdeValue::Object(ConfigMap::new()));
@@ -1745,13 +1741,14 @@ pub async fn update_row(
     Ok(())
 }
 
-////////////////////////////////////////////////////////////////////////////////////////////////////
-// Python wrappers
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-/// TODO: Add docstring here.
-#[pyfunction]
-fn py_configure_and_or_load(table_table: &str, db_dir: &str, load: bool) -> PyResult<String> {
+/// Given a path to a table table file (table.tsv), a directory in which to find/create a database:
+/// configure the database using the configuration which can be looked up using the table table,
+/// and optionally load it if the `load` flag is set to true.
+pub async fn configure_and_or_load(
+    table_table: &str,
+    db_dir: &str,
+    load: bool,
+) -> Result<String, sqlx::Error> {
     let parser = StartParser::new();
 
     let (specials_config, mut tables_config, mut datatypes_config, rules_config) =
@@ -1760,10 +1757,8 @@ fn py_configure_and_or_load(table_table: &str, db_dir: &str, load: bool) -> PyRe
     let connection_options =
         AnyConnectOptions::from_str(format!("sqlite://{}/valve.db?mode=rwc", db_dir).as_str())
             .unwrap();
-
-    let pool = AnyPoolOptions::new().max_connections(5).connect_with(connection_options);
-    let pool = block_on(pool).unwrap();
-    block_on(sqlx_query("PRAGMA foreign_keys = ON").execute(&pool)).unwrap();
+    let pool = AnyPoolOptions::new().max_connections(5).connect_with(connection_options).await?;
+    sqlx_query("PRAGMA foreign_keys = ON").execute(&pool).await?;
 
     let write_sql_to_stdout;
     let write_to_db;
@@ -1774,15 +1769,15 @@ fn py_configure_and_or_load(table_table: &str, db_dir: &str, load: bool) -> PyRe
         write_sql_to_stdout = false;
         write_to_db = false;
     }
-    let constraints_config = block_on(configure_db(
+    let constraints_config = configure_db(
         &mut tables_config,
         &mut datatypes_config,
         &pool,
         &parser,
-        Some(write_sql_to_stdout),
-        Some(write_to_db),
-    ))
-    .unwrap();
+        write_sql_to_stdout,
+        write_to_db,
+    )
+    .await?;
 
     let mut config = ConfigMap::new();
     config.insert(String::from("special"), SerdeValue::Object(specials_config.clone()));
@@ -1796,15 +1791,31 @@ fn py_configure_and_or_load(table_table: &str, db_dir: &str, load: bool) -> PyRe
         get_compiled_rule_conditions(&config, compiled_datatype_conditions.clone(), &parser);
 
     if load {
-        block_on(load_db(&config, &pool, &compiled_datatype_conditions, &compiled_rule_conditions))
-            .unwrap();
+        load_db(&config, &pool, &compiled_datatype_conditions, &compiled_rule_conditions).await?;
     }
 
     let config = SerdeValue::Object(config);
     Ok(config.to_string())
 }
 
-/// TODO: Add docstring here.
+////////////////////////////////////////////////////////////////////////////////////////////////////
+// Python wrappers
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+/// Given a path to a table table file (table.tsv), a directory in which to find/create a database:
+/// configure the database using the configuration which can be looked up using the table table,
+/// and optionally load it if the `load` flag is set to true.
+#[pyfunction]
+fn py_configure_and_or_load(table_table: &str, db_dir: &str, load: bool) -> PyResult<String> {
+    let config = block_on(configure_and_or_load(table_table, db_dir, load)).unwrap();
+    Ok(config)
+}
+
+/// Given a config map represented as a JSON string, a directory containing the database, the table
+/// name and column name from which to retrieve matching values, return a JSON array (represented as
+/// a string) of possible valid values for the given column which contain the matching string as a
+/// substring (or all of them if no matching string is given). The JSON array returned is formatted
+/// for Typeahead, i.e., it takes the form: [{"id": id, "label": label, "order": order}, ...].
 #[pyfunction]
 fn py_get_matching_values(
     config: &str,
@@ -1841,7 +1852,9 @@ fn py_get_matching_values(
     Ok(matching_values.to_string())
 }
 
-/// TODO: Add docstring here.
+/// Given a config map represented as a JSON string, a directory in which to find the database,
+/// a table name, a row, and if the row already exists in the database, its associated row number,
+/// perform both intra- and inter-row validation and return the validated row as a JSON string.
 #[pyfunction]
 fn py_validate_row(
     config: &str,
@@ -1883,7 +1896,8 @@ fn py_validate_row(
     Ok(SerdeValue::Object(result_row).to_string())
 }
 
-/// TODO: Add docstring here.
+/// Given a directory in which the database is located, a table name, a row represented as a
+/// JSON string, and its associated row number, update the row in the database.
 #[pyfunction]
 fn py_update_row(db_dir: &str, table_name: &str, row: &str, row_number: u32) -> PyResult<()> {
     let row: SerdeValue = serde_json::from_str(row).unwrap();
@@ -1902,7 +1916,8 @@ fn py_update_row(db_dir: &str, table_name: &str, row: &str, row_number: u32) -> 
     Ok(())
 }
 
-/// TODO: Add docstring here.
+/// Given a directory in which the database is located, a table name, and a row represented as a
+/// JSON string, insert the new row to the database.
 #[pyfunction]
 fn py_insert_new_row(db_dir: &str, table_name: &str, row: &str) -> PyResult<u32> {
     let row: SerdeValue = serde_json::from_str(row).unwrap();
