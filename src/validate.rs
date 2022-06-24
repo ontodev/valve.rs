@@ -341,56 +341,36 @@ pub fn validate_rows_intra(
 ) -> Vec<ResultRow> {
     let mut result_rows = vec![];
     for row in rows {
-        if let Ok(row) = row {
-            let mut result_row = ResultRow { row_number: None, contents: HashMap::new() };
-            for (i, value) in row.iter().enumerate() {
-                let result_cell = ResultCell {
-                    nulltype: None,
-                    value: String::from(value),
-                    valid: true,
-                    messages: vec![],
-                };
-                let column = headers.get(i).unwrap();
-                result_row.contents.insert(column.to_string(), result_cell);
-            }
+        match row {
+            Err(err) => eprintln!("Error while processing row for '{}': {}", table_name, err),
+            Ok(row) => {
+                let mut result_row = ResultRow { row_number: None, contents: HashMap::new() };
+                for (i, value) in row.iter().enumerate() {
+                    let result_cell = ResultCell {
+                        nulltype: None,
+                        value: String::from(value),
+                        valid: true,
+                        messages: vec![],
+                    };
+                    let column = headers.get(i).unwrap();
+                    result_row.contents.insert(column.to_string(), result_cell);
+                }
 
-            let column_names = config
-                .get("table")
-                .and_then(|t| t.get(table_name))
-                .and_then(|t| t.get("column_order"))
-                .and_then(|c| c.as_array())
-                .unwrap()
-                .iter()
-                .map(|v| v.as_str().unwrap().to_string())
-                .collect::<Vec<_>>();
+                let column_names = config
+                    .get("table")
+                    .and_then(|t| t.get(table_name))
+                    .and_then(|t| t.get("column_order"))
+                    .and_then(|c| c.as_array())
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.as_str().unwrap().to_string())
+                    .collect::<Vec<_>>();
 
-            // We begin by determining the nulltype of all of the cells, since the rules validation
-            // step requires that all cells have this information.
-            for column_name in &column_names {
-                let cell = result_row.contents.get_mut(column_name).unwrap();
-                validate_cell_nulltype(
-                    config,
-                    compiled_datatype_conditions,
-                    table_name,
-                    &column_name,
-                    cell,
-                );
-            }
-
-            for column_name in &column_names {
-                let context = result_row.clone();
-                let cell = result_row.contents.get_mut(column_name).unwrap();
-                validate_cell_rules(
-                    config,
-                    compiled_rule_conditions,
-                    table_name,
-                    &column_name,
-                    &context,
-                    cell,
-                );
-
-                if cell.nulltype == None {
-                    validate_cell_datatype(
+                // We begin by determining the nulltype of all of the cells, since the rules
+                // validation step requires that all cells have this information.
+                for column_name in &column_names {
+                    let cell = result_row.contents.get_mut(column_name).unwrap();
+                    validate_cell_nulltype(
                         config,
                         compiled_datatype_conditions,
                         table_name,
@@ -398,9 +378,32 @@ pub fn validate_rows_intra(
                         cell,
                     );
                 }
+
+                for column_name in &column_names {
+                    let context = result_row.clone();
+                    let cell = result_row.contents.get_mut(column_name).unwrap();
+                    validate_cell_rules(
+                        config,
+                        compiled_rule_conditions,
+                        table_name,
+                        &column_name,
+                        &context,
+                        cell,
+                    );
+
+                    if cell.nulltype == None {
+                        validate_cell_datatype(
+                            config,
+                            compiled_datatype_conditions,
+                            table_name,
+                            &column_name,
+                            cell,
+                        );
+                    }
+                }
+                result_rows.push(result_row);
             }
-            result_rows.push(result_row);
-        }
+        };
     }
 
     // Finally return the result rows:

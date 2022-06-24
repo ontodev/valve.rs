@@ -97,7 +97,7 @@ fn read_tsv_into_vector(path: &String) -> Vec<ConfigMap> {
     let rows: Vec<_> = rdr
         .deserialize()
         .map(|result| {
-            let row: ConfigMap = result.unwrap();
+            let row: ConfigMap = result.expect(format!("Error reading: {}", path).as_str());
             row
         })
         .collect();
@@ -815,13 +815,18 @@ pub async fn load_db(
         );
 
         // Extract the headers, which we will need later:
-        // TODO: Make sure none of the header cells are empty.
         let mut records = rdr.records();
         let headers;
         if let Some(result) = records.next() {
             headers = result.unwrap();
         } else {
             panic!("'{}' is empty", path);
+        }
+
+        for header in headers.iter() {
+            if header.trim().is_empty() {
+                panic!("One or more of the header fields is empty for table '{}'", table_name);
+            }
         }
 
         // Split the data into chunks of size CHUNK_SIZE before passing them to the validation
@@ -847,8 +852,6 @@ pub async fn load_db(
             validate_tree_foreign_keys(config, pool, &table_name, None).await?;
         recs_to_update.append(&mut validate_under(config, pool, &table_name, None).await?);
 
-        // TODO: Verify that each row has the right number of fields
-        // (see issue: https://github.com/lmcmicu/cmi-pb-terminology.rs/issues/1)
         for record in recs_to_update {
             let column_name = record.get("column").and_then(|c| c.as_str()).unwrap();
             let meta_name = format!("{}_meta", column_name);
@@ -1753,8 +1756,7 @@ pub async fn configure_and_or_load(
         read_config_files(&table_table.to_string());
 
     let connection_options =
-        AnyConnectOptions::from_str(format!("sqlite://{}?mode=rwc", db_path).as_str())
-            .unwrap();
+        AnyConnectOptions::from_str(format!("sqlite://{}?mode=rwc", db_path).as_str()).unwrap();
     let pool = AnyPoolOptions::new().max_connections(5).connect_with(connection_options).await?;
     sqlx_query("PRAGMA foreign_keys = ON").execute(&pool).await?;
 
