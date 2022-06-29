@@ -222,11 +222,7 @@ fn compile_condition(
                                 let value = unquoted_re.replace(value, "$unquoted");
                                 alternatives.push(value.to_string());
                             } else {
-                                panic!(
-                                    "Programming error: argument: {:?} to function 'in' \
-                                     is not a label",
-                                    arg
-                                );
+                                panic!("Argument: {:?} to function 'in' is not a label", arg);
                             }
                         }
                         return CompiledCondition {
