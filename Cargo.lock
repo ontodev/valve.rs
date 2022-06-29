@@ -1090,6 +1090,7 @@ dependencies = [
  "crossbeam",
  "csv",
  "enquote",
+ "futures",
  "itertools",
  "lalrpop",
  "lalrpop-util",

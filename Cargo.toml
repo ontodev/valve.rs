@@ -16,6 +16,8 @@ async-scoped = { version = "0.7.0", features = [ "use-async-std" ] }
 crossbeam = "0.8.1"
 csv = "1.1"
 enquote = "1.1.0"
+# Futures is not used directly but is needed for the python bindings in github.com/ontodev/valve.py.
+futures = "0.3"
 itertools = "0.10.3"
 lazy_static = "1.4.0"
 num_cpus = "1.13.1"
