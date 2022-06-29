@@ -1,5 +1,5 @@
-//! <!-- Please do not edit README.md directly. To generate a new readme from the crate documentation,
-//!      install cargo-readme using `cargo install cargo-readme` and then run:
+//! <!-- Please do not edit README.md directly. To generate a new readme from the crate documentation
+//!      in src/lib.rs, install cargo-readme using `cargo install cargo-readme` and then run:
 //!      `cargo readme > README.md` -->
 //!
 //! # valve.rs
