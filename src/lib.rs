@@ -1,3 +1,19 @@
+//! <!-- Please do not edit README.md directly. To generate a new readme from the crate documentation,
+//!      install cargo-readme using `cargo install cargo-readme` and then run:
+//!      `cargo readme > README.md` -->
+//!
+//! # valve.rs
+//! A lightweight validation engine written in rust.
+//! 
+//! This implementation is a port of the
+//! [next implementation of the valve parser](https://github.com/jamesaoverton/cmi-pb-terminology/tree/next) to rust.
+//!
+//! ## Command line usage
+//! `valve table db_path`
+//!
+//! ## Python bindings
+//! See [valve.py](https://github.com/ontodev/valve.py/tree/valve_rs_python_bindings)
+
 #[macro_use]
 extern crate lalrpop_util;
 
@@ -32,8 +48,9 @@ use std::{
     sync::Arc,
 };
 
-// Note: serde_json::Map is backed by a BTreeMap by default
-// (see https://docs.serde.rs/serde_json/map/index.html)
+/// An alias for [serde_json::Map](..//serde_json/struct.Map.html)<String, [serde_json::Value](../serde_json/enum.Value.html)>.
+// Note: serde_json::Map is
+// [backed by a BTreeMap by default](https://docs.serde.rs/serde_json/map/index.html)
 pub type ConfigMap = serde_json::Map<String, SerdeValue>;
 
 lazy_static! {
@@ -41,20 +58,22 @@ lazy_static! {
     static ref SQL_TYPES: Vec<&'static str> = vec!["text", "integer", "real", "blob"];
 }
 
+/// The number of rows that are validated at a time by a thread.
 static CHUNK_SIZE: usize = 500;
+/// Run valve in multi-threaded mode.
 static MULTI_THREADED: bool = true;
 
 /// Represents a structure such as those found in the `structure` column of the `column` table in
-/// both its parsed format (i.e., as an Expression) as well as in its original format (i.e., as a
-/// plain string).
+/// both its parsed format (i.e., as an [Expression](ast/enum.Expression.html)) as well as in its
+/// original format (i.e., as a plain String).
 #[derive(Clone, Debug)]
 pub struct ParsedStructure {
     original: String,
     parsed: Expression,
 }
 
-/// Represents a condition in three different ways: in String format, as a parsed Expression,
-/// and as a pre-compiled regular expression.
+/// Represents a condition in three different ways: (i) in String format, (ii) as a parsed
+/// [Expression](ast/enum.Expression.html), and (iii) as a pre-compiled regular expression.
 #[derive(Clone)]
 pub struct CompiledCondition {
     original: String,
@@ -71,8 +90,9 @@ impl std::fmt::Debug for CompiledCondition {
     }
 }
 
-/// Represents a 'when-then' condition, as found in the `rule` table, as CompiledConditions
-/// corresponding to the when and then parts of the given rule.
+/// Represents a 'when-then' condition, as found in the `rule` table, as two
+/// [CompiledCondition](struct.CompiledCondition.html) structs corresponding to the when and then
+/// parts of the given rule.
 pub struct ColumnRule {
     when: CompiledCondition,
     then: CompiledCondition,
@@ -510,6 +530,7 @@ pub fn get_compiled_datatype_conditions(
 /// Given the global config map, a hash map of compiled datatype conditions (indexed by the text
 /// version of the conditions), and a parser, compile all of the rule conditions, add them to a
 /// hash which has the following structure:
+/// ```
 /// {
 ///      table_1: {
 ///          when_column_1: [rule_1, rule_2, ...],
@@ -517,6 +538,7 @@ pub fn get_compiled_datatype_conditions(
 ///      },
 ///      ...
 /// }
+/// ```
 pub fn get_compiled_rule_conditions(
     config: &ConfigMap,
     compiled_datatype_conditions: HashMap<String, CompiledCondition>,

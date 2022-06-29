@@ -8,7 +8,10 @@ SHELL := bash
 build:
 	mkdir build
 
-.PHONY: time test
+.PHONY: doc time test
+
+doc:
+	cargo doc --document-private-items
 
 build/valve.db: test/src/table.tsv | build
 	cargo run $< $@

@@ -2,9 +2,9 @@ use crate::ast::Expression;
 
 grammar;
 
-pub Start = CmiExpression+;
+pub Start = ValveExpression+;
 
-CmiExpression: Box<Expression> = {
+ValveExpression: Box<Expression> = {
     Label => Box::new(Expression::Label(<>)),
     Function,
 };

@@ -1,5 +1,6 @@
 use std::fmt::Debug;
 
+/// Represents an expression as parsed using [Valve's grammar](../valve_grammar/index.html).
 #[derive(Debug, Clone)]
 pub enum Expression {
     None,

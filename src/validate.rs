@@ -170,9 +170,7 @@ pub async fn validate_row(
 /// name, a column name, and (optionally) a string to match, return a JSON array of possible valid
 /// values for the given column which contain the matching string as a substring (or all of them if
 /// no matching string is given). The JSON array returned is formatted for Typeahead, i.e., it takes
-/// the form: [{"id": id, "label": label, "order": order}, ...].
-/// This function may throw a `ValidationException` if the structure used to fetch the matching
-/// values refers to a tree that does not exist.
+/// the form: `[{"id": id, "label": label, "order": order}, ...]`.
 pub async fn get_matching_values(
     config: &ConfigMap,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
