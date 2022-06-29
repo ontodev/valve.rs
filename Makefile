@@ -13,6 +13,9 @@ build:
 doc:
 	cargo doc --document-private-items
 
+readme:
+	cargo readme --no-title > README.md
+
 build/valve.db: test/src/table.tsv | build
 	cargo run $< $@
 
