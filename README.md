@@ -9,7 +9,11 @@ This implementation is a port of the
 [next implementation of the valve parser](https://github.com/jamesaoverton/cmi-pb-terminology/tree/next) to rust.
 
 ### Command line usage
-`valve table db_path`
+```rust
+valve table db
+```
+where `table` is the path to the table table (normally table.tsv) and `db` is the path to the
+sqlite database file (which is created if it doesn't exist).
 
 ### Python bindings
 See [valve.py](https://github.com/ontodev/valve.py/tree/valve_rs_python_bindings)
