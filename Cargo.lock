@@ -1082,6 +1082,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "87f3e037eac156d1775da914196f0f37741a274155e34a0b7e427c35d2a2ecb9"
 
 [[package]]
+name = "ontodev_valve"
+version = "0.1.0"
+dependencies = [
+ "async-scoped",
+ "async-std",
+ "crossbeam",
+ "csv",
+ "enquote",
+ "itertools",
+ "lalrpop",
+ "lalrpop-util",
+ "lazy_static",
+ "num_cpus",
+ "petgraph 0.6.0",
+ "regex",
+ "serde",
+ "serde_json",
+ "sqlx",
+]
+
+[[package]]
 name = "opaque-debug"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1793,27 +1814,6 @@ checksum = "79923f7731dc61ebfba3633098bf3ac533bbd35ccd8c57e7088d9a5eebe0263f"
 dependencies = [
  "ctor",
  "version_check",
-]
-
-[[package]]
-name = "valve"
-version = "0.1.0"
-dependencies = [
- "async-scoped",
- "async-std",
- "crossbeam",
- "csv",
- "enquote",
- "itertools",
- "lalrpop",
- "lalrpop-util",
- "lazy_static",
- "num_cpus",
- "petgraph 0.6.0",
- "regex",
- "serde",
- "serde_json",
- "sqlx",
 ]
 
 [[package]]

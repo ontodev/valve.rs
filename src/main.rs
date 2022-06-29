@@ -1,5 +1,5 @@
+use ontodev_valve::configure_and_or_load;
 use std::{env, process};
-use valve::configure_and_or_load;
 
 #[async_std::main]
 async fn main() -> Result<(), sqlx::Error> {
