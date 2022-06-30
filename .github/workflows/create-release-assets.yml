@@ -10,6 +10,8 @@ jobs:
   build-linux:
     runs-on: ubuntu-latest
     steps:
+      - name: Install OpenSSL
+        run: sudo apt-get install libssl-dev
       - name: Setup python
         uses: actions/setup-python@v4
         with:
