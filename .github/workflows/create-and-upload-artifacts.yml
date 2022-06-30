@@ -1,0 +1,176 @@
+name: Create and upload artifacts
+
+on:
+  push:
+    branches:
+      - 'main'
+      - 'releases/**'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v3
+
+      - name: Install latest rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          target: x86_64-apple-darwin
+          default: true
+          override: true
+
+      - name: Setup python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Run tests
+        run: |
+          make test
+
+      - name: Build release
+        run: |
+          cargo build --verbose --release --target x86_64-apple-darwin
+          cp target/x86_64-apple-darwin/release/ontodev_valve ontodev_valve-x86_64-apple-darwin
+
+      - name: Upload a Build Artifact
+        uses: actions/upload-artifact@v2
+        with:
+          name: ontodev_valve-x86_64-apple-darwin
+          path: ontodev_valve-x86_64-apple-darwin
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v3
+
+      - name: Install latest rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          target: x86_64-pc-windows-msvc
+          default: true
+          override: true
+
+      # - name: Install make
+      #   run: |
+      #     choco install make
+
+      # - name: Setup python
+      #   uses: actions/setup-python@v4
+      #   with:
+      #     python-version: '3.9'
+
+      # - name: Run tests
+      #   run: |
+      #     make test
+
+      - name: Build release
+        run: |
+          cargo build --verbose --release --target x86_64-pc-windows-msvc
+          cp target\x86_64-pc-windows-msvc\release\ontodev_valve.exe ontodev_valve-x86_64-pc-windows-msvc.exe
+
+      - name: Upload a Build Artifact
+        uses: actions/upload-artifact@v2
+        with:
+          name: ontodev_valve-x86_64-pc-windows-msvc.exe
+          path: ontodev_valve-x86_64-pc-windows-msvc.exe
+
+  build-linux-gnu:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v3
+
+      - name: Install latest rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          target: x86_64-unknown-linux-gnu
+          default: true
+          override: true
+
+      - name: Setup python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Run tests
+        run: |
+          make test
+
+      - name: Build release
+        run: |
+          cargo build --verbose --release --target x86_64-unknown-linux-gnu
+          cp target/x86_64-unknown-linux-gnu/release/ontodev_valve ontodev_valve-x86_64-unknown-linux-gnu
+
+      - name: Upload a Build Artifact
+        uses: actions/upload-artifact@v2
+        with:
+          name: ontodev_valve-x86_64-unknown-linux-gnu
+          path: ontodev_valve-x86_64-unknown-linux-gnu
+
+  build-linux-musl:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v3
+
+      - name: Install musl-tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install musl-tools
+
+      - name: Install OpelSSL from source
+        # See https://qiita.com/liubin/items/6c94f0b61f746c08b74c
+        run: |
+          sudo -E ln -s /usr/include/x86_64-linux-gnu/asm /usr/include/x86_64-linux-musl/asm
+          sudo -E ln -s /usr/include/asm-generic /usr/include/x86_64-linux-musl/asm-generic
+          sudo -E ln -s /usr/include/linux /usr/include/x86_64-linux-musl/linux
+          sudo -E mkdir /musl
+          sudo -E wget https://github.com/openssl/openssl/archive/OpenSSL_1_1_1f.tar.gz
+          sudo -E tar zxvf OpenSSL_1_1_1f.tar.gz
+          cd openssl-OpenSSL_1_1_1f/
+          sudo -E CC="musl-gcc -fPIE -pie" ./Configure no-shared no-async --prefix=/musl --openssldir=/musl/ssl linux-x86_64
+          sudo -E make depend
+          sudo -E make -j$(nproc)
+          sudo -E make install
+
+      - name: Install latest rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          target: x86_64-unknown-linux-musl
+          default: true
+          override: true
+
+      - name: Setup python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Run tests
+        run: |
+          make test
+
+      - name: Build release
+        env:
+          PKG_CONFIG_ALLOW_CROSS: 1
+          OPENSSL_STATIC: true
+          OPENSSL_DIR: /musl
+        run: |
+          cargo build --verbose --release --target x86_64-unknown-linux-musl
+          cp target/x86_64-unknown-linux-musl/release/ontodev_valve ontodev_valve-x86_64-unknown-linux-musl
+
+      - name: Upload a Build Artifact
+        uses: actions/upload-artifact@v2
+        with:
+          name: ontodev_valve-x86_64-unknown-linux-musl
+          path: ontodev_valve-x86_64-unknown-linux-musl
