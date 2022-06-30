@@ -1,9 +1,8 @@
 name: Valve Tests
-on: [push]
-#  push:
-#    branches-ignore:
-#      - 'main'
-#      - 'releases/**'
+  push:
+    branches-ignore:
+      - 'main'
+      - 'releases/**'
 env:
   CARGO_TERM_COLOR: always
 jobs:
