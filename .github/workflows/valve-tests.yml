@@ -1,4 +1,5 @@
 name: Valve Tests
+on:
   push:
     branches-ignore:
       - 'main'
