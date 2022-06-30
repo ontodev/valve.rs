@@ -1,0 +1,21 @@
+name: Valve Tests
+on:
+  push:
+    branches-ignore:
+      - 'main'
+      - 'releases/**'
+env:
+  CARGO_TERM_COLOR: always
+jobs:
+  run-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+      - name: Check out repository code
+        uses: actions/checkout@v3
+      - name: Run tests
+        run: |
+          make test
