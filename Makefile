@@ -22,10 +22,10 @@ valve: src/*.rs src/*.lalrpop
 	ln -s target/release/ontodev_valve valve
 
 build/valve.db: test/src/table.tsv valve clean | build
-	valve $< $@ > /dev/null
+	./valve $< $@ > /dev/null
 
 time: clean valve | build
-	time valve TestData/build/table.tsv build/valve.db
+	time ./valve TestData/build/table.tsv build/valve.db
 
 test/output:
 	mkdir -p test/output
