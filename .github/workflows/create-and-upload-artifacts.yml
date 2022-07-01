@@ -30,14 +30,15 @@ jobs:
         with:
           python-version: '3.9'
 
-      - name: Run tests
-        run: |
-          make test
-
       - name: Build release
         run: |
           cargo build --verbose --release --target x86_64-apple-darwin
           cp target/x86_64-apple-darwin/release/ontodev_valve ontodev_valve-x86_64-apple-darwin
+          ln -s target/x86_64-apple-darwin/release/ontodev_valve valve
+
+      - name: Run tests
+        run: |
+          make test
 
       - name: Upload a Build Artifact
         uses: actions/upload-artifact@v2
@@ -68,14 +69,14 @@ jobs:
       #   with:
       #     python-version: '3.9'
 
-      # - name: Run tests
-      #   run: |
-      #     make test
-
       - name: Build release
         run: |
           cargo build --verbose --release --target x86_64-pc-windows-msvc
           cp target\x86_64-pc-windows-msvc\release\ontodev_valve.exe ontodev_valve-x86_64-pc-windows-msvc.exe
+
+      # - name: Run tests
+      #   run: |
+      #     make test
 
       - name: Upload a Build Artifact
         uses: actions/upload-artifact@v2
@@ -102,14 +103,15 @@ jobs:
         with:
           python-version: '3.9'
 
-      - name: Run tests
-        run: |
-          make test
-
       - name: Build release
         run: |
           cargo build --verbose --release --target x86_64-unknown-linux-gnu
           cp target/x86_64-unknown-linux-gnu/release/ontodev_valve ontodev_valve-x86_64-unknown-linux-gnu
+          ln -s target/x86_64-unknown-linux-gnu/release/ontodev_valve valve
+
+      - name: Run tests
+        run: |
+          make test
 
       - name: Upload a Build Artifact
         uses: actions/upload-artifact@v2
@@ -156,10 +158,6 @@ jobs:
         with:
           python-version: '3.9'
 
-      - name: Run tests
-        run: |
-          make test
-
       - name: Build release
         env:
           PKG_CONFIG_ALLOW_CROSS: 1
@@ -168,6 +166,11 @@ jobs:
         run: |
           cargo build --verbose --release --target x86_64-unknown-linux-musl
           cp target/x86_64-unknown-linux-musl/release/ontodev_valve ontodev_valve-x86_64-unknown-linux-musl
+          ln -s target/x86_64-unknown-linux-musl/release/ontodev_valve valve
+
+      - name: Run tests
+        run: |
+          make test
 
       - name: Upload a Build Artifact
         uses: actions/upload-artifact@v2
