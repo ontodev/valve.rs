@@ -33,7 +33,7 @@ test/output:
 test: build/valve.db | build test/output
 	test/round_trip.sh
 	scripts/export.py messages build/valve.db test/output/ column datatype prefix rule table foobar foreign_table import
-	diff -q test/expected/messages.tsv test/output/messages.tsv
+	diff --strip-trailing-cr -q test/expected/messages.tsv test/output/messages.tsv
 
 clean:
 	rm -Rf build test/output

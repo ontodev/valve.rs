@@ -15,5 +15,5 @@ do
     table_file=$(basename $table_path)
     table=${table_file%.*}
     ${export_script} data --nosort $db $output_dir $table
-    diff -q ${table_path} $output_dir/${table}.tsv
+    diff --strip-trailing-cr -q ${table_path} $output_dir/${table}.tsv
 done
