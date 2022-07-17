@@ -1,10 +1,8 @@
 name: Create and upload artifacts
 
 on:
-  push:
-    branches:
-      - 'main'
-      - 'releases/**'
+  release:
+    types: [released]
 
 env:
   CARGO_TERM_COLOR: always
@@ -25,26 +23,18 @@ jobs:
           default: true
           override: true
 
-      - name: Setup python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.9'
-
-      - name: Build release
+      - name: Build binary
         run: |
           cargo build --verbose --release --target x86_64-apple-darwin
           cp target/x86_64-apple-darwin/release/ontodev_valve ontodev_valve-x86_64-apple-darwin
           ln -s target/x86_64-apple-darwin/release/ontodev_valve valve
 
-      - name: Run tests
-        run: |
-          make test
-
-      - name: Upload a Build Artifact
-        uses: actions/upload-artifact@v2
+      - name: Upload binary to release
+        uses: svenstaro/upload-release-action@v2
         with:
-          name: ontodev_valve-x86_64-apple-darwin
-          path: ontodev_valve-x86_64-apple-darwin
+          file: ontodev_valve-x86_64-apple-darwin
+          tag: ${{ github.ref }}
+          overwrite: true
 
   build-macos-aarch64:
     runs-on: macos-latest
@@ -60,33 +50,18 @@ jobs:
           default: true
           override: true
 
-      - name: Setup python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.9'
-
-      - name: Build release
+      - name: Build binary
         run: |
           cargo build --verbose --release --target aarch64-apple-darwin
           cp target/aarch64-apple-darwin/release/ontodev_valve ontodev_valve-aarch64-apple-darwin
           ln -s target/aarch64-apple-darwin/release/ontodev_valve valve
 
-      #- name: Change the default shell for make to zsh
-      #  run: |
-      #    echo "SHELL := /bin/zsh" > zsh.tmp
-      #    cat zsh.tmp Makefile > Makefile.tmp
-      #    mv -f Makefile.tmp Makefile
-      #    rm -f zsh.tmp
-
-      #- name: Run tests
-      #  run: |
-      #    make test
-
-      - name: Upload a Build Artifact
-        uses: actions/upload-artifact@v2
+      - name: Upload binary to release
+        uses: svenstaro/upload-release-action@v2
         with:
-          name: ontodev_valve-aarch64-apple-darwin
-          path: ontodev_valve-aarch64-apple-darwin
+          file: ontodev_valve-aarch64-apple-darwin
+          tag: ${{ github.ref }}
+          overwrite: true
 
   build-windows:
     runs-on: windows-latest
@@ -102,30 +77,18 @@ jobs:
           default: true
           override: true
 
-      - name: Install make
-        run: |
-          choco install make
-
-      - name: Setup python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.9'
-
-      - name: Build release
+      - name: Build binary
         run: |
           cargo build --verbose --release --target x86_64-pc-windows-msvc
           cp target\x86_64-pc-windows-msvc\release\ontodev_valve.exe ontodev_valve-x86_64-pc-windows-msvc.exe
           cp target\x86_64-pc-windows-msvc\release\ontodev_valve.exe valve
 
-      - name: Run tests
-        run: |
-          make test
-
-      - name: Upload a Build Artifact
-        uses: actions/upload-artifact@v2
+      - name: Upload binary to release
+        uses: svenstaro/upload-release-action@v2
         with:
-          name: ontodev_valve-x86_64-pc-windows-msvc.exe
-          path: ontodev_valve-x86_64-pc-windows-msvc.exe
+          file: ontodev_valve-x86_64-pc-windows-msvc.exe
+          tag: ${{ github.ref }}
+          overwrite: true
 
   build-linux-gnu:
     runs-on: ubuntu-latest
@@ -141,26 +104,18 @@ jobs:
           default: true
           override: true
 
-      - name: Setup python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.9'
-
-      - name: Build release
+      - name: Build binary
         run: |
           cargo build --verbose --release --target x86_64-unknown-linux-gnu
           cp target/x86_64-unknown-linux-gnu/release/ontodev_valve ontodev_valve-x86_64-unknown-linux-gnu
           ln -s target/x86_64-unknown-linux-gnu/release/ontodev_valve valve
 
-      - name: Run tests
-        run: |
-          make test
-
-      - name: Upload a Build Artifact
-        uses: actions/upload-artifact@v2
+      - name: Upload binary to release
+        uses: svenstaro/upload-release-action@v2
         with:
-          name: ontodev_valve-x86_64-unknown-linux-gnu
-          path: ontodev_valve-x86_64-unknown-linux-gnu
+          file: ontodev_valve-x86_64-unknown-linux-gnu
+          tag: ${{ github.ref }}
+          overwrite: true
 
   build-linux-musl:
     runs-on: ubuntu-latest
@@ -196,12 +151,7 @@ jobs:
           default: true
           override: true
 
-      - name: Setup python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.9'
-
-      - name: Build release
+      - name: Build binary
         env:
           PKG_CONFIG_ALLOW_CROSS: 1
           OPENSSL_STATIC: true
@@ -211,12 +161,9 @@ jobs:
           cp target/x86_64-unknown-linux-musl/release/ontodev_valve ontodev_valve-x86_64-unknown-linux-musl
           ln -s target/x86_64-unknown-linux-musl/release/ontodev_valve valve
 
-      - name: Run tests
-        run: |
-          make test
-
-      - name: Upload a Build Artifact
-        uses: actions/upload-artifact@v2
+      - name: Upload binary to release
+        uses: svenstaro/upload-release-action@v2
         with:
-          name: ontodev_valve-x86_64-unknown-linux-musl
-          path: ontodev_valve-x86_64-unknown-linux-musl
+          file: ontodev_valve-x86_64-unknown-linux-musl
+          tag: ${{ github.ref }}
+          overwrite: true
