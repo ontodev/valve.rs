@@ -1,9 +1,5 @@
 name: Valve Tests
-on:
-  push:
-    branches:
-      - 'main'
-      - 'releases/**'
+on: [push, pull_request]
 env:
   CARGO_TERM_COLOR: always
 jobs:
