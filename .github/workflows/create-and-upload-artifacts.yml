@@ -112,4 +112,4 @@ jobs:
       - name: Publish to crates.io
         run: |
           cargo publish --dry-run
-          # cargo publish
+          cargo publish
