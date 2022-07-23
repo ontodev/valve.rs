@@ -45,6 +45,13 @@ jobs:
           sudo -E make -j$(nproc)
           sudo -E make install
 
+      - name: Set up cross-compilation and openssl environment variables (MUSL)
+        if: ${{ matrix.target.runner == 'ubuntu-latest' && matrix.target.arch == 'x86_64-unknown-linux-musl' }}
+        run: |
+          echo "PKG_CONFIG_ALLOW_CROSS=1" >> $GITHUB_ENV
+          echo "OPENSSL_STATIC=true" >> $GITHUB_ENV
+          echo "OPENSSL_DIR=/musl" >> $GITHUB_ENV
+
       - name: Install latest rust toolchain
         uses: actions-rs/toolchain@v1
         with:
@@ -53,12 +60,8 @@ jobs:
           default: true
           override: true
 
-      - name: Build binary (MUSL)
-        if: ${{ matrix.target.runner == 'ubuntu-latest' && matrix.target.arch == 'x86_64-unknown-linux-musl' }}
-        env:
-          PKG_CONFIG_ALLOW_CROSS: 1
-          OPENSSL_STATIC: true
-          OPENSSL_DIR: /musl
+      - name: Build binary (non-Windows)
+        if: ${{ matrix.target.runner != 'windows-latest' }}
         run: |
           cargo build --verbose --release --target ${{ matrix.target.arch }}
           cp target/${{ matrix.target.arch }}/release/ontodev_valve ontodev_valve-${{ matrix.target.arch }}
@@ -70,13 +73,6 @@ jobs:
           cargo build --verbose --release --target ${{ matrix.target.arch }}
           cp target\${{ matrix.target.arch }}\release\ontodev_valve.exe ontodev_valve-${{ matrix.target.arch }}.exe
           cp target\${{ matrix.target.arch }}\release\ontodev_valve.exe valve
-
-      - name: Build binary (non-MUSL, non-Windows)
-        if: ${{ matrix.target.runner != 'windows-latest' && matrix.target.arch != 'x86_64-unknown-linux-musl' }}
-        run: |
-          cargo build --verbose --release --target ${{ matrix.target.arch }}
-          cp target/${{ matrix.target.arch }}/release/ontodev_valve ontodev_valve-${{ matrix.target.arch }}
-          ln -s target/${{ matrix.target.arch }}/release/ontodev_valve valve
 
       - name: Upload binary to release (Windows)
         if: ${{ matrix.target.runner == 'windows-latest' }}
