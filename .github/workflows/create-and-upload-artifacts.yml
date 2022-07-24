@@ -29,29 +29,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install musl-tools
 
-      - name: Install OpenSSL from source (MUSL)
-        if: ${{ matrix.target.runner == 'ubuntu-latest' && matrix.target.arch == 'x86_64-unknown-linux-musl' }}
-        # See https://qiita.com/liubin/items/6c94f0b61f746c08b74c
-        run: |
-          sudo -E ln -s /usr/include/x86_64-linux-gnu/asm /usr/include/x86_64-linux-musl/asm
-          sudo -E ln -s /usr/include/asm-generic /usr/include/x86_64-linux-musl/asm-generic
-          sudo -E ln -s /usr/include/linux /usr/include/x86_64-linux-musl/linux
-          sudo -E mkdir /musl
-          sudo -E wget https://github.com/openssl/openssl/archive/OpenSSL_1_1_1f.tar.gz
-          sudo -E tar zxvf OpenSSL_1_1_1f.tar.gz
-          cd openssl-OpenSSL_1_1_1f/
-          sudo -E CC="musl-gcc -fPIE -pie" ./Configure no-shared no-async --prefix=/musl --openssldir=/musl/ssl linux-x86_64
-          sudo -E make depend
-          sudo -E make -j$(nproc)
-          sudo -E make install
-
-      - name: Set up cross-compilation and openssl environment variables (MUSL)
-        if: ${{ matrix.target.runner == 'ubuntu-latest' && matrix.target.arch == 'x86_64-unknown-linux-musl' }}
-        run: |
-          echo "PKG_CONFIG_ALLOW_CROSS=1" >> $GITHUB_ENV
-          echo "OPENSSL_STATIC=true" >> $GITHUB_ENV
-          echo "OPENSSL_DIR=/musl" >> $GITHUB_ENV
-
       - name: Install latest rust toolchain
         uses: actions-rs/toolchain@v1
         with:
@@ -60,33 +37,42 @@ jobs:
           default: true
           override: true
 
-      - name: Build binary (non-Windows)
-        if: ${{ matrix.target.runner != 'windows-latest' }}
+      - name: Build binary using cross (Linux)
+        if: ${{ matrix.target.runner != 'windows-latest' && matrix.target.runner != 'macos-latest' }}
         run: |
-          cargo build --verbose --release --target ${{ matrix.target.arch }}
+          cargo install cross --git https://github.com/cross-rs/cross
+          sudo systemctl start docker
+          cross build --release --target ${{ matrix.target.arch }}
           cp target/${{ matrix.target.arch }}/release/ontodev_valve ontodev_valve-${{ matrix.target.arch }}
           ln -s target/${{ matrix.target.arch }}/release/ontodev_valve valve
 
-      - name: Build binary (Windows)
+      - name: Build binary using cargo (MacOS)
+        if: ${{ matrix.target.runner == 'macos-latest' }}
+        run: |
+          cargo build --release --target ${{ matrix.target.arch }}
+          cp target/${{ matrix.target.arch }}/release/ontodev_valve ontodev_valve-${{ matrix.target.arch }}
+          ln -s target/${{ matrix.target.arch }}/release/ontodev_valve valve
+
+      - name: Build binary using cargo (Windows)
         if: ${{ matrix.target.runner == 'windows-latest' }}
         run: |
           cargo build --verbose --release --target ${{ matrix.target.arch }}
           cp target\${{ matrix.target.arch }}\release\ontodev_valve.exe ontodev_valve-${{ matrix.target.arch }}.exe
           cp target\${{ matrix.target.arch }}\release\ontodev_valve.exe valve
 
-      - name: Upload binary to release (Windows)
-        if: ${{ matrix.target.runner == 'windows-latest' }}
-        uses: svenstaro/upload-release-action@v2
-        with:
-          file: ontodev_valve-${{ matrix.target.arch }}.exe
-          tag: ${{ github.ref }}
-          overwrite: true
-
       - name: Upload binary to release (non-Windows)
         if: ${{ matrix.target.runner != 'windows-latest' }}
         uses: svenstaro/upload-release-action@v2
         with:
           file: ontodev_valve-${{ matrix.target.arch }}
+          tag: ${{ github.ref }}
+          overwrite: true
+
+      - name: Upload binary to release (Windows)
+        if: ${{ matrix.target.runner == 'windows-latest' }}
+        uses: svenstaro/upload-release-action@v2
+        with:
+          file: ontodev_valve-${{ matrix.target.arch }}.exe
           tag: ${{ github.ref }}
           overwrite: true
 
