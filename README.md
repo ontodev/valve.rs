@@ -8,6 +8,10 @@ A lightweight validation engine written in rust.
 This implementation is a port of the
 [next implementation of the valve parser](https://github.com/jamesaoverton/cmi-pb-terminology/tree/next) to rust.
 
+### Crates.io page
+
+https://crates.io/crates/ontodev_valve
+
 ### Command line usage
 ```rust
 valve table db
