@@ -38,41 +38,30 @@ jobs:
           override: true
 
       - name: Build binary using cross (Linux)
-        if: ${{ matrix.target.runner != 'windows-latest' && matrix.target.runner != 'macos-latest' }}
+        if: ${{ matrix.target.runner == 'ubuntu-latest' }}
         run: |
           cargo install cross --git https://github.com/cross-rs/cross
           sudo systemctl start docker
           cross build --release --target ${{ matrix.target.arch }}
           cp target/${{ matrix.target.arch }}/release/ontodev_valve ontodev_valve-${{ matrix.target.arch }}
-          ln -s target/${{ matrix.target.arch }}/release/ontodev_valve valve
 
       - name: Build binary using cargo (MacOS)
         if: ${{ matrix.target.runner == 'macos-latest' }}
         run: |
           cargo build --release --target ${{ matrix.target.arch }}
           cp target/${{ matrix.target.arch }}/release/ontodev_valve ontodev_valve-${{ matrix.target.arch }}
-          ln -s target/${{ matrix.target.arch }}/release/ontodev_valve valve
 
       - name: Build binary using cargo (Windows)
         if: ${{ matrix.target.runner == 'windows-latest' }}
         run: |
-          cargo build --verbose --release --target ${{ matrix.target.arch }}
+          cargo build --release --target ${{ matrix.target.arch }}
           cp target\${{ matrix.target.arch }}\release\ontodev_valve.exe ontodev_valve-${{ matrix.target.arch }}.exe
-          cp target\${{ matrix.target.arch }}\release\ontodev_valve.exe valve
 
-      - name: Upload binary to release (non-Windows)
-        if: ${{ matrix.target.runner != 'windows-latest' }}
+      - name: Upload binary to release
         uses: svenstaro/upload-release-action@v2
         with:
-          file: ontodev_valve-${{ matrix.target.arch }}
-          tag: ${{ github.ref }}
-          overwrite: true
-
-      - name: Upload binary to release (Windows)
-        if: ${{ matrix.target.runner == 'windows-latest' }}
-        uses: svenstaro/upload-release-action@v2
-        with:
-          file: ontodev_valve-${{ matrix.target.arch }}.exe
+          file: ontodev_valve-${{ matrix.target.arch }}*
+          file_glob: true
           tag: ${{ github.ref }}
           overwrite: true
 
