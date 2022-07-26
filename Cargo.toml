@@ -2,7 +2,7 @@
 name = "ontodev_valve"
 description = "A lightweight validation engine written in rust"
 license = "BSD-3-Clause"
-version = "0.1.5"
+version = "0.1.6"
 repository = "https://github.com/ontodev/valve.rs"
 # Because of this issue: https://github.com/lalrpop/lalrpop/issues/650 we need to use the 2018
 # edition of rust for now.

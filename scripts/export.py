@@ -1,8 +1,9 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.7
 
 import csv
 import json
 import os.path
+import re
 import sqlite3
 import sys
 
@@ -182,7 +183,7 @@ def export_messages(args):
         for column_key in [ckey for ckey in row if ckey.endswith("_meta")]:
             meta = json.loads(row[column_key])
             if not meta["valid"]:
-                columnid = column_key.removesuffix("_meta")
+                columnid = re.sub("_meta", "", column_key)
                 if a1:
                     columnid = col_to_a1(
                         columnid, [c for c in row if c != "row_number" and not c.endswith("_meta")]
