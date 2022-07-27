@@ -12,11 +12,11 @@ jobs:
     strategy:
       matrix:
         target: [
-          { runner: "macos-latest", arch: "x86_64-apple-darwin" },
-          { runner: "macos-latest", arch: "aarch64-apple-darwin" },
-          { runner: "windows-latest", arch: "x86_64-pc-windows-msvc" },
-          { runner: "ubuntu-latest", arch: "x86_64-unknown-linux-gnu" },
-          { runner: "ubuntu-latest", arch: "x86_64-unknown-linux-musl" },
+          { runner: "macos-11", arch: "x86_64-apple-darwin" },
+          { runner: "macos-11", arch: "aarch64-apple-darwin" },
+          { runner: "windows-2022", arch: "x86_64-pc-windows-msvc" },
+          { runner: "ubuntu-20.04", arch: "x86_64-unknown-linux-gnu" },
+          { runner: "ubuntu-20.04", arch: "x86_64-unknown-linux-musl" },
         ]
     runs-on: ${{ matrix.target.runner }}
     steps:
@@ -24,7 +24,7 @@ jobs:
         uses: actions/checkout@v3
 
       - name: Install musl-tools (MUSL)
-        if: ${{ matrix.target.runner == 'ubuntu-latest' && matrix.target.arch == 'x86_64-unknown-linux-musl' }}
+        if: ${{ matrix.target.runner == 'ubuntu-20.04' && matrix.target.arch == 'x86_64-unknown-linux-musl' }}
         run: |
           sudo apt-get update
           sudo apt-get install musl-tools
@@ -38,7 +38,7 @@ jobs:
           override: true
 
       - name: Build binary using cross (Linux)
-        if: ${{ matrix.target.runner == 'ubuntu-latest' }}
+        if: ${{ matrix.target.runner == 'ubuntu-20.04' }}
         run: |
           cargo install cross --git https://github.com/cross-rs/cross
           sudo systemctl start docker
@@ -46,13 +46,13 @@ jobs:
           cp target/${{ matrix.target.arch }}/release/ontodev_valve ontodev_valve-${{ matrix.target.arch }}
 
       - name: Build binary using cargo (MacOS)
-        if: ${{ matrix.target.runner == 'macos-latest' }}
+        if: ${{ matrix.target.runner == 'macos-11' }}
         run: |
           cargo build --release --target ${{ matrix.target.arch }}
           cp target/${{ matrix.target.arch }}/release/ontodev_valve ontodev_valve-${{ matrix.target.arch }}
 
       - name: Build binary using cargo (Windows)
-        if: ${{ matrix.target.runner == 'windows-latest' }}
+        if: ${{ matrix.target.runner == 'windows-2022' }}
         run: |
           cargo build --release --target ${{ matrix.target.arch }}
           cp target\${{ matrix.target.arch }}\release\ontodev_valve.exe ontodev_valve-${{ matrix.target.arch }}.exe
@@ -67,7 +67,7 @@ jobs:
 
   cargo-publish:
     needs: build-binaries
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     steps:
       - name: Check out repository code
         uses: actions/checkout@v3
