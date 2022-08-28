@@ -42,7 +42,7 @@ use petgraph::{
 use regex::Regex;
 use serde_json::{json, Value as SerdeValue};
 use sqlx::{
-    any::{AnyConnectOptions, AnyPool, AnyPoolOptions},
+    any::{AnyConnectOptions, AnyKind, AnyPool, AnyPoolOptions},
     query as sqlx_query, Row, ValueRef,
 };
 use std::{
@@ -656,7 +656,8 @@ pub fn get_parsed_structure_conditions(
 
 /// Given config maps for tables and datatypes, a database connection pool, and a StartParser,
 /// read in the TSV files corresponding to the tables defined in the tables config, and use that
-/// information to fill in constraints information into a new config map that is then returned. If
+/// information to fill in constraints information into a new config map that is then returned along
+/// with a list of the tables in the database sorted according to their mutual dependencies. If
 /// the flag `write_sql_to_stdout` is set to true, emit SQL to create the database schema to STDOUT.
 /// If the flag `write_to_db` is set to true, execute the SQL in the database using the given
 /// connection pool.
@@ -667,8 +668,8 @@ pub async fn configure_db(
     parser: &StartParser,
     write_sql_to_stdout: bool,
     write_to_db: bool,
-) -> Result<ConfigMap, sqlx::Error> {
-    // This is what we will return:
+) -> Result<(Vec<String>, ConfigMap), sqlx::Error> {
+    // This is the ConfigMap that we will be returning:
     let mut constraints_config = ConfigMap::new();
     constraints_config.insert(String::from("foreign"), SerdeValue::Object(ConfigMap::new()));
     constraints_config.insert(String::from("unique"), SerdeValue::Object(ConfigMap::new()));
@@ -679,6 +680,7 @@ pub async fn configure_db(
     // Begin by reading in the TSV files corresponding to the tables defined in tables_config, and
     // use that information to create the associated database tables, while saving constraint
     // information to constrains_config.
+    let mut setup_statements = HashMap::new();
     let table_names: Vec<String> = tables_config.keys().cloned().collect();
     for table_name in table_names {
         let path = tables_config
@@ -748,9 +750,11 @@ pub async fn configure_db(
         });
 
         // Create the table and its corresponding conflict table:
+        let mut table_statements = vec![];
         for table in vec![table_name.to_string(), format!("{}_conflict", table_name)] {
-            let (table_sql, table_constraints) =
+            let (mut statements, table_constraints) =
                 create_table(tables_config, datatypes_config, parser, &table);
+            table_statements.append(&mut statements);
             if !table.ends_with("_conflict") {
                 for constraint_type in vec!["foreign", "unique", "primary", "tree", "under"] {
                     let table_constraints = table_constraints.get(constraint_type).unwrap().clone();
@@ -760,37 +764,44 @@ pub async fn configure_db(
                         .and_then(|o| o.insert(table_name.to_string(), table_constraints));
                 }
             }
-            if write_to_db {
-                sqlx_query(&table_sql)
-                    .execute(pool)
-                    .await
-                    .expect(format!("The SQL statement: {} returned an error", table_sql).as_str());
-            }
-            if write_sql_to_stdout {
-                println!("{}\n", table_sql);
-            }
         }
 
         // Create a view as the union of the regular and conflict versions of the table:
-        let drop_view_sql = format!(r#"DROP VIEW IF EXISTS "{}_view";"#, table_name);
+        let drop_view_sql = format!(r#"DROP VIEW IF EXISTS "{}_view CASCADE";"#, table_name);
         let create_view_sql = format!(
             r#"CREATE VIEW "{t}_view" AS SELECT * FROM "{t}" UNION SELECT * FROM "{t}_conflict";"#,
             t = table_name,
         );
-        let sql = format!("{}\n{}\n", drop_view_sql, create_view_sql);
+        table_statements.push(drop_view_sql);
+        table_statements.push(create_view_sql);
 
-        if write_sql_to_stdout {
-            println!("{}", sql);
-        }
-        if write_to_db {
-            sqlx_query(&sql)
-                .execute(pool)
-                .await
-                .expect(format!("The SQL statement: {} returned an error", sql).as_str());
+        setup_statements.insert(table_name.to_string(), table_statements);
+    }
+
+    // Sort the tables according to their foreign key dependencies so that tables are always loaded
+    // after the tables they depend on:
+    let unsorted_tables: Vec<String> = setup_statements.keys().cloned().collect();
+    let sorted_tables = verify_table_deps_and_sort(&unsorted_tables, &constraints_config);
+
+    if write_to_db || write_sql_to_stdout {
+        for table in &sorted_tables {
+            let table_statements = setup_statements.get(table).unwrap();
+            if write_to_db {
+                for stmt in table_statements {
+                    sqlx_query(stmt)
+                        .execute(pool)
+                        .await
+                        .expect(format!("The SQL statement: {} returned an error", stmt).as_str());
+                }
+            }
+            if write_sql_to_stdout {
+                let output = String::from(table_statements.join("\n"));
+                println!("{}\n", output);
+            }
         }
     }
 
-    return Ok(constraints_config);
+    return Ok((sorted_tables, constraints_config));
 }
 
 /// Given a configuration map, a database connection pool, a parser, HashMaps representing
@@ -802,24 +813,9 @@ pub async fn load_db(
     pool: &AnyPool,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    table_list: Vec<String>,
+    write_sql_to_stdout: bool,
 ) -> Result<(), sqlx::Error> {
-    // Sort the tables according to their foreign key dependencies so that tables are always loaded
-    // after the tables they depend on:
-    let table_list: Vec<String> = config
-        .get("table")
-        .and_then(|t| t.as_object())
-        .and_then(|o| Some(o.keys()))
-        .and_then(|k| Some(k.cloned()))
-        .and_then(|k| Some(k.collect()))
-        .and_then(|v| {
-            Some(verify_table_deps_and_sort(
-                &v,
-                config.get("constraints").and_then(|t| t.as_object()).unwrap(),
-            ))
-        })
-        .unwrap();
-
-    // Now load the rows:
     for table_name in table_list {
         let path = String::from(
             config
@@ -862,6 +858,7 @@ pub async fn load_db(
             &table_name,
             &chunks,
             &headers,
+            write_sql_to_stdout,
         )
         .await?;
 
@@ -903,6 +900,7 @@ async fn validate_and_insert_chunks(
     table_name: &String,
     chunks: &IntoChunks<csv::StringRecordsIter<'_, std::fs::File>>,
     headers: &csv::StringRecord,
+    write_sql_to_stdout: bool,
 ) -> Result<(), sqlx::Error> {
     if !MULTI_THREADED {
         for (chunk_number, chunk) in chunks.into_iter().enumerate() {
@@ -921,6 +919,7 @@ async fn validate_and_insert_chunks(
                 table_name,
                 &mut intra_validated_rows,
                 chunk_number,
+                write_sql_to_stdout,
             )
             .await?;
         }
@@ -971,6 +970,7 @@ async fn validate_and_insert_chunks(
                     table_name,
                     &mut intra_validated_rows,
                     chunk_number,
+                    write_sql_to_stdout,
                 )
                 .await?;
             }
@@ -989,6 +989,7 @@ async fn validate_rows_inter_and_insert(
     table_name: &String,
     rows: &mut Vec<ResultRow>,
     chunk_number: usize,
+    write_sql_to_stdout: bool,
 ) -> Result<(), sqlx::Error> {
     // First, do the tree validation:
     validate_rows_trees(config, pool, table_name, rows).await?;
@@ -998,6 +999,10 @@ async fn validate_rows_inter_and_insert(
     // explicitly do the constraint validation and insert the resulting rows:
     let ((main_sql, main_params), (_, _)) =
         make_inserts(config, table_name, rows, chunk_number).await?;
+
+    // TODO: pass the write_sql_to_stdout flag to this function, and then below,
+    // somehow write the insert statements to stdout. You may also need to do this for some
+    // of the updates (but only for initial load).
 
     let mut main_query = sqlx_query(&main_sql);
     for param in &main_params {
@@ -1023,8 +1028,6 @@ async fn validate_rows_inter_and_insert(
                 conflict_query = conflict_query.bind(param);
             }
             conflict_query.execute(pool).await?;
-            println!("{}\n", main_sql);
-            println!("{}\n", conflict_sql);
         }
     };
 
@@ -1395,9 +1398,9 @@ fn create_table(
     datatypes_config: &mut ConfigMap,
     parser: &StartParser,
     table_name: &String,
-) -> (String, SerdeValue) {
-    let mut output = vec![
-        format!(r#"DROP TABLE IF EXISTS "{}";"#, table_name),
+) -> (Vec<String>, SerdeValue) {
+    let mut statements = vec![format!(r#"DROP TABLE IF EXISTS "{}" CASCADE;"#, table_name)];
+    let mut create_lines = vec![
         format!(r#"CREATE TABLE "{}" ("#, table_name),
         String::from(r#"  "row_number" INTEGER,"#),
     ];
@@ -1596,7 +1599,7 @@ fn create_table(
             }
         }
         line.push_str(",");
-        output.push(line);
+        create_lines.push(line);
         let metacol = format!("{}_meta", column_name);
         let mut line = format!(r#"  "{}" TEXT"#, metacol);
         if r >= c
@@ -1610,13 +1613,13 @@ fn create_table(
         } else {
             line.push_str(",");
         }
-        output.push(line);
+        create_lines.push(line);
     }
 
     let foreign_keys = table_constraints.get("foreign").and_then(|v| v.as_array()).unwrap();
     let num_fkeys = foreign_keys.len();
     for (i, fkey) in foreign_keys.iter().enumerate() {
-        output.push(format!(
+        create_lines.push(format!(
             r#"  FOREIGN KEY ("{}") REFERENCES "{}"("{}"){}"#,
             fkey.get("column").and_then(|s| s.as_str()).unwrap(),
             fkey.get("ftable").and_then(|s| s.as_str()).unwrap(),
@@ -1624,7 +1627,10 @@ fn create_table(
             if i < (num_fkeys - 1) { "," } else { "" }
         ));
     }
-    output.push(String::from(");"));
+    create_lines.push(String::from(");"));
+    // We are done generating the lines for the 'create table' statement. Join them and add the
+    // result to the statements to return:
+    statements.push(String::from(create_lines.join("\n")));
 
     // Loop through the tree constraints and if any of their associated child columns do not already
     // have an associated unique or primary index, create one implicitly here:
@@ -1636,7 +1642,7 @@ fn create_table(
         if !unique_keys.contains(&SerdeValue::String(tree_child.to_string()))
             && !primary_keys.contains(&SerdeValue::String(tree_child.to_string()))
         {
-            output.push(format!(
+            statements.push(format!(
                 r#"CREATE UNIQUE INDEX "{}_{}_idx" ON "{}"("{}");"#,
                 table_name, tree_child, table_name, tree_child
             ));
@@ -1644,13 +1650,12 @@ fn create_table(
     }
 
     // Finally, create a further unique index on row_number:
-    output.push(format!(
+    statements.push(format!(
         r#"CREATE UNIQUE INDEX "{}_row_number_idx" ON "{}"("row_number");"#,
         table_name, table_name
     ));
 
-    let output = String::from(output.join("\n"));
-    return (output, table_constraints);
+    return (statements, table_constraints);
 }
 
 /// Given a database connection pool, a table name, and a row, assign a new row number to the row
@@ -1769,18 +1774,13 @@ pub async fn update_row(
 /// and optionally load it if the `load` flag is set to true.
 pub async fn configure_and_or_load(
     table_table: &str,
-    db_path: &str,
+    database: &str,
     load: bool,
 ) -> Result<String, sqlx::Error> {
     let parser = StartParser::new();
 
     let (specials_config, mut tables_config, mut datatypes_config, rules_config) =
         read_config_files(&table_table.to_string());
-
-    let connection_options =
-        AnyConnectOptions::from_str(format!("sqlite://{}?mode=rwc", db_path).as_str()).unwrap();
-    let pool = AnyPoolOptions::new().max_connections(5).connect_with(connection_options).await?;
-    sqlx_query("PRAGMA foreign_keys = ON").execute(&pool).await?;
 
     // To connect to a postgresql database listening to a unix domain socket:
     // ----------------------------------------------------------------------
@@ -1791,6 +1791,24 @@ pub async fn configure_and_or_load(
     // -----------------------------------------------------
     // let db_type = pool.any_kind();
 
+    let connection_options;
+    if database.starts_with("postgresql://") {
+        connection_options = AnyConnectOptions::from_str(database)?;
+    } else {
+        let connection_string;
+        if !database.starts_with("sqlite://") {
+            connection_string = format!("sqlite://{}?mode=rwc", database);
+        } else {
+            connection_string = database.to_string();
+        }
+        connection_options = AnyConnectOptions::from_str(connection_string.as_str()).unwrap();
+    }
+
+    let pool = AnyPoolOptions::new().max_connections(5).connect_with(connection_options).await?;
+    if pool.any_kind() == AnyKind::Sqlite {
+        sqlx_query("PRAGMA foreign_keys = ON").execute(&pool).await?;
+    }
+
     let write_sql_to_stdout;
     let write_to_db;
     if load {
@@ -1800,7 +1818,7 @@ pub async fn configure_and_or_load(
         write_sql_to_stdout = false;
         write_to_db = false;
     }
-    let constraints_config = configure_db(
+    let (sorted_table_list, constraints_config) = configure_db(
         &mut tables_config,
         &mut datatypes_config,
         &pool,
@@ -1821,8 +1839,13 @@ pub async fn configure_and_or_load(
     let compiled_rule_conditions =
         get_compiled_rule_conditions(&config, compiled_datatype_conditions.clone(), &parser);
 
+    // TODO: Remove this debugging statement later:
+    eprintln!("******** Created database schema successfully! ********");
+    eprintln!("******** Loading ... ********\n");
+
     if load {
-        load_db(&config, &pool, &compiled_datatype_conditions, &compiled_rule_conditions).await?;
+        load_db(&config, &pool, &compiled_datatype_conditions, &compiled_rule_conditions,
+                sorted_table_list, write_sql_to_stdout).await?;
     }
 
     let config = SerdeValue::Object(config);
