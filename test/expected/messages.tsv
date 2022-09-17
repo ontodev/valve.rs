@@ -1,8 +1,8 @@
 table	row	column	level	rule_id	message	value
-prefix	VO	prefix	error	key:primary	Values of prefix must be unique	VO
-prefix	VO	base	error	key:unique	Values of base must be unique	http://purl.obolibrary.org/obo/VO_
 prefix	rdf	prefix	error	key:primary	Values of prefix must be unique	rdf
 prefix	rdf	base	error	key:unique	Values of base must be unique	http://www.w3.org/1999/02/22-rdf-syntax-ns#
+prefix	VO	prefix	error	key:primary	Values of prefix must be unique	VO
+prefix	VO	base	error	key:unique	Values of base must be unique	http://purl.obolibrary.org/obo/VO_
 table	rule	type	error	datatype:table_type	type should be a table type	rule
 foobar	1	foo	error	rule:foo-2	bar cannot be null if foo is not null	x
 foobar	1	foo	error	rule:foo-4	bar must be 'y' or 'z' if foo is 'x'	x
@@ -15,12 +15,12 @@ foobar	5	xyzzy	error	under:not-under	Value 'h' of column xyzzy is not under 'd'	
 foobar	7	xyzzy	error	under:not-in-tree	Value z of column xyzzy is not in foobar.child	z
 foobar	9	child	error	key:foreign	Value i of column child exists only in foreign_table_conflict.other_foreign_column	i
 foreign_table	a	foreign_column	error	key:primary	Values of foreign_column must be unique	a
+import	   mobecular entity	source	error	key:foreign	Value MOB of column source is not in prefix.prefix	MOB
+import	   mobecular entity	label	error	datatype:trimmed_line	label should be a line of text that does not begin or end with whitespace	   mobecular entity
 import	vaccine	source	error	key:foreign	Value BOB of column source is not in prefix.prefix	BOB
 import	vaccine	id	error	key:unique	Values of id must be unique	VO:0000001
 import	vaccine	label	error	key:primary	Values of label must be unique	vaccine
 import	vaccine	label	error	tree:child-unique	Values of label must be unique	vaccine
-import	   mobecular entity	source	error	key:foreign	Value MOB of column source is not in prefix.prefix	MOB
-import	   mobecular entity	label	error	datatype:trimmed_line	label should be a line of text that does not begin or end with whitespace	   mobecular entity
 import	bar	source	error	key:foreign	Value ZOB of column source is not in prefix.prefix	ZOB
 import	car	source	error	key:foreign	Value JOB of column source is not in prefix.prefix	JOB
 import	foo	source	error	key:foreign	Value SOB of column source is not in prefix.prefix	SOB

@@ -21,4 +21,6 @@ jobs:
         uses: actions/checkout@v3
       - name: Run tests
         run: |
-          make test
+          # TODO: Add steps to set up a small postgres db, and then run `make test` instead
+          # of just `make sqlite_test` below.
+          make sqlite_test
