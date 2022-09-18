@@ -41,7 +41,7 @@ pg_test: valve test/src/table.tsv | test/output
 	# This target assumes that we have a postgresql server, accessible by the current user via the
 	# UNIX socket /var/run/postgresql, in which a database called `valve_postgres` has been created.
 	# It also requires that `psycopg2` has been installed.
-	$^ postgresql:///valve_postgres
+	./$^ postgresql:///valve_postgres
 	test/round_trip.sh postgresql:///valve_postgres
 	scripts/export.py messages postgresql:///valve_postgres test/output/ column datatype prefix rule table foobar foreign_table import
 	diff --strip-trailing-cr -q test/expected/messages.tsv test/output/messages.tsv
