@@ -33,8 +33,6 @@ jobs:
       - name: Install psycopg2
         run: |
           pip3 install -r requirements.txt
-      - name: Run tests
+      - name: Run tests on both sqlite and on postgresql
         run: |
-          # TODO: Add steps to set up a small postgres db, and then run `make test` instead
-          # of just `make sqlite_test` below.
-          make pg_test
+          make test
