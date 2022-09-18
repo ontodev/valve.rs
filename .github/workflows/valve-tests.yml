@@ -13,6 +13,17 @@ jobs:
   run-tests:
     runs-on: ubuntu-20.04
     steps:
+      - name: Install postgresql server and client
+        run: |
+          sudo apt-get update
+          sudo apt-get install postgresql postgresql-contrib postgresql-client
+      - name: Start the database server
+        run: |
+          sudo systemctl start postgresql.service
+      - name: Create the valve_postgres database
+        run: |
+          sudo su - postgres -c "createuser runner"
+          sudo su - postgres -c "createdb -O runner valve_postgres"
       - name: Setup python
         uses: actions/setup-python@v4
         with:
@@ -26,4 +37,4 @@ jobs:
         run: |
           # TODO: Add steps to set up a small postgres db, and then run `make test` instead
           # of just `make sqlite_test` below.
-          make sqlite_test
+          make pg_test
