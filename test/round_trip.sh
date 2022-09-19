@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
 
-if [[ $# -ne 1 ]]
+if [[ $# -lt 1 ]]
 then
     echo "Usage: $(basename $0) DATABASE"
     exit 1
 fi
 
 db=$1
+shift
+if [[ $# -gt 0 ]]
+then
+    echo "Warning: Extra arguments: '$*' will be ignored"
+fi
 
 pwd=$(dirname $(readlink -f $0))
 table_defs=$pwd/src/table.tsv
