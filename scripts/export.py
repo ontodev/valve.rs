@@ -168,7 +168,7 @@ def export_data(cursor, is_sqlite, args):
                     select.append(
                         f"""
                         CASE
-                          WHEN "{column}" IS NOT NULL THEN "{column}"
+                          WHEN "{column}" IS NOT NULL THEN CAST("{column}" AS TEXT)
                           ELSE {else_stmt}
                           END AS "{column}"
                         """

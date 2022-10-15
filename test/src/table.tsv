@@ -7,3 +7,4 @@ prefix	test/src/prefix.tsv	Prefixes and source ontologies.
 rule	test/src/rule.tsv	More complex "when" rules	rule
 table	test/src/table.tsv	All of the user-editable tables in this project.	table
 foobar	test/src/ontology/foobar.tsv		
+numeric	test/src/ontology/numeric.tsv	Table with some numbers	
