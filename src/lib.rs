@@ -1132,6 +1132,7 @@ async fn make_inserts(
     };
 
     fn generate_sql(
+        config: &ConfigMap,
         table_name: &String,
         column_names: &Vec<String>,
         rows: &Vec<ResultRow>,
@@ -1145,7 +1146,13 @@ async fn make_inserts(
                 // Insert the value of the cell into the column unless it is invalid, in which case
                 // insert NULL:
                 if cell.nulltype == None && cell.valid {
-                    values.push(String::from(SQL_PARAM));
+                    let sql_type =
+                        get_sql_type_from_global_config(&config, &table_name, &column).unwrap();
+                    if sql_type.to_lowercase() == "integer" {
+                        values.push(format!("CAST({} AS INTEGER)", SQL_PARAM));
+                    } else {
+                        values.push(String::from(SQL_PARAM));
+                    }
                     params.push(cell.value.clone());
                 } else {
                     values.push(String::from("NULL"));
@@ -1236,9 +1243,9 @@ async fn make_inserts(
         .map(|v| v.as_str().unwrap().to_string())
         .collect::<Vec<_>>();
 
-    let (main_sql, main_params) = generate_sql(&table_name, &column_names, &main_rows);
+    let (main_sql, main_params) = generate_sql(&config, &table_name, &column_names, &main_rows);
     let (conflict_sql, conflict_params) =
-        generate_sql(&format!("{}_conflict", table_name), &column_names, &conflict_rows);
+        generate_sql(&config, &format!("{}_conflict", table_name), &column_names, &conflict_rows);
 
     Ok(((main_sql, main_params), (conflict_sql, conflict_params)))
 }
@@ -1431,6 +1438,31 @@ fn get_sql_type(dt_config: &ConfigMap, datatype: &String) -> Option<String> {
         dt_config.get(datatype).and_then(|d| d.get("parent")).and_then(|p| p.as_str()).unwrap();
 
     return get_sql_type(dt_config, &parent_datatype.to_string());
+}
+
+/// Given the global config map, a table name, and a column name, return the column's SQL type.
+fn get_sql_type_from_global_config(
+    global_config: &ConfigMap,
+    table: &String,
+    column: &String,
+) -> Option<String> {
+    let dt_config = global_config.get("datatype").and_then(|d| d.as_object()).unwrap();
+    let normal_table_name;
+    if let Some(s) = table.strip_suffix("_conflict") {
+        normal_table_name = String::from(s);
+    } else {
+        normal_table_name = table.to_string();
+    }
+    let dt = global_config
+        .get("table")
+        .and_then(|t| t.get(normal_table_name))
+        .and_then(|t| t.get("column"))
+        .and_then(|c| c.get(column))
+        .and_then(|c| c.get("datatype"))
+        .and_then(|d| d.as_str())
+        .and_then(|d| Some(d.to_string()))
+        .unwrap();
+    get_sql_type(&dt_config, &dt)
 }
 
 /// Given the config maps for tables and datatypes, and a table name, generate a SQL schema string,
@@ -1706,9 +1738,10 @@ fn create_table(
     return (statements, table_constraints);
 }
 
-/// Given a database connection pool, a table name, and a row, assign a new row number to the row
-/// and insert it to the database, then return the new row number.
+/// Given a global config map, a database connection pool, a table name, and a row, assign a new
+/// row number to the row and insert it to the database, then return the new row number.
 pub async fn insert_new_row(
+    global_config: &ConfigMap,
     pool: &AnyPool,
     table_name: &str,
     row: &ConfigMap,
@@ -1739,7 +1772,14 @@ pub async fn insert_new_row(
         if cell_valid {
             let value = cell.get("value").and_then(|v| v.as_str()).unwrap();
             cell_for_insert.remove("value");
-            insert_values.push(String::from(format!("{}", SQL_PARAM)));
+            let sql_type =
+                get_sql_type_from_global_config(&global_config, &table_name.to_string(), &column)
+                    .unwrap();
+            if sql_type.to_lowercase() == "integer" {
+                insert_values.push(format!("CAST({} AS INTEGER)", SQL_PARAM));
+            } else {
+                insert_values.push(String::from(SQL_PARAM));
+            }
             insert_params.push(String::from(value));
         } else {
             insert_values.push(String::from("NULL"));
@@ -1775,9 +1815,10 @@ pub async fn insert_new_row(
     Ok(new_row_number)
 }
 
-/// Given a database connection pool, a table name, a row, and the row number to update, update the
-/// corresponding row in the database with new values as specified by `row`.
+/// Given global config map, a database connection pool, a table name, a row, and the row number to
+/// update, update the corresponding row in the database with new values as specified by `row`.
 pub async fn update_row(
+    global_config: &ConfigMap,
     pool: &AnyPool,
     table_name: &str,
     row: &ConfigMap,
@@ -1792,7 +1833,15 @@ pub async fn update_row(
         if cell_valid {
             let value = cell.get("value").and_then(|v| v.as_str()).unwrap();
             cell_for_insert.remove("value");
-            assignments.push(format!(r#""{}" = {}"#, column, SQL_PARAM));
+
+            let sql_type =
+                get_sql_type_from_global_config(&global_config, &table_name.to_string(), &column)
+                    .unwrap();
+            if sql_type.to_lowercase() == "integer" {
+                assignments.push(format!(r#""{}" = CAST({} AS INTEGER)"#, column, SQL_PARAM));
+            } else {
+                assignments.push(format!(r#""{}" = {}"#, column, SQL_PARAM));
+            }
             params.push(String::from(value));
         } else {
             assignments.push(format!(r#""{}" = NULL"#, column));

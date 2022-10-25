@@ -36,7 +36,12 @@ def get_column_order_and_info_for_postgres(cursor, table):
     primary_keys = [row[0] for row in cursor]
 
     cursor.execute(
-        f"SELECT column_name FROM information_schema.columns WHERE table_name = '{table}'"
+        f"""
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_name = '{table}'
+        ORDER BY ordinal_position
+        """
     )
     if not primary_keys:
         sorted_columns = ["row_number"]
@@ -168,7 +173,7 @@ def export_data(cursor, is_sqlite, args):
                     select.append(
                         f"""
                         CASE
-                          WHEN "{column}" IS NOT NULL THEN "{column}"
+                          WHEN "{column}" IS NOT NULL THEN CAST("{column}" AS TEXT)
                           ELSE {else_stmt}
                           END AS "{column}"
                         """
