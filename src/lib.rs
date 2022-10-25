@@ -754,10 +754,6 @@ pub async fn configure_db(
         } else {
             panic!("'{}' is empty", path);
         }
-        // Get the first row of data (just to verify that there is data in the file):
-        if let None = iter.next() {
-            panic!("No rows in '{}'", path);
-        }
 
         // We use column_order to explicitly indicate the order in which the columns should appear
         // in the table, for later reference.
