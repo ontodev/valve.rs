@@ -6,6 +6,7 @@ datatype_condition	line		exclude(/\n/)		a datatype condition specification
 datatype_name	word		exclude(/\W/)		a datatype name			
 description	trimmed_text		match(/\S(.*\S)*/)		a brief description			
 empty	text		equals('')		the empty string	NULL	null	
+integer	nonspace		match(/-?\d+/)		a positive or negative integer	INTEGER		
 label	trimmed_line		match(/\S([^\n]*\S)*/)					
 line	text		exclude(/\n/)		a line of text			input
 nonspace	trimmed_line		exclude(/\s/)		text without whitespace			

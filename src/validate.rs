@@ -5,7 +5,10 @@ use sqlx::ValueRef;
 use sqlx::{query as sqlx_query, Row};
 use std::collections::HashMap;
 
-use crate::{ast::Expression, ColumnRule, CompiledCondition, ConfigMap, ParsedStructure};
+use crate::{
+    ast::Expression, local_sql_syntax, ColumnRule, CompiledCondition, ConfigMap, ParsedStructure,
+    SQL_PARAM,
+};
 
 /// Represents a particular cell in a particular row of data with vaildation results.
 #[derive(Clone, Debug)]
@@ -145,7 +148,7 @@ pub async fn validate_row(
     );
 
     for violation in violations.iter_mut() {
-        let vrow_number = violation.get("row_number").unwrap().as_u64().unwrap() as u32;
+        let vrow_number = violation.get("row_number").unwrap().as_i64().unwrap() as u32;
         if Some(vrow_number) == row_number || (row_number == None && Some(vrow_number) == Some(0)) {
             let column = violation.get("column").and_then(|c| c.as_str()).unwrap().to_string();
             let column_meta = violation.get_mut("meta").unwrap();
@@ -246,9 +249,12 @@ pub async fn get_matching_values(
                 Expression::Function(name, args) if name == "from" => {
                     let foreign_key = &args[0];
                     if let Expression::Field(ftable, fcolumn) = &**foreign_key {
-                        let sql = format!(
-                            r#"SELECT "{}" FROM "{}" WHERE "{}" LIKE ?"#,
-                            fcolumn, ftable, fcolumn
+                        let sql = local_sql_syntax(
+                            &pool,
+                            &format!(
+                                r#"SELECT "{}" FROM "{}" WHERE "{}" LIKE {}"#,
+                                fcolumn, ftable, fcolumn, SQL_PARAM
+                            ),
                         );
                         let rows = sqlx_query(&sql).bind(&matching_string).fetch_all(pool).await?;
                         for row in rows.iter() {
@@ -290,9 +296,12 @@ pub async fn get_matching_values(
 
                     let (tree_sql, mut params) =
                         with_tree_sql(tree, &table_name.to_string(), under_val, None);
-                    let sql = format!(
-                        r#"{} SELECT "{}" FROM "tree" WHERE "{}" LIKE ?"#,
-                        tree_sql, child_column, child_column
+                    let sql = local_sql_syntax(
+                        &pool,
+                        &format!(
+                            r#"{} SELECT "{}" FROM "tree" WHERE "{}" LIKE {}"#,
+                            tree_sql, child_column, child_column, SQL_PARAM
+                        ),
                     );
                     params.push(matching_string);
 
@@ -524,7 +533,7 @@ fn with_tree_sql(
     let mut params = vec![];
     let under_sql;
     if let Some(root) = root {
-        under_sql = format!(r#"WHERE "{}" = ?"#, child_col);
+        under_sql = format!(r#"WHERE "{}" = {}"#, child_col, SQL_PARAM);
         params.push(root.clone());
     } else {
         under_sql = String::new();
@@ -616,7 +625,10 @@ async fn validate_cell_foreign_constraints(
     for fkey in fkeys {
         let ftable = fkey.get("ftable").and_then(|t| t.as_str()).unwrap();
         let fcolumn = fkey.get("fcolumn").and_then(|c| c.as_str()).unwrap();
-        let fsql = format!(r#"SELECT 1 FROM "{}" WHERE "{}" = ? LIMIT 1"#, ftable, fcolumn);
+        let fsql = local_sql_syntax(
+            &pool,
+            &format!(r#"SELECT 1 FROM "{}" WHERE "{}" = {} LIMIT 1"#, ftable, fcolumn, SQL_PARAM),
+        );
         let frows = sqlx_query(&fsql).bind(&cell.value).fetch_all(pool).await?;
 
         if frows.is_empty() {
@@ -626,8 +638,13 @@ async fn validate_cell_foreign_constraints(
                 "level": "error",
             });
 
-            let fsql =
-                format!(r#"SELECT 1 FROM "{}_conflict" WHERE "{}" = ? LIMIT 1"#, ftable, fcolumn);
+            let fsql = local_sql_syntax(
+                &pool,
+                &format!(
+                    r#"SELECT 1 FROM "{}_conflict" WHERE "{}" = {} LIMIT 1"#,
+                    ftable, fcolumn, SQL_PARAM
+                ),
+            );
             let frows = sqlx_query(&fsql).bind(cell.value.clone()).fetch_all(pool).await?;
 
             if frows.is_empty() {
@@ -710,7 +727,10 @@ async fn validate_cell_trees(
             .map(|p| {
                 params.push(p.contents.get(child_col).unwrap().value.clone());
                 params.push(p.contents.get(parent_col).unwrap().value.clone());
-                format!(r#"SELECT ? AS "{}", ? AS "{}""#, child_col, parent_col)
+                format!(
+                    r#"SELECT {} AS "{}", {} AS "{}""#,
+                    SQL_PARAM, child_col, SQL_PARAM, parent_col
+                )
             })
             .collect::<Vec<_>>();
         let prev_selects = prev_selects.join(" UNION ");
@@ -736,7 +756,7 @@ async fn validate_cell_trees(
         let (tree_sql, mut tree_sql_params) =
             with_tree_sql(&tkey, &table_name_ext, Some(parent_val.clone()), Some(extra_clause));
         params.append(&mut tree_sql_params);
-        let sql = format!(r#"{} SELECT * FROM "tree""#, tree_sql);
+        let sql = local_sql_syntax(&pool, &format!(r#"{} SELECT * FROM "tree""#, tree_sql));
         let mut query = sqlx_query(&sql);
         for param in &params {
             query = query.bind(param);
@@ -1060,9 +1080,12 @@ async fn validate_cell_unique_constraints(
             query_table = table_name.to_string();
         }
 
-        let sql = format!(
-            r#"{} SELECT 1 FROM "{}" WHERE "{}" = ? LIMIT 1"#,
-            with_sql, query_table, column_name,
+        let sql = local_sql_syntax(
+            &pool,
+            &format!(
+                r#"{} SELECT 1 FROM "{}" WHERE "{}" = {} LIMIT 1"#,
+                with_sql, query_table, column_name, SQL_PARAM
+            ),
         );
         let query = sqlx_query(&sql).bind(&cell.value);
 
@@ -1110,7 +1133,7 @@ fn select_with_extra_row(extra_row: &ResultRow, table_name: &String) -> (String,
     for (i, (key, content)) in extra_row.contents.iter().enumerate() {
         // enumerate() begins from 0 but we need to begin at 1:
         let i = i + 1;
-        first_select.push_str(format!(r#"? AS "{}", "#, key).as_str());
+        first_select.push_str(format!(r#"{} AS "{}", "#, SQL_PARAM, key).as_str());
         params.push(content.value.to_string());
         first_select.push_str(format!(r#"NULL AS "{}_meta""#, key).as_str());
         second_select.push_str(format!(r#""{}", "{}_meta""#, key, key).as_str());
@@ -1211,46 +1234,49 @@ pub async fn validate_under(
         if !extra_clause.is_empty() {
             extra_clause = format!(", {}", &extra_clause[5..]);
         }
-        let sql = format!(
-            r#"{} {}
-               SELECT
-                "row_number",
-                "{}"."{}",
-                CASE
-                  WHEN "{}"."{}_meta" IS NOT NULL
-                    THEN JSON("{}"."{}_meta")
-                   ELSE JSON('{{"valid": true, "messages": []}}')
-                END AS "{}_meta",
-                CASE
-                  WHEN "{}"."{}" IN (
-                    SELECT "{}" FROM "{}"
-                  )
-                  THEN 1 ELSE 0
-                END AS "is_in_tree",
-                CASE
-                  WHEN "{}"."{}" IN (
-                    SELECT "{}" FROM "tree"
-                  )
-                  THEN 0 ELSE 1
-                END AS "is_under"
-              FROM "{}""#,
-            tree_sql,
-            extra_clause,
-            effective_table,
-            column,
-            effective_table,
-            column,
-            effective_table,
-            column,
-            column,
-            effective_table,
-            column,
-            tree_child,
-            effective_tree,
-            effective_table,
-            column,
-            tree_parent,
-            effective_table,
+        let sql = local_sql_syntax(
+            &pool,
+            &format!(
+                r#"{} {}
+                   SELECT
+                    "row_number",
+                    "{}"."{}",
+                    CASE
+                      WHEN "{}"."{}_meta" IS NOT NULL
+                        THEN JSON("{}"."{}_meta")
+                       ELSE JSON('{{"valid": true, "messages": []}}')
+                    END AS "{}_meta",
+                    CASE
+                      WHEN "{}"."{}" IN (
+                        SELECT "{}" FROM "{}"
+                      )
+                      THEN 1 ELSE 0
+                    END AS "is_in_tree",
+                    CASE
+                      WHEN "{}"."{}" IN (
+                        SELECT "{}" FROM "tree"
+                      )
+                      THEN 0 ELSE 1
+                    END AS "is_under"
+                  FROM "{}""#,
+                tree_sql,
+                extra_clause,
+                effective_table,
+                column,
+                effective_table,
+                column,
+                effective_table,
+                column,
+                column,
+                effective_table,
+                column,
+                tree_child,
+                effective_tree,
+                effective_table,
+                column,
+                tree_parent,
+                effective_table,
+            ),
         );
 
         let mut query = sqlx_query(&sql);
@@ -1259,7 +1285,7 @@ pub async fn validate_under(
         }
         let rows = query.fetch_all(pool).await?;
         for row in rows {
-            let meta: &str = row.get(format!(r#"{}_meta"#, column).as_str());
+            let meta: &str = row.get_unchecked(format!(r#"{}_meta"#, column).as_str());
             let meta: SerdeValue = serde_json::from_str(meta).unwrap();
             let meta = meta.as_object().unwrap();
             // If the value in the parent column is legitimately empty, then just skip this row:
@@ -1278,9 +1304,11 @@ pub async fn validate_under(
                 column_val = row.get(format!(r#"{}"#, column).as_str());
             }
 
-            let is_in_tree: f32 = row.get_unchecked("is_in_tree");
+            // We use i32 instead of i64 (which we use for row_number) here because, unlike row_number,
+            // which is a BIGINT, 0 and 1 are being interpreted as normal sized ints.
+            let is_in_tree: i32 = row.get("is_in_tree");
             let is_in_tree: u32 = is_in_tree as u32;
-            let is_under: f32 = row.get_unchecked("is_under");
+            let is_under: i32 = row.get("is_under");
             let is_under: u32 = is_under as u32;
             if is_in_tree == 0 {
                 let mut meta = meta.clone();
@@ -1295,7 +1323,7 @@ pub async fn validate_under(
                 meta.get_mut("messages")
                     .and_then(|m| m.as_array_mut())
                     .and_then(|a| Some(a.push(message)));
-                let row_number: f32 = row.get_unchecked("row_number");
+                let row_number: i64 = row.get("row_number");
                 let row_number = row_number as u32;
                 let result = json!({
                     "row_number": row_number,
@@ -1316,7 +1344,7 @@ pub async fn validate_under(
                 meta.get_mut("messages")
                     .and_then(|m| m.as_array_mut())
                     .and_then(|a| Some(a.push(message)));
-                let row_number: f32 = row.get_unchecked("row_number");
+                let row_number: i64 = row.get("row_number");
                 let row_number = row_number as u32;
                 let result = json!({
                     "row_number": row_number,
@@ -1371,30 +1399,33 @@ pub async fn validate_tree_foreign_keys(
             effective_table_name = table_name.clone();
         }
 
-        let sql = format!(
-            r#"{}
-               SELECT
-                 t1."row_number", t1."{}",
-                 CASE
-                   WHEN t1."{}_meta" IS NOT NULL
-                     THEN JSON(t1."{}_meta")
-                   ELSE JSON('{{"valid": true, "messages": []}}')
-                 END AS "{}_meta"
-               FROM "{}" t1
-               WHERE NOT EXISTS (
-                 SELECT 1
-                 FROM "{}" t2
-                 WHERE t2."{}" = t1."{}"
-               )"#,
-            with_clause,
-            parent_col,
-            parent_col,
-            parent_col,
-            parent_col,
-            effective_table_name,
-            effective_table_name,
-            child_col,
-            parent_col
+        let sql = local_sql_syntax(
+            &pool,
+            &format!(
+                r#"{}
+                   SELECT
+                     t1."row_number", t1."{}",
+                     CASE
+                       WHEN t1."{}_meta" IS NOT NULL
+                         THEN JSON(t1."{}_meta")
+                       ELSE JSON('{{"valid": true, "messages": []}}')
+                     END AS "{}_meta"
+                   FROM "{}" t1
+                   WHERE NOT EXISTS (
+                     SELECT 1
+                     FROM "{}" t2
+                     WHERE t2."{}" = t1."{}"
+                   )"#,
+                with_clause,
+                parent_col,
+                parent_col,
+                parent_col,
+                parent_col,
+                effective_table_name,
+                effective_table_name,
+                child_col,
+                parent_col
+            ),
         );
 
         let mut query = sqlx_query(&sql);
@@ -1403,7 +1434,7 @@ pub async fn validate_tree_foreign_keys(
         }
         let rows = query.fetch_all(pool).await?;
         for row in rows {
-            let meta: &str = row.try_get(format!(r#"{}_meta"#, parent_col).as_str()).unwrap();
+            let meta: &str = row.get_unchecked(format!(r#"{}_meta"#, parent_col).as_str());
             let meta: SerdeValue = serde_json::from_str(meta).unwrap();
             let meta = meta.as_object().unwrap();
             // If the value in the parent column is legitimately empty, then just skip this row:
@@ -1420,8 +1451,13 @@ pub async fn validate_tree_foreign_keys(
                 parent_val = row.get(format!(r#"{}"#, parent_col).as_str());
             } else {
                 parent_val = meta.get("value").and_then(|v| v.as_str()).unwrap();
-                let sql =
-                    format!(r#"SELECT 1 FROM "{}" WHERE "{}" = ? LIMIT 1"#, table_name, child_col);
+                let sql = local_sql_syntax(
+                    &pool,
+                    &format!(
+                        r#"SELECT 1 FROM "{}" WHERE "{}" = {} LIMIT 1"#,
+                        table_name, child_col, SQL_PARAM
+                    ),
+                );
                 let query = sqlx_query(&sql).bind(parent_val);
                 let rows = query.fetch_all(pool).await?;
                 if rows.len() > 0 {
@@ -1442,7 +1478,7 @@ pub async fn validate_tree_foreign_keys(
                 .and_then(|m| m.as_array_mut())
                 .and_then(|a| Some(a.push(message)));
 
-            let row_number: f32 = row.get_unchecked("row_number");
+            let row_number: i64 = row.get("row_number");
             let row_number = row_number as u32;
             let result = json!({
                 "row_number": row_number,

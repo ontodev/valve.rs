@@ -35,3 +35,5 @@ foobar	foo	empty	text
 foobar	bar	empty	text		
 foreign_table	foreign_column		text	primary	
 foreign_table	other_foreign_column		text	unique	
+numeric	foo		word	primary	
+numeric	bar		integer		
