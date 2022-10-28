@@ -809,7 +809,7 @@ pub async fn configure_db(
             drop_view_sql.push_str(" CASCADE");
         }
         let create_view_sql = format!(
-            r#"CREATE VIEW "{t}_view" AS SELECT * FROM "{t}" UNION SELECT * FROM "{t}_conflict""#,
+            r#"CREATE VIEW "{t}_view" AS SELECT * FROM "{t}" UNION ALL SELECT * FROM "{t}_conflict""#,
             t = table_name,
         );
         table_statements.push(drop_view_sql);

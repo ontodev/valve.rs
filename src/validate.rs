@@ -733,7 +733,7 @@ async fn validate_cell_trees(
                 )
             })
             .collect::<Vec<_>>();
-        let prev_selects = prev_selects.join(" UNION ");
+        let prev_selects = prev_selects.join(" UNION ALL ");
 
         let table_name_ext;
         let extra_clause;
@@ -746,7 +746,7 @@ async fn validate_cell_trees(
                 r#"WITH "{}" AS (
                        SELECT "{}", "{}"
                            FROM "{}"
-                           UNION
+                           UNION ALL
                        {}
                    )"#,
                 table_name_ext, child_col, parent_col, table_name, prev_selects
@@ -1145,7 +1145,10 @@ fn select_with_extra_row(extra_row: &ResultRow, table_name: &String) -> (String,
         }
     }
 
-    (format!(r#"WITH "{}_ext" AS ({} UNION {})"#, table_name, first_select, second_select), params)
+    (
+        format!(r#"WITH "{}_ext" AS ({} UNION ALL {})"#, table_name, first_select, second_select),
+        params,
+    )
 }
 
 /// Given a config map, a db connection pool, a table name, and an optional extra row, validate
