@@ -733,7 +733,7 @@ async fn validate_cell_trees(
                 )
             })
             .collect::<Vec<_>>();
-        let prev_selects = prev_selects.join(" UNION ");
+        let prev_selects = prev_selects.join(" UNION ALL ");
 
         let table_name_ext;
         let extra_clause;
@@ -746,7 +746,7 @@ async fn validate_cell_trees(
                 r#"WITH "{}" AS (
                        SELECT "{}", "{}"
                            FROM "{}"
-                           UNION
+                           UNION ALL
                        {}
                    )"#,
                 table_name_ext, child_col, parent_col, table_name, prev_selects
@@ -1065,7 +1065,7 @@ async fn validate_cell_unique_constraints(
             with_sql = format!(
                 r#"WITH "{}" AS (
                        SELECT * FROM "{}"
-                       WHERE "row_number" IS NOT {}
+                       WHERE "row_number" != {}
                    ) "#,
                 except_table,
                 table_name,
@@ -1145,7 +1145,10 @@ fn select_with_extra_row(extra_row: &ResultRow, table_name: &String) -> (String,
         }
     }
 
-    (format!(r#"WITH "{}_ext" AS ({} UNION {})"#, table_name, first_select, second_select), params)
+    (
+        format!(r#"WITH "{}_ext" AS ({} UNION ALL {})"#, table_name, first_select, second_select),
+        params,
+    )
 }
 
 /// Given a config map, a db connection pool, a table name, and an optional extra row, validate
@@ -1478,7 +1481,14 @@ pub async fn validate_tree_foreign_keys(
                 .and_then(|m| m.as_array_mut())
                 .and_then(|a| Some(a.push(message)));
 
-            let row_number: i64 = row.get("row_number");
+            let raw_row_number = row.try_get_raw("row_number").unwrap();
+            let row_number: i64;
+            if raw_row_number.is_null() {
+                row_number = 0;
+            } else {
+                row_number = row.get("row_number");
+            }
+
             let row_number = row_number as u32;
             let result = json!({
                 "row_number": row_number,
