@@ -1065,7 +1065,7 @@ async fn validate_cell_unique_constraints(
             with_sql = format!(
                 r#"WITH "{}" AS (
                        SELECT * FROM "{}"
-                       WHERE "row_number" IS NOT {}
+                       WHERE "row_number" != {}
                    ) "#,
                 except_table,
                 table_name,
@@ -1478,7 +1478,14 @@ pub async fn validate_tree_foreign_keys(
                 .and_then(|m| m.as_array_mut())
                 .and_then(|a| Some(a.push(message)));
 
-            let row_number: i64 = row.get("row_number");
+            let raw_row_number = row.try_get_raw("row_number").unwrap();
+            let row_number: i64;
+            if raw_row_number.is_null() {
+                row_number = 0;
+            } else {
+                row_number = row.get("row_number");
+            }
+
             let row_number = row_number as u32;
             let result = json!({
                 "row_number": row_number,

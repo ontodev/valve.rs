@@ -1750,7 +1750,7 @@ pub async fn insert_new_row(
     let query = sqlx_query(&sql);
     let result_row = query.fetch_one(pool).await?;
     let result = result_row.try_get_raw("row_number").unwrap();
-    let new_row_number;
+    let new_row_number: i64;
     if result.is_null() {
         new_row_number = 1;
     } else {

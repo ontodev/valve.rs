@@ -20,6 +20,8 @@ output_dir=$pwd/output
 
 num_tables=$(expr $(cat $table_defs | wc -l) - 1)
 table_paths=$(tail -$num_tables $table_defs | cut -f 2)
+
+ret_value=0
 for table_path in $table_paths
 do
     table_path=${table_path#test/}
@@ -28,4 +30,7 @@ do
     table=${table_file%.*}
     ${export_script} data --nosort $db $output_dir $table
     diff --strip-trailing-cr -q ${table_path} $output_dir/${table}.tsv
+    ret_value=$(expr $ret_value + $?)
 done
+
+exit $ret_value
