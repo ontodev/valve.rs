@@ -1,0 +1,12 @@
+source	id	label	type	parent
+MOB	MOB:0000013	   mobecular entity	owl:Class	material entity
+ZOB	ZOB:0000013	bar	owl:Class	car
+JOB	JOB:0000013	car	owl:Class	foo
+SOB	SOB:0000013	foo	owl:Class	bar
+YOB	YOB:0000013	mar	owl:Class	jafar
+COB	BFO:0000040	material entity	owl:Class	owl:Thing
+CO B	COB:0000013	molecular dentity	owl:Class	material entity
+COB	COB:0000013	molecular entity	owl:Class	material entity
+COB	VO:0000001	vaccine	owl:Class	material entity
+BFOBBER	BFO:0000027	bazaar	owl:Class	barrie
+BOB	VO:0000001	vaccine	owl:Class	material entity
