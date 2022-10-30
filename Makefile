@@ -52,9 +52,9 @@ pg_test: valve test/src/table.tsv | test/output
 
 api_test: valve test/src/table.tsv build/valve.db test/insert_update.sh | test/output
 	@echo "Testing API functions on sqlite and postgresql ..."
-	$< $(word 2,$^) postgresql:///valve_postgres > /dev/null
-	$< --api_test $(word 2,$^) postgresql:///valve_postgres
-	$< --api_test $(word 2,$^) $(word 3,$^)
+	./$< $(word 2,$^) postgresql:///valve_postgres > /dev/null
+	./$< --api_test $(word 2,$^) postgresql:///valve_postgres
+	./$< --api_test $(word 2,$^) $(word 3,$^)
 	$(word 4,$^) postgresql:///valve_postgres
 	$(word 4,$^) $(word 3,$^)
 	@echo "Test succeeded!"
