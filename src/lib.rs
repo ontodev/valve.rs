@@ -70,10 +70,21 @@ static MULTI_THREADED: bool = true;
 /// Represents a structure such as those found in the `structure` column of the `column` table in
 /// both its parsed format (i.e., as an [Expression](ast/enum.Expression.html)) as well as in its
 /// original format (i.e., as a plain String).
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ParsedStructure {
     original: String,
     parsed: Expression,
+}
+
+// TODO: It would be better to implement this as std::fmt::Display instead of Debug.
+impl std::fmt::Debug for ParsedStructure {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(
+            f,
+            "{{\"parsed_structure\": {{\"original\": \"{}\", \"parsed\": {:?}}}}}",
+            &self.original, &self.parsed
+        )
+    }
 }
 
 /// Represents a condition in three different ways: (i) in String format, (ii) as a parsed
@@ -85,12 +96,18 @@ pub struct CompiledCondition {
     compiled: Arc<dyn Fn(&str) -> bool + Sync + Send>,
 }
 
+// TODO: It would be better to implement this as std::fmt::Display instead of Debug.
 impl std::fmt::Debug for CompiledCondition {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        f.debug_struct("CompiledCondition")
-            .field("original", &self.original)
-            .field("parsed", &self.parsed)
-            .finish()
+        write!(
+            f,
+            "{{\"compiled_condition\": {{\"original\": \"{}\", \"parsed\": {:?}}}}}",
+            &self.original, &self.parsed
+        )
+        //f.debug_struct("")
+        //    .field("\"original\"", &self.original)
+        //    .field("\"parsed\"", &self.parsed)
+        //    .finish()
     }
 }
 
@@ -102,9 +119,11 @@ pub struct ColumnRule {
     then: CompiledCondition,
 }
 
+// TODO: It would be better to implement this as std::fmt::Display instead of Debug.
 impl std::fmt::Debug for ColumnRule {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        f.debug_struct("ColumnRule").field("when", &self.when).field("then", &self.then).finish()
+        //f.debug_struct("").field("\"when\"", &self.when).field("\"then\"", &self.then).finish()
+        write!(f, "{{\"column_rule\": {{\"when\": {:?}, \"then\": {:?}}}}}", &self.when, &self.then)
     }
 }
 
@@ -152,7 +171,7 @@ fn local_sql_syntax(pool: &AnyPool, sql: &String) -> String {
 /// Given a path, read a TSV file and return a vector of rows represented as ConfigMaps.
 /// Note: Use this function to read "small" TSVs only. In particular, use this for the special
 /// configuration tables.
-fn read_tsv_into_vector(path: &String) -> Vec<ConfigMap> {
+fn read_tsv_into_vector(path: &str) -> Vec<ConfigMap> {
     let mut rdr = csv::ReaderBuilder::new().delimiter(b'\t').from_reader(
         File::open(path).unwrap_or_else(|err| {
             panic!("Unable to open '{}': {}", path, err);
@@ -320,7 +339,7 @@ fn compile_condition(
 
 /// Given the path to a table.tsv file, load and check the 'table', 'column', and 'datatype'
 /// tables, and return ConfigMaps corresponding to specials, tables, datatypes, and rules.
-pub fn read_config_files(path: &String) -> (ConfigMap, ConfigMap, ConfigMap, ConfigMap) {
+pub fn read_config_files(path: &str) -> (ConfigMap, ConfigMap, ConfigMap, ConfigMap) {
     let special_table_types = json!({
         "table": {"required": true},
         "column": {"required": true},
@@ -790,7 +809,7 @@ pub async fn configure_db(
         let mut table_statements = vec![];
         for table in vec![table_name.to_string(), format!("{}_conflict", table_name)] {
             let (mut statements, table_constraints) =
-                create_table(tables_config, datatypes_config, parser, &table, &pool);
+                create_table_statement(tables_config, datatypes_config, parser, &table, &pool);
             table_statements.append(&mut statements);
             if !table.ends_with("_conflict") {
                 for constraint_type in vec!["foreign", "unique", "primary", "tree", "under"] {
@@ -853,9 +872,13 @@ pub async fn load_db(
     pool: &AnyPool,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
-    table_list: Vec<String>,
     write_sql_to_stdout: bool,
 ) -> Result<(), sqlx::Error> {
+    let mut table_list = vec![];
+    for table in config.get("sorted_table_list").and_then(|l| l.as_array()).unwrap() {
+        table_list.push(table.as_str().and_then(|s| Some(s.to_string())).unwrap());
+    }
+    let table_list = table_list;
     for table_name in table_list {
         let path = String::from(
             config
@@ -1363,8 +1386,8 @@ fn verify_table_deps_and_sort(table_list: &Vec<String>, constraints: &ConfigMap)
     }
 
     match get_cycles(&dependency_graph) {
-        Ok(table_list) => {
-            return table_list;
+        Ok(sorted_table_list) => {
+            return sorted_table_list;
         }
         Err(cycles) => {
             let mut message = String::new();
@@ -1468,7 +1491,7 @@ fn get_sql_type_from_global_config(
 /// Given the config maps for tables and datatypes, and a table name, generate a SQL schema string,
 /// including each column C and its matching C_meta column, then return the schema string as well as
 /// a list of the table's constraints.
-fn create_table(
+fn create_table_statement(
     tables_config: &mut ConfigMap,
     datatypes_config: &mut ConfigMap,
     parser: &StartParser,
@@ -1906,7 +1929,7 @@ pub async fn configure_and_or_load(
     }
 
     let pool = AnyPoolOptions::new().max_connections(5).connect_with(connection_options).await?;
-    if pool.any_kind() == AnyKind::Sqlite {
+    if load && pool.any_kind() == AnyKind::Sqlite {
         sqlx_query("PRAGMA foreign_keys = ON").execute(&pool).await?;
     }
 
@@ -1935,6 +1958,12 @@ pub async fn configure_and_or_load(
     config.insert(String::from("datatype"), SerdeValue::Object(datatypes_config.clone()));
     config.insert(String::from("rule"), SerdeValue::Object(rules_config.clone()));
     config.insert(String::from("constraints"), SerdeValue::Object(constraints_config.clone()));
+    let mut sorted_table_serdevalue_list: Vec<SerdeValue> = vec![];
+    for table in &sorted_table_list {
+        sorted_table_serdevalue_list.push(SerdeValue::String(table.to_string()));
+    }
+    config
+        .insert(String::from("sorted_table_list"), SerdeValue::Array(sorted_table_serdevalue_list));
 
     let compiled_datatype_conditions = get_compiled_datatype_conditions(&config, &parser);
     let compiled_rule_conditions =
@@ -1946,7 +1975,6 @@ pub async fn configure_and_or_load(
             &pool,
             &compiled_datatype_conditions,
             &compiled_rule_conditions,
-            sorted_table_list,
             write_sql_to_stdout,
         )
         .await?;
