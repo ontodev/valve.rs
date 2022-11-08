@@ -32,10 +32,12 @@ test/output:
 
 test: sqlite_test pg_test api_test
 
+tables_to_test = column datatype rule table table1 table2 table3 table4 table5
+
 sqlite_test: build/valve.db | test/output
 	@echo "Testing valve on sqlite ..."
 	test/round_trip.sh $<
-	scripts/export.py messages build/valve.db test/output/ column datatype prefix rule table foobar foreign_table import numeric
+	scripts/export.py messages build/valve.db test/output/ $(tables_to_test)
 	diff --strip-trailing-cr -q test/expected/messages.tsv test/output/messages.tsv
 	@echo "Test succeeded!"
 
@@ -46,7 +48,7 @@ pg_test: valve test/src/table.tsv | test/output
 	# It also requires that `psycopg2` has been installed.
 	./$^ postgresql:///valve_postgres > /dev/null
 	test/round_trip.sh postgresql:///valve_postgres
-	scripts/export.py messages postgresql:///valve_postgres test/output/ column datatype prefix rule table foobar foreign_table import numeric
+	scripts/export.py messages postgresql:///valve_postgres test/output/ $(tables_to_test)
 	diff --strip-trailing-cr -q test/expected/messages.tsv test/output/messages.tsv
 	@echo "Test succeeded!"
 

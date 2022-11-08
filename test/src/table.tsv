@@ -3,8 +3,8 @@ column	test/src/column.tsv	Columns for all of the tables.	column
 datatype	test/src/datatype.tsv	Datatypes for all of the columns	datatype
 rule	test/src/rule.tsv	More complex "when" rules	rule
 table	test/src/table.tsv	All of the user-editable tables in this project.	table
-foobar	test/src/ontology/foobar.tsv		
-numeric	test/src/ontology/numeric.tsv	Table with some numbers	
-foreign_table	test/src/ontology/foreign_table.tsv		
-import	test/src/ontology/import.tsv	Terms imported from other ontologies	
-prefix	test/src/ontology/prefix.tsv	Prefixes and source ontologies.	
+table1	test/src/ontology/table1.tsv	The first table	
+table2	test/src/ontology/table2.tsv		
+table3	test/src/ontology/table3.tsv	Terms imported from other ontologies	
+table4	test/src/ontology/table4.tsv		
+table5	test/src/ontology/table5.tsv	Table with some numbers	

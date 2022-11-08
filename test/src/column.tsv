@@ -19,21 +19,21 @@ rule	then column		column_name
 rule	then condition		datatype_condition		
 rule	level		word		
 rule	description	empty	description		
-prefix	prefix		prefix	primary	
-prefix	base		IRI	unique	
-prefix	ontology IRI	empty	IRI		
-prefix	version IRI	empty	IRI		
-import	source		prefix	from(prefix.prefix)	
-import	id		CURIE	unique	
-import	label		label	primary	
-import	parent	empty	label	tree(label)	
-import	related	empty	trimmed_line		
-foobar	child		trimmed_line	from(foreign_table.other_foreign_column)	
-foobar	parent	empty	trimmed_line	tree(child)	
-foobar	xyzzy	empty	trimmed_line	under(foobar.child, d)	
-foobar	foo	empty	text		
-foobar	bar	empty	text		
-foreign_table	foreign_column		text	primary	
-foreign_table	other_foreign_column		text	unique	
-numeric	foo		word	primary	
-numeric	bar		integer		
+table1	prefix		prefix	primary	
+table1	base		IRI	unique	
+table1	ontology IRI	empty	IRI		
+table1	version IRI	empty	IRI		
+table2	child		trimmed_line	from(table4.other_foreign_column)	
+table2	parent	empty	trimmed_line	tree(child)	
+table2	xyzzy	empty	trimmed_line	under(table2.child, d)	
+table2	foo	empty	text		
+table2	bar	empty	text		
+table3	source		prefix	from(table1.prefix)	
+table3	id		CURIE	unique	
+table3	label		label	primary	
+table3	parent	empty	label	tree(label)	
+table3	related	empty	trimmed_line		
+table4	foreign_column		text	primary	
+table4	other_foreign_column		text	unique	
+table5	foo		word	primary	
+table5	bar		integer		

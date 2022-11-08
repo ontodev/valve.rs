@@ -54,7 +54,7 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         &compiled_datatype_conditions,
         &parsed_structure_conditions,
         &pool,
-        "foobar",
+        "table2",
         "child",
         None,
     )
@@ -95,13 +95,13 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         &compiled_datatype_conditions,
         &compiled_rule_conditions,
         &pool,
-        "foobar",
+        "table2",
         row.as_object().unwrap(),
         true,
         Some(1),
     )
     .await?;
-    update_row(&config, &pool, "foobar", &result_row, 1).await?;
+    update_row(&config, &pool, "table2", &result_row, 1).await?;
 
     let row = json!({
         "id": {"messages": [], "valid": true, "value": "BFO:0000027"},
@@ -122,13 +122,13 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         &compiled_datatype_conditions,
         &compiled_rule_conditions,
         &pool,
-        "import",
+        "table3",
         row.as_object().unwrap(),
         false,
         None,
     )
     .await?;
-    let _new_row_num = insert_new_row(&config, &pool, "import", &result_row).await?;
+    let _new_row_num = insert_new_row(&config, &pool, "table3", &result_row).await?;
 
     Ok(())
 }

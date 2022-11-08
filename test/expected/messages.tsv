@@ -1,35 +1,35 @@
 table	row	column	level	rule_id	message	value
-prefix	rdf	prefix	error	key:primary	Values of prefix must be unique	rdf
-prefix	rdf	base	error	key:unique	Values of base must be unique	http://www.w3.org/1999/02/22-rdf-syntax-ns#
-prefix	VO	prefix	error	key:primary	Values of prefix must be unique	VO
-prefix	VO	base	error	key:unique	Values of base must be unique	http://purl.obolibrary.org/obo/VO_
 table	rule	type	error	datatype:table_type	type should be a table type	rule
-foobar	1	foo	error	rule:foo-2	bar cannot be null if foo is not null	x
-foobar	1	foo	error	rule:foo-4	bar must be 'y' or 'z' if foo is 'x'	x
-foobar	2	xyzzy	error	under:not-under	Value 'e' of column xyzzy is not under 'd'	e
-foobar	2	foo	error	rule:foo-1	bar must be null whenever foo is null	
-foobar	3	xyzzy	error	under:not-under	Value 'f' of column xyzzy is not under 'd'	f
-foobar	4	xyzzy	error	under:not-under	Value 'g' of column xyzzy is not under 'd'	g
-foobar	4	foo	error	rule:foo-4	bar must be 'y' or 'z' if foo is 'x'	x
-foobar	5	xyzzy	error	under:not-under	Value 'h' of column xyzzy is not under 'd'	h
-foobar	7	xyzzy	error	under:not-in-tree	Value z of column xyzzy is not in foobar.child	z
-foobar	9	child	error	key:foreign	Value i of column child exists only in foreign_table_conflict.other_foreign_column	i
-foreign_table	a	foreign_column	error	key:primary	Values of foreign_column must be unique	a
-import	   mobecular entity	source	error	key:foreign	Value MOB of column source is not in prefix.prefix	MOB
-import	   mobecular entity	label	error	datatype:trimmed_line	label should be a line of text that does not begin or end with whitespace	   mobecular entity
-import	vaccine	source	error	key:foreign	Value BOB of column source is not in prefix.prefix	BOB
-import	vaccine	id	error	key:unique	Values of id must be unique	VO:0000001
-import	vaccine	label	error	key:primary	Values of label must be unique	vaccine
-import	vaccine	label	error	tree:child-unique	Values of label must be unique	vaccine
-import	bar	source	error	key:foreign	Value ZOB of column source is not in prefix.prefix	ZOB
-import	car	source	error	key:foreign	Value JOB of column source is not in prefix.prefix	JOB
-import	foo	source	error	key:foreign	Value SOB of column source is not in prefix.prefix	SOB
-import	foo	parent	error	tree:cycle	Cyclic dependency: (label: bar, parent: car), (label: car, parent: foo), (label: foo, parent: bar) for tree(parent) of label	bar
-import	mar	source	error	key:foreign	Value YOB of column source is not in prefix.prefix	YOB
-import	mar	parent	error	tree:foreign	Value jafar of column parent is not in column label	jafar
-import	material entity	parent	error	tree:foreign	Value owl:Thing of column parent is not in column label	owl:Thing
-import	molecular dentity	source	error	datatype:nonspace	source should be text without whitespace	CO B
-import	molecular dentity	source	error	datatype:word	source should be a single word: letters, numbers, underscore	CO B
-import	molecular dentity	source	error	datatype:prefix	source should be a prefix for a CURIE	CO B
-import	molecular dentity	source	error	key:foreign	Value CO B of column source is not in prefix.prefix	CO B
-import	molecular entity	id	error	key:unique	Values of id must be unique	COB:0000013
+table1	rdf	prefix	error	key:primary	Values of prefix must be unique	rdf
+table1	rdf	base	error	key:unique	Values of base must be unique	http://www.w3.org/1999/02/22-rdf-syntax-ns#
+table1	VO	prefix	error	key:primary	Values of prefix must be unique	VO
+table1	VO	base	error	key:unique	Values of base must be unique	http://purl.obolibrary.org/obo/VO_
+table2	1	foo	error	rule:foo-2	bar cannot be null if foo is not null	x
+table2	1	foo	error	rule:foo-4	bar must be 'y' or 'z' if foo is 'x'	x
+table2	2	xyzzy	error	under:not-under	Value 'e' of column xyzzy is not under 'd'	e
+table2	2	foo	error	rule:foo-1	bar must be null whenever foo is null	
+table2	3	xyzzy	error	under:not-under	Value 'f' of column xyzzy is not under 'd'	f
+table2	4	xyzzy	error	under:not-under	Value 'g' of column xyzzy is not under 'd'	g
+table2	4	foo	error	rule:foo-4	bar must be 'y' or 'z' if foo is 'x'	x
+table2	5	xyzzy	error	under:not-under	Value 'h' of column xyzzy is not under 'd'	h
+table2	7	xyzzy	error	under:not-in-tree	Value z of column xyzzy is not in table2.child	z
+table2	9	child	error	key:foreign	Value i of column child exists only in table4_conflict.other_foreign_column	i
+table3	   mobecular entity	source	error	key:foreign	Value MOB of column source is not in table1.prefix	MOB
+table3	   mobecular entity	label	error	datatype:trimmed_line	label should be a line of text that does not begin or end with whitespace	   mobecular entity
+table3	vaccine	source	error	key:foreign	Value BOB of column source is not in table1.prefix	BOB
+table3	vaccine	id	error	key:unique	Values of id must be unique	VO:0000001
+table3	vaccine	label	error	key:primary	Values of label must be unique	vaccine
+table3	vaccine	label	error	tree:child-unique	Values of label must be unique	vaccine
+table3	bar	source	error	key:foreign	Value ZOB of column source is not in table1.prefix	ZOB
+table3	car	source	error	key:foreign	Value JOB of column source is not in table1.prefix	JOB
+table3	foo	source	error	key:foreign	Value SOB of column source is not in table1.prefix	SOB
+table3	foo	parent	error	tree:cycle	Cyclic dependency: (label: bar, parent: car), (label: car, parent: foo), (label: foo, parent: bar) for tree(parent) of label	bar
+table3	mar	source	error	key:foreign	Value YOB of column source is not in table1.prefix	YOB
+table3	mar	parent	error	tree:foreign	Value jafar of column parent is not in column label	jafar
+table3	material entity	parent	error	tree:foreign	Value owl:Thing of column parent is not in column label	owl:Thing
+table3	molecular dentity	source	error	datatype:nonspace	source should be text without whitespace	CO B
+table3	molecular dentity	source	error	datatype:word	source should be a single word: letters, numbers, underscore	CO B
+table3	molecular dentity	source	error	datatype:prefix	source should be a prefix for a CURIE	CO B
+table3	molecular dentity	source	error	key:foreign	Value CO B of column source is not in table1.prefix	CO B
+table3	molecular entity	id	error	key:unique	Values of id must be unique	COB:0000013
+table4	a	foreign_column	error	key:primary	Values of foreign_column must be unique	a

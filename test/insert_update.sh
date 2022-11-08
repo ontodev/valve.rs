@@ -19,7 +19,7 @@ output_dir=$pwd/output
 expected_dir=$pwd/expected
 
 ret_value=0
-for table_path in import.tsv foobar.tsv
+for table_path in table3.tsv table2.tsv
 do
     table_path=${table_path#test/}
     table_path=$pwd/output/$table_path

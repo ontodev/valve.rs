@@ -1,5 +1,5 @@
 table	when column	when condition	then column	then condition	level	description
-foobar	foo	null	bar	null	error	bar must be null whenever foo is null
-foobar	foo	not null	bar	not null	error	bar cannot be null if foo is not null
-foobar	foo	IRI	bar	word	error	bar must be a word if foo is an IRI
-foobar	foo	equals('x')	bar	in('y', 'z')	error	bar must be 'y' or 'z' if foo is 'x'
+table2	foo	null	bar	null	error	bar must be null whenever foo is null
+table2	foo	not null	bar	not null	error	bar cannot be null if foo is not null
+table2	foo	IRI	bar	word	error	bar must be a word if foo is an IRI
+table2	foo	equals('x')	bar	in('y', 'z')	error	bar must be 'y' or 'z' if foo is 'x'
