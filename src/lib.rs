@@ -1466,8 +1466,8 @@ fn get_sql_type(dt_config: &ConfigMap, datatype: &String) -> Option<String> {
 /// Given the global config map, a table name, and a column name, return the column's SQL type.
 fn get_sql_type_from_global_config(
     global_config: &ConfigMap,
-    table: &String,
-    column: &String,
+    table: &str,
+    column: &str,
 ) -> Option<String> {
     let dt_config = global_config.get("datatype").and_then(|d| d.as_object()).unwrap();
     let normal_table_name;

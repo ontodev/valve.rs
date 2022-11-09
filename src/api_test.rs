@@ -80,7 +80,7 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         "child": {"messages": [], "valid": true, "value": "b"},
         "parent": {"messages": [], "valid": true, "value": "f"},
         "xyzzy": {"messages": [], "valid": true, "value": "w"},
-        "foo": {"messages": [], "valid": true, "value": "A"},
+        "foo": {"messages": [], "valid": true, "value": 1},
         "bar": {
             "messages": [
                 {"level": "error", "message": "An unrelated error", "rule": "custom:unrelated"}

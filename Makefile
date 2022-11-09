@@ -52,13 +52,19 @@ pg_test: valve test/src/table.tsv | test/output
 	diff --strip-trailing-cr -q test/expected/messages.tsv test/output/messages.tsv
 	@echo "Test succeeded!"
 
-api_test: valve test/src/table.tsv build/valve.db test/insert_update.sh | test/output
-	@echo "Testing API functions on sqlite and postgresql ..."
+api_test: sqlite_api_test pg_api_test
+
+sqlite_api_test: valve test/src/table.tsv build/valve.db test/insert_update.sh | test/output
+	@echo "Testing API functions on sqlite ..."
+	./$< --api_test $(word 2,$^) $(word 3,$^)
+	$(word 4,$^) $(word 3,$^)
+	@echo "Test succeeded!"
+
+pg_api_test: valve test/src/table.tsv test/insert_update.sh | test/output
+	@echo "Testing API functions on postgresql ..."
 	./$< $(word 2,$^) postgresql:///valve_postgres > /dev/null
 	./$< --api_test $(word 2,$^) postgresql:///valve_postgres
-	./$< --api_test $(word 2,$^) $(word 3,$^)
-	$(word 4,$^) postgresql:///valve_postgres
-	$(word 4,$^) $(word 3,$^)
+	$(word 3,$^) postgresql:///valve_postgres
 	@echo "Test succeeded!"
 
 clean:

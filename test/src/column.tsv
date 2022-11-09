@@ -26,7 +26,7 @@ table1	version IRI	empty	IRI
 table2	child		trimmed_line	from(table4.other_foreign_column)	
 table2	parent	empty	trimmed_line	tree(child)	
 table2	xyzzy	empty	trimmed_line	under(table2.child, d)	
-table2	foo	empty	text		
+table2	foo	empty	integer	from(table4.numeric_foreign_column)	
 table2	bar	empty	text		
 table3	source		prefix	from(table1.prefix)	
 table3	id		CURIE	unique	
@@ -35,5 +35,6 @@ table3	parent	empty	label	tree(label)
 table3	related	empty	trimmed_line		
 table4	foreign_column		text	primary	
 table4	other_foreign_column		text	unique	
+table4	numeric_foreign_column		integer	unique	
 table5	foo		word	primary	
 table5	bar		integer		

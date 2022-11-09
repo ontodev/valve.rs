@@ -6,8 +6,8 @@ use sqlx::{query as sqlx_query, Row};
 use std::collections::HashMap;
 
 use crate::{
-    ast::Expression, local_sql_syntax, ColumnRule, CompiledCondition, ConfigMap, ParsedStructure,
-    SQL_PARAM,
+    ast::Expression, get_sql_type_from_global_config, local_sql_syntax, ColumnRule,
+    CompiledCondition, ConfigMap, ParsedStructure, SQL_PARAM,
 };
 
 /// Represents a particular cell in a particular row of data with vaildation results.
@@ -70,7 +70,11 @@ pub async fn validate_row(
                 .get("nulltype")
                 .and_then(|n| Some(n.as_str().unwrap()))
                 .and_then(|n| Some(n.to_string())),
-            value: cell.get("value").and_then(|v| v.as_str()).unwrap().to_string(),
+            value: match cell.get("value") {
+                Some(SerdeValue::String(s)) => s.to_string(),
+                Some(SerdeValue::Number(n)) => format!("{}", n),
+                _ => panic!("Cell value is neither a number nor a string."),
+            },
             valid: cell.get("valid").and_then(|v| v.as_bool()).unwrap(),
             messages: cell.get("messages").and_then(|m| m.as_array()).unwrap().to_vec(),
         };
@@ -625,9 +629,16 @@ async fn validate_cell_foreign_constraints(
     for fkey in fkeys {
         let ftable = fkey.get("ftable").and_then(|t| t.as_str()).unwrap();
         let fcolumn = fkey.get("fcolumn").and_then(|c| c.as_str()).unwrap();
+        let sql_type = get_sql_type_from_global_config(&config, &ftable, &fcolumn).unwrap();
+        let sql_param;
+        if sql_type.to_lowercase() == "integer" {
+            sql_param = format!("CAST({} AS INTEGER)", SQL_PARAM);
+        } else {
+            sql_param = String::from(SQL_PARAM);
+        }
         let fsql = local_sql_syntax(
             &pool,
-            &format!(r#"SELECT 1 FROM "{}" WHERE "{}" = {} LIMIT 1"#, ftable, fcolumn, SQL_PARAM),
+            &format!(r#"SELECT 1 FROM "{}" WHERE "{}" = {} LIMIT 1"#, ftable, fcolumn, sql_param),
         );
         let frows = sqlx_query(&fsql).bind(&cell.value).fetch_all(pool).await?;
 
@@ -642,7 +653,7 @@ async fn validate_cell_foreign_constraints(
                 &pool,
                 &format!(
                     r#"SELECT 1 FROM "{}_conflict" WHERE "{}" = {} LIMIT 1"#,
-                    ftable, fcolumn, SQL_PARAM
+                    ftable, fcolumn, sql_param
                 ),
             );
             let frows = sqlx_query(&fsql).bind(cell.value.clone()).fetch_all(pool).await?;
@@ -1080,11 +1091,18 @@ async fn validate_cell_unique_constraints(
             query_table = table_name.to_string();
         }
 
+        let sql_type = get_sql_type_from_global_config(&config, &table_name, &column_name).unwrap();
+        let sql_param;
+        if sql_type.to_lowercase() == "integer" {
+            sql_param = format!("CAST({} AS INTEGER)", SQL_PARAM);
+        } else {
+            sql_param = String::from(SQL_PARAM);
+        }
         let sql = local_sql_syntax(
             &pool,
             &format!(
                 r#"{} SELECT 1 FROM "{}" WHERE "{}" = {} LIMIT 1"#,
-                with_sql, query_table, column_name, SQL_PARAM
+                with_sql, query_table, column_name, sql_param
             ),
         );
         let query = sqlx_query(&sql).bind(&cell.value);
@@ -1120,7 +1138,11 @@ async fn validate_cell_unique_constraints(
 
 /// Generate a SQL Select clause that is a union of: (a) the literal values of the given extra row,
 /// and (b) a Select statement over `table_name` of all the fields in the extra row.
-fn select_with_extra_row(extra_row: &ResultRow, table_name: &String) -> (String, Vec<String>) {
+fn select_with_extra_row(
+    config: &ConfigMap,
+    extra_row: &ResultRow,
+    table_name: &str,
+) -> (String, Vec<String>) {
     let extra_row_len = extra_row.contents.keys().len();
     let mut params = vec![];
     let mut first_select;
@@ -1131,9 +1153,16 @@ fn select_with_extra_row(extra_row: &ResultRow, table_name: &String) -> (String,
 
     let mut second_select = String::from(r#"SELECT "row_number", "#);
     for (i, (key, content)) in extra_row.contents.iter().enumerate() {
+        let sql_type = get_sql_type_from_global_config(&config, &table_name, &key).unwrap();
+        let sql_param;
+        if sql_type.to_lowercase() == "integer" {
+            sql_param = format!("CAST({} AS INTEGER)", SQL_PARAM);
+        } else {
+            sql_param = String::from(SQL_PARAM);
+        }
         // enumerate() begins from 0 but we need to begin at 1:
         let i = i + 1;
-        first_select.push_str(format!(r#"{} AS "{}", "#, SQL_PARAM, key).as_str());
+        first_select.push_str(format!(r#"{} AS "{}", "#, sql_param, key).as_str());
         params.push(content.value.to_string());
         first_select.push_str(format!(r#"NULL AS "{}_meta""#, key).as_str());
         second_select.push_str(format!(r#""{}", "{}_meta""#, key, key).as_str());
@@ -1195,7 +1224,7 @@ pub async fn validate_under(
         let mut extra_clause;
         let mut params;
         if let Some(ref extra_row) = extra_row {
-            (extra_clause, params) = select_with_extra_row(extra_row, table_name);
+            (extra_clause, params) = select_with_extra_row(&config, extra_row, table_name);
         } else {
             extra_clause = String::new();
             params = vec![];
@@ -1389,7 +1418,7 @@ pub async fn validate_tree_foreign_keys(
         let with_clause;
         let params;
         if let Some(ref extra_row) = extra_row {
-            (with_clause, params) = select_with_extra_row(extra_row, table_name);
+            (with_clause, params) = select_with_extra_row(&config, extra_row, table_name);
         } else {
             with_clause = String::new();
             params = vec![];
