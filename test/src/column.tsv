@@ -33,8 +33,8 @@ table3	id		CURIE	unique
 table3	label		label	primary	
 table3	parent	empty	label	tree(label)	
 table3	related	empty	trimmed_line		
-table4	foreign_column		text	primary	
+table4	foreign_column		text	unique	
 table4	other_foreign_column		text	unique	
-table4	numeric_foreign_column		integer	unique	
+table4	numeric_foreign_column		integer	primary	
 table5	foo		word	primary	
 table5	bar		integer		

@@ -32,4 +32,6 @@ table3	molecular dentity	source	error	datatype:word	source should be a single wo
 table3	molecular dentity	source	error	datatype:prefix	source should be a prefix for a CURIE	CO B
 table3	molecular dentity	source	error	key:foreign	Value CO B of column source is not in table1.prefix	CO B
 table3	molecular entity	id	error	key:unique	Values of id must be unique	COB:0000013
-table4	a	foreign_column	error	key:primary	Values of foreign_column must be unique	a
+table4	9	foreign_column	error	key:unique	Values of foreign_column must be unique	b
+table4	9	numeric_foreign_column	error	key:primary	Values of numeric_foreign_column must be unique	9
+table4	9	foreign_column	error	key:unique	Values of foreign_column must be unique	a
