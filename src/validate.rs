@@ -298,8 +298,14 @@ pub async fn get_matching_values(
                         .unwrap();
                     let child_column = tree.get("child").and_then(|c| c.as_str()).unwrap();
 
-                    let (tree_sql, mut params) =
-                        with_tree_sql(tree, &table_name.to_string(), under_val, None);
+                    let (tree_sql, mut params) = with_tree_sql(
+                        &config,
+                        tree,
+                        &table_name.to_string(),
+                        &table_name.to_string(),
+                        under_val,
+                        None,
+                    );
                     let sql = local_sql_syntax(
                         &pool,
                         &format!(
@@ -525,8 +531,10 @@ pub async fn validate_rows_constraints(
 /// sub-tree of the tree, and an extra SQL clause, generate the SQL for a WITH clause representing
 /// the sub-tree.
 fn with_tree_sql(
+    config: &ConfigMap,
     tree: &ConfigMap,
-    table_name: &String,
+    table_name: &str,
+    effective_table_name: &str,
     root: Option<String>,
     extra_clause: Option<String>,
 ) -> (String, Vec<String>) {
@@ -537,7 +545,14 @@ fn with_tree_sql(
     let mut params = vec![];
     let under_sql;
     if let Some(root) = root {
-        under_sql = format!(r#"WHERE "{}" = {}"#, child_col, SQL_PARAM);
+        let sql_type = get_sql_type_from_global_config(&config, table_name, &child_col).unwrap();
+        let sql_param;
+        if sql_type.to_lowercase() == "integer" {
+            sql_param = format!("CAST({} AS INTEGER)", SQL_PARAM);
+        } else {
+            sql_param = String::from(SQL_PARAM);
+        }
+        under_sql = format!(r#"WHERE "{}" = {}"#, child_col, sql_param);
         params.push(root.clone());
     } else {
         under_sql = String::new();
@@ -557,11 +572,11 @@ fn with_tree_sql(
         extra_clause,
         child_col,
         parent_col,
-        table_name,
+        effective_table_name,
         under_sql,
         child_col,
         parent_col,
-        table_name,
+        effective_table_name,
         parent_col,
         child_col
     );
@@ -738,9 +753,17 @@ async fn validate_cell_trees(
             .map(|p| {
                 params.push(p.contents.get(child_col).unwrap().value.clone());
                 params.push(p.contents.get(parent_col).unwrap().value.clone());
+                let sql_type =
+                    get_sql_type_from_global_config(&config, &table_name, &column_name).unwrap();
+                let sql_param;
+                if sql_type.to_lowercase() == "integer" {
+                    sql_param = format!("CAST({} AS INTEGER)", SQL_PARAM);
+                } else {
+                    sql_param = String::from(SQL_PARAM);
+                }
                 format!(
                     r#"SELECT {} AS "{}", {} AS "{}""#,
-                    SQL_PARAM, child_col, SQL_PARAM, parent_col
+                    sql_param, child_col, sql_param, parent_col
                 )
             })
             .collect::<Vec<_>>();
@@ -764,8 +787,14 @@ async fn validate_cell_trees(
             );
         }
 
-        let (tree_sql, mut tree_sql_params) =
-            with_tree_sql(&tkey, &table_name_ext, Some(parent_val.clone()), Some(extra_clause));
+        let (tree_sql, mut tree_sql_params) = with_tree_sql(
+            &config,
+            &tkey,
+            &table_name,
+            &table_name_ext,
+            Some(parent_val.clone()),
+            Some(extra_clause),
+        );
         params.append(&mut tree_sql_params);
         let sql = local_sql_syntax(&pool, &format!(r#"{} SELECT * FROM "tree""#, tree_sql));
         let mut query = sqlx_query(&sql);
@@ -1256,7 +1285,7 @@ pub async fn validate_under(
 
         let uval = ukey.get("value").and_then(|v| v.as_str()).unwrap().to_string();
         let (tree_sql, mut tree_params) =
-            with_tree_sql(tree, &effective_tree, Some(uval.clone()), None);
+            with_tree_sql(&config, tree, &table_name, &effective_tree, Some(uval.clone()), None);
         // Add the tree params to the beginning of the parameter list:
         tree_params.append(&mut params);
         params = tree_params;
@@ -1329,11 +1358,19 @@ pub async fn validate_under(
             // and it will be returned by the above query regardless of whether it is valid or
             // invalid. So we need to check the value from the meta column instead.
             let raw_column_val = row.try_get_raw(format!(r#"{}"#, column).as_str()).unwrap();
-            let column_val;
+            let column_val: String;
             if raw_column_val.is_null() {
-                column_val = meta.get("value").and_then(|v| v.as_str()).unwrap();
+                column_val = meta.get("value").and_then(|v| v.as_str()).unwrap().to_string();
             } else {
-                column_val = row.get(format!(r#"{}"#, column).as_str());
+                let sql_type =
+                    get_sql_type_from_global_config(&config, &table_name, &column).unwrap();
+                if sql_type.to_lowercase() == "integer" {
+                    let foo: i32 = row.get(format!(r#"{}"#, column).as_str());
+                    let foo: u32 = foo as u32;
+                    column_val = foo.to_string();
+                } else {
+                    column_val = row.get(format!(r#"{}"#, column).as_str());
+                }
             }
 
             // We use i32 instead of i64 (which we use for row_number) here because, unlike row_number,

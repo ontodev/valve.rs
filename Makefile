@@ -32,7 +32,7 @@ test/output:
 
 test: sqlite_test pg_test api_test
 
-tables_to_test = column datatype rule table table1 table2 table3 table4 table5
+tables_to_test = column datatype rule table table1 table2 table3 table4 table5 table6
 
 sqlite_test: build/valve.db | test/output
 	@echo "Testing valve on sqlite ..."

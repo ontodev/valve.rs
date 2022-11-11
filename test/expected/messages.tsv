@@ -35,3 +35,12 @@ table3	molecular entity	id	error	key:unique	Values of id must be unique	COB:0000
 table4	9	foreign_column	error	key:unique	Values of foreign_column must be unique	b
 table4	9	numeric_foreign_column	error	key:primary	Values of numeric_foreign_column must be unique	9
 table4	9	foreign_column	error	key:unique	Values of foreign_column must be unique	a
+table6	1	foo	error	rule:foo-2	bar cannot be null if foo is not null	e
+table6	1	foo	error	rule:foo-4	bar must be 25 or 26 if foo = 'e'	e
+table6	2	xyzzy	error	under:not-under	Value '5' of column xyzzy is not under '4'	5
+table6	2	foo	error	rule:foo-1	bar must be null whenever foo is null	
+table6	3	xyzzy	error	under:not-under	Value '6' of column xyzzy is not under '4'	6
+table6	4	xyzzy	error	under:not-under	Value '7' of column xyzzy is not under '4'	7
+table6	4	foo	error	rule:foo-4	bar must be 25 or 26 if foo = 'e'	e
+table6	5	xyzzy	error	under:not-under	Value '8' of column xyzzy is not under '4'	8
+table6	7	xyzzy	error	under:not-in-tree	Value 26 of column xyzzy is not in table6.child	26
