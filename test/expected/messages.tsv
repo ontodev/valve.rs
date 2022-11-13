@@ -44,3 +44,4 @@ table6	4	xyzzy	error	under:not-under	Value '7' of column xyzzy is not under '4'	
 table6	4	foo	error	rule:foo-4	bar must be 25 or 26 if foo = 'e'	e
 table6	5	xyzzy	error	under:not-under	Value '8' of column xyzzy is not under '4'	8
 table6	7	xyzzy	error	under:not-in-tree	Value 26 of column xyzzy is not in table6.child	26
+table6	9	child	error	key:foreign	Value 9 of column child exists only in table4_conflict.numeric_foreign_column	9

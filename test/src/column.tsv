@@ -38,7 +38,7 @@ table4	other_foreign_column		text	unique
 table4	numeric_foreign_column		integer	primary	
 table5	foo		word	primary	
 table5	bar		integer		
-table6	child		integer		
+table6	child		integer	from(table4.numeric_foreign_column)	
 table6	parent	empty	integer	tree(child)	
 table6	xyzzy	empty	integer	under(table6.child, 4)	
 table6	foo	empty	text		

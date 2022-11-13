@@ -201,11 +201,11 @@ pub async fn get_matching_values(
         .unwrap();
 
     let dt_condition =
-        compiled_datatype_conditions.get(dt_name).and_then(|d| Some(d.parsed.clone())).unwrap();
+        compiled_datatype_conditions.get(dt_name).and_then(|d| Some(d.parsed.clone()));
 
     let mut values = vec![];
     match dt_condition {
-        Expression::Function(name, args) if name == "in" => {
+        Some(Expression::Function(name, args)) if name == "in" => {
             for arg in args {
                 if let Expression::Label(arg) = *arg {
                     // Remove the enclosing quotes from the values being returned:
@@ -225,108 +225,144 @@ pub async fn get_matching_values(
             // foreign column. Otherwise if the structure includes an
             // `under(tree_table.tree_column, value)` condition, then get the values from the tree
             // column that are under `value`.
-            let structure = parsed_structure_conditions
-                .get(
-                    config
-                        .get("table")
-                        .and_then(|t| t.as_object())
-                        .and_then(|t| t.get(table_name))
-                        .and_then(|t| t.as_object())
-                        .and_then(|t| t.get("column"))
-                        .and_then(|c| c.as_object())
-                        .and_then(|c| c.get(column_name))
-                        .and_then(|c| c.as_object())
-                        .and_then(|c| c.get("structure"))
-                        .and_then(|d| d.as_str())
-                        .unwrap(),
-                )
-                .unwrap();
+            let structure = parsed_structure_conditions.get(
+                config
+                    .get("table")
+                    .and_then(|t| t.as_object())
+                    .and_then(|t| t.get(table_name))
+                    .and_then(|t| t.as_object())
+                    .and_then(|t| t.get("column"))
+                    .and_then(|c| c.as_object())
+                    .and_then(|c| c.get(column_name))
+                    .and_then(|c| c.as_object())
+                    .and_then(|c| c.get("structure"))
+                    .and_then(|d| d.as_str())
+                    .unwrap(),
+            );
 
-            let matching_string = {
-                match matching_string {
-                    None => "%".to_string(),
-                    Some(s) => format!("%{}%", s),
+            let sql_type =
+                get_sql_type_from_global_config(&config, table_name, &column_name).unwrap();
+
+            match structure {
+                Some(ParsedStructure { original, parsed }) => {
+                    let matching_string = {
+                        match matching_string {
+                            None => "%".to_string(),
+                            Some(s) => format!("%{}%", s),
+                        }
+                    };
+
+                    match parsed {
+                        Expression::Function(name, args) if name == "from" => {
+                            let foreign_key = &args[0];
+                            if let Expression::Field(ftable, fcolumn) = &**foreign_key {
+                                let fcolumn_text;
+                                if sql_type.to_lowercase() == "integer" {
+                                    fcolumn_text = format!(r#"CAST("{}" AS TEXT)"#, fcolumn);
+                                } else {
+                                    fcolumn_text = format!(r#""{}""#, fcolumn);
+                                }
+                                let sql = local_sql_syntax(
+                                    &pool,
+                                    &format!(
+                                        r#"SELECT "{}" FROM "{}" WHERE {} LIKE {}"#,
+                                        fcolumn, ftable, fcolumn_text, SQL_PARAM
+                                    ),
+                                );
+                                let rows =
+                                    sqlx_query(&sql).bind(&matching_string).fetch_all(pool).await?;
+                                for row in rows.iter() {
+                                    if sql_type.to_lowercase() == "integer" {
+                                        let foo: i32 = row.get(format!(r#"{}"#, fcolumn).as_str());
+                                        let foo: u32 = foo as u32;
+                                        values.push(foo.to_string());
+                                    } else {
+                                        let value: &str = row.get(&**fcolumn);
+                                        values.push(value.to_string());
+                                    }
+                                }
+                            }
+                        }
+                        Expression::Function(name, args) if name == "under" || name == "tree" => {
+                            let mut tree_col = "not set";
+                            let mut under_val = Some("not set".to_string());
+                            if name == "under" {
+                                if let Expression::Field(_, column) = &**&args[0] {
+                                    tree_col = column;
+                                }
+                                if let Expression::Label(label) = &**&args[1] {
+                                    under_val = Some(label.to_string());
+                                }
+                            } else {
+                                let tree_key = &args[0];
+                                if let Expression::Label(label) = &**tree_key {
+                                    tree_col = label;
+                                    under_val = None;
+                                }
+                            }
+
+                            let tree = config
+                                .get("constraints")
+                                .and_then(|c| c.as_object())
+                                .and_then(|c| c.get("tree"))
+                                .and_then(|t| t.as_object())
+                                .and_then(|t| t.get(table_name))
+                                .and_then(|t| t.as_array())
+                                .and_then(|t| {
+                                    t.iter().find(|o| o.get("child").unwrap() == tree_col)
+                                })
+                                .expect(
+                                    format!("No tree: '{}.{}' found", table_name, tree_col)
+                                        .as_str(),
+                                )
+                                .as_object()
+                                .unwrap();
+                            let child_column = tree.get("child").and_then(|c| c.as_str()).unwrap();
+
+                            let (tree_sql, mut params) = with_tree_sql(
+                                &config,
+                                tree,
+                                &table_name.to_string(),
+                                &table_name.to_string(),
+                                under_val,
+                                None,
+                            );
+                            let child_column_text;
+                            if sql_type.to_lowercase() == "integer" {
+                                child_column_text = format!(r#"CAST("{}" AS TEXT)"#, child_column);
+                            } else {
+                                child_column_text = format!(r#""{}""#, child_column);
+                            }
+                            let sql = local_sql_syntax(
+                                &pool,
+                                &format!(
+                                    r#"{} SELECT "{}" FROM "tree" WHERE {} LIKE {}"#,
+                                    tree_sql, child_column, child_column_text, SQL_PARAM
+                                ),
+                            );
+                            params.push(matching_string);
+
+                            let mut query = sqlx_query(&sql);
+                            for param in &params {
+                                query = query.bind(param);
+                            }
+
+                            let rows = query.fetch_all(pool).await?;
+                            for row in rows.iter() {
+                                if sql_type.to_lowercase() == "integer" {
+                                    let foo: i32 = row.get(format!(r#"{}"#, child_column).as_str());
+                                    let foo: u32 = foo as u32;
+                                    values.push(foo.to_string());
+                                } else {
+                                    let value: &str = row.get(child_column);
+                                    values.push(value.to_string());
+                                }
+                            }
+                        }
+                        _ => panic!("Unrecognised structure: {}", original),
+                    };
                 }
-            };
-
-            match &structure.parsed {
-                Expression::Function(name, args) if name == "from" => {
-                    let foreign_key = &args[0];
-                    if let Expression::Field(ftable, fcolumn) = &**foreign_key {
-                        let sql = local_sql_syntax(
-                            &pool,
-                            &format!(
-                                r#"SELECT "{}" FROM "{}" WHERE "{}" LIKE {}"#,
-                                fcolumn, ftable, fcolumn, SQL_PARAM
-                            ),
-                        );
-                        let rows = sqlx_query(&sql).bind(&matching_string).fetch_all(pool).await?;
-                        for row in rows.iter() {
-                            let value: &str = row.get(&**fcolumn);
-                            values.push(value.to_string());
-                        }
-                    }
-                }
-                Expression::Function(name, args) if name == "under" || name == "tree" => {
-                    let mut tree_col = "not set";
-                    let mut under_val = Some("not set".to_string());
-                    if name == "under" {
-                        if let Expression::Field(_, column) = &**&args[0] {
-                            tree_col = column;
-                        }
-                        if let Expression::Label(label) = &**&args[1] {
-                            under_val = Some(label.to_string());
-                        }
-                    } else {
-                        let tree_key = &args[0];
-                        if let Expression::Label(label) = &**tree_key {
-                            tree_col = label;
-                            under_val = None;
-                        }
-                    }
-
-                    let tree = config
-                        .get("constraints")
-                        .and_then(|c| c.as_object())
-                        .and_then(|c| c.get("tree"))
-                        .and_then(|t| t.as_object())
-                        .and_then(|t| t.get(table_name))
-                        .and_then(|t| t.as_array())
-                        .and_then(|t| t.iter().find(|o| o.get("child").unwrap() == tree_col))
-                        .expect(format!("No tree: '{}.{}' found", table_name, tree_col).as_str())
-                        .as_object()
-                        .unwrap();
-                    let child_column = tree.get("child").and_then(|c| c.as_str()).unwrap();
-
-                    let (tree_sql, mut params) = with_tree_sql(
-                        &config,
-                        tree,
-                        &table_name.to_string(),
-                        &table_name.to_string(),
-                        under_val,
-                        None,
-                    );
-                    let sql = local_sql_syntax(
-                        &pool,
-                        &format!(
-                            r#"{} SELECT "{}" FROM "tree" WHERE "{}" LIKE {}"#,
-                            tree_sql, child_column, child_column, SQL_PARAM
-                        ),
-                    );
-                    params.push(matching_string);
-
-                    let mut query = sqlx_query(&sql);
-                    for param in &params {
-                        query = query.bind(param);
-                    }
-
-                    let rows = query.fetch_all(pool).await?;
-                    for row in rows.iter() {
-                        let value: &str = row.get(child_column);
-                        values.push(value.to_string());
-                    }
-                }
-                _ => panic!("Unrecognised structure: {}", structure.original),
+                None => (),
             };
         }
     };
@@ -796,7 +832,11 @@ async fn validate_cell_trees(
             Some(extra_clause),
         );
         params.append(&mut tree_sql_params);
-        let sql = local_sql_syntax(&pool, &format!(r#"{} SELECT * FROM "tree""#, tree_sql));
+        let sql = local_sql_syntax(
+            &pool,
+            &format!(r#"{} SELECT "{}", "{}" FROM "tree""#, tree_sql, child_col, parent_col),
+        );
+
         let mut query = sqlx_query(&sql);
         for param in &params {
             query = query.bind(param);
@@ -807,11 +847,24 @@ async fn validate_cell_trees(
         // the new row would result in a cycle.
         let cycle_detected = {
             let cycle_row = rows.iter().find(|row| {
-                let parent: Result<&str, sqlx::Error> = row.try_get(parent_col.as_str());
-                if let Ok(parent) = parent {
-                    parent == child_val
+                let sql_type =
+                    get_sql_type_from_global_config(&config, &table_name, &parent_col).unwrap();
+                if sql_type.to_lowercase() == "integer" {
+                    let raw_foo = row.try_get_raw(format!(r#"{}"#, parent_col).as_str()).unwrap();
+                    if raw_foo.is_null() {
+                        false
+                    } else {
+                        let foo: i32 = row.get(format!(r#"{}"#, parent_col).as_str());
+                        let foo: u32 = foo as u32;
+                        foo.to_string() == child_val
+                    }
                 } else {
-                    false
+                    let parent: Result<&str, sqlx::Error> = row.try_get(parent_col.as_str());
+                    if let Ok(parent) = parent {
+                        parent == child_val
+                    } else {
+                        false
+                    }
                 }
             });
             match cycle_row {
@@ -1392,7 +1445,15 @@ pub async fn validate_under(
                 meta.get_mut("messages")
                     .and_then(|m| m.as_array_mut())
                     .and_then(|a| Some(a.push(message)));
-                let row_number: i64 = row.get("row_number");
+
+                let raw_row_number = row.try_get_raw("row_number").unwrap();
+                let row_number: i64;
+                if raw_row_number.is_null() {
+                    row_number = 0;
+                } else {
+                    row_number = row.get("row_number");
+                }
+
                 let row_number = row_number as u32;
                 let result = json!({
                     "row_number": row_number,
