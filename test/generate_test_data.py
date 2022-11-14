@@ -2,8 +2,7 @@
 
 import random
 import string
-
-# import sys
+import sys
 
 from argparse import ArgumentParser
 
@@ -262,37 +261,33 @@ if __name__ == "__main__":
                         ttable = structure["ttable"]
                         tcolumn = structure["tcolumn"]
                         cell = last_inserts[ttable][tcolumn]
-                    elif config[table][column]["datatype"] == "prefix":
-                        # TODO: To be implemented
-                        pass
-                    elif config[table][column]["datatype"] == "IRI":
-                        # TODO: To be implemented
-                        pass
-                    elif config[table][column]["datatype"] == "trimmed_line":
-                        # TODO: To be implemented
-                        pass
+                    elif config[table][column]["datatype"] in [
+                        "prefix",
+                        "IRI",
+                        "trimmed_line",
+                        "label",
+                        "word",
+                    ]:
+                        cell = "".join(random.choices(string.ascii_lowercase, k=TOKEN_LENGTH))
                     elif config[table][column]["datatype"] == "curie":
-                        # TODO: To be implemented
-                        pass
-                    elif config[table][column]["datatype"] == "label":
-                        # TODO: To be implemented
-                        pass
+                        cell = (
+                            "".join(random.choices(string.ascii_lowercase, k=3)).upper()
+                            + ":"
+                            + "".join(random.choices(string.ascii_lowercase, k=TOKEN_LENGTH))
+                        )
                     elif config[table][column]["datatype"] == "text":
-                        # TODO: To be implemented
-                        pass
-                    elif config[table][column]["datatype"] == "word":
-                        # TODO: To be implemented
-                        pass
+                        cell = (
+                            "".join(random.choices(string.ascii_lowercase, k=TOKEN_LENGTH))
+                            + " "
+                            + "".join(random.choices(string.ascii_lowercase, k=TOKEN_LENGTH))
+                        )
                     elif config[table][column]["datatype"] == "integer":
                         cell = "".join(random.choices(string.digits, k=TOKEN_LENGTH))
                     else:
-                        cell = "".join(random.choices(string.ascii_lowercase, k=TOKEN_LENGTH))
+                        print(f"Unsupported datatype: {config[table][column]['datatype']}")
+                        sys.exit(1)
 
                 row[column] = cell
-                # TODO: Instead of only saving the last insert, save the last, say, 5 inserts
-                # and when getting values from here, randomly select from those 5. Although note
-                # that we will need to be careful because we don't want to select the same value
-                # more than once.
                 if not last_inserts.get(table):
                     last_inserts[table] = {}
                 last_inserts[table][column] = cell
