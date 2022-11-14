@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 
-import json
+# import json
+
 import random
-import sys
+import string
+
+# import sys
 
 from argparse import ArgumentParser
 
-# Remove this later:
-from pprint import pformat
+# TODO: Remove this later:
+# from pprint import pformat
 
 
 config = {
@@ -189,6 +192,7 @@ config = {
     },
 }
 
+TOKEN_LENGTH = 9
 
 if __name__ == "__main__":
     parser = ArgumentParser(
@@ -198,12 +202,8 @@ if __name__ == "__main__":
     output directory.
     """
     )
-    parser.add_argument(
-        "seed", help="The seed to use to generate the random data"
-    )
-    parser.add_argument(
-        "num_rows", help="The number of rows per table to generate"
-    )
+    parser.add_argument("seed", help="The seed to use to generate the random data")
+    parser.add_argument("num_rows", help="The number of rows per table to generate")
     parser.add_argument(
         "pct_errors", help="The percentage of rows in each table that should have errors"
     )
@@ -211,13 +211,40 @@ if __name__ == "__main__":
         "output_dir", help="The output directory to write the new table configuration to"
     )
     args = parser.parse_args()
-    seed = args.seed
-    num_rows = args.num_rows
-    pct_errors = args.pct_errors
+    seed = int(args.seed)
+    num_rows = int(args.num_rows)
+    pct_errors = int(args.pct_errors)
     outdir = args.output_dir
+
+    random.seed(seed)
 
     print(f"Num rows: {num_rows}, Pct Errors: {pct_errors}, Out dir: {outdir}. Using seed: {seed}")
 
+    # This is a record of the last inserted values for each table and column. When one column
+    # takes its values from another column, then we look here and fetch the last inserted value of
+    # the second column.
+    last_inserts = {}
+
     for table in ["table4", "table1", "table2", "table3", "table5", "table6"]:
+        outfile = open(f"{outdir}/{table}.tsv", "w")
         columns = [column for column in config[table]]
-        print("\t".join(columns))
+        print("\t".join(columns), file=outfile)
+
+        for row_number in range(1, num_rows + 1):
+            row = {}
+            for column in columns:
+                # If the column allows empty values, make every tenth value empty, beginning with
+                # the first:
+                if config[table][column]["allow_empty"] and row_number % 10 == 1:
+                    cell = ""
+                elif config[table][column]["datatype"] == "integer":
+                    cell = "".join(random.choices(string.digits, k=TOKEN_LENGTH))
+                else:
+                    cell = "".join(random.choices(string.ascii_lowercase, k=TOKEN_LENGTH))
+                # print(f"{table}.{column}, row #{row_number}: {cell}")
+                row[column] = cell
+
+            last_inserts[table] = row
+            row = "\t".join([row[column] for column in row])
+            print(row, file=outfile)
+            # print(f"Last inserts:\n{pformat(last_inserts)}\n")
