@@ -10,7 +10,10 @@ from argparse import ArgumentParser
 # from pprint import pformat
 
 
-config = {
+TOKEN_LENGTH = 9
+
+
+CONFIG = {
     "table1": {
         "prefix": {
             "allow_empty": False,
@@ -189,9 +192,95 @@ config = {
     },
 }
 
-TOKEN_LENGTH = 9
 
-if __name__ == "__main__":
+def get_value_from_prev_insert(prev_inserts, from_table, from_column, to_table, to_column):
+    global CONFIG
+
+    # Note: because we are loading the tables and columns in the correct order (i.e. such that
+    # all dependencies are loaded before the tables and columns they depend on), the list of
+    # previous inserts for the from_table/from_column will never be empty.
+    if len(prev_inserts[from_table][from_column]) == 1:
+        if CONFIG[to_table][to_column]["allow_empty"]:
+            return ""
+        else:
+            return prev_inserts[from_table][from_column][0]
+    else:
+        from_values = prev_inserts[from_table][from_column]
+        # We'd ideally like to exclude the last inserted value from consideration, but we save it
+        # here in case we cannot:
+        last_val = from_values[len(from_values) - 1]
+        from_values = from_values[0 : len(from_values) - 1]
+
+        to_values = set(prev_inserts[to_table][to_column])
+        values_to_choose_from = [f for f in from_values if f not in to_values]
+
+        if not values_to_choose_from:
+            return last_val
+        else:
+            return values_to_choose_from[random.randrange(len(values_to_choose_from))]
+
+
+def get_constrained_cell_value(table, column, row_num, prev_inserts):
+    global TOKEN_LENGTH
+    global CONFIG
+
+    structure = CONFIG[table][column].get("structure")
+    if structure and structure["type"] == "foreign":
+        ftable = structure["ftable"]
+        fcolumn = structure["fcolumn"]
+        cell = get_value_from_prev_insert(prev_inserts, ftable, fcolumn, table, column)
+    elif structure and structure["type"] == "tree":
+        tcolumn = structure["tcolumn"]
+        cell = get_value_from_prev_insert(prev_inserts, table, tcolumn, table, column)
+    elif structure and structure["type"] == "under":
+        # Note that properly satisfying the under constraint requires, not only that
+        # the cell is in the specified tree column, but also (a) that the tree
+        # actually exists, and (b) that the value is "under" the under value. To do
+        # this properly, though, would require a decent amount of memory. So perhaps
+        # it's not worth it to check for (a) and (b) and allow any offending cells
+        # to generate errors which we can then verify are handled properly by valve.
+        ttable = structure["ttable"]
+        tcolumn = structure["tcolumn"]
+        cell = get_value_from_prev_insert(prev_inserts, ttable, tcolumn, table, column)
+    elif CONFIG[table][column]["datatype"] in [
+        "prefix",
+        "IRI",
+        "trimmed_line",
+        "label",
+        "word",
+    ]:
+        cell = "".join(random.choices(string.ascii_lowercase, k=TOKEN_LENGTH))
+    elif CONFIG[table][column]["datatype"] == "curie":
+        cell = (
+            "".join(random.choices(string.ascii_lowercase, k=3)).upper()
+            + ":"
+            + "".join(random.choices(string.ascii_lowercase, k=TOKEN_LENGTH))
+        )
+    elif CONFIG[table][column]["datatype"] == "text":
+        cell = (
+            "".join(random.choices(string.ascii_lowercase, k=TOKEN_LENGTH))
+            + " "
+            + "".join(random.choices(string.ascii_lowercase, k=TOKEN_LENGTH))
+        )
+    elif CONFIG[table][column]["datatype"] == "integer":
+        # No leading 0s:
+        cell = "".join(random.choices("123456789", k=1)) + "".join(
+            random.choices(string.digits, k=TOKEN_LENGTH - 1)
+        )
+    else:
+        print(
+            f"Warning: Unknown datatype: {CONFIG[table][column]['datatype']}. "
+            "Generating a random string."
+        )
+        cell = "".join(random.choices(string.ascii_lowercase, k=TOKEN_LENGTH))
+
+    return cell
+
+
+def main():
+    global TOKEN_LENGTH
+    global CONFIG
+
     parser = ArgumentParser(
         description="""
     Deterministically generate a specified amount of data, a specified percentage of which are
@@ -223,84 +312,40 @@ if __name__ == "__main__":
     tables_in_order = ["table4", "table1", "table2", "table3", "table5", "table6"]
     for table in tables_in_order:
         tsv_files[table] = open(f"{outdir}/{table}.tsv", "w")
-        columns = [column for column in config[table]]
+        columns = [column for column in CONFIG[table]]
         print("\t".join(columns), file=tsv_files[table])
 
     num_error_rows = math.ceil((pct_errors / 100) * num_rows)
     error_proportion = None if not num_error_rows else math.floor(num_rows / num_error_rows)
-    for row_number in range(1, num_rows + 1):
+    for row_num in range(1, num_rows + 1):
         for table in tables_in_order:
-            is_error_row = error_proportion and row_number % error_proportion == (
+            is_error_row = error_proportion and row_num % error_proportion == (
                 random.randrange(1, num_rows + 1)
             )
             if is_error_row:
-                print(f"Generating error row for {table} at row number {row_number}.")
+                print(f"Generating error row for {table} at row number {row_num}.")
 
-            columns = [column for column in config[table]]
+            columns = [column for column in CONFIG[table]]
             row = {}
             for column in columns:
                 if (
                     not is_error_row
-                    and config[table][column]["allow_empty"]
-                    and row_number % random.randrange(2, num_rows) == 1
+                    and CONFIG[table][column]["allow_empty"]
+                    and row_num % random.randrange(2, num_rows) == 1
                 ):
                     # If the column allows empty values, assign an empty value "sometimes":
                     cell = ""
                 elif not is_error_row:
-                    structure = config[table][column].get("structure")
-                    # Note that since each successive value generated by the algorithm should be
-                    # unique, we can just ignore "unique" and "primary" structure types.
-                    if structure and structure["type"] == "foreign":
-                        ftable = structure["ftable"]
-                        fcolumn = structure["fcolumn"]
-                        cell = prev_inserts[ftable][fcolumn][row_number - 1]
-                    elif structure and structure["type"] == "tree":
-                        tcolumn = structure["tcolumn"]
-                        cell = prev_inserts[table][tcolumn][row_number - 1]
-                    elif structure and structure["type"] == "under":
-                        # Note that properly satisfying the under constraint requires, not only that
-                        # the cell is in the specified tree column, but also (a) that the tree
-                        # actually exists, and (b) that the value is "under" the under value. To do
-                        # this properly, though, would require a decent amount of memory. So perhaps
-                        # it's not worth it to check for (a) and (b) and allow any offending cells
-                        # to generate errors which we can then verify are handled properly by valve.
-                        ttable = structure["ttable"]
-                        tcolumn = structure["tcolumn"]
-                        cell = prev_inserts[ttable][tcolumn][row_number - 1]
-                    elif config[table][column]["datatype"] in [
-                        "prefix",
-                        "IRI",
-                        "trimmed_line",
-                        "label",
-                        "word",
-                    ]:
-                        cell = "".join(random.choices(string.ascii_lowercase, k=TOKEN_LENGTH))
-                    elif config[table][column]["datatype"] == "curie":
-                        cell = (
-                            "".join(random.choices(string.ascii_lowercase, k=3)).upper()
-                            + ":"
-                            + "".join(random.choices(string.ascii_lowercase, k=TOKEN_LENGTH))
-                        )
-                    elif config[table][column]["datatype"] == "text":
-                        cell = (
-                            "".join(random.choices(string.ascii_lowercase, k=TOKEN_LENGTH))
-                            + " "
-                            + "".join(random.choices(string.ascii_lowercase, k=TOKEN_LENGTH))
-                        )
-                    elif config[table][column]["datatype"] == "integer":
-                        cell = "".join(random.choices(string.digits, k=TOKEN_LENGTH))
-                    else:
-                        print(
-                            f"Warning: Unknown datatype: {config[table][column]['datatype']}. "
-                            "Generating a random string."
-                        )
-                        cell = "".join(random.choices(string.ascii_lowercase, k=TOKEN_LENGTH))
+                    cell = get_constrained_cell_value(table, column, row_num, prev_inserts)
                 else:
                     # If this is an error row, just generate a random token. This might end up
                     # being valid, but given that some cells have structure constraints, then
                     # chances are this will result in at least some errors:
-                    if config[table][column]["datatype"] == "integer":
-                        cell = "".join(random.choices(string.digits, k=TOKEN_LENGTH))
+                    if CONFIG[table][column]["datatype"] == "integer":
+                        # No leading 0s:
+                        cell = "".join(random.choices("123456789", k=1)) + "".join(
+                            random.choices(string.digits, k=TOKEN_LENGTH - 1)
+                        )
                     else:
                         cell = "".join(random.choices(string.ascii_lowercase, k=TOKEN_LENGTH))
 
@@ -322,3 +367,7 @@ if __name__ == "__main__":
 
             row = "\t".join([row[column] for column in row])
             print(row, file=tsv_files[table])
+
+
+if __name__ == "__main__":
+    main()
