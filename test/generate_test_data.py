@@ -218,7 +218,7 @@ if __name__ == "__main__":
     # This is a record of the last inserted values for each table and column. When one column
     # takes its values from another column, then we look here and fetch the last inserted value of
     # the second column.
-    last_inserts = {}
+    prev_inserts = {}
     tsv_files = {}
     tables_in_order = ["table4", "table1", "table2", "table3", "table5", "table6"]
     for table in tables_in_order:
@@ -253,10 +253,10 @@ if __name__ == "__main__":
                     if structure and structure["type"] == "foreign":
                         ftable = structure["ftable"]
                         fcolumn = structure["fcolumn"]
-                        cell = last_inserts[ftable][fcolumn]
+                        cell = prev_inserts[ftable][fcolumn][row_number - 1]
                     elif structure and structure["type"] == "tree":
                         tcolumn = structure["tcolumn"]
-                        cell = last_inserts[table][tcolumn]
+                        cell = prev_inserts[table][tcolumn][row_number - 1]
                     elif structure and structure["type"] == "under":
                         # Note that properly satisfying the under constraint requires, not only that
                         # the cell is in the specified tree column, but also (a) that the tree
@@ -266,7 +266,7 @@ if __name__ == "__main__":
                         # to generate errors which we can then verify are handled properly by valve.
                         ttable = structure["ttable"]
                         tcolumn = structure["tcolumn"]
-                        cell = last_inserts[ttable][tcolumn]
+                        cell = prev_inserts[ttable][tcolumn][row_number - 1]
                     elif config[table][column]["datatype"] in [
                         "prefix",
                         "IRI",
@@ -305,9 +305,20 @@ if __name__ == "__main__":
                         cell = "".join(random.choices(string.ascii_lowercase, k=TOKEN_LENGTH))
 
                 row[column] = cell
-                if not last_inserts.get(table):
-                    last_inserts[table] = {}
-                last_inserts[table][column] = cell
+                # TODO: We are generally only going to be generating about 100,000 rows at maximum,
+                # so don't worry too much about memory constraints. In other words instead of just
+                # saving the _last_ inserted values, just save _all_ of them. Then, when we are
+                # looking up a foreign or tree column, randomly select one of the previous values.
+                #
+                # Don't be too clever. It's ok if, once in awhile, you select a value that has
+                # already been used. Just make the random.range() from which you make the selection
+                # big enough so that this doesn't happen too often. A few "duplicate value" errors
+                # is ok. Valve will just handle them and generae the appropriate errors.
+                if not prev_inserts.get(table):
+                    prev_inserts[table] = {}
+                if not prev_inserts[table].get(column):
+                    prev_inserts[table][column] = []
+                prev_inserts[table][column].append(cell)
 
             row = "\t".join([row[column] for column in row])
             print(row, file=tsv_files[table])
