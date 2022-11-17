@@ -6,7 +6,7 @@ MAKEFLAGS += --warn-undefined-variables
 build:
 	mkdir build
 
-.PHONY: doc time test sqlite_test pg_test
+.PHONY: doc time test sqlite_test pg_test perf_test_data
 
 doc:
 	cargo doc --document-private-items
@@ -29,6 +29,12 @@ time: clean valve | build
 
 test/output:
 	mkdir -p test/output
+
+test/perf_test_data/ontology:
+	mkdir -p test/perf_test_data/ontology
+
+perf_test_data: test/generate_perf_test_data.py | test/perf_test_data/ontology
+	$< 1 50 0 $|
 
 test: sqlite_test pg_test api_test
 
@@ -68,7 +74,7 @@ pg_api_test: valve test/src/table.tsv test/insert_update.sh | test/output
 	@echo "Test succeeded!"
 
 clean:
-	rm -Rf build test/output
+	rm -Rf build test/output test/perf_test_data/ontology
 
 cleanall: clean
 	cargo clean

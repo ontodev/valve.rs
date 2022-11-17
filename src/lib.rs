@@ -1172,7 +1172,7 @@ async fn make_inserts(
                     let sql_type =
                         get_sql_type_from_global_config(&config, &table_name, &column).unwrap();
                     if sql_type.to_lowercase() == "integer" {
-                        values.push(format!("CAST({} AS INTEGER)", SQL_PARAM));
+                        values.push(format!("CAST(NULLIF({}, '') AS INTEGER)", SQL_PARAM));
                     } else {
                         values.push(String::from(SQL_PARAM));
                     }
@@ -1799,7 +1799,7 @@ pub async fn insert_new_row(
                 get_sql_type_from_global_config(&global_config, &table_name.to_string(), &column)
                     .unwrap();
             if sql_type.to_lowercase() == "integer" {
-                insert_values.push(format!("CAST({} AS INTEGER)", SQL_PARAM));
+                insert_values.push(format!("CAST(NULLIF({}, '') AS INTEGER)", SQL_PARAM));
             } else {
                 insert_values.push(String::from(SQL_PARAM));
             }
@@ -1861,7 +1861,8 @@ pub async fn update_row(
                 get_sql_type_from_global_config(&global_config, &table_name.to_string(), &column)
                     .unwrap();
             if sql_type.to_lowercase() == "integer" {
-                assignments.push(format!(r#""{}" = CAST({} AS INTEGER)"#, column, SQL_PARAM));
+                assignments
+                    .push(format!(r#""{}" = CAST(NULLIF({}, '') AS INTEGER)"#, column, SQL_PARAM));
             } else {
                 assignments.push(format!(r#""{}" = {}"#, column, SQL_PARAM));
             }

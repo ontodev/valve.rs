@@ -1,0 +1,45 @@
+table	column	nulltype	datatype	structure	description
+table	table		table_name	primary	name of this table
+table	path		path		path to the TSV file for this table, relative to the table.tsv file
+table	type	empty	table_type		type of this table, used for tables with special meanings
+table	description	empty	description		a description of this table
+column	table		table_name	from(table.table)	the table that this column belongs to
+column	column		column_name		the name of this column
+column	datatype		datatype_name	from(datatype.datatype)	the datatype for this column
+column	nulltype	empty	datatype_name	from(datatype.datatype)	the datatype for NULL values in this column
+column	structure	empty	trimmed_line		schema information for this column
+column	description	empty	description		a description of this column
+datatype	datatype		datatype_name	primary	the name of this datatype
+datatype	parent	empty	datatype_name	tree(datatype)	the parent datatype
+datatype	condition	empty	datatype_condition		
+rule	table		table_name		
+rule	when column		column_name		
+rule	when condition		datatype_condition		
+rule	then column		column_name		
+rule	then condition		datatype_condition		
+rule	level		word		
+rule	description	empty	description		
+table1	prefix		prefix	primary	
+table1	base		IRI	unique	
+table1	ontology IRI	empty	IRI		
+table1	version IRI	empty	IRI		
+table2	child		trimmed_line	from(table4.other_foreign_column)	
+table2	parent	empty	trimmed_line	tree(child)	
+table2	xyzzy	empty	trimmed_line	under(table2.child, d)	
+table2	foo	empty	integer	from(table4.numeric_foreign_column)	
+table2	bar	empty	text		
+table3	source		prefix	from(table1.prefix)	
+table3	id		CURIE	unique	
+table3	label		label	primary	
+table3	parent	empty	label	tree(label)	
+table3	related	empty	trimmed_line		
+table4	foreign_column		text	unique	
+table4	other_foreign_column		text	unique	
+table4	numeric_foreign_column		integer	primary	
+table5	foo		word	primary	
+table5	bar		integer		
+table6	child		integer	from(table4.numeric_foreign_column)	
+table6	parent	empty	integer	tree(child)	
+table6	xyzzy	empty	integer	under(table6.child, 4)	
+table6	foo	empty	text		
+table6	bar	empty	integer		

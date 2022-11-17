@@ -584,7 +584,7 @@ fn with_tree_sql(
         let sql_type = get_sql_type_from_global_config(&config, table_name, &child_col).unwrap();
         let sql_param;
         if sql_type.to_lowercase() == "integer" {
-            sql_param = format!("CAST({} AS INTEGER)", SQL_PARAM);
+            sql_param = format!("CAST(NULLIF({}, '') AS INTEGER)", SQL_PARAM);
         } else {
             sql_param = String::from(SQL_PARAM);
         }
@@ -683,7 +683,7 @@ async fn validate_cell_foreign_constraints(
         let sql_type = get_sql_type_from_global_config(&config, &ftable, &fcolumn).unwrap();
         let sql_param;
         if sql_type.to_lowercase() == "integer" {
-            sql_param = format!("CAST({} AS INTEGER)", SQL_PARAM);
+            sql_param = format!("CAST(NULLIF({}, '') AS INTEGER)", SQL_PARAM);
         } else {
             sql_param = String::from(SQL_PARAM);
         }
@@ -789,17 +789,25 @@ async fn validate_cell_trees(
             .map(|p| {
                 params.push(p.contents.get(child_col).unwrap().value.clone());
                 params.push(p.contents.get(parent_col).unwrap().value.clone());
-                let sql_type =
-                    get_sql_type_from_global_config(&config, &table_name, &column_name).unwrap();
-                let sql_param;
-                if sql_type.to_lowercase() == "integer" {
-                    sql_param = format!("CAST({} AS INTEGER)", SQL_PARAM);
+                let child_sql_type =
+                    get_sql_type_from_global_config(&config, &table_name, &child_col).unwrap();
+                let child_sql_param;
+                if child_sql_type.to_lowercase() == "integer" {
+                    child_sql_param = format!("CAST(NULLIF({}, '') AS INTEGER)", SQL_PARAM);
                 } else {
-                    sql_param = String::from(SQL_PARAM);
+                    child_sql_param = String::from(SQL_PARAM);
+                }
+                let parent_sql_type =
+                    get_sql_type_from_global_config(&config, &table_name, &parent_col).unwrap();
+                let parent_sql_param;
+                if parent_sql_type.to_lowercase() == "integer" {
+                    parent_sql_param = format!("CAST(NULLIF({}, '') AS INTEGER)", SQL_PARAM);
+                } else {
+                    parent_sql_param = String::from(SQL_PARAM);
                 }
                 format!(
                     r#"SELECT {} AS "{}", {} AS "{}""#,
-                    sql_param, child_col, sql_param, parent_col
+                    child_sql_param, child_col, parent_sql_param, parent_col
                 )
             })
             .collect::<Vec<_>>();
@@ -1176,7 +1184,7 @@ async fn validate_cell_unique_constraints(
         let sql_type = get_sql_type_from_global_config(&config, &table_name, &column_name).unwrap();
         let sql_param;
         if sql_type.to_lowercase() == "integer" {
-            sql_param = format!("CAST({} AS INTEGER)", SQL_PARAM);
+            sql_param = format!("CAST(NULLIF({}, '') AS INTEGER)", SQL_PARAM);
         } else {
             sql_param = String::from(SQL_PARAM);
         }
@@ -1238,7 +1246,7 @@ fn select_with_extra_row(
         let sql_type = get_sql_type_from_global_config(&config, &table_name, &key).unwrap();
         let sql_param;
         if sql_type.to_lowercase() == "integer" {
-            sql_param = format!("CAST({} AS INTEGER)", SQL_PARAM);
+            sql_param = format!("CAST(NULLIF({}, '') AS INTEGER)", SQL_PARAM);
         } else {
             sql_param = String::from(SQL_PARAM);
         }
