@@ -76,7 +76,7 @@ $(perf_test_dir)/ontology:
 	mkdir -p $(perf_test_dir)/ontology
 
 perf_test_data: test/generate_perf_test_data.py | $(perf_test_dir)/ontology
-	$< 1 100 0 $|
+	$< 1 100000 0 $|
 
 sqlite_perf_test: valve clean perf_test_data | build test/output
 	$< $(perf_test_dir)/table.tsv $(sqlite_perf_db) > /dev/null
