@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
 
-if [[ $# -lt 1 ]]
+if [[ $# -lt 2 ]]
 then
-    echo "Usage: $(basename $0) DATABASE"
+    echo "Usage: $(basename $0) DATABASE TABLE_CONFIG"
     exit 1
 fi
 
 db=$1
-shift
+table_defs=$2
+shift 2
 if [[ $# -gt 0 ]]
 then
     echo "Warning: Extra arguments: '$*' will be ignored"
 fi
 
 pwd=$(dirname $(readlink -f $0))
-table_defs=$pwd/src/table.tsv
 export_script=$pwd/../scripts/export.py
 output_dir=$pwd/output
 

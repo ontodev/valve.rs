@@ -1,0 +1,20 @@
+table	row	column	level	rule_id	message	value
+table	rule	type	error	datatype:table_type	type should be a table type	rule
+table2	1	foo	error	rule:foo-3	bar must be a label if foo is an IRI	
+table2	10	foo	error	rule:foo-2	bar cannot be null if foo is not null	599315548
+table2	10	foo	error	rule:foo-3	bar must be a label if foo is an IRI	599315548
+table2	11	foo	error	rule:foo-2	bar cannot be null if foo is not null	346035853
+table2	11	foo	error	rule:foo-3	bar must be a label if foo is an IRI	346035853
+table2	53	foo	error	rule:foo-1	bar must be null whenever foo is null	
+table2	67	foo	error	rule:foo-1	bar must be null whenever foo is null	
+table6	1	foo	error	rule:foo-3	bar must be a label if foo is an IRI	
+table6	29	foo	error	rule:foo-2	bar cannot be null if foo is not null	mlqqciwfb dzrkvkdoo
+table6	31	foo	error	rule:foo-3	bar must be a label if foo is an IRI	
+table6	39	foo	error	rule:foo-1	bar must be null whenever foo is null	
+table6	47	foo	error	rule:foo-1	bar must be null whenever foo is null	
+table6	49	foo	error	rule:foo-2	bar cannot be null if foo is not null	vkhkocfjc emmqljtgn
+table6	68	foo	error	rule:foo-1	bar must be null whenever foo is null	
+table6	69	foo	error	rule:foo-2	bar cannot be null if foo is not null	frxqnfstu ounuheeny
+table6	71	foo	error	rule:foo-1	bar must be null whenever foo is null	
+table6	81	foo	error	rule:foo-1	bar must be null whenever foo is null	
+table6	85	foo	error	rule:foo-3	bar must be a label if foo is an IRI	
