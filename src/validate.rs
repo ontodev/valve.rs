@@ -1,13 +1,12 @@
 use enquote::unquote;
 use serde_json::{json, Value as SerdeValue};
-use sqlx::any::AnyPool;
-use sqlx::ValueRef;
-use sqlx::{query as sqlx_query, Row};
+use sqlx::{any::AnyPool, query as sqlx_query, Row, ValueRef};
 use std::collections::HashMap;
 
 use crate::{
-    ast::Expression, get_sql_type_from_global_config, local_sql_syntax, ColumnRule,
-    CompiledCondition, ConfigMap, ParsedStructure, SQL_PARAM,
+    ast::Expression, cast_column_sql_to_text, cast_sql_param_from_text, get_column_value,
+    get_sql_type_from_global_config, local_sql_syntax, ColumnRule, CompiledCondition, ConfigMap,
+    ParsedStructure, SQL_PARAM,
 };
 
 /// Represents a particular cell in a particular row of data with vaildation results.
@@ -256,12 +255,7 @@ pub async fn get_matching_values(
                         Expression::Function(name, args) if name == "from" => {
                             let foreign_key = &args[0];
                             if let Expression::Field(ftable, fcolumn) = &**foreign_key {
-                                let fcolumn_text;
-                                if sql_type.to_lowercase() == "integer" {
-                                    fcolumn_text = format!(r#"CAST("{}" AS TEXT)"#, fcolumn);
-                                } else {
-                                    fcolumn_text = format!(r#""{}""#, fcolumn);
-                                }
+                                let fcolumn_text = cast_column_sql_to_text(&fcolumn, &sql_type);
                                 let sql = local_sql_syntax(
                                     &pool,
                                     &format!(
@@ -272,14 +266,7 @@ pub async fn get_matching_values(
                                 let rows =
                                     sqlx_query(&sql).bind(&matching_string).fetch_all(pool).await?;
                                 for row in rows.iter() {
-                                    if sql_type.to_lowercase() == "integer" {
-                                        let foo: i32 = row.get(format!(r#"{}"#, fcolumn).as_str());
-                                        let foo: u32 = foo as u32;
-                                        values.push(foo.to_string());
-                                    } else {
-                                        let value: &str = row.get(&**fcolumn);
-                                        values.push(value.to_string());
-                                    }
+                                    values.push(get_column_value(&row, &fcolumn, &sql_type));
                                 }
                             }
                         }
@@ -327,12 +314,8 @@ pub async fn get_matching_values(
                                 under_val,
                                 None,
                             );
-                            let child_column_text;
-                            if sql_type.to_lowercase() == "integer" {
-                                child_column_text = format!(r#"CAST("{}" AS TEXT)"#, child_column);
-                            } else {
-                                child_column_text = format!(r#""{}""#, child_column);
-                            }
+                            let child_column_text =
+                                cast_column_sql_to_text(&child_column, &sql_type);
                             let sql = local_sql_syntax(
                                 &pool,
                                 &format!(
@@ -349,14 +332,7 @@ pub async fn get_matching_values(
 
                             let rows = query.fetch_all(pool).await?;
                             for row in rows.iter() {
-                                if sql_type.to_lowercase() == "integer" {
-                                    let foo: i32 = row.get(format!(r#"{}"#, child_column).as_str());
-                                    let foo: u32 = foo as u32;
-                                    values.push(foo.to_string());
-                                } else {
-                                    let value: &str = row.get(child_column);
-                                    values.push(value.to_string());
-                                }
+                                values.push(get_column_value(&row, &child_column, &sql_type));
                             }
                         }
                         _ => panic!("Unrecognised structure: {}", original),
@@ -582,13 +558,7 @@ fn with_tree_sql(
     let under_sql;
     if let Some(root) = root {
         let sql_type = get_sql_type_from_global_config(&config, table_name, &child_col).unwrap();
-        let sql_param;
-        if sql_type.to_lowercase() == "integer" {
-            sql_param = format!("CAST(NULLIF({}, '') AS INTEGER)", SQL_PARAM);
-        } else {
-            sql_param = String::from(SQL_PARAM);
-        }
-        under_sql = format!(r#"WHERE "{}" = {}"#, child_col, sql_param);
+        under_sql = format!(r#"WHERE "{}" = {}"#, child_col, cast_sql_param_from_text(&sql_type));
         params.push(root.clone());
     } else {
         under_sql = String::new();
@@ -681,12 +651,7 @@ async fn validate_cell_foreign_constraints(
         let ftable = fkey.get("ftable").and_then(|t| t.as_str()).unwrap();
         let fcolumn = fkey.get("fcolumn").and_then(|c| c.as_str()).unwrap();
         let sql_type = get_sql_type_from_global_config(&config, &ftable, &fcolumn).unwrap();
-        let sql_param;
-        if sql_type.to_lowercase() == "integer" {
-            sql_param = format!("CAST(NULLIF({}, '') AS INTEGER)", SQL_PARAM);
-        } else {
-            sql_param = String::from(SQL_PARAM);
-        }
+        let sql_param = cast_sql_param_from_text(&sql_type);
         let fsql = local_sql_syntax(
             &pool,
             &format!(r#"SELECT 1 FROM "{}" WHERE "{}" = {} LIMIT 1"#, ftable, fcolumn, sql_param),
@@ -791,20 +756,10 @@ async fn validate_cell_trees(
                 params.push(p.contents.get(parent_col).unwrap().value.clone());
                 let child_sql_type =
                     get_sql_type_from_global_config(&config, &table_name, &child_col).unwrap();
-                let child_sql_param;
-                if child_sql_type.to_lowercase() == "integer" {
-                    child_sql_param = format!("CAST(NULLIF({}, '') AS INTEGER)", SQL_PARAM);
-                } else {
-                    child_sql_param = String::from(SQL_PARAM);
-                }
+                let child_sql_param = cast_sql_param_from_text(&child_sql_type);
                 let parent_sql_type =
                     get_sql_type_from_global_config(&config, &table_name, &parent_col).unwrap();
-                let parent_sql_param;
-                if parent_sql_type.to_lowercase() == "integer" {
-                    parent_sql_param = format!("CAST(NULLIF({}, '') AS INTEGER)", SQL_PARAM);
-                } else {
-                    parent_sql_param = String::from(SQL_PARAM);
-                }
+                let parent_sql_param = cast_sql_param_from_text(&parent_sql_type);
                 format!(
                     r#"SELECT {} AS "{}", {} AS "{}""#,
                     child_sql_param, child_col, parent_sql_param, parent_col
@@ -855,24 +810,14 @@ async fn validate_cell_trees(
         // the new row would result in a cycle.
         let cycle_detected = {
             let cycle_row = rows.iter().find(|row| {
-                let sql_type =
-                    get_sql_type_from_global_config(&config, &table_name, &parent_col).unwrap();
-                if sql_type.to_lowercase() == "integer" {
-                    let raw_foo = row.try_get_raw(format!(r#"{}"#, parent_col).as_str()).unwrap();
-                    if raw_foo.is_null() {
-                        false
-                    } else {
-                        let foo: i32 = row.get(format!(r#"{}"#, parent_col).as_str());
-                        let foo: u32 = foo as u32;
-                        foo.to_string() == child_val
-                    }
+                let raw_foo = row.try_get_raw(format!(r#"{}"#, parent_col).as_str()).unwrap();
+                if raw_foo.is_null() {
+                    false
                 } else {
-                    let parent: Result<&str, sqlx::Error> = row.try_get(parent_col.as_str());
-                    if let Ok(parent) = parent {
-                        parent == child_val
-                    } else {
-                        false
-                    }
+                    let sql_type =
+                        get_sql_type_from_global_config(&config, &table_name, &parent_col).unwrap();
+                    let parent = get_column_value(&row, &parent_col, &sql_type);
+                    parent == child_val
                 }
             });
             match cycle_row {
@@ -884,11 +829,15 @@ async fn validate_cell_trees(
         if cycle_detected {
             let mut cycle_legs = vec![];
             for row in &rows {
-                let child: &str = row.get(child_col);
-                let parent: &str = row.get(parent_col.as_str());
+                let child_sql_type =
+                    get_sql_type_from_global_config(&config, &table_name, &child_col).unwrap();
+                let parent_sql_type =
+                    get_sql_type_from_global_config(&config, &table_name, &parent_col).unwrap();
+                let child = get_column_value(&row, &child_col, &child_sql_type);
+                let parent = get_column_value(&row, &parent_col, &parent_sql_type);
                 cycle_legs.push((child, parent));
             }
-            cycle_legs.push((&child_val, &parent_val));
+            cycle_legs.push((child_val, parent_val));
 
             let mut cycle_msg = vec![];
             for cycle in &cycle_legs {
@@ -1182,12 +1131,7 @@ async fn validate_cell_unique_constraints(
         }
 
         let sql_type = get_sql_type_from_global_config(&config, &table_name, &column_name).unwrap();
-        let sql_param;
-        if sql_type.to_lowercase() == "integer" {
-            sql_param = format!("CAST(NULLIF({}, '') AS INTEGER)", SQL_PARAM);
-        } else {
-            sql_param = String::from(SQL_PARAM);
-        }
+        let sql_param = cast_sql_param_from_text(&sql_type);
         let sql = local_sql_syntax(
             &pool,
             &format!(
@@ -1244,12 +1188,7 @@ fn select_with_extra_row(
     let mut second_select = String::from(r#"SELECT "row_number", "#);
     for (i, (key, content)) in extra_row.contents.iter().enumerate() {
         let sql_type = get_sql_type_from_global_config(&config, &table_name, &key).unwrap();
-        let sql_param;
-        if sql_type.to_lowercase() == "integer" {
-            sql_param = format!("CAST(NULLIF({}, '') AS INTEGER)", SQL_PARAM);
-        } else {
-            sql_param = String::from(SQL_PARAM);
-        }
+        let sql_param = cast_sql_param_from_text(&sql_type);
         // enumerate() begins from 0 but we need to begin at 1:
         let i = i + 1;
         first_select.push_str(format!(r#"{} AS "{}", "#, sql_param, key).as_str());
@@ -1425,17 +1364,11 @@ pub async fn validate_under(
             } else {
                 let sql_type =
                     get_sql_type_from_global_config(&config, &table_name, &column).unwrap();
-                if sql_type.to_lowercase() == "integer" {
-                    let foo: i32 = row.get(format!(r#"{}"#, column).as_str());
-                    let foo: u32 = foo as u32;
-                    column_val = foo.to_string();
-                } else {
-                    column_val = row.get(format!(r#"{}"#, column).as_str());
-                }
+                column_val = get_column_value(&row, &column, &sql_type);
             }
 
-            // We use i32 instead of i64 (which we use for row_number) here because, unlike row_number,
-            // which is a BIGINT, 0 and 1 are being interpreted as normal sized ints.
+            // We use i32 instead of i64 (which we use for row_number) here because, unlike
+            // row_number, which is a BIGINT, 0 and 1 are being interpreted as normal sized ints.
             let is_in_tree: i32 = row.get("is_in_tree");
             let is_in_tree: u32 = is_in_tree as u32;
             let is_under: i32 = row.get("is_under");

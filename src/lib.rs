@@ -42,7 +42,7 @@ use petgraph::{
 use regex::Regex;
 use serde_json::{json, Value as SerdeValue};
 use sqlx::{
-    any::{AnyConnectOptions, AnyKind, AnyPool, AnyPoolOptions},
+    any::{AnyConnectOptions, AnyKind, AnyPool, AnyPoolOptions, AnyRow},
     query as sqlx_query, Row, ValueRef,
 };
 use std::{
@@ -1171,11 +1171,7 @@ async fn make_inserts(
                 if cell.nulltype == None && cell.valid {
                     let sql_type =
                         get_sql_type_from_global_config(&config, &table_name, &column).unwrap();
-                    if sql_type.to_lowercase() == "integer" {
-                        values.push(format!("CAST(NULLIF({}, '') AS INTEGER)", SQL_PARAM));
-                    } else {
-                        values.push(String::from(SQL_PARAM));
-                    }
+                    values.push(cast_sql_param_from_text(&sql_type));
                     params.push(cell.value.clone());
                 } else {
                     values.push(String::from("NULL"));
@@ -1488,6 +1484,36 @@ fn get_sql_type_from_global_config(
     get_sql_type(&dt_config, &dt)
 }
 
+/// TODO: Add docstring here
+fn cast_sql_param_from_text(sql_type: &str) -> String {
+    if sql_type.to_lowercase() == "integer" {
+        format!("CAST(NULLIF({}, '') AS INTEGER)", SQL_PARAM)
+    } else {
+        String::from(SQL_PARAM)
+    }
+}
+
+/// TODO: Add docstring here
+fn cast_column_sql_to_text(column: &str, sql_type: &str) -> String {
+    if sql_type.to_lowercase() == "integer" {
+        format!(r#"CAST("{}" AS TEXT)"#, column)
+    } else {
+        format!(r#""{}""#, column)
+    }
+}
+
+/// TODO: Add a docstring for this helper function
+fn get_column_value(row: &AnyRow, column: &str, sql_type: &str) -> String {
+    if sql_type.to_lowercase() == "integer" {
+        let value: i32 = row.get(format!(r#"{}"#, column).as_str());
+        let value: u32 = value as u32;
+        value.to_string()
+    } else {
+        let value: &str = row.get(format!(r#"{}"#, column).as_str());
+        value.to_string()
+    }
+}
+
 /// Given the config maps for tables and datatypes, and a table name, generate a SQL schema string,
 /// including each column C and its matching C_meta column, then return the schema string as well as
 /// a list of the table's constraints.
@@ -1798,11 +1824,7 @@ pub async fn insert_new_row(
             let sql_type =
                 get_sql_type_from_global_config(&global_config, &table_name.to_string(), &column)
                     .unwrap();
-            if sql_type.to_lowercase() == "integer" {
-                insert_values.push(format!("CAST(NULLIF({}, '') AS INTEGER)", SQL_PARAM));
-            } else {
-                insert_values.push(String::from(SQL_PARAM));
-            }
+            insert_values.push(cast_sql_param_from_text(&sql_type));
             insert_params.push(String::from(value));
         } else {
             insert_values.push(String::from("NULL"));
@@ -1856,16 +1878,10 @@ pub async fn update_row(
         if cell_valid {
             let value = cell.get("value").and_then(|v| v.as_str()).unwrap();
             cell_for_insert.remove("value");
-
             let sql_type =
                 get_sql_type_from_global_config(&global_config, &table_name.to_string(), &column)
                     .unwrap();
-            if sql_type.to_lowercase() == "integer" {
-                assignments
-                    .push(format!(r#""{}" = CAST(NULLIF({}, '') AS INTEGER)"#, column, SQL_PARAM));
-            } else {
-                assignments.push(format!(r#""{}" = {}"#, column, SQL_PARAM));
-            }
+            assignments.push(format!(r#""{}" = {}"#, column, cast_sql_param_from_text(&sql_type)));
             params.push(String::from(value));
         } else {
             assignments.push(format!(r#""{}" = NULL"#, column));
