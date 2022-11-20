@@ -105,13 +105,13 @@ perf_test_data: test/generate_random_test_data.py | $(perf_test_dir)/ontology
 	./$< 1 10000 0 $|
 
 sqlite_perf_test: valve clean perf_test_data | build test/output
-	./$< $(perf_test_dir)/table.tsv $(sqlite_perf_db) > /dev/null
+	time -p ./$< $(perf_test_dir)/table.tsv $(sqlite_perf_db) > /dev/null
 	time -p test/round_trip.sh $(sqlite_perf_db) $(perf_test_dir)/table.tsv
 	time -p scripts/export.py messages $(sqlite_perf_db) $(word 2,$|) $(tables_to_test)
 	diff --strip-trailing-cr -q $(perf_test_dir)/expected/messages.tsv test/output/messages.tsv
 
 pg_perf_test: valve clean perf_test_data | build test/output
-	./$< $(perf_test_dir)/table.tsv postgresql:///valve_postgres > /dev/null
+	time -p ./$< $(perf_test_dir)/table.tsv postgresql:///valve_postgres > /dev/null
 	time -p test/round_trip.sh postgresql:///valve_postgres $(perf_test_dir)/table.tsv
 	time -p scripts/export.py messages postgresql:///valve_postgres $(word 2,$|) $(tables_to_test)
 	diff --strip-trailing-cr -q $(perf_test_dir)/expected/messages.tsv test/output/messages.tsv
