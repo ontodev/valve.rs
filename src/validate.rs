@@ -1516,12 +1516,15 @@ pub async fn validate_tree_foreign_keys(
             // If the parent column already contains a different error, its value will be null and
             // it will be returned by the above query regardless of whether it actually violates the
             // tree's foreign constraint. So we check the value from the meta column instead.
+
             let raw_parent_val = row.try_get_raw(format!(r#"{}"#, parent_col).as_str()).unwrap();
             let parent_val;
             if !raw_parent_val.is_null() {
-                parent_val = row.get(format!(r#"{}"#, parent_col).as_str());
+                let sql_type =
+                    get_sql_type_from_global_config(&config, &table_name, &parent_col).unwrap();
+                parent_val = get_column_value(&row, &parent_col, &sql_type);
             } else {
-                parent_val = meta.get("value").and_then(|v| v.as_str()).unwrap();
+                parent_val = meta.get("value").and_then(|v| v.as_str()).unwrap().to_string();
                 let sql = local_sql_syntax(
                     &pool,
                     &format!(
@@ -1529,7 +1532,7 @@ pub async fn validate_tree_foreign_keys(
                         table_name, child_col, SQL_PARAM
                     ),
                 );
-                let query = sqlx_query(&sql).bind(parent_val);
+                let query = sqlx_query(&sql).bind(parent_val.to_string());
                 let rows = query.fetch_all(pool).await?;
                 if rows.len() > 0 {
                     continue;

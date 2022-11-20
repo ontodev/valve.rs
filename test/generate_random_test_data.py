@@ -322,9 +322,6 @@ def main():
             is_error_row = error_proportion and row_num % error_proportion == (
                 random.randrange(1, num_rows + 1)
             )
-            if is_error_row:
-                print(f"Generating error row for {table} at row number {row_num}.")
-
             columns = [column for column in CONFIG[table]]
             row = {}
             for column in columns:
