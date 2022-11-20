@@ -12,7 +12,10 @@ MAKEFLAGS += --warn-undefined-variables
 build:
 	mkdir build
 
-.PHONY: doc time test sqlite_test pg_test perf_test_data perf_test
+.PHONY: doc time test sqlite_test pg_test
+.PHONY: api_test sqlite_api_test pg_qpi_test
+.PHONY: perf_test_data perf_test sqlite_perf_test pg_perf_test
+.PHONY: random_test_data random_test sqlite_random_test pg_random_test
 
 doc:
 	cargo doc --document-private-items
@@ -33,7 +36,7 @@ build/valve.db: test/src/table.tsv valve clean | build
 test/output:
 	mkdir -p test/output
 
-test: sqlite_test pg_test api_test
+test: sqlite_test pg_test api_test random_test
 
 tables_to_test = column datatype rule table table1 table2 table3 table4 table5 table6
 
@@ -67,6 +70,29 @@ pg_api_test: valve test/src/table.tsv test/insert_update.sh | test/output
 	$(word 3,$^) postgresql:///valve_postgres
 	@echo "Test succeeded!"
 
+sqlite_random_db = build/valve_random.db
+random_test_dir = test/random_test_data
+
+random_test: sqlite_random_test pg_random_test
+
+$(random_test_dir)/ontology:
+	mkdir -p $(random_test_dir)/ontology
+
+random_test_data: test/generate_random_test_data.py | $(random_test_dir)/ontology
+	$< $$(date +"%s") 100 0 $|
+
+sqlite_random_test: valve clean random_test_data | build test/output
+	@echo "Testing with random data on sqlite ..."
+	$< $(random_test_dir)/table.tsv $(sqlite_random_db) > /dev/null
+	test/round_trip.sh $(sqlite_random_db) $(random_test_dir)/table.tsv
+	@echo "Test succeeded!"
+
+pg_random_test: valve clean random_test_data | build test/output
+	@echo "Testing with random data on postgresql ..."
+	$< $(random_test_dir)/table.tsv postgresql:///valve_postgres > /dev/null
+	test/round_trip.sh postgresql:///valve_postgres $(random_test_dir)/table.tsv
+	@echo "Test succeeded!"
+
 sqlite_perf_db = build/valve_perf.db
 perf_test_dir = test/perf_test_data
 
@@ -75,8 +101,8 @@ perf_test: sqlite_perf_test pg_perf_test
 $(perf_test_dir)/ontology:
 	mkdir -p $(perf_test_dir)/ontology
 
-perf_test_data: test/generate_perf_test_data.py | $(perf_test_dir)/ontology
-	$< 1 100000 0 $|
+perf_test_data: test/generate_random_test_data.py | $(perf_test_dir)/ontology
+	$< 1 10000 0 $|
 
 sqlite_perf_test: valve clean perf_test_data | build test/output
 	$< $(perf_test_dir)/table.tsv $(sqlite_perf_db) > /dev/null
@@ -91,7 +117,7 @@ pg_perf_test: valve clean perf_test_data | build test/output
 	diff --strip-trailing-cr -q $(perf_test_dir)/expected/messages.tsv test/output/messages.tsv
 
 clean:
-	rm -Rf build test/output $(perf_test_dir)/ontology
+	rm -Rf build test/output $(perf_test_dir)/ontology $(random_test_dir)/ontology
 
 cleanall: clean
 	cargo clean
