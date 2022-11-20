@@ -954,6 +954,81 @@ pub async fn load_db(
     Ok(())
 }
 
+/// Given the config map and the name of a datatype, climb the datatype tree (as required),
+/// and return the first 'SQL type' found.
+fn get_sql_type(dt_config: &ConfigMap, datatype: &String) -> Option<String> {
+    if !dt_config.contains_key(datatype) {
+        return None;
+    }
+
+    if let Some(sql_type) = dt_config.get(datatype).and_then(|d| d.get("SQL type")) {
+        return Some(sql_type.as_str().and_then(|s| Some(s.to_string())).unwrap());
+    }
+
+    let parent_datatype =
+        dt_config.get(datatype).and_then(|d| d.get("parent")).and_then(|p| p.as_str()).unwrap();
+
+    return get_sql_type(dt_config, &parent_datatype.to_string());
+}
+
+/// Given the global config map, a table name, and a column name, return the column's SQL type.
+fn get_sql_type_from_global_config(
+    global_config: &ConfigMap,
+    table: &str,
+    column: &str,
+) -> Option<String> {
+    let dt_config = global_config.get("datatype").and_then(|d| d.as_object()).unwrap();
+    let normal_table_name;
+    if let Some(s) = table.strip_suffix("_conflict") {
+        normal_table_name = String::from(s);
+    } else {
+        normal_table_name = table.to_string();
+    }
+    let dt = global_config
+        .get("table")
+        .and_then(|t| t.get(normal_table_name))
+        .and_then(|t| t.get("column"))
+        .and_then(|c| c.get(column))
+        .and_then(|c| c.get("datatype"))
+        .and_then(|d| d.as_str())
+        .and_then(|d| Some(d.to_string()))
+        .unwrap();
+    get_sql_type(&dt_config, &dt)
+}
+
+/// Given a SQL type, return the appropriate CAST(...) statement for casting the SQL_PARAM
+/// from a TEXT column.
+fn cast_sql_param_from_text(sql_type: &str) -> String {
+    if sql_type.to_lowercase() == "integer" {
+        format!("CAST(NULLIF({}, '') AS INTEGER)", SQL_PARAM)
+    } else {
+        String::from(SQL_PARAM)
+    }
+}
+
+/// Given a SQL type, return the appropriate CAST(...) statement for casting the SQL_PARAM
+/// to a TEXT column.
+fn cast_column_sql_to_text(column: &str, sql_type: &str) -> String {
+    if sql_type.to_lowercase() == "integer" {
+        format!(r#"CAST("{}" AS TEXT)"#, column)
+    } else {
+        format!(r#""{}""#, column)
+    }
+}
+
+/// Given a database row, the name of a column, and it's SQL type, return the value of that column
+// from the given row as a String.
+fn get_column_value(row: &AnyRow, column: &str, sql_type: &str) -> String {
+    if sql_type.to_lowercase() == "integer" {
+        let value: i32 = row.get(format!(r#"{}"#, column).as_str());
+        let value: u32 = value as u32;
+        value.to_string()
+    } else {
+        let value: &str = row.get(format!(r#"{}"#, column).as_str());
+        value.to_string()
+    }
+}
+
 /// Given a configuration map, a database connection pool, maps for compiled datatype and rule
 /// conditions, a table name, a number of chunks of rows to insert into the table in the database,
 /// and the headers of the rows to be inserted, validate each chunk and insert the validated rows
@@ -1440,78 +1515,6 @@ fn verify_table_deps_and_sort(table_list: &Vec<String>, constraints: &ConfigMap)
             panic!("{}", message);
         }
     };
-}
-
-/// Given the config map and the name of a datatype, climb the datatype tree (as required),
-/// and return the first 'SQL type' found.
-fn get_sql_type(dt_config: &ConfigMap, datatype: &String) -> Option<String> {
-    if !dt_config.contains_key(datatype) {
-        return None;
-    }
-
-    if let Some(sql_type) = dt_config.get(datatype).and_then(|d| d.get("SQL type")) {
-        return Some(sql_type.as_str().and_then(|s| Some(s.to_string())).unwrap());
-    }
-
-    let parent_datatype =
-        dt_config.get(datatype).and_then(|d| d.get("parent")).and_then(|p| p.as_str()).unwrap();
-
-    return get_sql_type(dt_config, &parent_datatype.to_string());
-}
-
-/// Given the global config map, a table name, and a column name, return the column's SQL type.
-fn get_sql_type_from_global_config(
-    global_config: &ConfigMap,
-    table: &str,
-    column: &str,
-) -> Option<String> {
-    let dt_config = global_config.get("datatype").and_then(|d| d.as_object()).unwrap();
-    let normal_table_name;
-    if let Some(s) = table.strip_suffix("_conflict") {
-        normal_table_name = String::from(s);
-    } else {
-        normal_table_name = table.to_string();
-    }
-    let dt = global_config
-        .get("table")
-        .and_then(|t| t.get(normal_table_name))
-        .and_then(|t| t.get("column"))
-        .and_then(|c| c.get(column))
-        .and_then(|c| c.get("datatype"))
-        .and_then(|d| d.as_str())
-        .and_then(|d| Some(d.to_string()))
-        .unwrap();
-    get_sql_type(&dt_config, &dt)
-}
-
-/// TODO: Add docstring here
-fn cast_sql_param_from_text(sql_type: &str) -> String {
-    if sql_type.to_lowercase() == "integer" {
-        format!("CAST(NULLIF({}, '') AS INTEGER)", SQL_PARAM)
-    } else {
-        String::from(SQL_PARAM)
-    }
-}
-
-/// TODO: Add docstring here
-fn cast_column_sql_to_text(column: &str, sql_type: &str) -> String {
-    if sql_type.to_lowercase() == "integer" {
-        format!(r#"CAST("{}" AS TEXT)"#, column)
-    } else {
-        format!(r#""{}""#, column)
-    }
-}
-
-/// TODO: Add a docstring for this helper function
-fn get_column_value(row: &AnyRow, column: &str, sql_type: &str) -> String {
-    if sql_type.to_lowercase() == "integer" {
-        let value: i32 = row.get(format!(r#"{}"#, column).as_str());
-        let value: u32 = value as u32;
-        value.to_string()
-    } else {
-        let value: &str = row.get(format!(r#"{}"#, column).as_str());
-        value.to_string()
-    }
 }
 
 /// Given the config maps for tables and datatypes, and a table name, generate a SQL schema string,
