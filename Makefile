@@ -79,17 +79,17 @@ $(random_test_dir)/ontology:
 	mkdir -p $(random_test_dir)/ontology
 
 random_test_data: test/generate_random_test_data.py | $(random_test_dir)/ontology
-	$< $$(date +"%s") 100 0 $|
+	./$< $$(date +"%s") 100 0 $|
 
 sqlite_random_test: valve clean random_test_data | build test/output
 	@echo "Testing with random data on sqlite ..."
-	$< $(random_test_dir)/table.tsv $(sqlite_random_db) > /dev/null
+	./$< $(random_test_dir)/table.tsv $(sqlite_random_db) > /dev/null
 	test/round_trip.sh $(sqlite_random_db) $(random_test_dir)/table.tsv
 	@echo "Test succeeded!"
 
 pg_random_test: valve clean random_test_data | build test/output
 	@echo "Testing with random data on postgresql ..."
-	$< $(random_test_dir)/table.tsv postgresql:///valve_postgres > /dev/null
+	./$< $(random_test_dir)/table.tsv postgresql:///valve_postgres > /dev/null
 	test/round_trip.sh postgresql:///valve_postgres $(random_test_dir)/table.tsv
 	@echo "Test succeeded!"
 
@@ -102,16 +102,16 @@ $(perf_test_dir)/ontology:
 	mkdir -p $(perf_test_dir)/ontology
 
 perf_test_data: test/generate_random_test_data.py | $(perf_test_dir)/ontology
-	$< 1 10000 0 $|
+	./$< 1 10000 0 $|
 
 sqlite_perf_test: valve clean perf_test_data | build test/output
-	$< $(perf_test_dir)/table.tsv $(sqlite_perf_db) > /dev/null
+	./$< $(perf_test_dir)/table.tsv $(sqlite_perf_db) > /dev/null
 	time -p test/round_trip.sh $(sqlite_perf_db) $(perf_test_dir)/table.tsv
 	time -p scripts/export.py messages $(sqlite_perf_db) $(word 2,$|) $(tables_to_test)
 	diff --strip-trailing-cr -q $(perf_test_dir)/expected/messages.tsv test/output/messages.tsv
 
 pg_perf_test: valve clean perf_test_data | build test/output
-	$< $(perf_test_dir)/table.tsv postgresql:///valve_postgres > /dev/null
+	./$< $(perf_test_dir)/table.tsv postgresql:///valve_postgres > /dev/null
 	time -p test/round_trip.sh postgresql:///valve_postgres $(perf_test_dir)/table.tsv
 	time -p scripts/export.py messages postgresql:///valve_postgres $(word 2,$|) $(tables_to_test)
 	diff --strip-trailing-cr -q $(perf_test_dir)/expected/messages.tsv test/output/messages.tsv
