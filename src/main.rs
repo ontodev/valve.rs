@@ -12,7 +12,7 @@ use std::{env, process};
 #[async_std::main]
 async fn main() -> Result<(), sqlx::Error> {
     let usage = r#"
-Usage: valve [OPTION] TABLE DATABASE
+Usage: valve [OPTION] TABLE [DATABASE]
 Where:
   OPTION may be one of:
     --api_test: Read the configuration referred to by TABLE and test the
@@ -24,29 +24,27 @@ Where:
       will be read and a new database will be created and loaded with the indicated
       data.
   TABLE is a filename referring to a specific valve configuration.
-  DATABASE can be one of:
+  DATABASE (required unless the --dump_config option has been specified) can be one of:
     - A URL of the form `postgresql://...` or `sqlite://...`
     - The filename (including path) of a sqlite database."#;
 
     let args: Vec<String> = env::args().collect();
-    if args.len() < 3
-        || (args[1] == "--api_test" && args.len() < 4)
-        || (args[1] == "--dump_config" && args.len() < 4)
-    {
+    if args.len() < 3 || (args[1] == "--api_test" && args.len() < 4) {
         eprintln!("{}", usage);
         process::exit(1);
     }
 
     let table;
     let database;
-    if &args[1] == "--api_test" {
+    if &args[1] == "--help" {
+        eprintln!("{}", usage);
+    } else if &args[1] == "--api_test" {
         table = &args[2];
         database = &args[3];
         run_api_tests(table, database).await?;
     } else if &args[1] == "--dump_config" {
         table = &args[2];
-        database = &args[3];
-        let config = configure_and_or_load(table, database, false).await?;
+        let config = configure_and_or_load(table, &String::from(":memory:"), false).await?;
         let mut config: SerdeValue = serde_json::from_str(config.as_str()).unwrap();
         let config = config.as_object_mut().unwrap();
         let parser = StartParser::new();

@@ -1,8 +1,6 @@
 use std::fmt;
-//use std::fmt::Debug;
 
 /// Represents an expression as parsed using [Valve's grammar](../valve_grammar/index.html).
-//#[derive(Debug, Clone)]
 #[derive(Clone)]
 pub enum Expression {
     None,
@@ -16,7 +14,9 @@ pub enum Expression {
     Function(String, Vec<Box<Expression>>),
 }
 
-// TODO: It would be better to implement this as std::fmt::Display instead of Debug.
+// We use Debug instead of Display because it is not possible to display a Vec.
+// TODO: There might be some way around this limitation. We should look into it eventually but this
+// is low on the priority list because this code is working fine.
 impl std::fmt::Debug for Expression {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {

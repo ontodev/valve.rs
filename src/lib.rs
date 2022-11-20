@@ -5,18 +5,15 @@
 //! # valve.rs
 //! A lightweight validation engine written in rust.
 //!
-//! This implementation is a port of the
-//! [next implementation of the valve parser](https://github.com/jamesaoverton/cmi-pb-terminology/tree/next) to rust.
-//!
 //! ## Command line usage
+//! Run:
 //! ```
-//! valve table db
+//! valve --help
 //! ```
-//! where `table` is the path to the table table (normally `table.tsv`) and `db` is the path to the
-//! sqlite database file (which is created if it doesn't exist).
+//! to see command line options.
 //!
 //! ## Python bindings
-//! See [valve.py](https://github.com/ontodev/valve.py/tree/valve_rs_python_bindings)
+//! See [valve.py](https://github.com/ontodev/valve.py)
 
 #[macro_use]
 extern crate lalrpop_util;
@@ -76,7 +73,8 @@ pub struct ParsedStructure {
     parsed: Expression,
 }
 
-// TODO: It would be better to implement this as std::fmt::Display instead of Debug.
+// We use Debug here instead of Display because we have only implemented Debug for Expressions.
+// See the comment about this in ast.rs.
 impl std::fmt::Debug for ParsedStructure {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(
@@ -96,7 +94,8 @@ pub struct CompiledCondition {
     compiled: Arc<dyn Fn(&str) -> bool + Sync + Send>,
 }
 
-// TODO: It would be better to implement this as std::fmt::Display instead of Debug.
+// We use Debug here instead of Display because we have only implemented Debug for Expressions.
+// See the comment about this in ast.rs.
 impl std::fmt::Debug for CompiledCondition {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(
@@ -104,10 +103,6 @@ impl std::fmt::Debug for CompiledCondition {
             "{{\"compiled_condition\": {{\"original\": \"{}\", \"parsed\": {:?}}}}}",
             &self.original, &self.parsed
         )
-        //f.debug_struct("")
-        //    .field("\"original\"", &self.original)
-        //    .field("\"parsed\"", &self.parsed)
-        //    .finish()
     }
 }
 
@@ -119,10 +114,10 @@ pub struct ColumnRule {
     then: CompiledCondition,
 }
 
-// TODO: It would be better to implement this as std::fmt::Display instead of Debug.
+// We use Debug here instead of Display because we have only implemented Debug for Expressions.
+// See the comment about this in ast.rs.
 impl std::fmt::Debug for ColumnRule {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        //f.debug_struct("").field("\"when\"", &self.when).field("\"then\"", &self.then).finish()
         write!(f, "{{\"column_rule\": {{\"when\": {:?}, \"then\": {:?}}}}}", &self.when, &self.then)
     }
 }
