@@ -31,7 +31,7 @@ valve: src/*.rs src/*.lalrpop
 	# ln -s target/debug/ontodev_valve valve
 
 build/valve.db: test/src/table.tsv valve clean | build
-	./valve $< $@ > /dev/null
+	./valve $< $@
 
 test/output:
 	mkdir -p test/output
@@ -49,7 +49,7 @@ sqlite_test: build/valve.db test/src/table.tsv | test/output
 
 pg_test: valve test/src/table.tsv | test/output
 	@echo "Testing valve on postgresql ..."
-	./$^ postgresql:///valve_postgres > /dev/null
+	./$^ postgresql:///valve_postgres
 	test/round_trip.sh postgresql:///valve_postgres $(word 2,$^)
 	scripts/export.py messages postgresql:///valve_postgres $| $(tables_to_test)
 	diff --strip-trailing-cr -q test/expected/messages.tsv test/output/messages.tsv
@@ -65,7 +65,7 @@ sqlite_api_test: valve test/src/table.tsv build/valve.db test/insert_update.sh |
 
 pg_api_test: valve test/src/table.tsv test/insert_update.sh | test/output
 	@echo "Testing API functions on postgresql ..."
-	./$< $(word 2,$^) postgresql:///valve_postgres > /dev/null
+	./$< $(word 2,$^) postgresql:///valve_postgres
 	./$< --api_test $(word 2,$^) postgresql:///valve_postgres
 	$(word 3,$^) postgresql:///valve_postgres
 	@echo "Test succeeded!"
@@ -83,13 +83,13 @@ random_test_data: test/generate_random_test_data.py | $(random_test_dir)/ontolog
 
 sqlite_random_test: valve clean random_test_data | build test/output
 	@echo "Testing with random data on sqlite ..."
-	./$< $(random_test_dir)/table.tsv $(sqlite_random_db) > /dev/null
+	./$< $(random_test_dir)/table.tsv $(sqlite_random_db)
 	test/round_trip.sh $(sqlite_random_db) $(random_test_dir)/table.tsv
 	@echo "Test succeeded!"
 
 pg_random_test: valve clean random_test_data | build test/output
 	@echo "Testing with random data on postgresql ..."
-	./$< $(random_test_dir)/table.tsv postgresql:///valve_postgres > /dev/null
+	./$< $(random_test_dir)/table.tsv postgresql:///valve_postgres
 	test/round_trip.sh postgresql:///valve_postgres $(random_test_dir)/table.tsv
 	@echo "Test succeeded!"
 
@@ -102,16 +102,16 @@ $(perf_test_dir)/ontology:
 	mkdir -p $(perf_test_dir)/ontology
 
 perf_test_data: test/generate_random_test_data.py | $(perf_test_dir)/ontology
-	./$< 1 10000 0 $|
+	./$< 1 10000 1 $|
 
 sqlite_perf_test: valve clean perf_test_data | build test/output
-	time -p ./$< $(perf_test_dir)/table.tsv $(sqlite_perf_db) > /dev/null
+	time -p ./$< $(perf_test_dir)/table.tsv $(sqlite_perf_db)
 	time -p test/round_trip.sh $(sqlite_perf_db) $(perf_test_dir)/table.tsv
 	time -p scripts/export.py messages $(sqlite_perf_db) $(word 2,$|) $(tables_to_test)
 	diff --strip-trailing-cr -q $(perf_test_dir)/expected/messages.tsv test/output/messages.tsv
 
 pg_perf_test: valve clean perf_test_data | build test/output
-	time -p ./$< $(perf_test_dir)/table.tsv postgresql:///valve_postgres > /dev/null
+	time -p ./$< $(perf_test_dir)/table.tsv postgresql:///valve_postgres
 	time -p test/round_trip.sh postgresql:///valve_postgres $(perf_test_dir)/table.tsv
 	time -p scripts/export.py messages postgresql:///valve_postgres $(word 2,$|) $(tables_to_test)
 	diff --strip-trailing-cr -q $(perf_test_dir)/expected/messages.tsv test/output/messages.tsv

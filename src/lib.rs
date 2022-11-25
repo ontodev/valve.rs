@@ -822,8 +822,9 @@ pub async fn configure_db(
         if pool.any_kind() == AnyKind::Postgres {
             drop_view_sql.push_str(" CASCADE");
         }
+        drop_view_sql.push_str(";");
         let create_view_sql = format!(
-            r#"CREATE VIEW "{t}_view" AS SELECT * FROM "{t}" UNION ALL SELECT * FROM "{t}_conflict""#,
+            r#"CREATE VIEW "{t}_view" AS SELECT * FROM "{t}" UNION ALL SELECT * FROM "{t}_conflict";"#,
             t = table_name,
         );
         table_statements.push(drop_view_sql);
@@ -867,7 +868,6 @@ pub async fn load_db(
     pool: &AnyPool,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
-    write_sql_to_stdout: bool,
 ) -> Result<(), sqlx::Error> {
     let mut table_list = vec![];
     for table in config.get("sorted_table_list").and_then(|l| l.as_array()).unwrap() {
@@ -916,7 +916,6 @@ pub async fn load_db(
             &table_name,
             &chunks,
             &headers,
-            write_sql_to_stdout,
         )
         .await?;
 
@@ -1036,7 +1035,6 @@ async fn validate_and_insert_chunks(
     table_name: &String,
     chunks: &IntoChunks<csv::StringRecordsIter<'_, std::fs::File>>,
     headers: &csv::StringRecord,
-    write_sql_to_stdout: bool,
 ) -> Result<(), sqlx::Error> {
     if !MULTI_THREADED {
         for (chunk_number, chunk) in chunks.into_iter().enumerate() {
@@ -1055,7 +1053,6 @@ async fn validate_and_insert_chunks(
                 table_name,
                 &mut intra_validated_rows,
                 chunk_number,
-                write_sql_to_stdout,
             )
             .await?;
         }
@@ -1106,7 +1103,6 @@ async fn validate_and_insert_chunks(
                     table_name,
                     &mut intra_validated_rows,
                     chunk_number,
-                    write_sql_to_stdout,
                 )
                 .await?;
             }
@@ -1125,9 +1121,6 @@ async fn validate_rows_inter_and_insert(
     table_name: &String,
     rows: &mut Vec<ResultRow>,
     chunk_number: usize,
-    // TODO: use `write_sql_to_stdout` to control whether the insert statements are written to
-    // STDOUT or not.
-    _write_sql_to_stdout: bool,
 ) -> Result<(), sqlx::Error> {
     // First, do the tree validation:
     validate_rows_trees(config, pool, table_name, rows).await?;
@@ -1526,6 +1519,7 @@ fn create_table_statement(
     if pool.any_kind() == AnyKind::Postgres {
         drop_table_sql.push_str(" CASCADE");
     }
+    drop_table_sql.push_str(";");
     let mut statements = vec![drop_table_sql];
     let mut create_lines = vec![
         format!(r#"CREATE TABLE "{}" ("#, table_name),
@@ -1910,11 +1904,13 @@ pub async fn update_row(
 
 /// Given a path to a table table file (table.tsv), a directory in which to find/create a database:
 /// configure the database using the configuration which can be looked up using the table table,
-/// and optionally load it if the `load` flag is set to true.
+/// and optionally load it if the `load` flag is set to true. If the `verbose` flag is set to true,
+/// output status messages while loading.
 pub async fn configure_and_or_load(
     table_table: &str,
     database: &str,
     load: bool,
+    verbose: bool,
 ) -> Result<String, sqlx::Error> {
     let parser = StartParser::new();
 
@@ -1948,24 +1944,9 @@ pub async fn configure_and_or_load(
         sqlx_query("PRAGMA foreign_keys = ON").execute(&pool).await?;
     }
 
-    let write_sql_to_stdout;
-    let write_to_db;
-    if load {
-        write_sql_to_stdout = true;
-        write_to_db = true;
-    } else {
-        write_sql_to_stdout = false;
-        write_to_db = false;
-    }
-    let (sorted_table_list, constraints_config) = configure_db(
-        &mut tables_config,
-        &mut datatypes_config,
-        &pool,
-        &parser,
-        write_sql_to_stdout,
-        write_to_db,
-    )
-    .await?;
+    let (sorted_table_list, constraints_config) =
+        configure_db(&mut tables_config, &mut datatypes_config, &pool, &parser, verbose, load)
+            .await?;
 
     let mut config = ConfigMap::new();
     config.insert(String::from("special"), SerdeValue::Object(specials_config.clone()));
@@ -1985,14 +1966,7 @@ pub async fn configure_and_or_load(
         get_compiled_rule_conditions(&config, compiled_datatype_conditions.clone(), &parser);
 
     if load {
-        load_db(
-            &config,
-            &pool,
-            &compiled_datatype_conditions,
-            &compiled_rule_conditions,
-            write_sql_to_stdout,
-        )
-        .await?;
+        load_db(&config, &pool, &compiled_datatype_conditions, &compiled_rule_conditions).await?;
     }
 
     let config = SerdeValue::Object(config);
