@@ -881,6 +881,9 @@ async fn load_db(
     }
     let table_list = table_list;
     let num_tables = table_list.len();
+    let mut total_errors = 0;
+    let mut total_warnings = 0;
+    let mut total_infos = 0;
     let mut table_num = 1;
     for table_name in table_list {
         if verbose {
@@ -988,7 +991,20 @@ async fn load_db(
                 errors, warnings, infos, table_name
             );
             eprintln!("{} - {}", Utc::now(), status_message);
+            total_errors += errors;
+            total_warnings += warnings;
+            total_infos += infos;
         }
+    }
+
+    if verbose {
+        eprintln!(
+            "{} - Loading complete with {} errors, {} warnings, and {} information messages",
+            Utc::now(),
+            total_errors,
+            total_warnings,
+            total_infos
+        );
     }
 
     Ok(())
