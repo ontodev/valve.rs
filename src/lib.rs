@@ -923,6 +923,13 @@ async fn load_db(
             }
         }
 
+        // HashMap used to report info about the number of error/warning/info messages for this
+        // table when the verbose flag is set to true:
+        let mut messages_stats = HashMap::new();
+        messages_stats.insert("error".to_string(), 0);
+        messages_stats.insert("warning".to_string(), 0);
+        messages_stats.insert("info".to_string(), 0);
+
         // Split the data into chunks of size CHUNK_SIZE before passing them to the validation
         // logic:
         let chunks = records.chunks(CHUNK_SIZE);
@@ -934,11 +941,10 @@ async fn load_db(
             &table_name,
             &chunks,
             &headers,
+            &mut messages_stats,
             verbose,
         )
         .await?;
-
-        // TODO: We need to update the message statistics on the basis of the validation below:
 
         // We need to wait until all of the rows for a table have been loaded before validating the
         // "foreign" constraints on a table's trees, since this checks if the values of one column
@@ -953,7 +959,8 @@ async fn load_db(
             let column_name = record.get("column").and_then(|c| c.as_str()).unwrap();
             let meta_name = format!("{}_meta", column_name);
             let row_number = record.get("row_number").unwrap();
-            let meta = format!("{}", record.get("meta").unwrap());
+            let meta = record.get("meta").unwrap();
+            let meta_str = format!("{}", meta);
             let sql = local_sql_syntax(
                 &pool,
                 &format!(
@@ -961,8 +968,26 @@ async fn load_db(
                     table_name, column_name, meta_name, SQL_PARAM, row_number
                 ),
             );
-            let query = sqlx_query(&sql).bind(meta);
+            let query = sqlx_query(&sql).bind(meta_str);
             query.execute(pool).await?;
+
+            if verbose {
+                // Add any validation messages generated to messages_stats:
+                let messages = meta.get("messages").and_then(|m| m.as_array()).unwrap();
+                add_message_counts(&messages, &mut messages_stats);
+            }
+        }
+
+        if verbose {
+            // Output a report on the messages generated to stderr:
+            let errors = messages_stats.get("error").unwrap();
+            let warnings = messages_stats.get("warning").unwrap();
+            let infos = messages_stats.get("info").unwrap();
+            let status_message = format!(
+                "{} errors, {} warnings, and {} information messages generated for {}",
+                errors, warnings, infos, table_name
+            );
+            eprintln!("{} - {}", Utc::now(), status_message);
         }
     }
 
@@ -972,8 +997,8 @@ async fn load_db(
 /// Given a configuration map, a database connection pool, maps for compiled datatype and rule
 /// conditions, a table name, a number of chunks of rows to insert into the table in the database,
 /// and the headers of the rows to be inserted, validate each chunk and insert the validated rows
-/// to the table. If the verbose flag is set to true, error/warning/info stats will be written to
-/// stderr.
+/// to the table. If the verbose flag is set to true, error/warning/info stats will be collected in
+/// messages_stats and later written to stderr.
 async fn validate_and_insert_chunks(
     config: &ConfigMap,
     pool: &AnyPool,
@@ -982,6 +1007,7 @@ async fn validate_and_insert_chunks(
     table_name: &String,
     chunks: &IntoChunks<csv::StringRecordsIter<'_, std::fs::File>>,
     headers: &csv::StringRecord,
+    messages_stats: &mut HashMap<String, usize>,
     verbose: bool,
 ) -> Result<(), sqlx::Error> {
     if !MULTI_THREADED {
@@ -1001,6 +1027,7 @@ async fn validate_and_insert_chunks(
                 table_name,
                 &mut intra_validated_rows,
                 chunk_number,
+                messages_stats,
                 verbose,
             )
             .await?;
@@ -1052,6 +1079,7 @@ async fn validate_and_insert_chunks(
                     table_name,
                     &mut intra_validated_rows,
                     chunk_number,
+                    messages_stats,
                     verbose,
                 )
                 .await?;
@@ -1064,14 +1092,15 @@ async fn validate_and_insert_chunks(
 
 /// Given a configuration map, a database connection pool, a table name, some rows to validate,
 /// and the chunk number corresponding to the rows, do inter-row validation on the rows and insert
-/// them to the table. If the verbose flag is set to true, error/warning/info stats will be written
-/// to stderr.
+/// them to the table. If the verbose flag is set to true, error/warning/info stats will be
+/// collected in messages_stats and later written to stderr.
 async fn validate_rows_inter_and_insert(
     config: &ConfigMap,
     pool: &AnyPool,
     table_name: &String,
     rows: &mut Vec<ResultRow>,
     chunk_number: usize,
+    messages_stats: &mut HashMap<String, usize>,
     verbose: bool,
 ) -> Result<(), sqlx::Error> {
     // First, do the tree validation:
@@ -1079,9 +1108,20 @@ async fn validate_rows_inter_and_insert(
 
     // Try to insert the rows to the db first without validating unique and foreign constraints.
     // If there are constraint violations this will cause a database error, in which case we then
-    // explicitly do the constraint validation and insert the resulting rows:
-    let ((main_sql, main_params), (_, _), messages_stats) =
-        make_inserts(config, table_name, rows, chunk_number, verbose).await?;
+    // explicitly do the constraint validation and insert the resulting rows.
+    // Note that instead of passing messages_stats here, we are going to initialize an empty map
+    // and pass that instead. The reason is that if a database error gets thrown, and then we
+    // redo the validation later, some of the messages will be double-counted. So to avoid that
+    // we send an empty map here, and in the case of no database error, we will just add the
+    // contents of the temporary map to messages_stats (in the Ok branch of the match statement
+    // below).
+    let mut tmp_messages_stats = HashMap::new();
+    tmp_messages_stats.insert("error".to_string(), 0);
+    tmp_messages_stats.insert("warning".to_string(), 0);
+    tmp_messages_stats.insert("info".to_string(), 0);
+    let ((main_sql, main_params), (_, _)) =
+        make_inserts(config, table_name, rows, chunk_number, &mut tmp_messages_stats, verbose)
+            .await?;
 
     let main_sql = local_sql_syntax(&pool, &main_sql);
     let mut main_query = sqlx_query(&main_sql);
@@ -1089,32 +1129,32 @@ async fn validate_rows_inter_and_insert(
         main_query = main_query.bind(param);
     }
     let main_result = main_query.execute(pool).await;
-
-    fn generate_status_message(
-        table_name: &str,
-        messages_stats: &HashMap<String, usize>,
-    ) -> String {
-        let errors = messages_stats.get("error").unwrap();
-        let warnings = messages_stats.get("warning").unwrap();
-        let infos = messages_stats.get("info").unwrap();
-        format!(
-            "{} errors, {} warnings, and {} information messages generated for {}",
-            errors, warnings, infos, table_name
-        )
-    }
-
     match main_result {
         Ok(_) => {
             if verbose {
-                let status_message = generate_status_message(table_name, &messages_stats);
-                eprintln!("{} - {}", Utc::now(), status_message);
+                let curr_errors = messages_stats.get("error").unwrap();
+                messages_stats.insert(
+                    "error".to_string(),
+                    curr_errors + tmp_messages_stats.get("error").unwrap(),
+                );
+                let curr_warnings = messages_stats.get("warning").unwrap();
+                messages_stats.insert(
+                    "warning".to_string(),
+                    curr_warnings + tmp_messages_stats.get("warning").unwrap(),
+                );
+                let curr_infos = messages_stats.get("info").unwrap();
+                messages_stats.insert(
+                    "info".to_string(),
+                    curr_infos + tmp_messages_stats.get("info").unwrap(),
+                );
             }
         }
         Err(_) => {
             validate_rows_constraints(config, pool, table_name, rows).await?;
 
-            let ((main_sql, main_params), (conflict_sql, conflict_params), messages_stats) =
-                make_inserts(config, table_name, rows, chunk_number, verbose).await?;
+            let ((main_sql, main_params), (conflict_sql, conflict_params)) =
+                make_inserts(config, table_name, rows, chunk_number, messages_stats, verbose)
+                    .await?;
 
             let main_sql = local_sql_syntax(&pool, &main_sql);
             let mut main_query = sqlx_query(&main_sql);
@@ -1129,30 +1169,47 @@ async fn validate_rows_inter_and_insert(
                 conflict_query = conflict_query.bind(param);
             }
             conflict_query.execute(pool).await?;
-
-            if verbose {
-                let status_message = generate_status_message(table_name, &messages_stats);
-                eprintln!("{} - {}", Utc::now(), status_message);
-            }
         }
     };
 
     Ok(())
 }
 
+/// Given a list of messages and a HashMap, messages_stats, with which to collect counts of
+/// message types, count the various message types encountered in the list and increment the counts
+/// in messages_stats accordingly.
+fn add_message_counts(messages: &Vec<SerdeValue>, messages_stats: &mut HashMap<String, usize>) {
+    for message in messages {
+        let message = message.as_object().unwrap();
+        let level = message.get("level").unwrap();
+        if level == "error" {
+            let current_errors = messages_stats.get("error").unwrap();
+            messages_stats.insert("error".to_string(), current_errors + 1);
+        } else if level == "warning" {
+            let current_warnings = messages_stats.get("warning").unwrap();
+            messages_stats.insert("warning".to_string(), current_warnings + 1);
+        } else if level == "info" {
+            let current_infos = messages_stats.get("info").unwrap();
+            messages_stats.insert("info".to_string(), current_infos + 1);
+        } else {
+            eprintln!("Warning: unknown message type: {}", level);
+        }
+    }
+}
+
 /// Given a configuration map, a table name, a number of rows, and their corresponding chunk number,
 /// return a three-place tuple containing: (i) SQL strings and params for INSERT statements with
-/// VALUES for the rows in the normal table, (ii) the same for the conflict versions of the table,
-/// and (iii) a HashMap which, if the verbose flag is set, describes the number of errors,
-/// warnings, and information messages generated. If verbose is set to false, this HashMap will be
-/// returned empty.
+/// VALUES for the rows in the normal table, (ii) the same for the conflict versions of the table.
+/// If the verbose flag is set, the number of errors, warnings, and information messages generated
+/// are added to messages_stats, the contents of which will later be written to stderr.
 async fn make_inserts(
     config: &ConfigMap,
     table_name: &String,
     rows: &mut Vec<ResultRow>,
     chunk_number: usize,
+    messages_stats: &mut HashMap<String, usize>,
     verbose: bool,
-) -> Result<((String, Vec<String>), (String, Vec<String>), HashMap<String, usize>), sqlx::Error> {
+) -> Result<((String, Vec<String>), (String, Vec<String>)), sqlx::Error> {
     let conflict_columns = {
         let mut conflict_columns = vec![];
         let primaries = config
@@ -1197,41 +1254,16 @@ async fn make_inserts(
         conflict_columns
     };
 
-    fn add_message_counts(
-        cell_messages: &Vec<SerdeValue>,
-        table_messages_stats: &mut HashMap<String, usize>,
-    ) {
-        for message in cell_messages {
-            let message = message.as_object().unwrap();
-            let level = message.get("level").unwrap();
-            if level == "error" {
-                let current_errors = table_messages_stats.get("error").unwrap();
-                table_messages_stats.insert("error".to_string(), current_errors + 1);
-            } else if level == "warning" {
-                let current_warnings = table_messages_stats.get("warning").unwrap();
-                table_messages_stats.insert("warning".to_string(), current_warnings + 1);
-            } else if level == "info" {
-                let current_infos = table_messages_stats.get("info").unwrap();
-                table_messages_stats.insert("info".to_string(), current_infos + 1);
-            } else {
-                eprintln!("Warning: unknown message type: {}", level);
-            }
-        }
-    }
-
     fn generate_sql(
         config: &ConfigMap,
         table_name: &String,
         column_names: &Vec<String>,
         rows: &Vec<ResultRow>,
+        messages_stats: &mut HashMap<String, usize>,
         verbose: bool,
-    ) -> (String, Vec<String>, HashMap<String, usize>) {
+    ) -> (String, Vec<String>) {
         let mut lines = vec![];
         let mut params = vec![];
-        let mut table_messages_stats = HashMap::new();
-        table_messages_stats.insert("error".to_string(), 0);
-        table_messages_stats.insert("warning".to_string(), 0);
-        table_messages_stats.insert("info".to_string(), 0);
         for row in rows.iter() {
             let mut values = vec![format!("{}", row.row_number.unwrap())];
             for column in column_names {
@@ -1255,7 +1287,7 @@ async fn make_inserts(
                     values.push(String::from("NULL"));
                 } else {
                     if verbose {
-                        add_message_counts(&cell.messages, &mut table_messages_stats);
+                        add_message_counts(&cell.messages, messages_stats);
                     }
                     values.push(String::from(&format!("JSON({})", SQL_PARAM)));
                     let mut param = json!({
@@ -1297,7 +1329,7 @@ async fn make_inserts(
             output.push_str(";");
         }
 
-        (output, params, table_messages_stats)
+        (output, params)
     }
 
     fn has_conflict(row: &ResultRow, conflict_columns: &Vec<SerdeValue>) -> bool {
@@ -1335,32 +1367,18 @@ async fn make_inserts(
         .map(|v| v.as_str().unwrap().to_string())
         .collect::<Vec<_>>();
 
-    let (main_sql, main_params, main_messages_stats) =
-        generate_sql(&config, &table_name, &column_names, &main_rows, verbose);
-    let (conflict_sql, conflict_params, conflict_messages_stats) = generate_sql(
+    let (main_sql, main_params) =
+        generate_sql(&config, &table_name, &column_names, &main_rows, messages_stats, verbose);
+    let (conflict_sql, conflict_params) = generate_sql(
         &config,
         &format!("{}_conflict", table_name),
         &column_names,
         &conflict_rows,
+        messages_stats,
         verbose,
     );
 
-    let mut table_messages_stats = HashMap::new();
-    table_messages_stats.insert(
-        "error".to_string(),
-        main_messages_stats.get("error").unwrap() + conflict_messages_stats.get("error").unwrap(),
-    );
-    table_messages_stats.insert(
-        "warning".to_string(),
-        main_messages_stats.get("warning").unwrap()
-            + conflict_messages_stats.get("warning").unwrap(),
-    );
-    table_messages_stats.insert(
-        "info".to_string(),
-        main_messages_stats.get("info").unwrap() + conflict_messages_stats.get("info").unwrap(),
-    );
-
-    Ok(((main_sql, main_params), (conflict_sql, conflict_params), table_messages_stats))
+    Ok(((main_sql, main_params), (conflict_sql, conflict_params)))
 }
 
 /// Takes as arguments a list of tables and a configuration map describing all of the constraints
