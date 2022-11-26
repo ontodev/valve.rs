@@ -17,6 +17,7 @@ features = ["lexer"]
 argparse = "0.2.2"
 async-std = { version = "1", features = [ "attributes" ] }
 async-scoped = { version = "0.7.0", features = [ "use-async-std" ] }
+chrono = "0.4.23"
 crossbeam = "0.8.1"
 csv = "1.1"
 enquote = "1.1.0"

@@ -28,6 +28,7 @@ use crate::validate::{
     validate_tree_foreign_keys, validate_under, ResultRow,
 };
 use crate::{ast::Expression, valve_grammar::StartParser};
+use chrono::Utc;
 use crossbeam;
 use itertools::{IntoChunks, Itertools};
 use lazy_static::lazy_static;
@@ -128,6 +129,9 @@ impl std::fmt::Debug for ColumnRule {
 // to '\B'.
 /// The word (in the regex sense) placeholder to use for query parameters when binding using sqlx.
 static SQL_PARAM: &str = "VALVEPARAM";
+
+// TODO: Re-organise code so that the following functions are grouped together:
+// (a) public functions, (b) asyn functions, (c) private functions
 
 /// Given a SQL string, possibly with unbound parameters represented by the placeholder string
 /// SQL_PARAM, and given a database pool, if the pool is of type Sqlite, then change the syntax used
@@ -713,7 +717,7 @@ pub fn get_parsed_structure_conditions(
 /// read in the TSV files corresponding to the tables defined in the tables config, and use that
 /// information to fill in constraints information into a new config map that is then returned along
 /// with a list of the tables in the database sorted according to their mutual dependencies. If
-/// the flag `write_sql_to_stdout` is set to true, emit SQL to create the database schema to STDOUT.
+/// the flag `verbose` is set to true, emit SQL to create the database schema to STDOUT.
 /// If the flag `write_to_db` is set to true, execute the SQL in the database using the given
 /// connection pool.
 pub async fn configure_db(
@@ -721,7 +725,7 @@ pub async fn configure_db(
     datatypes_config: &mut ConfigMap,
     pool: &AnyPool,
     parser: &StartParser,
-    write_sql_to_stdout: bool,
+    verbose: bool,
     write_to_db: bool,
 ) -> Result<(Vec<String>, ConfigMap), sqlx::Error> {
     // This is the ConfigMap that we will be returning:
@@ -838,7 +842,7 @@ pub async fn configure_db(
     let unsorted_tables: Vec<String> = setup_statements.keys().cloned().collect();
     let sorted_tables = verify_table_deps_and_sort(&unsorted_tables, &constraints_config);
 
-    if write_to_db || write_sql_to_stdout {
+    if write_to_db || verbose {
         for table in &sorted_tables {
             let table_statements = setup_statements.get(table).unwrap();
             if write_to_db {
@@ -849,7 +853,7 @@ pub async fn configure_db(
                         .expect(format!("The SQL statement: {} returned an error", stmt).as_str());
                 }
             }
-            if write_sql_to_stdout {
+            if verbose {
                 let output = String::from(table_statements.join("\n"));
                 println!("{}\n", output);
             }
@@ -862,19 +866,33 @@ pub async fn configure_db(
 /// Given a configuration map, a database connection pool, a parser, HashMaps representing
 /// compiled datatype and rule conditions, and a HashMap representing parsed structure conditions,
 /// read in the data TSV files corresponding to each configured table, then validate and load all of
-/// the corresponding data rows.
-pub async fn load_db(
+/// the corresponding data rows. If the verbose flag is set to true, output progress messages to
+/// stderr during load.
+async fn load_db(
     config: &ConfigMap,
     pool: &AnyPool,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    verbose: bool,
 ) -> Result<(), sqlx::Error> {
     let mut table_list = vec![];
     for table in config.get("sorted_table_list").and_then(|l| l.as_array()).unwrap() {
         table_list.push(table.as_str().and_then(|s| Some(s.to_string())).unwrap());
     }
     let table_list = table_list;
+    let num_tables = table_list.len();
+    let mut table_num = 1;
     for table_name in table_list {
+        if verbose {
+            eprintln!(
+                "{} - Loading table {}/{}: {}",
+                Utc::now(),
+                table_num,
+                num_tables,
+                table_name
+            );
+        }
+        table_num += 1;
         let path = String::from(
             config
                 .get("table")
@@ -916,8 +934,11 @@ pub async fn load_db(
             &table_name,
             &chunks,
             &headers,
+            verbose,
         )
         .await?;
+
+        // TODO: We need to update the message statistics on the basis of the validation below:
 
         // We need to wait until all of the rows for a table have been loaded before validating the
         // "foreign" constraints on a table's trees, since this checks if the values of one column
@@ -948,85 +969,11 @@ pub async fn load_db(
     Ok(())
 }
 
-/// Given the config map and the name of a datatype, climb the datatype tree (as required),
-/// and return the first 'SQL type' found.
-fn get_sql_type(dt_config: &ConfigMap, datatype: &String) -> Option<String> {
-    if !dt_config.contains_key(datatype) {
-        return None;
-    }
-
-    if let Some(sql_type) = dt_config.get(datatype).and_then(|d| d.get("SQL type")) {
-        return Some(sql_type.as_str().and_then(|s| Some(s.to_string())).unwrap());
-    }
-
-    let parent_datatype =
-        dt_config.get(datatype).and_then(|d| d.get("parent")).and_then(|p| p.as_str()).unwrap();
-
-    return get_sql_type(dt_config, &parent_datatype.to_string());
-}
-
-/// Given the global config map, a table name, and a column name, return the column's SQL type.
-fn get_sql_type_from_global_config(
-    global_config: &ConfigMap,
-    table: &str,
-    column: &str,
-) -> Option<String> {
-    let dt_config = global_config.get("datatype").and_then(|d| d.as_object()).unwrap();
-    let normal_table_name;
-    if let Some(s) = table.strip_suffix("_conflict") {
-        normal_table_name = String::from(s);
-    } else {
-        normal_table_name = table.to_string();
-    }
-    let dt = global_config
-        .get("table")
-        .and_then(|t| t.get(normal_table_name))
-        .and_then(|t| t.get("column"))
-        .and_then(|c| c.get(column))
-        .and_then(|c| c.get("datatype"))
-        .and_then(|d| d.as_str())
-        .and_then(|d| Some(d.to_string()))
-        .unwrap();
-    get_sql_type(&dt_config, &dt)
-}
-
-/// Given a SQL type, return the appropriate CAST(...) statement for casting the SQL_PARAM
-/// from a TEXT column.
-fn cast_sql_param_from_text(sql_type: &str) -> String {
-    if sql_type.to_lowercase() == "integer" {
-        format!("CAST(NULLIF({}, '') AS INTEGER)", SQL_PARAM)
-    } else {
-        String::from(SQL_PARAM)
-    }
-}
-
-/// Given a SQL type, return the appropriate CAST(...) statement for casting the SQL_PARAM
-/// to a TEXT column.
-fn cast_column_sql_to_text(column: &str, sql_type: &str) -> String {
-    if sql_type.to_lowercase() == "integer" {
-        format!(r#"CAST("{}" AS TEXT)"#, column)
-    } else {
-        format!(r#""{}""#, column)
-    }
-}
-
-/// Given a database row, the name of a column, and it's SQL type, return the value of that column
-// from the given row as a String.
-fn get_column_value(row: &AnyRow, column: &str, sql_type: &str) -> String {
-    if sql_type.to_lowercase() == "integer" {
-        let value: i32 = row.get(format!(r#"{}"#, column).as_str());
-        let value: u32 = value as u32;
-        value.to_string()
-    } else {
-        let value: &str = row.get(format!(r#"{}"#, column).as_str());
-        value.to_string()
-    }
-}
-
 /// Given a configuration map, a database connection pool, maps for compiled datatype and rule
 /// conditions, a table name, a number of chunks of rows to insert into the table in the database,
 /// and the headers of the rows to be inserted, validate each chunk and insert the validated rows
-/// to the table.
+/// to the table. If the verbose flag is set to true, error/warning/info stats will be written to
+/// stderr.
 async fn validate_and_insert_chunks(
     config: &ConfigMap,
     pool: &AnyPool,
@@ -1035,6 +982,7 @@ async fn validate_and_insert_chunks(
     table_name: &String,
     chunks: &IntoChunks<csv::StringRecordsIter<'_, std::fs::File>>,
     headers: &csv::StringRecord,
+    verbose: bool,
 ) -> Result<(), sqlx::Error> {
     if !MULTI_THREADED {
         for (chunk_number, chunk) in chunks.into_iter().enumerate() {
@@ -1053,6 +1001,7 @@ async fn validate_and_insert_chunks(
                 table_name,
                 &mut intra_validated_rows,
                 chunk_number,
+                verbose,
             )
             .await?;
         }
@@ -1103,6 +1052,7 @@ async fn validate_and_insert_chunks(
                     table_name,
                     &mut intra_validated_rows,
                     chunk_number,
+                    verbose,
                 )
                 .await?;
             }
@@ -1114,13 +1064,15 @@ async fn validate_and_insert_chunks(
 
 /// Given a configuration map, a database connection pool, a table name, some rows to validate,
 /// and the chunk number corresponding to the rows, do inter-row validation on the rows and insert
-/// them to the table.
+/// them to the table. If the verbose flag is set to true, error/warning/info stats will be written
+/// to stderr.
 async fn validate_rows_inter_and_insert(
     config: &ConfigMap,
     pool: &AnyPool,
     table_name: &String,
     rows: &mut Vec<ResultRow>,
     chunk_number: usize,
+    verbose: bool,
 ) -> Result<(), sqlx::Error> {
     // First, do the tree validation:
     validate_rows_trees(config, pool, table_name, rows).await?;
@@ -1128,8 +1080,8 @@ async fn validate_rows_inter_and_insert(
     // Try to insert the rows to the db first without validating unique and foreign constraints.
     // If there are constraint violations this will cause a database error, in which case we then
     // explicitly do the constraint validation and insert the resulting rows:
-    let ((main_sql, main_params), (_, _)) =
-        make_inserts(config, table_name, rows, chunk_number).await?;
+    let ((main_sql, main_params), (_, _), messages_stats) =
+        make_inserts(config, table_name, rows, chunk_number, verbose).await?;
 
     let main_sql = local_sql_syntax(&pool, &main_sql);
     let mut main_query = sqlx_query(&main_sql);
@@ -1137,13 +1089,32 @@ async fn validate_rows_inter_and_insert(
         main_query = main_query.bind(param);
     }
     let main_result = main_query.execute(pool).await;
+
+    fn generate_status_message(
+        table_name: &str,
+        messages_stats: &HashMap<String, usize>,
+    ) -> String {
+        let errors = messages_stats.get("error").unwrap();
+        let warnings = messages_stats.get("warning").unwrap();
+        let infos = messages_stats.get("info").unwrap();
+        format!(
+            "{} errors, {} warnings, and {} information messages generated for {}",
+            errors, warnings, infos, table_name
+        )
+    }
+
     match main_result {
-        Ok(_) => (),
+        Ok(_) => {
+            if verbose {
+                let status_message = generate_status_message(table_name, &messages_stats);
+                eprintln!("{} - {}", Utc::now(), status_message);
+            }
+        }
         Err(_) => {
             validate_rows_constraints(config, pool, table_name, rows).await?;
 
-            let ((main_sql, main_params), (conflict_sql, conflict_params)) =
-                make_inserts(config, table_name, rows, chunk_number).await?;
+            let ((main_sql, main_params), (conflict_sql, conflict_params), messages_stats) =
+                make_inserts(config, table_name, rows, chunk_number, verbose).await?;
 
             let main_sql = local_sql_syntax(&pool, &main_sql);
             let mut main_query = sqlx_query(&main_sql);
@@ -1158,6 +1129,11 @@ async fn validate_rows_inter_and_insert(
                 conflict_query = conflict_query.bind(param);
             }
             conflict_query.execute(pool).await?;
+
+            if verbose {
+                let status_message = generate_status_message(table_name, &messages_stats);
+                eprintln!("{} - {}", Utc::now(), status_message);
+            }
         }
     };
 
@@ -1165,14 +1141,18 @@ async fn validate_rows_inter_and_insert(
 }
 
 /// Given a configuration map, a table name, a number of rows, and their corresponding chunk number,
-/// return a two-place tuple containing SQL strings and params for INSERT statements with VALUES for
-/// all the rows in the normal and conflict versions of the table, respectively.
+/// return a three-place tuple containing: (i) SQL strings and params for INSERT statements with
+/// VALUES for the rows in the normal table, (ii) the same for the conflict versions of the table,
+/// and (iii) a HashMap which, if the verbose flag is set, describes the number of errors,
+/// warnings, and information messages generated. If verbose is set to false, this HashMap will be
+/// returned empty.
 async fn make_inserts(
     config: &ConfigMap,
     table_name: &String,
     rows: &mut Vec<ResultRow>,
     chunk_number: usize,
-) -> Result<((String, Vec<String>), (String, Vec<String>)), sqlx::Error> {
+    verbose: bool,
+) -> Result<((String, Vec<String>), (String, Vec<String>), HashMap<String, usize>), sqlx::Error> {
     let conflict_columns = {
         let mut conflict_columns = vec![];
         let primaries = config
@@ -1217,14 +1197,41 @@ async fn make_inserts(
         conflict_columns
     };
 
+    fn add_message_counts(
+        cell_messages: &Vec<SerdeValue>,
+        table_messages_stats: &mut HashMap<String, usize>,
+    ) {
+        for message in cell_messages {
+            let message = message.as_object().unwrap();
+            let level = message.get("level").unwrap();
+            if level == "error" {
+                let current_errors = table_messages_stats.get("error").unwrap();
+                table_messages_stats.insert("error".to_string(), current_errors + 1);
+            } else if level == "warning" {
+                let current_warnings = table_messages_stats.get("warning").unwrap();
+                table_messages_stats.insert("warning".to_string(), current_warnings + 1);
+            } else if level == "info" {
+                let current_infos = table_messages_stats.get("info").unwrap();
+                table_messages_stats.insert("info".to_string(), current_infos + 1);
+            } else {
+                eprintln!("Warning: unknown message type: {}", level);
+            }
+        }
+    }
+
     fn generate_sql(
         config: &ConfigMap,
         table_name: &String,
         column_names: &Vec<String>,
         rows: &Vec<ResultRow>,
-    ) -> (String, Vec<String>) {
+        verbose: bool,
+    ) -> (String, Vec<String>, HashMap<String, usize>) {
         let mut lines = vec![];
         let mut params = vec![];
+        let mut table_messages_stats = HashMap::new();
+        table_messages_stats.insert("error".to_string(), 0);
+        table_messages_stats.insert("warning".to_string(), 0);
+        table_messages_stats.insert("info".to_string(), 0);
         for row in rows.iter() {
             let mut values = vec![format!("{}", row.row_number.unwrap())];
             for column in column_names {
@@ -1247,6 +1254,9 @@ async fn make_inserts(
                 if cell.valid && cell.nulltype == None {
                     values.push(String::from("NULL"));
                 } else {
+                    if verbose {
+                        add_message_counts(&cell.messages, &mut table_messages_stats);
+                    }
                     values.push(String::from(&format!("JSON({})", SQL_PARAM)));
                     let mut param = json!({
                         "value": cell.value.clone(),
@@ -1287,7 +1297,7 @@ async fn make_inserts(
             output.push_str(";");
         }
 
-        (output, params)
+        (output, params, table_messages_stats)
     }
 
     fn has_conflict(row: &ResultRow, conflict_columns: &Vec<SerdeValue>) -> bool {
@@ -1325,11 +1335,32 @@ async fn make_inserts(
         .map(|v| v.as_str().unwrap().to_string())
         .collect::<Vec<_>>();
 
-    let (main_sql, main_params) = generate_sql(&config, &table_name, &column_names, &main_rows);
-    let (conflict_sql, conflict_params) =
-        generate_sql(&config, &format!("{}_conflict", table_name), &column_names, &conflict_rows);
+    let (main_sql, main_params, main_messages_stats) =
+        generate_sql(&config, &table_name, &column_names, &main_rows, verbose);
+    let (conflict_sql, conflict_params, conflict_messages_stats) = generate_sql(
+        &config,
+        &format!("{}_conflict", table_name),
+        &column_names,
+        &conflict_rows,
+        verbose,
+    );
 
-    Ok(((main_sql, main_params), (conflict_sql, conflict_params)))
+    let mut table_messages_stats = HashMap::new();
+    table_messages_stats.insert(
+        "error".to_string(),
+        main_messages_stats.get("error").unwrap() + conflict_messages_stats.get("error").unwrap(),
+    );
+    table_messages_stats.insert(
+        "warning".to_string(),
+        main_messages_stats.get("warning").unwrap()
+            + conflict_messages_stats.get("warning").unwrap(),
+    );
+    table_messages_stats.insert(
+        "info".to_string(),
+        main_messages_stats.get("info").unwrap() + conflict_messages_stats.get("info").unwrap(),
+    );
+
+    Ok(((main_sql, main_params), (conflict_sql, conflict_params), table_messages_stats))
 }
 
 /// Takes as arguments a list of tables and a configuration map describing all of the constraints
@@ -1503,6 +1534,81 @@ fn verify_table_deps_and_sort(table_list: &Vec<String>, constraints: &ConfigMap)
             panic!("{}", message);
         }
     };
+}
+
+/// Given the config map and the name of a datatype, climb the datatype tree (as required),
+/// and return the first 'SQL type' found.
+fn get_sql_type(dt_config: &ConfigMap, datatype: &String) -> Option<String> {
+    if !dt_config.contains_key(datatype) {
+        return None;
+    }
+
+    if let Some(sql_type) = dt_config.get(datatype).and_then(|d| d.get("SQL type")) {
+        return Some(sql_type.as_str().and_then(|s| Some(s.to_string())).unwrap());
+    }
+
+    let parent_datatype =
+        dt_config.get(datatype).and_then(|d| d.get("parent")).and_then(|p| p.as_str()).unwrap();
+
+    return get_sql_type(dt_config, &parent_datatype.to_string());
+}
+
+/// Given the global config map, a table name, and a column name, return the column's SQL type.
+fn get_sql_type_from_global_config(
+    global_config: &ConfigMap,
+    table: &str,
+    column: &str,
+) -> Option<String> {
+    let dt_config = global_config.get("datatype").and_then(|d| d.as_object()).unwrap();
+    let normal_table_name;
+    if let Some(s) = table.strip_suffix("_conflict") {
+        normal_table_name = String::from(s);
+    } else {
+        normal_table_name = table.to_string();
+    }
+    let dt = global_config
+        .get("table")
+        .and_then(|t| t.get(normal_table_name))
+        .and_then(|t| t.get("column"))
+        .and_then(|c| c.get(column))
+        .and_then(|c| c.get("datatype"))
+        .and_then(|d| d.as_str())
+        .and_then(|d| Some(d.to_string()))
+        .unwrap();
+    get_sql_type(&dt_config, &dt)
+}
+
+/// Given a SQL type, return the appropriate CAST(...) statement for casting the SQL_PARAM
+/// from a TEXT column.
+fn cast_sql_param_from_text(sql_type: &str) -> String {
+    if sql_type.to_lowercase() == "integer" {
+        format!("CAST(NULLIF({}, '') AS INTEGER)", SQL_PARAM)
+    } else {
+        String::from(SQL_PARAM)
+    }
+}
+
+/// Given a SQL type, return the appropriate CAST(...) statement for casting the SQL_PARAM
+/// to a TEXT column.
+fn cast_column_sql_to_text(column: &str, sql_type: &str) -> String {
+    if sql_type.to_lowercase() == "integer" {
+        format!(r#"CAST("{}" AS TEXT)"#, column)
+    } else {
+        format!(r#""{}""#, column)
+    }
+}
+
+/// Given a database row, the name of a column, and it's SQL type, return the value of that column
+// from the given row as a String.
+fn get_column_value(row: &AnyRow, column: &str, sql_type: &str) -> String {
+    if sql_type.to_lowercase() == "integer" {
+        let value: i32 = row.get(format!(r#"{}"#, column).as_str());
+        let value: u32 = value as u32;
+        value.to_string()
+    } else {
+        let value: &str = row.get(format!(r#"{}"#, column).as_str());
+        value.to_string()
+    }
 }
 
 /// Given the config maps for tables and datatypes, and a table name, generate a SQL schema string,
@@ -1966,7 +2072,11 @@ pub async fn configure_and_or_load(
         get_compiled_rule_conditions(&config, compiled_datatype_conditions.clone(), &parser);
 
     if load {
-        load_db(&config, &pool, &compiled_datatype_conditions, &compiled_rule_conditions).await?;
+        if verbose {
+            eprintln!("{} - Processing {} tables.", Utc::now(), sorted_table_list.len());
+        }
+        load_db(&config, &pool, &compiled_datatype_conditions, &compiled_rule_conditions, verbose)
+            .await?;
     }
 
     let config = SerdeValue::Object(config);
