@@ -4,14 +4,11 @@ description = "A lightweight validation engine written in rust"
 license = "BSD-3-Clause"
 version = "0.1.12"
 repository = "https://github.com/ontodev/valve.rs"
-# Because of this issue: https://github.com/lalrpop/lalrpop/issues/650 we need to use the 2018
-# edition of rust for now.
-edition = "2018"
+edition = "2021"
 build = "build.rs"
 
-[build-dependencies.lalrpop]
-version = "0.19.7"
-features = ["lexer"]
+[build-dependencies]
+lalrpop = { version = "0.19.7", features = ["lexer"] }
 
 [dependencies]
 async-std = { version = "1", features = [ "attributes" ] }
@@ -22,6 +19,7 @@ enquote = "1.1.0"
 # Futures is not used directly but is needed for the python bindings in github.com/ontodev/valve.py.
 futures = "0.3"
 itertools = "0.10.3"
+lalrpop-util = { version = "0.19.7", features = ["lexer"] }
 lazy_static = "1.4.0"
 num_cpus = "1.13.1"
 petgraph = "0.6.0"
@@ -29,8 +27,5 @@ regex = "1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0" }
 sqlx = { version = "0.5", features = [ "runtime-async-std-rustls", "any", "postgres", "sqlite" ] }
-
-[dependencies.lalrpop-util]
-version = "0.19.7"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
