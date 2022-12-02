@@ -335,27 +335,22 @@ def main():
                 elif not is_error_row:
                     cell = get_constrained_cell_value(table, column, row_num, prev_inserts)
                 else:
-                    # If this is an error row, just generate a random token. This might end up
-                    # being valid, but given that some cells have structure constraints, then
-                    # chances are this will result in at least some errors:
-                    if CONFIG[table][column]["datatype"] == "integer":
-                        # No leading 0s:
-                        cell = "".join(random.choices("123456789", k=1)) + "".join(
-                            random.choices(string.digits, k=TOKEN_LENGTH - 1)
-                        )
+                    # If this is an error row, then half of the time generate an empty string, and
+                    # half of the time just generate a random token. This might end up being valid,
+                    # but given that some cells have structure constraints, then chances are this
+                    # will result in at least some errors:
+                    if bool(random.randint(0, 1)):
+                        cell = ""
                     else:
-                        cell = "".join(random.choices(string.ascii_lowercase, k=TOKEN_LENGTH))
+                        if CONFIG[table][column]["datatype"] == "integer":
+                            # No leading 0s:
+                            cell = "".join(random.choices("123456789", k=1)) + "".join(
+                                random.choices(string.digits, k=TOKEN_LENGTH - 1)
+                            )
+                        else:
+                            cell = "".join(random.choices(string.ascii_lowercase, k=TOKEN_LENGTH))
 
                 row[column] = cell
-                # TODO: We are generally only going to be generating about 100,000 rows at maximum,
-                # so don't worry too much about memory constraints. In other words instead of just
-                # saving the _last_ inserted values, just save _all_ of them. Then, when we are
-                # looking up a foreign or tree column, randomly select one of the previous values.
-                #
-                # Don't be too clever. It's ok if, once in awhile, you select a value that has
-                # already been used. Just make the random.range() from which you make the selection
-                # big enough so that this doesn't happen too often. A few "duplicate value" errors
-                # is ok. Valve will just handle them and generae the appropriate errors.
                 if not prev_inserts.get(table):
                     prev_inserts[table] = {}
                 if not prev_inserts[table].get(column):

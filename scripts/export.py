@@ -248,9 +248,9 @@ def export_messages(cursor, is_sqlite, args):
                 rn = str(row[pk]) if type(row[pk]) == int else row[pk]
                 if not rn:
                     if is_sqlite:
-                        rn = json.loads(row[f"{pk}_meta"])["value"]
+                        rn = json.loads(row[f"{pk}_meta"]).get("value") or "0"
                     else:
-                        rn = row[f"{pk}_meta"]["value"]
+                        rn = row[f"{pk}_meta"].get("value") or "0"
                 row_number.append(rn)
             row_number = "###".join(row_number)
 
