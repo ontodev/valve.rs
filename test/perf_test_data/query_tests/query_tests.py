@@ -9,7 +9,6 @@ import sys
 import time
 
 from argparse import ArgumentParser
-from pprint import pformat
 
 
 def test_query(cursor, query, headers, runs, vacuum):
@@ -193,7 +192,7 @@ def query_tests(cursor, table, column, like, limit, offset, runs, vacuum):
             cursor, table, limit, offset, runs, vacuum
         ),
     }
-    print(pformat(json.loads(json.dumps(result))))
+    print(json.dumps(result))
 
 
 def main():
