@@ -53,7 +53,7 @@ def json_simple_view(cursor, table, limit, offset, runs, vacuum):
     cursor.execute(f'PRAGMA TABLE_INFO("{table}")')
     columns_info = [d[0] for d in cursor.description]
     pragma_rows = list(map(lambda r: OrderedDict(zip(columns_info, r)), cursor))
-    headers = [p["name"] for p in pragma_rows if not p["name"].endswith("_meta")]
+    headers = [f'"{p["name"]}"' for p in pragma_rows if not p["name"].endswith("_meta")]
     select = ", ".join(headers)
     query = f"SELECT {select} FROM {table}_view LIMIT {limit}"
     if offset:
@@ -61,7 +61,7 @@ def json_simple_view(cursor, table, limit, offset, runs, vacuum):
     return test_query(cursor, query, headers, runs, vacuum)
 
 
-def json_full_view(cursor, table, limit, offset, runs, vacuum):
+def json_cell_view(cursor, table, limit, offset, runs, vacuum):
     cursor.execute(f'PRAGMA TABLE_INFO("{table}")')
     columns_info = [d[0] for d in cursor.description]
     pragma_rows = list(map(lambda r: OrderedDict(zip(columns_info, r)), cursor))
@@ -71,6 +71,7 @@ def json_full_view(cursor, table, limit, offset, runs, vacuum):
         column = p["name"]
         if column == "row_number":
             headers.append(column)
+            select.append(column)
         elif column.endswith("_meta"):
             headers.append(column)
             select.append(
@@ -86,14 +87,48 @@ def json_full_view(cursor, table, limit, offset, runs, vacuum):
     return test_query(cursor, query, headers, runs, vacuum)
 
 
+def json_errors_cell_view(cursor, table, limit, offset, runs, vacuum):
+    cursor.execute(f'PRAGMA TABLE_INFO("{table}")')
+    columns_info = [d[0] for d in cursor.description]
+    pragma_rows = list(map(lambda r: OrderedDict(zip(columns_info, r)), cursor))
+    headers = []
+    where = []
+    select = []
+    for p in pragma_rows:
+        column = p["name"]
+        if column == "row_number":
+            headers.append(column)
+            select.append(column)
+        elif column.endswith("_meta"):
+            headers.append(column)
+            select.append(
+                f'CASE WHEN "{column}" IS NOT NULL THEN JSON("{column}") '
+                f'ELSE JSON(\'{{"valid": true, "messages": []}}\') '
+                f'END AS "{column}"'
+            )
+            where.append(f'"{column}" IS NOT NULL')
+
+    select = ", ".join(select)
+    where = " OR ".join(where)
+    query = f"SELECT {select} FROM {table}_view WHERE {where} LIMIT {limit}"
+    if offset:
+        query = f"{query} OFFSET {offset}"
+
+    return test_query(cursor, query, headers, runs, vacuum)
+
+
 def query_tests(cursor, table, column, like, limit, offset, runs, vacuum):
     result = {
         "count_view_all": count_view(cursor, table, column, runs, vacuum),
         "count_view_like": count_view(cursor, table, column, runs, vacuum, like),
         "json_simple_view": json_simple_view(cursor, table, limit, 0, runs, vacuum),
         "json_simple_view_offset": json_simple_view(cursor, table, limit, offset, runs, vacuum),
-        "json_full_view": json_full_view(cursor, table, limit, 0, runs, vacuum),
-        "json_full_view_offset": json_full_view(cursor, table, limit, offset, runs, vacuum),
+        "json_cell_view": json_cell_view(cursor, table, limit, 0, runs, vacuum),
+        "json_cell_view_offset": json_cell_view(cursor, table, limit, offset, runs, vacuum),
+        "json_errors_cell_view": json_errors_cell_view(cursor, table, limit, 0, runs, vacuum),
+        "json_errors_cell_view_offset": json_errors_cell_view(
+            cursor, table, limit, offset, runs, vacuum
+        ),
     }
     print(pformat(json.loads(json.dumps(result))))
 
