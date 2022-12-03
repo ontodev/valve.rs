@@ -9,7 +9,6 @@ import sys
 import time
 
 from argparse import ArgumentParser
-from collections import OrderedDict
 from pprint import pformat
 
 
@@ -24,7 +23,7 @@ def test_query(cursor, query, headers, runs, vacuum):
         end = time.perf_counter()
         execution_time = end - start
         if not result["rows"]:
-            result["rows"] = [row for row in map(lambda r: OrderedDict(zip(headers, r)), cursor)]
+            result["rows"] = [row for row in map(lambda r: dict(zip(headers, r)), cursor)]
         if min_time == -1 or execution_time < min_time:
             min_time = execution_time
         if execution_time > max_time:
@@ -41,30 +40,55 @@ def test_query(cursor, query, headers, runs, vacuum):
     return result
 
 
-def count_view(cursor, table, column, runs, vacuum, like=""):
-    query = f"SELECT COUNT(1) FROM {table}_view"
+def count(cursor, table, table_suffix, column, runs, vacuum, like=""):
+    table = f"{table}_{table_suffix}" if table_suffix else table
+    query = f"SELECT COUNT(1) FROM {table}"
     if like:
         query = f"{query} WHERE {column} LIKE '{like}%'"
     headers = ["count"]
     return test_query(cursor, query, headers, runs, vacuum)
 
 
-def json_simple_view(cursor, table, limit, offset, runs, vacuum):
+def count_view(cursor, table, column, runs, vacuum, like=""):
+    return count(cursor, table, "view", column, runs, vacuum, like)
+
+
+def count_separate(cursor, table, column, runs, vacuum, like=""):
+    return {
+        "normal": count(cursor, table, "", column, runs, vacuum, like),
+        "conflict": count(cursor, table, "conflict", column, runs, vacuum, like),
+    }
+
+
+def json_simple(cursor, table, table_suffix, limit, offset, runs, vacuum):
+    table = f"{table}_{table_suffix}" if table_suffix else table
     cursor.execute(f'PRAGMA TABLE_INFO("{table}")')
     columns_info = [d[0] for d in cursor.description]
-    pragma_rows = list(map(lambda r: OrderedDict(zip(columns_info, r)), cursor))
+    pragma_rows = list(map(lambda r: dict(zip(columns_info, r)), cursor))
     headers = [f'"{p["name"]}"' for p in pragma_rows if not p["name"].endswith("_meta")]
     select = ", ".join(headers)
-    query = f"SELECT {select} FROM {table}_view LIMIT {limit}"
+    query = f"SELECT {select} FROM {table} LIMIT {limit}"
     if offset:
         query = f"{query} OFFSET {offset}"
     return test_query(cursor, query, headers, runs, vacuum)
 
 
-def json_cell_view(cursor, table, limit, offset, runs, vacuum):
+def json_simple_view(cursor, table, limit, offset, runs, vacuum):
+    return json_simple(cursor, table, "view", limit, offset, runs, vacuum)
+
+
+def json_simple_separate(cursor, table, limit, offset, runs, vacuum):
+    return {
+        "normal": json_simple(cursor, table, "", limit, offset, runs, vacuum),
+        "conflict": json_simple(cursor, table, "conflict", limit, offset, runs, vacuum),
+    }
+
+
+def json_cell(cursor, table, table_suffix, limit, offset, runs, vacuum):
+    table = f"{table}_{table_suffix}" if table_suffix else table
     cursor.execute(f'PRAGMA TABLE_INFO("{table}")')
     columns_info = [d[0] for d in cursor.description]
-    pragma_rows = list(map(lambda r: OrderedDict(zip(columns_info, r)), cursor))
+    pragma_rows = list(map(lambda r: dict(zip(columns_info, r)), cursor))
     headers = []
     select = []
     for p in pragma_rows:
@@ -80,17 +104,29 @@ def json_cell_view(cursor, table, limit, offset, runs, vacuum):
                 f'END AS "{column}"'
             )
     select = ", ".join(select)
-    query = f"SELECT {select} FROM {table}_view LIMIT {limit}"
+    query = f"SELECT {select} FROM {table} LIMIT {limit}"
     if offset:
         query = f"{query} OFFSET {offset}"
 
     return test_query(cursor, query, headers, runs, vacuum)
 
 
-def json_errors_cell_view(cursor, table, limit, offset, runs, vacuum):
+def json_cell_view(cursor, table, limit, offset, runs, vacuum):
+    return json_cell(cursor, table, "view", limit, offset, runs, vacuum)
+
+
+def json_cell_separate(cursor, table, limit, offset, runs, vacuum):
+    return {
+        "normal": json_cell(cursor, table, "", limit, offset, runs, vacuum),
+        "conflict": json_cell(cursor, table, "conflict", limit, offset, runs, vacuum),
+    }
+
+
+def json_errors_cell(cursor, table, table_suffix, limit, offset, runs, vacuum):
+    table = f"{table}_{table_suffix}" if table_suffix else table
     cursor.execute(f'PRAGMA TABLE_INFO("{table}")')
     columns_info = [d[0] for d in cursor.description]
-    pragma_rows = list(map(lambda r: OrderedDict(zip(columns_info, r)), cursor))
+    pragma_rows = list(map(lambda r: dict(zip(columns_info, r)), cursor))
     headers = []
     where = []
     select = []
@@ -110,23 +146,50 @@ def json_errors_cell_view(cursor, table, limit, offset, runs, vacuum):
 
     select = ", ".join(select)
     where = " OR ".join(where)
-    query = f"SELECT {select} FROM {table}_view WHERE {where} LIMIT {limit}"
+    query = f"SELECT {select} FROM {table} WHERE {where} LIMIT {limit}"
     if offset:
         query = f"{query} OFFSET {offset}"
 
     return test_query(cursor, query, headers, runs, vacuum)
 
 
+def json_errors_cell_view(cursor, table, limit, offset, runs, vacuum):
+    return json_errors_cell(cursor, table, "view", limit, offset, runs, vacuum)
+
+
+def json_errors_cell_separate(cursor, table, limit, offset, runs, vacuum):
+    return {
+        "normal": json_errors_cell(cursor, table, "", limit, offset, runs, vacuum),
+        "conflict": json_errors_cell(cursor, table, "conflict", limit, offset, runs, vacuum),
+    }
+
+
 def query_tests(cursor, table, column, like, limit, offset, runs, vacuum):
     result = {
-        "count_view_all": count_view(cursor, table, column, runs, vacuum),
-        "count_view_like": count_view(cursor, table, column, runs, vacuum, like),
-        "json_simple_view": json_simple_view(cursor, table, limit, 0, runs, vacuum),
-        "json_simple_view_offset": json_simple_view(cursor, table, limit, offset, runs, vacuum),
-        "json_cell_view": json_cell_view(cursor, table, limit, 0, runs, vacuum),
-        "json_cell_view_offset": json_cell_view(cursor, table, limit, offset, runs, vacuum),
-        "json_errors_cell_view": json_errors_cell_view(cursor, table, limit, 0, runs, vacuum),
-        "json_errors_cell_view_offset": json_errors_cell_view(
+        "A_count_view_all": count_view(cursor, table, column, runs, vacuum),
+        "B_count_separate_all": count_separate(cursor, table, column, runs, vacuum),
+        "C_count_view_like": count_view(cursor, table, column, runs, vacuum, like),
+        "D_count_separate_like": count_separate(cursor, table, column, runs, vacuum, like),
+        "E_json_simple_view": json_simple_view(cursor, table, limit, 0, runs, vacuum),
+        "F_json_simple_separate": json_simple_separate(cursor, table, limit, 0, runs, vacuum),
+        "G_json_simple_view_offset": json_simple_view(cursor, table, limit, offset, runs, vacuum),
+        "H_json_simple_separate_offset": json_simple_separate(
+            cursor, table, limit, offset, runs, vacuum
+        ),
+        "I_json_cell_view": json_cell_view(cursor, table, limit, 0, runs, vacuum),
+        "J_json_cell_separate": json_cell_separate(cursor, table, limit, 0, runs, vacuum),
+        "K_json_cell_view_offset": json_cell_view(cursor, table, limit, offset, runs, vacuum),
+        "L_json_cell_separate_offset": json_cell_separate(
+            cursor, table, limit, offset, runs, vacuum
+        ),
+        "M_json_errors_cell_view": json_errors_cell_view(cursor, table, limit, 0, runs, vacuum),
+        "N_json_errors_cell_separate": json_errors_cell_separate(
+            cursor, table, limit, 0, runs, vacuum
+        ),
+        "O_json_errors_cell_view_offset": json_errors_cell_view(
+            cursor, table, limit, offset, runs, vacuum
+        ),
+        "P_json_errors_cell_separate_offset": json_errors_cell_separate(
             cursor, table, limit, offset, runs, vacuum
         ),
     }
