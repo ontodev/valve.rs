@@ -13,14 +13,10 @@ from collections import OrderedDict
 from pprint import pformat
 
 
-def count(cursor, table, column, num_repetitions, like=""):
+def test_query(cursor, query, headers, num_repetitions, vacuum):
     min_time = -1
     max_time = 0
     total_time = 0
-    query = f"SELECT COUNT(1) FROM {table}_view"
-    if like:
-        query = f"{query} WHERE {column} LIKE '{like}%'"
-    headers = ["count"]
     result = {"query": query, "runs": num_repetitions, "rows": []}
     for i in range(1, num_repetitions + 1):
         start = time.perf_counter()
@@ -34,8 +30,9 @@ def count(cursor, table, column, num_repetitions, like=""):
         if execution_time > max_time:
             max_time = execution_time
         total_time += execution_time
-        # Clear the cache after every query for more meaningful performance tests:
-        cursor.execute("vacuum")
+        if vacuum:
+            # Clear the cache after every query for more meaningful performance tests:
+            cursor.execute("vacuum")
 
     result["min_time"] = f"{min_time:06f}"
     result["max_time"] = f"{max_time:06f}"
@@ -44,16 +41,36 @@ def count(cursor, table, column, num_repetitions, like=""):
     return result
 
 
-def query_tests(cursor, table, column, like, num_repetitions):
+def count_view(cursor, table, column, num_repetitions, vacuum, like=""):
+    query = f"SELECT COUNT(1) FROM {table}_view"
+    if like:
+        query = f"{query} WHERE {column} LIKE '{like}%'"
+    headers = ["count"]
+    return test_query(cursor, query, headers, num_repetitions, vacuum)
+
+
+def json_simple_view(cursor, table, num_rows, offset, num_repetitions, vacuum):
+    cursor.execute(f'PRAGMA TABLE_INFO("{table}")')
+    columns_info = [d[0] for d in cursor.description]
+    pragma_rows = list(map(lambda r: OrderedDict(zip(columns_info, r)), cursor))
+    headers = [p["name"] for p in pragma_rows if not p["name"].endswith("_meta")]
+    select = ", ".join(headers)
+    query = f"SELECT {select} FROM {table}_view LIMIT {num_rows}"
+    return test_query(cursor, query, headers, num_repetitions, vacuum)
+
+
+def query_tests(cursor, table, column, like, num_repetitions, vacuum):
     result = {
-        "count_all": count(cursor, table, column, num_repetitions),
-        "count_like": count(cursor, table, column, num_repetitions, like),
+        "count_view_all": count_view(cursor, table, column, num_repetitions, vacuum),
+        "count_view_like": count_view(cursor, table, column, num_repetitions, vacuum, like),
+        "json_simple_view": json_simple_view(cursor, table, 100, 0, num_repetitions, vacuum),
     }
     print(pformat(json.loads(json.dumps(result))))
 
 
 def main():
     parser = ArgumentParser()
+    parser.add_argument("--vacuum", action="store_true", help="Clear cache after every query")
     parser.add_argument("num_repetitions", help="The number of times to repeat each test")
     parser.add_argument("table", help="The name of a table to run the tests on")
     parser.add_argument("column", help="The name of the column to run the tests on")
@@ -66,6 +83,7 @@ def main():
     column = args.column
     like = args.like
     db = args.db
+    vacuum = args.vacuum
     params = ""
     if db.startswith("postgresql://"):
         with psycopg2.connect(db) as conn:
@@ -83,7 +101,7 @@ def main():
             db = f"file:{path}{params}"
             with sqlite3.connect(db) as conn:
                 cursor = conn.cursor()
-                query_tests(cursor, table, column, like, num_repetitions)
+                query_tests(cursor, table, column, like, num_repetitions, vacuum)
         else:
             print(f"Could not parse database specification: {db}", file=sys.stderr)
             sys.exit(1)
