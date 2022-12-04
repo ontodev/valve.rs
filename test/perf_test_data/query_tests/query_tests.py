@@ -10,8 +10,11 @@ import time
 
 from argparse import ArgumentParser
 
+vacuum = False
+include_rows = False
 
-def test_query(cursor, query, headers, runs, vacuum):
+
+def test_query(cursor, query, headers, runs):
     min_time = -1
     max_time = 0
     total_time = 0
@@ -21,7 +24,7 @@ def test_query(cursor, query, headers, runs, vacuum):
         cursor.execute(query)
         end = time.perf_counter()
         execution_time = end - start
-        if not result["rows"]:
+        if include_rows and not result["rows"]:
             result["rows"] = [row for row in map(lambda r: dict(zip(headers, r)), cursor)]
         if min_time == -1 or execution_time < min_time:
             min_time = execution_time
@@ -39,27 +42,27 @@ def test_query(cursor, query, headers, runs, vacuum):
     return result
 
 
-def count(cursor, table, table_suffix, column, runs, vacuum, like=""):
+def count(cursor, table, table_suffix, column, runs, like=""):
     table = f"{table}_{table_suffix}" if table_suffix else table
     query = f"SELECT COUNT(1) FROM {table}"
     if like:
         query = f"{query} WHERE {column} LIKE '{like}%'"
     headers = ["count"]
-    return test_query(cursor, query, headers, runs, vacuum)
+    return test_query(cursor, query, headers, runs)
 
 
-def count_view(cursor, table, column, runs, vacuum, like=""):
-    return count(cursor, table, "view", column, runs, vacuum, like)
+def count_view(cursor, table, column, runs, like=""):
+    return count(cursor, table, "view", column, runs, like)
 
 
-def count_separate(cursor, table, column, runs, vacuum, like=""):
+def count_separate(cursor, table, column, runs, like=""):
     return {
-        "normal": count(cursor, table, "", column, runs, vacuum, like),
-        "conflict": count(cursor, table, "conflict", column, runs, vacuum, like),
+        "normal": count(cursor, table, "", column, runs, like),
+        "conflict": count(cursor, table, "conflict", column, runs, like),
     }
 
 
-def json_simple(cursor, table, table_suffix, limit, offset, runs, vacuum):
+def json_simple(cursor, table, table_suffix, limit, offset, runs):
     table = f"{table}_{table_suffix}" if table_suffix else table
     cursor.execute(f'PRAGMA TABLE_INFO("{table}")')
     columns_info = [d[0] for d in cursor.description]
@@ -69,21 +72,21 @@ def json_simple(cursor, table, table_suffix, limit, offset, runs, vacuum):
     query = f"SELECT {select} FROM {table} LIMIT {limit}"
     if offset:
         query = f"{query} OFFSET {offset}"
-    return test_query(cursor, query, headers, runs, vacuum)
+    return test_query(cursor, query, headers, runs)
 
 
-def json_simple_view(cursor, table, limit, offset, runs, vacuum):
-    return json_simple(cursor, table, "view", limit, offset, runs, vacuum)
+def json_simple_view(cursor, table, limit, offset, runs):
+    return json_simple(cursor, table, "view", limit, offset, runs)
 
 
-def json_simple_separate(cursor, table, limit, offset, runs, vacuum):
+def json_simple_separate(cursor, table, limit, offset, runs):
     return {
-        "normal": json_simple(cursor, table, "", limit, offset, runs, vacuum),
-        "conflict": json_simple(cursor, table, "conflict", limit, offset, runs, vacuum),
+        "normal": json_simple(cursor, table, "", limit, offset, runs),
+        "conflict": json_simple(cursor, table, "conflict", limit, offset, runs),
     }
 
 
-def json_cell(cursor, table, table_suffix, limit, offset, runs, vacuum):
+def json_cell(cursor, table, table_suffix, limit, offset, runs):
     table = f"{table}_{table_suffix}" if table_suffix else table
     cursor.execute(f'PRAGMA TABLE_INFO("{table}")')
     columns_info = [d[0] for d in cursor.description]
@@ -107,21 +110,21 @@ def json_cell(cursor, table, table_suffix, limit, offset, runs, vacuum):
     if offset:
         query = f"{query} OFFSET {offset}"
 
-    return test_query(cursor, query, headers, runs, vacuum)
+    return test_query(cursor, query, headers, runs)
 
 
-def json_cell_view(cursor, table, limit, offset, runs, vacuum):
-    return json_cell(cursor, table, "view", limit, offset, runs, vacuum)
+def json_cell_view(cursor, table, limit, offset, runs):
+    return json_cell(cursor, table, "view", limit, offset, runs)
 
 
-def json_cell_separate(cursor, table, limit, offset, runs, vacuum):
+def json_cell_separate(cursor, table, limit, offset, runs):
     return {
-        "normal": json_cell(cursor, table, "", limit, offset, runs, vacuum),
-        "conflict": json_cell(cursor, table, "conflict", limit, offset, runs, vacuum),
+        "normal": json_cell(cursor, table, "", limit, offset, runs),
+        "conflict": json_cell(cursor, table, "conflict", limit, offset, runs),
     }
 
 
-def json_errors_cell(cursor, table, table_suffix, limit, offset, runs, vacuum):
+def json_errors_cell(cursor, table, table_suffix, limit, offset, runs):
     table = f"{table}_{table_suffix}" if table_suffix else table
     cursor.execute(f'PRAGMA TABLE_INFO("{table}")')
     columns_info = [d[0] for d in cursor.description]
@@ -149,47 +152,39 @@ def json_errors_cell(cursor, table, table_suffix, limit, offset, runs, vacuum):
     if offset:
         query = f"{query} OFFSET {offset}"
 
-    return test_query(cursor, query, headers, runs, vacuum)
+    return test_query(cursor, query, headers, runs)
 
 
-def json_errors_cell_view(cursor, table, limit, offset, runs, vacuum):
-    return json_errors_cell(cursor, table, "view", limit, offset, runs, vacuum)
+def json_errors_cell_view(cursor, table, limit, offset, runs):
+    return json_errors_cell(cursor, table, "view", limit, offset, runs)
 
 
-def json_errors_cell_separate(cursor, table, limit, offset, runs, vacuum):
+def json_errors_cell_separate(cursor, table, limit, offset, runs):
     return {
-        "normal": json_errors_cell(cursor, table, "", limit, offset, runs, vacuum),
-        "conflict": json_errors_cell(cursor, table, "conflict", limit, offset, runs, vacuum),
+        "normal": json_errors_cell(cursor, table, "", limit, offset, runs),
+        "conflict": json_errors_cell(cursor, table, "conflict", limit, offset, runs),
     }
 
 
-def query_tests(cursor, table, column, like, limit, offset, runs, vacuum):
+def query_tests(cursor, table, column, like, limit, offset, runs):
     result = {
-        "A_count_view_all": count_view(cursor, table, column, runs, vacuum),
-        "B_count_separate_all": count_separate(cursor, table, column, runs, vacuum),
-        "C_count_view_like": count_view(cursor, table, column, runs, vacuum, like),
-        "D_count_separate_like": count_separate(cursor, table, column, runs, vacuum, like),
-        "E_json_simple_view": json_simple_view(cursor, table, limit, 0, runs, vacuum),
-        "F_json_simple_separate": json_simple_separate(cursor, table, limit, 0, runs, vacuum),
-        "G_json_simple_view_offset": json_simple_view(cursor, table, limit, offset, runs, vacuum),
-        "H_json_simple_separate_offset": json_simple_separate(
-            cursor, table, limit, offset, runs, vacuum
-        ),
-        "I_json_cell_view": json_cell_view(cursor, table, limit, 0, runs, vacuum),
-        "J_json_cell_separate": json_cell_separate(cursor, table, limit, 0, runs, vacuum),
-        "K_json_cell_view_offset": json_cell_view(cursor, table, limit, offset, runs, vacuum),
-        "L_json_cell_separate_offset": json_cell_separate(
-            cursor, table, limit, offset, runs, vacuum
-        ),
-        "M_json_errors_cell_view": json_errors_cell_view(cursor, table, limit, 0, runs, vacuum),
-        "N_json_errors_cell_separate": json_errors_cell_separate(
-            cursor, table, limit, 0, runs, vacuum
-        ),
-        "O_json_errors_cell_view_offset": json_errors_cell_view(
-            cursor, table, limit, offset, runs, vacuum
-        ),
+        "A_count_view_all": count_view(cursor, table, column, runs),
+        "B_count_separate_all": count_separate(cursor, table, column, runs),
+        "C_count_view_like": count_view(cursor, table, column, runs, like),
+        "D_count_separate_like": count_separate(cursor, table, column, runs, like),
+        "E_json_simple_view": json_simple_view(cursor, table, limit, 0, runs),
+        "F_json_simple_separate": json_simple_separate(cursor, table, limit, 0, runs),
+        "G_json_simple_view_offset": json_simple_view(cursor, table, limit, offset, runs),
+        "H_json_simple_separate_offset": json_simple_separate(cursor, table, limit, offset, runs),
+        "I_json_cell_view": json_cell_view(cursor, table, limit, 0, runs),
+        "J_json_cell_separate": json_cell_separate(cursor, table, limit, 0, runs),
+        "K_json_cell_view_offset": json_cell_view(cursor, table, limit, offset, runs),
+        "L_json_cell_separate_offset": json_cell_separate(cursor, table, limit, offset, runs),
+        "M_json_errors_cell_view": json_errors_cell_view(cursor, table, limit, 0, runs),
+        "N_json_errors_cell_separate": json_errors_cell_separate(cursor, table, limit, 0, runs),
+        "O_json_errors_cell_view_offset": json_errors_cell_view(cursor, table, limit, offset, runs),
         "P_json_errors_cell_separate_offset": json_errors_cell_separate(
-            cursor, table, limit, offset, runs, vacuum
+            cursor, table, limit, offset, runs
         ),
     }
     print(json.dumps(result))
@@ -198,6 +193,7 @@ def query_tests(cursor, table, column, like, limit, offset, runs, vacuum):
 def main():
     parser = ArgumentParser()
     parser.add_argument("--vacuum", action="store_true", help="Clear cache after every query")
+    parser.add_argument("--include_rows", action="store_true", help="Include rows in result")
     parser.add_argument("runs", help="The number of times to repeat each test")
     parser.add_argument("table", help="The name of a table to run the tests on")
     parser.add_argument("column", help="The name of the column to run the tests on")
@@ -207,6 +203,9 @@ def main():
     parser.add_argument("db", help="The database to query against")
     args = parser.parse_args()
 
+    global vacuum
+    global include_rows
+
     runs = int(args.runs)
     table = args.table
     column = args.column
@@ -215,6 +214,7 @@ def main():
     offset = int(args.offset)
     db = args.db
     vacuum = args.vacuum
+    include_rows = args.include_rows
     params = ""
     if db.startswith("postgresql://"):
         with psycopg2.connect(db) as conn:
@@ -232,7 +232,7 @@ def main():
             db = f"file:{path}{params}"
             with sqlite3.connect(db) as conn:
                 cursor = conn.cursor()
-                query_tests(cursor, table, column, like, limit, offset, runs, vacuum)
+                query_tests(cursor, table, column, like, limit, offset, runs)
         else:
             print(f"Could not parse database specification: {db}", file=sys.stderr)
             sys.exit(1)
