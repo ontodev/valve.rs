@@ -93,27 +93,34 @@ pg_random_test: valve clean random_test_data | build test/output
 	test/round_trip.sh postgresql:///valve_postgres $(random_test_dir)/table.tsv
 	@echo "Test succeeded!"
 
-sqlite_perf_db = build/valve_perf.db
-perf_test_dir = test/perf_test_data
+test/perf_test_data/ontology: test/generate_random_test_data.py
+	mkdir $@
+	./$< 1 100000 5 $@
 
+build/valve_perf.db: valve | test/perf_test_data/ontology build
+	time -p ./$< test/perf_test_data/table.tsv $@
+
+.PHONY: sqlite_perf_test
+sqlite_perf_test: build/valve_perf.db | test/output
+	time -p scripts/export.py messages $< $| $(tables_to_test)
+
+.PHONY: pg_perf_test
+pg_perf_test: valve test/perf_test_data/ontology | test/output
+	time -p ./$< test/perf_test_data/table.tsv postgresql:///valve_postgres
+	time -p scripts/export.py messages postgresql:///valve_postgres $| $(tables_to_test)
+
+.PHONY: perf_test
 perf_test: sqlite_perf_test pg_perf_test
 
-$(perf_test_dir)/ontology:
-	mkdir -p $(perf_test_dir)/ontology
-
-perf_test_data: test/generate_random_test_data.py | $(perf_test_dir)/ontology
-	./$< 1 10000 5 $|
-
-sqlite_perf_test: valve clean perf_test_data | build test/output
-	time -p ./$< $(perf_test_dir)/table.tsv $(sqlite_perf_db)
-	time -p scripts/export.py messages $(sqlite_perf_db) $(word 2,$|) $(tables_to_test)
-
-pg_perf_test: valve clean perf_test_data | build test/output
-	time -p ./$< $(perf_test_dir)/table.tsv postgresql:///valve_postgres
-	time -p scripts/export.py messages postgresql:///valve_postgres $(word 2,$|) $(tables_to_test)
-
 clean:
-	rm -Rf build test/output $(perf_test_dir)/ontology $(random_test_dir)/ontology
+	rm -Rf build/valve.db build/valve_random.db test/output $(random_test_dir)/ontology
 
-cleanall: clean
+cleanperfdb:
+	rm -Rf build/valve_perf.db
+
+cleanperfdata:
+	rm -Rf test/perf_test_data/ontology
+
+cleanall: clean cleanperfdb cleanperfdata
 	cargo clean
+	rm -Rf valve
