@@ -205,8 +205,8 @@ def get_value_from_prev_insert(prev_inserts, from_table, from_column, to_table, 
         else:
             return prev_inserts[from_table][from_column][0]
     else:
-        # Select at random from the last 200 inserted values:
-        prev_inserts[from_table][from_column] = prev_inserts[from_table][from_column][-200:]
+        # Select at random from the last 100 inserted values:
+        prev_inserts[from_table][from_column] = prev_inserts[from_table][from_column][-100:]
         from_values = prev_inserts[from_table][from_column]
         # We'd ideally like to exclude the last inserted value from consideration, but we save it
         # here in case we cannot:
