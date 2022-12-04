@@ -95,7 +95,7 @@ pg_random_test: valve clean random_test_data | build test/output
 
 test/perf_test_data/ontology: test/generate_random_test_data.py
 	mkdir $@
-	./$< 1 100000 5 $@
+	./$< 1 10000 5 $@
 
 build/valve_perf.db: valve | test/perf_test_data/ontology build
 	time -p ./$< --verbose test/perf_test_data/table.tsv $@
