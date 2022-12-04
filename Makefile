@@ -98,7 +98,7 @@ test/perf_test_data/ontology: test/generate_random_test_data.py
 	./$< 1 100000 5 $@
 
 build/valve_perf.db: valve | test/perf_test_data/ontology build
-	time -p ./$< test/perf_test_data/table.tsv $@
+	time -p ./$< --verbose test/perf_test_data/table.tsv $@
 
 .PHONY: sqlite_perf_test
 sqlite_perf_test: build/valve_perf.db | test/output
@@ -106,7 +106,7 @@ sqlite_perf_test: build/valve_perf.db | test/output
 
 .PHONY: pg_perf_test
 pg_perf_test: valve test/perf_test_data/ontology | test/output
-	time -p ./$< test/perf_test_data/table.tsv postgresql:///valve_postgres
+	time -p ./$< --verbose test/perf_test_data/table.tsv postgresql:///valve_postgres
 	time -p scripts/export.py messages postgresql:///valve_postgres $| $(tables_to_test)
 
 .PHONY: perf_test
