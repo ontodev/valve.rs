@@ -736,7 +736,13 @@ async fn validate_cell_trees(
         .collect::<Vec<_>>();
     for tkey in tkeys {
         let parent_col = column_name;
+        let parent_sql_type =
+            get_sql_type_from_global_config(&config, &table_name, &parent_col).unwrap();
+        let parent_sql_param = cast_sql_param_from_text(&parent_sql_type);
         let child_col = tkey.get("child").and_then(|c| c.as_str()).unwrap();
+        let child_sql_type =
+            get_sql_type_from_global_config(&config, &table_name, &child_col).unwrap();
+        let child_sql_param = cast_sql_param_from_text(&child_sql_type);
         let parent_val = cell.value.clone();
         let child_val =
             context.contents.get(child_col).and_then(|c| Some(c.value.clone())).unwrap();
@@ -754,12 +760,6 @@ async fn validate_cell_trees(
             .map(|p| {
                 params.push(p.contents.get(child_col).unwrap().value.clone());
                 params.push(p.contents.get(parent_col).unwrap().value.clone());
-                let child_sql_type =
-                    get_sql_type_from_global_config(&config, &table_name, &child_col).unwrap();
-                let child_sql_param = cast_sql_param_from_text(&child_sql_type);
-                let parent_sql_type =
-                    get_sql_type_from_global_config(&config, &table_name, &parent_col).unwrap();
-                let parent_sql_param = cast_sql_param_from_text(&parent_sql_type);
                 format!(
                     r#"SELECT {} AS "{}", {} AS "{}""#,
                     child_sql_param, child_col, parent_sql_param, parent_col
@@ -814,9 +814,7 @@ async fn validate_cell_trees(
                 if raw_foo.is_null() {
                     false
                 } else {
-                    let sql_type =
-                        get_sql_type_from_global_config(&config, &table_name, &parent_col).unwrap();
-                    let parent = get_column_value(&row, &parent_col, &sql_type);
+                    let parent = get_column_value(&row, &parent_col, &parent_sql_type);
                     parent == child_val
                 }
             });
@@ -829,10 +827,6 @@ async fn validate_cell_trees(
         if cycle_detected {
             let mut cycle_legs = vec![];
             for row in &rows {
-                let child_sql_type =
-                    get_sql_type_from_global_config(&config, &table_name, &child_col).unwrap();
-                let parent_sql_type =
-                    get_sql_type_from_global_config(&config, &table_name, &parent_col).unwrap();
                 let child = get_column_value(&row, &child_col, &child_sql_type);
                 let parent = get_column_value(&row, &parent_col, &parent_sql_type);
                 cycle_legs.push((child, parent));
@@ -1232,6 +1226,7 @@ pub async fn validate_under(
         let tree_table = ukey.get("ttable").and_then(|tt| tt.as_str()).unwrap();
         let tree_child = ukey.get("tcolumn").and_then(|tc| tc.as_str()).unwrap();
         let column = ukey.get("column").and_then(|c| c.as_str()).unwrap();
+        let sql_type = get_sql_type_from_global_config(&config, &table_name, &column).unwrap();
         let tree = config
             .get("constraints")
             .and_then(|c| c.as_object())
@@ -1362,8 +1357,6 @@ pub async fn validate_under(
             if raw_column_val.is_null() {
                 column_val = meta.get("value").and_then(|v| v.as_str()).unwrap().to_string();
             } else {
-                let sql_type =
-                    get_sql_type_from_global_config(&config, &table_name, &column).unwrap();
                 column_val = get_column_value(&row, &column, &sql_type);
             }
 
@@ -1454,6 +1447,8 @@ pub async fn validate_tree_foreign_keys(
         let tkey = tkey.as_object().unwrap();
         let child_col = tkey.get("child").and_then(|c| c.as_str()).unwrap();
         let parent_col = tkey.get("parent").and_then(|p| p.as_str()).unwrap();
+        let parent_sql_type =
+            get_sql_type_from_global_config(&config, &table_name, &parent_col).unwrap();
         let with_clause;
         let params;
         if let Some(ref extra_row) = extra_row {
@@ -1520,9 +1515,7 @@ pub async fn validate_tree_foreign_keys(
             let raw_parent_val = row.try_get_raw(format!(r#"{}"#, parent_col).as_str()).unwrap();
             let parent_val;
             if !raw_parent_val.is_null() {
-                let sql_type =
-                    get_sql_type_from_global_config(&config, &table_name, &parent_col).unwrap();
-                parent_val = get_column_value(&row, &parent_col, &sql_type);
+                parent_val = get_column_value(&row, &parent_col, &parent_sql_type);
             } else {
                 parent_val = meta.get("value").and_then(|v| v.as_str()).unwrap().to_string();
                 let sql = local_sql_syntax(
