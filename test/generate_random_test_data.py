@@ -6,9 +6,6 @@ import string
 
 from argparse import ArgumentParser
 
-# TODO: Remove this later:
-# from pprint import pformat
-
 
 TOKEN_LENGTH = 9
 
@@ -321,36 +318,45 @@ def main():
     error_proportion = None if not num_error_rows else math.floor(num_rows / num_error_rows)
     for row_num in range(1, num_rows + 1):
         for table in tables_in_order:
-            is_error_row = error_proportion and row_num % error_proportion == (
-                random.randrange(1, num_rows + 1)
-            )
+            is_error_row = error_proportion and row_num % error_proportion == 1
             columns = [column for column in CONFIG[table]]
+            error_column = random.randrange(len(columns))
             row = {}
-            for column in columns:
+            for column_num, column in enumerate(columns):
+                is_error_column = is_error_row and column_num == error_column
                 if (
-                    not is_error_row
+                    not is_error_column
                     and CONFIG[table][column]["allow_empty"]
                     and row_num % random.randrange(2, num_rows) == 1
                 ):
                     # If the column allows empty values, assign an empty value "sometimes":
                     cell = ""
-                elif not is_error_row:
+                elif not is_error_column:
                     cell = get_constrained_cell_value(table, column, row_num, prev_inserts)
                 else:
-                    # If this is an error row, then half of the time generate an empty string, and
-                    # half of the time just generate a random token. This might end up being valid,
-                    # but given that some cells have structure constraints, then chances are this
-                    # will result in at least some errors:
-                    if bool(random.randint(0, 1)):
+                    if CONFIG[table][column].get("structure") and CONFIG[table][column][
+                        "structure"
+                    ]["type"] in ["unique", "primary"]:
                         cell = ""
+                    elif CONFIG[table][column]["datatype"] in [
+                        "prefix",
+                        "IRI",
+                        "word",
+                        "curie",
+                    ]:
+                        cell = (
+                            "".join(random.choices(string.ascii_lowercase, k=TOKEN_LENGTH))
+                            + " "
+                            + "".join(random.choices(string.ascii_lowercase, k=TOKEN_LENGTH))
+                        )
                     else:
                         if CONFIG[table][column]["datatype"] == "integer":
+                            cell = "".join(random.choices(string.ascii_lowercase, k=TOKEN_LENGTH))
+                        else:
                             # No leading 0s:
                             cell = "".join(random.choices("123456789", k=1)) + "".join(
                                 random.choices(string.digits, k=TOKEN_LENGTH - 1)
                             )
-                        else:
-                            cell = "".join(random.choices(string.ascii_lowercase, k=TOKEN_LENGTH))
 
                 row[column] = cell
                 if not prev_inserts.get(table):

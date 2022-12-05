@@ -24,8 +24,12 @@ def test_query(cursor, query, headers, runs):
         cursor.execute(query)
         end = time.perf_counter()
         execution_time = end - start
-        if include_rows and not result["rows"]:
-            result["rows"] = [row for row in map(lambda r: dict(zip(headers, r)), cursor)]
+        if not result["rows"]:
+            if include_rows:
+                result["rows"] = [row for row in map(lambda r: dict(zip(headers, r)), cursor)]
+            else:
+                result["rows"] = len([row for row in map(lambda r: dict(zip(headers, r)), cursor)])
+
         if min_time == -1 or execution_time < min_time:
             min_time = execution_time
         if execution_time > max_time:

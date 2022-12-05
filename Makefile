@@ -14,7 +14,6 @@ build:
 
 .PHONY: doc time test sqlite_test pg_test
 .PHONY: api_test sqlite_api_test pg_qpi_test
-.PHONY: perf_test_data perf_test sqlite_perf_test pg_perf_test
 .PHONY: random_test_data random_test sqlite_random_test pg_random_test
 
 doc:
