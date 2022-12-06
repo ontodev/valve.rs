@@ -111,35 +111,41 @@ pub async fn validate_row(
                 column_name,
                 cell,
             );
-            validate_cell_trees(
-                config,
-                pool,
-                &table_name.to_string(),
-                column_name,
-                cell,
-                &context,
-                &vec![],
-            )
-            .await?;
-            validate_cell_foreign_constraints(
-                config,
-                pool,
-                &table_name.to_string(),
-                column_name,
-                cell,
-            )
-            .await?;
-            validate_cell_unique_constraints(
-                config,
-                pool,
-                &table_name.to_string(),
-                column_name,
-                cell,
-                &vec![],
-                existing_row,
-                row_number,
-            )
-            .await?;
+
+            // We don't do any further validation on cells that have datatype violations because
+            // they can result in database errors when, for instance, we compare a numeric with a
+            // non-numeric type.
+            if cell.valid || !contains_dt_violation(&cell.messages) {
+                validate_cell_trees(
+                    config,
+                    pool,
+                    &table_name.to_string(),
+                    column_name,
+                    cell,
+                    &context,
+                    &vec![],
+                )
+                .await?;
+                validate_cell_foreign_constraints(
+                    config,
+                    pool,
+                    &table_name.to_string(),
+                    column_name,
+                    cell,
+                )
+                .await?;
+                validate_cell_unique_constraints(
+                    config,
+                    pool,
+                    &table_name.to_string(),
+                    column_name,
+                    cell,
+                    &vec![],
+                    existing_row,
+                    row_number,
+                )
+                .await?;
+            }
         }
     }
 
@@ -439,6 +445,18 @@ pub fn validate_rows_intra(
     result_rows
 }
 
+/// Given a message list, determine if it contains a message corresponding to a dataype violation
+fn contains_dt_violation(messages: &Vec<SerdeValue>) -> bool {
+    let mut contains_dt_violation = false;
+    for m in messages {
+        if m.get("rule").and_then(|r| r.as_str()).unwrap().starts_with("datatype:") {
+            contains_dt_violation = true;
+            break;
+        }
+    }
+    contains_dt_violation
+}
+
 /// Given a config map, a database connection pool, a table name, and a number of rows to validate,
 /// perform tree validation on the rows and return the validated results.
 pub async fn validate_rows_trees(
@@ -463,7 +481,10 @@ pub async fn validate_rows_trees(
         for column_name in &column_names {
             let context = row.clone();
             let cell = row.contents.get_mut(column_name).unwrap();
-            if cell.nulltype == None {
+            // We don't do any further validation on cells that are legitimately empty, or on cells
+            // that have datatype violations. We exclude the latter because they can result in
+            // database errors when, for instance, we compare a numeric with a non-numeric type.
+            if cell.nulltype == None && (cell.valid || !contains_dt_violation(&cell.messages)) {
                 validate_cell_trees(
                     config,
                     pool,
@@ -511,7 +532,10 @@ pub async fn validate_rows_constraints(
         let mut result_row = ResultRow { row_number: None, contents: HashMap::new() };
         for column_name in &column_names {
             let cell = row.contents.get_mut(column_name).unwrap();
-            if cell.nulltype == None {
+            // We don't do any further validation on cells that are legitimately empty, or on cells
+            // that have datatype violations. We exclude the latter because they can result in
+            // database errors when, for instance, we compare a numeric with a non-numeric type.
+            if cell.nulltype == None && (cell.valid || !contains_dt_violation(&cell.messages)) {
                 validate_cell_foreign_constraints(config, pool, table_name, &column_name, cell)
                     .await?;
 
@@ -734,16 +758,17 @@ async fn validate_cell_trees(
         })
         .map(|v| v.as_object().unwrap())
         .collect::<Vec<_>>();
+
+    let parent_col = column_name;
+    let parent_sql_type =
+        get_sql_type_from_global_config(&config, &table_name, &parent_col).unwrap();
+    let parent_sql_param = cast_sql_param_from_text(&parent_sql_type);
+    let parent_val = cell.value.clone();
     for tkey in tkeys {
-        let parent_col = column_name;
-        let parent_sql_type =
-            get_sql_type_from_global_config(&config, &table_name, &parent_col).unwrap();
-        let parent_sql_param = cast_sql_param_from_text(&parent_sql_type);
         let child_col = tkey.get("child").and_then(|c| c.as_str()).unwrap();
         let child_sql_type =
             get_sql_type_from_global_config(&config, &table_name, &child_col).unwrap();
         let child_sql_param = cast_sql_param_from_text(&child_sql_type);
-        let parent_val = cell.value.clone();
         let child_val =
             context.contents.get(child_col).and_then(|c| Some(c.value.clone())).unwrap();
 
@@ -831,7 +856,7 @@ async fn validate_cell_trees(
                 let parent = get_column_value(&row, &parent_col, &parent_sql_type);
                 cycle_legs.push((child, parent));
             }
-            cycle_legs.push((child_val, parent_val));
+            cycle_legs.push((child_val, parent_val.clone()));
 
             let mut cycle_msg = vec![];
             for cycle in &cycle_legs {
@@ -1344,8 +1369,16 @@ pub async fn validate_under(
             let meta: &str = row.get_unchecked(format!(r#"{}_meta"#, column).as_str());
             let meta: SerdeValue = serde_json::from_str(meta).unwrap();
             let meta = meta.as_object().unwrap();
-            // If the value in the parent column is legitimately empty, then just skip this row:
-            if meta.contains_key("nulltype") {
+            // If the value in the parent column is legitimately empty, or if it is invalid
+            // because of a datatype error, then just skip this row. In the latter case this is
+            // to avoid potential datatype errors that might arise if we compare a numeric with a
+            // non-numeric type.
+            if meta.contains_key("nulltype")
+                || (meta.get("valid").unwrap() == false
+                    && contains_dt_violation(
+                        &meta.get("messages").and_then(|m| m.as_array()).unwrap(),
+                    ))
+            {
                 continue;
             }
 
@@ -1503,8 +1536,16 @@ pub async fn validate_tree_foreign_keys(
             let meta: &str = row.get_unchecked(format!(r#"{}_meta"#, parent_col).as_str());
             let meta: SerdeValue = serde_json::from_str(meta).unwrap();
             let meta = meta.as_object().unwrap();
-            // If the value in the parent column is legitimately empty, then just skip this row:
-            if meta.contains_key("nulltype") {
+            // If the value in the parent column is legitimately empty, or if it is invalid
+            // because of a datatype error, then just skip this row. In the latter case this is
+            // to avoid potential datatype errors that might arise if we compare a numeric with a
+            // non-numeric type.
+            if meta.contains_key("nulltype")
+                || (meta.get("valid").unwrap() == false
+                    && contains_dt_violation(
+                        &meta.get("messages").and_then(|m| m.as_array()).unwrap(),
+                    ))
+            {
                 continue;
             }
 

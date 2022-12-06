@@ -30,7 +30,6 @@ table3	material entity	parent	error	tree:foreign	Value owl:Thing of column paren
 table3	molecular dentity	source	error	datatype:nonspace	source should be text without whitespace	CO B
 table3	molecular dentity	source	error	datatype:word	source should be a single word: letters, numbers, underscore	CO B
 table3	molecular dentity	source	error	datatype:prefix	source should be a prefix for a CURIE	CO B
-table3	molecular dentity	source	error	key:foreign	Value CO B of column source is not in table1.prefix	CO B
 table3	molecular entity	id	error	key:unique	Values of id must be unique	COB:0000013
 table4	9	foreign_column	error	key:unique	Values of foreign_column must be unique	b
 table4	9	numeric_foreign_column	error	key:primary	Values of numeric_foreign_column must be unique	9
