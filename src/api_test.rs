@@ -69,7 +69,9 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
             {"id":"e","label":"e","order":5},
             {"id":"f","label":"f","order":6},
             {"id":"g","label":"g","order":7},
-            {"id":"h","label":"h","order":8}
+            {"id":"h","label":"h","order":8},
+            {"id":"k","label":"k","order":9}
+
         ])
     );
 

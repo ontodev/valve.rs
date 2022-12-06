@@ -1644,7 +1644,6 @@ fn cast_column_sql_to_text(column: &str, sql_type: &str) -> String {
 fn get_column_value(row: &AnyRow, column: &str, sql_type: &str) -> String {
     if sql_type.to_lowercase() == "integer" {
         let value: i32 = row.get(format!(r#"{}"#, column).as_str());
-        let value: u32 = value as u32;
         value.to_string()
     } else {
         let value: &str = row.get(format!(r#"{}"#, column).as_str());

@@ -1396,9 +1396,7 @@ pub async fn validate_under(
             // We use i32 instead of i64 (which we use for row_number) here because, unlike
             // row_number, which is a BIGINT, 0 and 1 are being interpreted as normal sized ints.
             let is_in_tree: i32 = row.get("is_in_tree");
-            let is_in_tree: u32 = is_in_tree as u32;
             let is_under: i32 = row.get("is_under");
-            let is_under: u32 = is_under as u32;
             if is_in_tree == 0 {
                 let mut meta = meta.clone();
                 meta.insert("valid".to_string(), SerdeValue::Bool(false));
