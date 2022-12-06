@@ -78,7 +78,7 @@ $(random_test_dir)/ontology:
 	mkdir -p $(random_test_dir)/ontology
 
 random_test_data: test/generate_random_test_data.py | $(random_test_dir)/ontology
-	./$< $$(date +"%s") 100 0 $|
+	./$< $$(date +"%s") 100 5 $|
 
 sqlite_random_test: valve clean random_test_data | build test/output
 	@echo "Testing with random data on sqlite ..."

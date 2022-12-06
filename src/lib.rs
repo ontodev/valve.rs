@@ -1135,7 +1135,7 @@ async fn validate_rows_inter_and_insert(
     tmp_messages_stats.insert("error".to_string(), 0);
     tmp_messages_stats.insert("warning".to_string(), 0);
     tmp_messages_stats.insert("info".to_string(), 0);
-    let ((main_sql, main_params), (_, _)) =
+    let ((main_sql, main_params), (conflict_sql, conflict_params)) =
         make_inserts(config, table_name, rows, chunk_number, &mut tmp_messages_stats, verbose)
             .await?;
 
@@ -1147,6 +1147,13 @@ async fn validate_rows_inter_and_insert(
     let main_result = main_query.execute(pool).await;
     match main_result {
         Ok(_) => {
+            let conflict_sql = local_sql_syntax(&pool, &conflict_sql);
+            let mut conflict_query = sqlx_query(&conflict_sql);
+            for param in &conflict_params {
+                conflict_query = conflict_query.bind(param);
+            }
+            conflict_query.execute(pool).await?;
+
             if verbose {
                 let curr_errors = messages_stats.get("error").unwrap();
                 messages_stats.insert(
