@@ -12,7 +12,7 @@ use sqlx::{
 use std::str::FromStr;
 
 pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Error> {
-    let config = configure_and_or_load(table, database, false).await?;
+    let config = configure_and_or_load(table, database, false, false).await?;
     let config: SerdeValue = serde_json::from_str(config.as_str()).unwrap();
     let config = config.as_object().unwrap();
 
@@ -54,7 +54,7 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         &compiled_datatype_conditions,
         &parsed_structure_conditions,
         &pool,
-        "foobar",
+        "table2",
         "child",
         None,
     )
@@ -69,7 +69,26 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
             {"id":"e","label":"e","order":5},
             {"id":"f","label":"f","order":6},
             {"id":"g","label":"g","order":7},
-            {"id":"h","label":"h","order":8}
+            {"id":"h","label":"h","order":8},
+            {"id":"k","label":"k","order":9}
+
+        ])
+    );
+
+    let matching_values = get_matching_values(
+        &config,
+        &compiled_datatype_conditions,
+        &parsed_structure_conditions,
+        &pool,
+        "table6",
+        "child",
+        Some("7"),
+    )
+    .await?;
+    assert_eq!(
+        matching_values,
+        json!([
+            {"id":"7","label":"7","order":1}
         ])
     );
 
@@ -80,7 +99,7 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         "child": {"messages": [], "valid": true, "value": "b"},
         "parent": {"messages": [], "valid": true, "value": "f"},
         "xyzzy": {"messages": [], "valid": true, "value": "w"},
-        "foo": {"messages": [], "valid": true, "value": "A"},
+        "foo": {"messages": [], "valid": true, "value": 1},
         "bar": {
             "messages": [
                 {"level": "error", "message": "An unrelated error", "rule": "custom:unrelated"}
@@ -95,13 +114,40 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         &compiled_datatype_conditions,
         &compiled_rule_conditions,
         &pool,
-        "foobar",
+        "table2",
         row.as_object().unwrap(),
         true,
         Some(1),
     )
     .await?;
-    update_row(&config, &pool, "foobar", &result_row, 1).await?;
+    update_row(&config, &pool, "table2", &result_row, 1).await?;
+
+    let row = json!({
+        "child": {"messages": [], "valid": true, "value": 2},
+        "parent": {"messages": [], "valid": true, "value": 6},
+        "xyzzy": {"messages": [], "valid": true, "value": 23},
+        "foo": {"messages": [], "valid": true, "value": 'a'},
+        "bar": {
+            "messages": [
+                {"level": "error", "message": "An unrelated error", "rule": "custom:unrelated"}
+            ],
+            "valid": false,
+            "value": 2,
+        },
+    });
+
+    let result_row = validate_row(
+        &config,
+        &compiled_datatype_conditions,
+        &compiled_rule_conditions,
+        &pool,
+        "table6",
+        row.as_object().unwrap(),
+        true,
+        Some(1),
+    )
+    .await?;
+    update_row(&config, &pool, "table6", &result_row, 1).await?;
 
     let row = json!({
         "id": {"messages": [], "valid": true, "value": "BFO:0000027"},
@@ -122,13 +168,39 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         &compiled_datatype_conditions,
         &compiled_rule_conditions,
         &pool,
-        "import",
+        "table3",
         row.as_object().unwrap(),
         false,
         None,
     )
     .await?;
-    let _new_row_num = insert_new_row(&config, &pool, "import", &result_row).await?;
+    let _new_row_num = insert_new_row(&config, &pool, "table3", &result_row).await?;
+
+    let row = json!({
+        "child": {"messages": [], "valid": true, "value": 2},
+        "parent": {"messages": [], "valid": true, "value": 6},
+        "xyzzy": {"messages": [], "valid": true, "value": 23},
+        "foo": {"messages": [], "valid": true, "value": 'a'},
+        "bar": {
+            "messages": [
+                {"level": "error", "message": "An unrelated error", "rule": "custom:unrelated"}
+            ],
+            "valid": false,
+            "value": 2,
+        },
+    });
+    let result_row = validate_row(
+        &config,
+        &compiled_datatype_conditions,
+        &compiled_rule_conditions,
+        &pool,
+        "table6",
+        row.as_object().unwrap(),
+        false,
+        None,
+    )
+    .await?;
+    let _new_row_num = insert_new_row(&config, &pool, "table6", &result_row).await?;
 
     Ok(())
 }

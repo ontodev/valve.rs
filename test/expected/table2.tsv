@@ -1,8 +1,8 @@
 child	parent	xyzzy	foo	bar
-b	f	w	A	B
+b	f	w	1	B
 b	c	e		y
-c	d	f	x	y
-d	e	g	x	w
+c	d	f	5	y
+d	e	g	5	w
 e	f	h		
 f	g	a		
 g	h	z		

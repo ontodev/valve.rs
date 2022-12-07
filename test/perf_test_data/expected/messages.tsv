@@ -1,0 +1,51 @@
+table	row	column	level	rule_id	message	value
+table	rule	type	error	datatype:table_type	type should be a table type	rule
+table2	1	foo	error	rule:foo-3	bar must be a label if foo is an IRI	
+table2	1745	foo	error	rule:foo-2	bar cannot be null if foo is not null	329695859
+table2	1745	foo	error	rule:foo-3	bar must be a label if foo is an IRI	329695859
+table2	3277	foo	error	rule:foo-2	bar cannot be null if foo is not null	386915348
+table2	3277	foo	error	rule:foo-3	bar must be a label if foo is an IRI	386915348
+table2	3491	foo	error	rule:foo-2	bar cannot be null if foo is not null	988252056
+table2	3491	foo	error	rule:foo-3	bar must be a label if foo is an IRI	988252056
+table2	3659	foo	error	rule:foo-2	bar cannot be null if foo is not null	865459386
+table2	3659	foo	error	rule:foo-3	bar must be a label if foo is an IRI	865459386
+table2	4201	foo	error	rule:foo-2	bar cannot be null if foo is not null	430802895
+table2	4201	foo	error	rule:foo-3	bar must be a label if foo is an IRI	430802895
+table2	4363	foo	error	rule:foo-1	bar must be null whenever foo is null	
+table2	4417	foo	error	rule:foo-2	bar cannot be null if foo is not null	125067459
+table2	4417	foo	error	rule:foo-3	bar must be a label if foo is an IRI	125067459
+table2	4545	foo	error	rule:foo-2	bar cannot be null if foo is not null	469956672
+table2	4545	foo	error	rule:foo-3	bar must be a label if foo is an IRI	469956672
+table2	4625	foo	error	rule:foo-1	bar must be null whenever foo is null	
+table2	4782	foo	error	rule:foo-2	bar cannot be null if foo is not null	301663833
+table2	4782	foo	error	rule:foo-3	bar must be a label if foo is an IRI	301663833
+table2	5125	foo	error	rule:foo-2	bar cannot be null if foo is not null	782877632
+table2	5125	foo	error	rule:foo-3	bar must be a label if foo is an IRI	782877632
+table2	5705	foo	error	rule:foo-2	bar cannot be null if foo is not null	558939134
+table2	5705	foo	error	rule:foo-3	bar must be a label if foo is an IRI	558939134
+table2	5971	foo	error	rule:foo-2	bar cannot be null if foo is not null	700385642
+table2	5971	foo	error	rule:foo-3	bar must be a label if foo is an IRI	700385642
+table2	6117	foo	error	rule:foo-2	bar cannot be null if foo is not null	899665499
+table2	6117	foo	error	rule:foo-3	bar must be a label if foo is an IRI	899665499
+table2	6853	foo	error	rule:foo-1	bar must be null whenever foo is null	
+table2	7101	foo	error	rule:foo-1	bar must be null whenever foo is null	
+table2	7729	foo	error	rule:foo-1	bar must be null whenever foo is null	
+table2	7739	foo	error	rule:foo-2	bar cannot be null if foo is not null	639728138
+table2	7739	foo	error	rule:foo-3	bar must be a label if foo is an IRI	639728138
+table2	8641	foo	error	rule:foo-2	bar cannot be null if foo is not null	102108200
+table2	8641	foo	error	rule:foo-3	bar must be a label if foo is an IRI	102108200
+table2	8713	foo	error	rule:foo-2	bar cannot be null if foo is not null	696105105
+table2	8713	foo	error	rule:foo-3	bar must be a label if foo is an IRI	696105105
+table2	9667	foo	error	rule:foo-2	bar cannot be null if foo is not null	900432660
+table2	9667	foo	error	rule:foo-3	bar must be a label if foo is an IRI	900432660
+table2	9977	foo	error	rule:foo-1	bar must be null whenever foo is null	
+table6	1	foo	error	rule:foo-3	bar must be a label if foo is an IRI	
+table6	1009	foo	error	rule:foo-2	bar cannot be null if foo is not null	jiwhrmlfh anrwwjntp
+table6	2008	foo	error	rule:foo-1	bar must be null whenever foo is null	
+table6	3289	foo	error	rule:foo-1	bar must be null whenever foo is null	
+table6	7873	foo	error	rule:foo-2	bar cannot be null if foo is not null	grboxhfej aykapmjfj
+table6	8005	foo	error	rule:foo-1	bar must be null whenever foo is null	
+table6	8086	foo	error	rule:foo-1	bar must be null whenever foo is null	
+table6	9142	foo	error	rule:foo-1	bar must be null whenever foo is null	
+table6	9442	foo	error	rule:foo-1	bar must be null whenever foo is null	
+table6	9797	foo	error	rule:foo-2	bar cannot be null if foo is not null	nhyntihbo mgfypxbwg

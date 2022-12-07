@@ -1,10 +1,11 @@
 table	path	description	type
 column	test/src/column.tsv	Columns for all of the tables.	column
 datatype	test/src/datatype.tsv	Datatypes for all of the columns	datatype
-foreign_table	test/src/ontology/foreign_table.tsv		
-import	test/src/ontology/import.tsv	Terms imported from other ontologies	
-prefix	test/src/prefix.tsv	Prefixes and source ontologies.	
 rule	test/src/rule.tsv	More complex "when" rules	rule
 table	test/src/table.tsv	All of the user-editable tables in this project.	table
-foobar	test/src/ontology/foobar.tsv		
-numeric	test/src/ontology/numeric.tsv	Table with some numbers	
+table1	test/src/ontology/table1.tsv	The first data table	
+table2	test/src/ontology/table2.tsv	The second data table	
+table3	test/src/ontology/table3.tsv	The third data table	
+table4	test/src/ontology/table4.tsv	The fourth data table	
+table5	test/src/ontology/table5.tsv	The fifth data table	
+table6	test/src/ontology/table6.tsv	The sixth data table (like table2 but all numeric)	

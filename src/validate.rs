@@ -1,13 +1,12 @@
 use enquote::unquote;
 use serde_json::{json, Value as SerdeValue};
-use sqlx::any::AnyPool;
-use sqlx::ValueRef;
-use sqlx::{query as sqlx_query, Row};
+use sqlx::{any::AnyPool, query as sqlx_query, Row, ValueRef};
 use std::collections::HashMap;
 
 use crate::{
-    ast::Expression, local_sql_syntax, ColumnRule, CompiledCondition, ConfigMap, ParsedStructure,
-    SQL_PARAM,
+    ast::Expression, cast_column_sql_to_text, cast_sql_param_from_text, get_column_value,
+    get_sql_type_from_global_config, local_sql_syntax, ColumnRule, CompiledCondition, ConfigMap,
+    ParsedStructure, SQL_PARAM,
 };
 
 /// Represents a particular cell in a particular row of data with vaildation results.
@@ -70,7 +69,11 @@ pub async fn validate_row(
                 .get("nulltype")
                 .and_then(|n| Some(n.as_str().unwrap()))
                 .and_then(|n| Some(n.to_string())),
-            value: cell.get("value").and_then(|v| v.as_str()).unwrap().to_string(),
+            value: match cell.get("value") {
+                Some(SerdeValue::String(s)) => s.to_string(),
+                Some(SerdeValue::Number(n)) => format!("{}", n),
+                _ => panic!("Cell value is neither a number nor a string."),
+            },
             valid: cell.get("valid").and_then(|v| v.as_bool()).unwrap(),
             messages: cell.get("messages").and_then(|m| m.as_array()).unwrap().to_vec(),
         };
@@ -108,35 +111,41 @@ pub async fn validate_row(
                 column_name,
                 cell,
             );
-            validate_cell_trees(
-                config,
-                pool,
-                &table_name.to_string(),
-                column_name,
-                cell,
-                &context,
-                &vec![],
-            )
-            .await?;
-            validate_cell_foreign_constraints(
-                config,
-                pool,
-                &table_name.to_string(),
-                column_name,
-                cell,
-            )
-            .await?;
-            validate_cell_unique_constraints(
-                config,
-                pool,
-                &table_name.to_string(),
-                column_name,
-                cell,
-                &vec![],
-                existing_row,
-                row_number,
-            )
-            .await?;
+
+            // We don't do any further validation on cells that have datatype violations because
+            // they can result in database errors when, for instance, we compare a numeric with a
+            // non-numeric type.
+            if cell.valid || !contains_dt_violation(&cell.messages) {
+                validate_cell_trees(
+                    config,
+                    pool,
+                    &table_name.to_string(),
+                    column_name,
+                    cell,
+                    &context,
+                    &vec![],
+                )
+                .await?;
+                validate_cell_foreign_constraints(
+                    config,
+                    pool,
+                    &table_name.to_string(),
+                    column_name,
+                    cell,
+                )
+                .await?;
+                validate_cell_unique_constraints(
+                    config,
+                    pool,
+                    &table_name.to_string(),
+                    column_name,
+                    cell,
+                    &vec![],
+                    existing_row,
+                    row_number,
+                )
+                .await?;
+            }
         }
     }
 
@@ -197,11 +206,11 @@ pub async fn get_matching_values(
         .unwrap();
 
     let dt_condition =
-        compiled_datatype_conditions.get(dt_name).and_then(|d| Some(d.parsed.clone())).unwrap();
+        compiled_datatype_conditions.get(dt_name).and_then(|d| Some(d.parsed.clone()));
 
     let mut values = vec![];
     match dt_condition {
-        Expression::Function(name, args) if name == "in" => {
+        Some(Expression::Function(name, args)) if name == "in" => {
             for arg in args {
                 if let Expression::Label(arg) = *arg {
                     // Remove the enclosing quotes from the values being returned:
@@ -221,102 +230,121 @@ pub async fn get_matching_values(
             // foreign column. Otherwise if the structure includes an
             // `under(tree_table.tree_column, value)` condition, then get the values from the tree
             // column that are under `value`.
-            let structure = parsed_structure_conditions
-                .get(
-                    config
-                        .get("table")
-                        .and_then(|t| t.as_object())
-                        .and_then(|t| t.get(table_name))
-                        .and_then(|t| t.as_object())
-                        .and_then(|t| t.get("column"))
-                        .and_then(|c| c.as_object())
-                        .and_then(|c| c.get(column_name))
-                        .and_then(|c| c.as_object())
-                        .and_then(|c| c.get("structure"))
-                        .and_then(|d| d.as_str())
-                        .unwrap(),
-                )
-                .unwrap();
+            let structure = parsed_structure_conditions.get(
+                config
+                    .get("table")
+                    .and_then(|t| t.as_object())
+                    .and_then(|t| t.get(table_name))
+                    .and_then(|t| t.as_object())
+                    .and_then(|t| t.get("column"))
+                    .and_then(|c| c.as_object())
+                    .and_then(|c| c.get(column_name))
+                    .and_then(|c| c.as_object())
+                    .and_then(|c| c.get("structure"))
+                    .and_then(|d| d.as_str())
+                    .unwrap(),
+            );
 
-            let matching_string = {
-                match matching_string {
-                    None => "%".to_string(),
-                    Some(s) => format!("%{}%", s),
+            let sql_type =
+                get_sql_type_from_global_config(&config, table_name, &column_name).unwrap();
+
+            match structure {
+                Some(ParsedStructure { original, parsed }) => {
+                    let matching_string = {
+                        match matching_string {
+                            None => "%".to_string(),
+                            Some(s) => format!("%{}%", s),
+                        }
+                    };
+
+                    match parsed {
+                        Expression::Function(name, args) if name == "from" => {
+                            let foreign_key = &args[0];
+                            if let Expression::Field(ftable, fcolumn) = &**foreign_key {
+                                let fcolumn_text = cast_column_sql_to_text(&fcolumn, &sql_type);
+                                let sql = local_sql_syntax(
+                                    &pool,
+                                    &format!(
+                                        r#"SELECT "{}" FROM "{}" WHERE {} LIKE {}"#,
+                                        fcolumn, ftable, fcolumn_text, SQL_PARAM
+                                    ),
+                                );
+                                let rows =
+                                    sqlx_query(&sql).bind(&matching_string).fetch_all(pool).await?;
+                                for row in rows.iter() {
+                                    values.push(get_column_value(&row, &fcolumn, &sql_type));
+                                }
+                            }
+                        }
+                        Expression::Function(name, args) if name == "under" || name == "tree" => {
+                            let mut tree_col = "not set";
+                            let mut under_val = Some("not set".to_string());
+                            if name == "under" {
+                                if let Expression::Field(_, column) = &**&args[0] {
+                                    tree_col = column;
+                                }
+                                if let Expression::Label(label) = &**&args[1] {
+                                    under_val = Some(label.to_string());
+                                }
+                            } else {
+                                let tree_key = &args[0];
+                                if let Expression::Label(label) = &**tree_key {
+                                    tree_col = label;
+                                    under_val = None;
+                                }
+                            }
+
+                            let tree = config
+                                .get("constraints")
+                                .and_then(|c| c.as_object())
+                                .and_then(|c| c.get("tree"))
+                                .and_then(|t| t.as_object())
+                                .and_then(|t| t.get(table_name))
+                                .and_then(|t| t.as_array())
+                                .and_then(|t| {
+                                    t.iter().find(|o| o.get("child").unwrap() == tree_col)
+                                })
+                                .expect(
+                                    format!("No tree: '{}.{}' found", table_name, tree_col)
+                                        .as_str(),
+                                )
+                                .as_object()
+                                .unwrap();
+                            let child_column = tree.get("child").and_then(|c| c.as_str()).unwrap();
+
+                            let (tree_sql, mut params) = with_tree_sql(
+                                &config,
+                                tree,
+                                &table_name.to_string(),
+                                &table_name.to_string(),
+                                under_val,
+                                None,
+                            );
+                            let child_column_text =
+                                cast_column_sql_to_text(&child_column, &sql_type);
+                            let sql = local_sql_syntax(
+                                &pool,
+                                &format!(
+                                    r#"{} SELECT "{}" FROM "tree" WHERE {} LIKE {}"#,
+                                    tree_sql, child_column, child_column_text, SQL_PARAM
+                                ),
+                            );
+                            params.push(matching_string);
+
+                            let mut query = sqlx_query(&sql);
+                            for param in &params {
+                                query = query.bind(param);
+                            }
+
+                            let rows = query.fetch_all(pool).await?;
+                            for row in rows.iter() {
+                                values.push(get_column_value(&row, &child_column, &sql_type));
+                            }
+                        }
+                        _ => panic!("Unrecognised structure: {}", original),
+                    };
                 }
-            };
-
-            match &structure.parsed {
-                Expression::Function(name, args) if name == "from" => {
-                    let foreign_key = &args[0];
-                    if let Expression::Field(ftable, fcolumn) = &**foreign_key {
-                        let sql = local_sql_syntax(
-                            &pool,
-                            &format!(
-                                r#"SELECT "{}" FROM "{}" WHERE "{}" LIKE {}"#,
-                                fcolumn, ftable, fcolumn, SQL_PARAM
-                            ),
-                        );
-                        let rows = sqlx_query(&sql).bind(&matching_string).fetch_all(pool).await?;
-                        for row in rows.iter() {
-                            let value: &str = row.get(&**fcolumn);
-                            values.push(value.to_string());
-                        }
-                    }
-                }
-                Expression::Function(name, args) if name == "under" || name == "tree" => {
-                    let mut tree_col = "not set";
-                    let mut under_val = Some("not set".to_string());
-                    if name == "under" {
-                        if let Expression::Field(_, column) = &**&args[0] {
-                            tree_col = column;
-                        }
-                        if let Expression::Label(label) = &**&args[1] {
-                            under_val = Some(label.to_string());
-                        }
-                    } else {
-                        let tree_key = &args[0];
-                        if let Expression::Label(label) = &**tree_key {
-                            tree_col = label;
-                            under_val = None;
-                        }
-                    }
-
-                    let tree = config
-                        .get("constraints")
-                        .and_then(|c| c.as_object())
-                        .and_then(|c| c.get("tree"))
-                        .and_then(|t| t.as_object())
-                        .and_then(|t| t.get(table_name))
-                        .and_then(|t| t.as_array())
-                        .and_then(|t| t.iter().find(|o| o.get("child").unwrap() == tree_col))
-                        .expect(format!("No tree: '{}.{}' found", table_name, tree_col).as_str())
-                        .as_object()
-                        .unwrap();
-                    let child_column = tree.get("child").and_then(|c| c.as_str()).unwrap();
-
-                    let (tree_sql, mut params) =
-                        with_tree_sql(tree, &table_name.to_string(), under_val, None);
-                    let sql = local_sql_syntax(
-                        &pool,
-                        &format!(
-                            r#"{} SELECT "{}" FROM "tree" WHERE "{}" LIKE {}"#,
-                            tree_sql, child_column, child_column, SQL_PARAM
-                        ),
-                    );
-                    params.push(matching_string);
-
-                    let mut query = sqlx_query(&sql);
-                    for param in &params {
-                        query = query.bind(param);
-                    }
-
-                    let rows = query.fetch_all(pool).await?;
-                    for row in rows.iter() {
-                        let value: &str = row.get(child_column);
-                        values.push(value.to_string());
-                    }
-                }
-                _ => panic!("Unrecognised structure: {}", structure.original),
+                None => (),
             };
         }
     };
@@ -417,6 +445,18 @@ pub fn validate_rows_intra(
     result_rows
 }
 
+/// Given a message list, determine if it contains a message corresponding to a dataype violation
+fn contains_dt_violation(messages: &Vec<SerdeValue>) -> bool {
+    let mut contains_dt_violation = false;
+    for m in messages {
+        if m.get("rule").and_then(|r| r.as_str()).unwrap().starts_with("datatype:") {
+            contains_dt_violation = true;
+            break;
+        }
+    }
+    contains_dt_violation
+}
+
 /// Given a config map, a database connection pool, a table name, and a number of rows to validate,
 /// perform tree validation on the rows and return the validated results.
 pub async fn validate_rows_trees(
@@ -441,7 +481,10 @@ pub async fn validate_rows_trees(
         for column_name in &column_names {
             let context = row.clone();
             let cell = row.contents.get_mut(column_name).unwrap();
-            if cell.nulltype == None {
+            // We don't do any further validation on cells that are legitimately empty, or on cells
+            // that have datatype violations. We exclude the latter because they can result in
+            // database errors when, for instance, we compare a numeric with a non-numeric type.
+            if cell.nulltype == None && (cell.valid || !contains_dt_violation(&cell.messages)) {
                 validate_cell_trees(
                     config,
                     pool,
@@ -489,7 +532,10 @@ pub async fn validate_rows_constraints(
         let mut result_row = ResultRow { row_number: None, contents: HashMap::new() };
         for column_name in &column_names {
             let cell = row.contents.get_mut(column_name).unwrap();
-            if cell.nulltype == None {
+            // We don't do any further validation on cells that are legitimately empty, or on cells
+            // that have datatype violations. We exclude the latter because they can result in
+            // database errors when, for instance, we compare a numeric with a non-numeric type.
+            if cell.nulltype == None && (cell.valid || !contains_dt_violation(&cell.messages)) {
                 validate_cell_foreign_constraints(config, pool, table_name, &column_name, cell)
                     .await?;
 
@@ -521,8 +567,10 @@ pub async fn validate_rows_constraints(
 /// sub-tree of the tree, and an extra SQL clause, generate the SQL for a WITH clause representing
 /// the sub-tree.
 fn with_tree_sql(
+    config: &ConfigMap,
     tree: &ConfigMap,
-    table_name: &String,
+    table_name: &str,
+    effective_table_name: &str,
     root: Option<String>,
     extra_clause: Option<String>,
 ) -> (String, Vec<String>) {
@@ -533,7 +581,8 @@ fn with_tree_sql(
     let mut params = vec![];
     let under_sql;
     if let Some(root) = root {
-        under_sql = format!(r#"WHERE "{}" = {}"#, child_col, SQL_PARAM);
+        let sql_type = get_sql_type_from_global_config(&config, table_name, &child_col).unwrap();
+        under_sql = format!(r#"WHERE "{}" = {}"#, child_col, cast_sql_param_from_text(&sql_type));
         params.push(root.clone());
     } else {
         under_sql = String::new();
@@ -553,11 +602,11 @@ fn with_tree_sql(
         extra_clause,
         child_col,
         parent_col,
-        table_name,
+        effective_table_name,
         under_sql,
         child_col,
         parent_col,
-        table_name,
+        effective_table_name,
         parent_col,
         child_col
     );
@@ -625,9 +674,11 @@ async fn validate_cell_foreign_constraints(
     for fkey in fkeys {
         let ftable = fkey.get("ftable").and_then(|t| t.as_str()).unwrap();
         let fcolumn = fkey.get("fcolumn").and_then(|c| c.as_str()).unwrap();
+        let sql_type = get_sql_type_from_global_config(&config, &ftable, &fcolumn).unwrap();
+        let sql_param = cast_sql_param_from_text(&sql_type);
         let fsql = local_sql_syntax(
             &pool,
-            &format!(r#"SELECT 1 FROM "{}" WHERE "{}" = {} LIMIT 1"#, ftable, fcolumn, SQL_PARAM),
+            &format!(r#"SELECT 1 FROM "{}" WHERE "{}" = {} LIMIT 1"#, ftable, fcolumn, sql_param),
         );
         let frows = sqlx_query(&fsql).bind(&cell.value).fetch_all(pool).await?;
 
@@ -642,7 +693,7 @@ async fn validate_cell_foreign_constraints(
                 &pool,
                 &format!(
                     r#"SELECT 1 FROM "{}_conflict" WHERE "{}" = {} LIMIT 1"#,
-                    ftable, fcolumn, SQL_PARAM
+                    ftable, fcolumn, sql_param
                 ),
             );
             let frows = sqlx_query(&fsql).bind(cell.value.clone()).fetch_all(pool).await?;
@@ -707,10 +758,17 @@ async fn validate_cell_trees(
         })
         .map(|v| v.as_object().unwrap())
         .collect::<Vec<_>>();
+
+    let parent_col = column_name;
+    let parent_sql_type =
+        get_sql_type_from_global_config(&config, &table_name, &parent_col).unwrap();
+    let parent_sql_param = cast_sql_param_from_text(&parent_sql_type);
+    let parent_val = cell.value.clone();
     for tkey in tkeys {
-        let parent_col = column_name;
         let child_col = tkey.get("child").and_then(|c| c.as_str()).unwrap();
-        let parent_val = cell.value.clone();
+        let child_sql_type =
+            get_sql_type_from_global_config(&config, &table_name, &child_col).unwrap();
+        let child_sql_param = cast_sql_param_from_text(&child_sql_type);
         let child_val =
             context.contents.get(child_col).and_then(|c| Some(c.value.clone())).unwrap();
 
@@ -729,7 +787,7 @@ async fn validate_cell_trees(
                 params.push(p.contents.get(parent_col).unwrap().value.clone());
                 format!(
                     r#"SELECT {} AS "{}", {} AS "{}""#,
-                    SQL_PARAM, child_col, SQL_PARAM, parent_col
+                    child_sql_param, child_col, parent_sql_param, parent_col
                 )
             })
             .collect::<Vec<_>>();
@@ -753,10 +811,20 @@ async fn validate_cell_trees(
             );
         }
 
-        let (tree_sql, mut tree_sql_params) =
-            with_tree_sql(&tkey, &table_name_ext, Some(parent_val.clone()), Some(extra_clause));
+        let (tree_sql, mut tree_sql_params) = with_tree_sql(
+            &config,
+            &tkey,
+            &table_name,
+            &table_name_ext,
+            Some(parent_val.clone()),
+            Some(extra_clause),
+        );
         params.append(&mut tree_sql_params);
-        let sql = local_sql_syntax(&pool, &format!(r#"{} SELECT * FROM "tree""#, tree_sql));
+        let sql = local_sql_syntax(
+            &pool,
+            &format!(r#"{} SELECT "{}", "{}" FROM "tree""#, tree_sql, child_col, parent_col),
+        );
+
         let mut query = sqlx_query(&sql);
         for param in &params {
             query = query.bind(param);
@@ -767,11 +835,12 @@ async fn validate_cell_trees(
         // the new row would result in a cycle.
         let cycle_detected = {
             let cycle_row = rows.iter().find(|row| {
-                let parent: Result<&str, sqlx::Error> = row.try_get(parent_col.as_str());
-                if let Ok(parent) = parent {
-                    parent == child_val
-                } else {
+                let raw_foo = row.try_get_raw(format!(r#"{}"#, parent_col).as_str()).unwrap();
+                if raw_foo.is_null() {
                     false
+                } else {
+                    let parent = get_column_value(&row, &parent_col, &parent_sql_type);
+                    parent == child_val
                 }
             });
             match cycle_row {
@@ -783,11 +852,11 @@ async fn validate_cell_trees(
         if cycle_detected {
             let mut cycle_legs = vec![];
             for row in &rows {
-                let child: &str = row.get(child_col);
-                let parent: &str = row.get(parent_col.as_str());
+                let child = get_column_value(&row, &child_col, &child_sql_type);
+                let parent = get_column_value(&row, &parent_col, &parent_sql_type);
                 cycle_legs.push((child, parent));
             }
-            cycle_legs.push((&child_val, &parent_val));
+            cycle_legs.push((child_val, parent_val.clone()));
 
             let mut cycle_msg = vec![];
             for cycle in &cycle_legs {
@@ -1080,11 +1149,13 @@ async fn validate_cell_unique_constraints(
             query_table = table_name.to_string();
         }
 
+        let sql_type = get_sql_type_from_global_config(&config, &table_name, &column_name).unwrap();
+        let sql_param = cast_sql_param_from_text(&sql_type);
         let sql = local_sql_syntax(
             &pool,
             &format!(
                 r#"{} SELECT 1 FROM "{}" WHERE "{}" = {} LIMIT 1"#,
-                with_sql, query_table, column_name, SQL_PARAM
+                with_sql, query_table, column_name, sql_param
             ),
         );
         let query = sqlx_query(&sql).bind(&cell.value);
@@ -1120,7 +1191,11 @@ async fn validate_cell_unique_constraints(
 
 /// Generate a SQL Select clause that is a union of: (a) the literal values of the given extra row,
 /// and (b) a Select statement over `table_name` of all the fields in the extra row.
-fn select_with_extra_row(extra_row: &ResultRow, table_name: &String) -> (String, Vec<String>) {
+fn select_with_extra_row(
+    config: &ConfigMap,
+    extra_row: &ResultRow,
+    table_name: &str,
+) -> (String, Vec<String>) {
     let extra_row_len = extra_row.contents.keys().len();
     let mut params = vec![];
     let mut first_select;
@@ -1131,9 +1206,11 @@ fn select_with_extra_row(extra_row: &ResultRow, table_name: &String) -> (String,
 
     let mut second_select = String::from(r#"SELECT "row_number", "#);
     for (i, (key, content)) in extra_row.contents.iter().enumerate() {
+        let sql_type = get_sql_type_from_global_config(&config, &table_name, &key).unwrap();
+        let sql_param = cast_sql_param_from_text(&sql_type);
         // enumerate() begins from 0 but we need to begin at 1:
         let i = i + 1;
-        first_select.push_str(format!(r#"{} AS "{}", "#, SQL_PARAM, key).as_str());
+        first_select.push_str(format!(r#"{} AS "{}", "#, sql_param, key).as_str());
         params.push(content.value.to_string());
         first_select.push_str(format!(r#"NULL AS "{}_meta""#, key).as_str());
         second_select.push_str(format!(r#""{}", "{}_meta""#, key, key).as_str());
@@ -1174,6 +1251,7 @@ pub async fn validate_under(
         let tree_table = ukey.get("ttable").and_then(|tt| tt.as_str()).unwrap();
         let tree_child = ukey.get("tcolumn").and_then(|tc| tc.as_str()).unwrap();
         let column = ukey.get("column").and_then(|c| c.as_str()).unwrap();
+        let sql_type = get_sql_type_from_global_config(&config, &table_name, &column).unwrap();
         let tree = config
             .get("constraints")
             .and_then(|c| c.as_object())
@@ -1195,7 +1273,7 @@ pub async fn validate_under(
         let mut extra_clause;
         let mut params;
         if let Some(ref extra_row) = extra_row {
-            (extra_clause, params) = select_with_extra_row(extra_row, table_name);
+            (extra_clause, params) = select_with_extra_row(&config, extra_row, table_name);
         } else {
             extra_clause = String::new();
             params = vec![];
@@ -1227,7 +1305,7 @@ pub async fn validate_under(
 
         let uval = ukey.get("value").and_then(|v| v.as_str()).unwrap().to_string();
         let (tree_sql, mut tree_params) =
-            with_tree_sql(tree, &effective_tree, Some(uval.clone()), None);
+            with_tree_sql(&config, tree, &table_name, &effective_tree, Some(uval.clone()), None);
         // Add the tree params to the beginning of the parameter list:
         tree_params.append(&mut params);
         params = tree_params;
@@ -1291,8 +1369,16 @@ pub async fn validate_under(
             let meta: &str = row.get_unchecked(format!(r#"{}_meta"#, column).as_str());
             let meta: SerdeValue = serde_json::from_str(meta).unwrap();
             let meta = meta.as_object().unwrap();
-            // If the value in the parent column is legitimately empty, then just skip this row:
-            if meta.contains_key("nulltype") {
+            // If the value in the parent column is legitimately empty, or if it is invalid
+            // because of a datatype error, then just skip this row. In the latter case this is
+            // to avoid potential datatype errors that might arise if we compare a numeric with a
+            // non-numeric type.
+            if meta.contains_key("nulltype")
+                || (meta.get("valid").unwrap() == false
+                    && contains_dt_violation(
+                        &meta.get("messages").and_then(|m| m.as_array()).unwrap(),
+                    ))
+            {
                 continue;
             }
 
@@ -1300,19 +1386,17 @@ pub async fn validate_under(
             // and it will be returned by the above query regardless of whether it is valid or
             // invalid. So we need to check the value from the meta column instead.
             let raw_column_val = row.try_get_raw(format!(r#"{}"#, column).as_str()).unwrap();
-            let column_val;
+            let column_val: String;
             if raw_column_val.is_null() {
-                column_val = meta.get("value").and_then(|v| v.as_str()).unwrap();
+                column_val = meta.get("value").and_then(|v| v.as_str()).unwrap().to_string();
             } else {
-                column_val = row.get(format!(r#"{}"#, column).as_str());
+                column_val = get_column_value(&row, &column, &sql_type);
             }
 
-            // We use i32 instead of i64 (which we use for row_number) here because, unlike row_number,
-            // which is a BIGINT, 0 and 1 are being interpreted as normal sized ints.
+            // We use i32 instead of i64 (which we use for row_number) here because, unlike
+            // row_number, which is a BIGINT, 0 and 1 are being interpreted as normal sized ints.
             let is_in_tree: i32 = row.get("is_in_tree");
-            let is_in_tree: u32 = is_in_tree as u32;
             let is_under: i32 = row.get("is_under");
-            let is_under: u32 = is_under as u32;
             if is_in_tree == 0 {
                 let mut meta = meta.clone();
                 meta.insert("valid".to_string(), SerdeValue::Bool(false));
@@ -1326,7 +1410,15 @@ pub async fn validate_under(
                 meta.get_mut("messages")
                     .and_then(|m| m.as_array_mut())
                     .and_then(|a| Some(a.push(message)));
-                let row_number: i64 = row.get("row_number");
+
+                let raw_row_number = row.try_get_raw("row_number").unwrap();
+                let row_number: i64;
+                if raw_row_number.is_null() {
+                    row_number = 0;
+                } else {
+                    row_number = row.get("row_number");
+                }
+
                 let row_number = row_number as u32;
                 let result = json!({
                     "row_number": row_number,
@@ -1386,10 +1478,12 @@ pub async fn validate_tree_foreign_keys(
         let tkey = tkey.as_object().unwrap();
         let child_col = tkey.get("child").and_then(|c| c.as_str()).unwrap();
         let parent_col = tkey.get("parent").and_then(|p| p.as_str()).unwrap();
+        let parent_sql_type =
+            get_sql_type_from_global_config(&config, &table_name, &parent_col).unwrap();
         let with_clause;
         let params;
         if let Some(ref extra_row) = extra_row {
-            (with_clause, params) = select_with_extra_row(extra_row, table_name);
+            (with_clause, params) = select_with_extra_row(&config, extra_row, table_name);
         } else {
             with_clause = String::new();
             params = vec![];
@@ -1440,20 +1534,29 @@ pub async fn validate_tree_foreign_keys(
             let meta: &str = row.get_unchecked(format!(r#"{}_meta"#, parent_col).as_str());
             let meta: SerdeValue = serde_json::from_str(meta).unwrap();
             let meta = meta.as_object().unwrap();
-            // If the value in the parent column is legitimately empty, then just skip this row:
-            if meta.contains_key("nulltype") {
+            // If the value in the parent column is legitimately empty, or if it is invalid
+            // because of a datatype error, then just skip this row. In the latter case this is
+            // to avoid potential datatype errors that might arise if we compare a numeric with a
+            // non-numeric type.
+            if meta.contains_key("nulltype")
+                || (meta.get("valid").unwrap() == false
+                    && contains_dt_violation(
+                        &meta.get("messages").and_then(|m| m.as_array()).unwrap(),
+                    ))
+            {
                 continue;
             }
 
             // If the parent column already contains a different error, its value will be null and
             // it will be returned by the above query regardless of whether it actually violates the
             // tree's foreign constraint. So we check the value from the meta column instead.
+
             let raw_parent_val = row.try_get_raw(format!(r#"{}"#, parent_col).as_str()).unwrap();
             let parent_val;
             if !raw_parent_val.is_null() {
-                parent_val = row.get(format!(r#"{}"#, parent_col).as_str());
+                parent_val = get_column_value(&row, &parent_col, &parent_sql_type);
             } else {
-                parent_val = meta.get("value").and_then(|v| v.as_str()).unwrap();
+                parent_val = meta.get("value").and_then(|v| v.as_str()).unwrap().to_string();
                 let sql = local_sql_syntax(
                     &pool,
                     &format!(
@@ -1461,7 +1564,7 @@ pub async fn validate_tree_foreign_keys(
                         table_name, child_col, SQL_PARAM
                     ),
                 );
-                let query = sqlx_query(&sql).bind(parent_val);
+                let query = sqlx_query(&sql).bind(parent_val.to_string());
                 let rows = query.fetch_all(pool).await?;
                 if rows.len() > 0 {
                     continue;
