@@ -2,7 +2,7 @@
 name = "ontodev_valve"
 description = "A lightweight validation engine written in rust"
 license = "BSD-3-Clause"
-version = "0.1.13"
+version = "0.1.14"
 repository = "https://github.com/ontodev/valve.rs"
 edition = "2021"
 build = "build.rs"
