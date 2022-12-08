@@ -47,49 +47,144 @@ CREATE TABLE "cell" (
 );
 
 INSERT INTO "cell" ("table", "row", "column", "nullvalue", "valid")
-SELECT 'table2',
+SELECT 'table2_alt',
        row_number AS row,
        'child',
-       JSON_EXTRACT("child_meta", '$.nulltype') AS nullvalue,
-       JSON_EXTRACT("child_meta", '$.valid') AS valid
-  FROM "table2"
- WHERE "child_meta" IS NOT NULL;
+       CASE WHEN "child_meta" IS NOT NULL
+         THEN JSON_EXTRACT("child_meta", '$.nulltype')
+       ELSE NULL
+       END AS nullvalue,
+       CASE WHEN "child_meta" IS NOT NULL
+         THEN JSON_EXTRACT("child_meta", '$.valid')
+       ELSE TRUE
+       END AS valid
+  FROM "table2";
 
 INSERT INTO "cell" ("table", "row", "column", "nullvalue", "valid")
-SELECT 'table2',
+SELECT 'table2_alt',
+       row_number AS row,
+       'child',
+       CASE WHEN "child_meta" IS NOT NULL
+         THEN JSON_EXTRACT("child_meta", '$.nulltype')
+       ELSE NULL
+       END AS nullvalue,
+       CASE WHEN "child_meta" IS NOT NULL
+         THEN JSON_EXTRACT("child_meta", '$.valid')
+       ELSE TRUE
+       END AS valid
+  FROM "table2_conflict";
+
+INSERT INTO "cell" ("table", "row", "column", "nullvalue", "valid")
+SELECT 'table2_alt',
        row_number AS row,
        'parent',
-       JSON_EXTRACT("parent_meta", '$.nulltype') AS nullvalue,
-       JSON_EXTRACT("parent_meta", '$.valid') AS valid
-  FROM "table2"
- WHERE "parent_meta" IS NOT NULL;
+       CASE WHEN "parent_meta" IS NOT NULL
+         THEN JSON_EXTRACT("parent_meta", '$.nulltype')
+       ELSE NULL
+       END AS nullvalue,
+       CASE WHEN "parent_meta" IS NOT NULL
+         THEN JSON_EXTRACT("parent_meta", '$.valid')
+       ELSE TRUE
+       END AS valid
+  FROM "table2";
 
 INSERT INTO "cell" ("table", "row", "column", "nullvalue", "valid")
-SELECT 'table2',
+SELECT 'table2_alt',
+       row_number AS row,
+       'parent',
+       CASE WHEN "parent_meta" IS NOT NULL
+         THEN JSON_EXTRACT("parent_meta", '$.nulltype')
+       ELSE NULL
+       END AS nullvalue,
+       CASE WHEN "parent_meta" IS NOT NULL
+         THEN JSON_EXTRACT("parent_meta", '$.valid')
+       ELSE TRUE
+       END AS valid
+  FROM "table2_conflict";
+
+INSERT INTO "cell" ("table", "row", "column", "nullvalue", "valid")
+SELECT 'table2_alt',
        row_number AS row,
        'xyzzy',
-       JSON_EXTRACT("xyzzy_meta", '$.nulltype') AS nullvalue,
-       JSON_EXTRACT("xyzzy_meta", '$.valid') AS valid
-  FROM "table2"
- WHERE "xyzzy_meta" IS NOT NULL;
+       CASE WHEN "xyzzy_meta" IS NOT NULL
+         THEN JSON_EXTRACT("xyzzy_meta", '$.nulltype')
+       ELSE NULL
+       END AS nullvalue,
+       CASE WHEN "xyzzy_meta" IS NOT NULL
+         THEN JSON_EXTRACT("xyzzy_meta", '$.valid')
+       ELSE TRUE
+       END AS valid
+  FROM "table2";
 
 INSERT INTO "cell" ("table", "row", "column", "nullvalue", "valid")
-SELECT 'table2',
+SELECT 'table2_alt',
+       row_number AS row,
+       'xyzzy',
+       CASE WHEN "xyzzy_meta" IS NOT NULL
+         THEN JSON_EXTRACT("xyzzy_meta", '$.nulltype')
+       ELSE NULL
+       END AS nullvalue,
+       CASE WHEN "xyzzy_meta" IS NOT NULL
+         THEN JSON_EXTRACT("xyzzy_meta", '$.valid')
+       ELSE TRUE
+       END AS valid
+  FROM "table2_conflict";
+
+INSERT INTO "cell" ("table", "row", "column", "nullvalue", "valid")
+SELECT 'table2_alt',
        row_number AS row,
        'foo',
-       JSON_EXTRACT("foo_meta", '$.nulltype') AS nullvalue,
-       JSON_EXTRACT("foo_meta", '$.valid') AS valid
-  FROM "table2"
- WHERE "foo_meta" IS NOT NULL;
+       CASE WHEN "foo_meta" IS NOT NULL
+         THEN JSON_EXTRACT("foo_meta", '$.nulltype')
+       ELSE NULL
+       END AS nullvalue,
+       CASE WHEN "foo_meta" IS NOT NULL
+         THEN JSON_EXTRACT("foo_meta", '$.valid')
+       ELSE TRUE
+       END AS valid
+  FROM "table2";
 
 INSERT INTO "cell" ("table", "row", "column", "nullvalue", "valid")
-SELECT 'table2',
+SELECT 'table2_alt',
+       row_number AS row,
+       'foo',
+       CASE WHEN "foo_meta" IS NOT NULL
+         THEN JSON_EXTRACT("foo_meta", '$.nulltype')
+       ELSE NULL
+       END AS nullvalue,
+       CASE WHEN "foo_meta" IS NOT NULL
+         THEN JSON_EXTRACT("foo_meta", '$.valid')
+       ELSE TRUE
+       END AS valid
+  FROM "table2_conflict";
+
+INSERT INTO "cell" ("table", "row", "column", "nullvalue", "valid")
+SELECT 'table2_alt',
        row_number AS row,
        'bar',
-       JSON_EXTRACT("bar_meta", '$.nulltype') AS nullvalue,
-       JSON_EXTRACT("bar_meta", '$.valid') AS valid
-  FROM "table2"
- WHERE "bar_meta" IS NOT NULL;
+       CASE WHEN "bar_meta" IS NOT NULL
+         THEN JSON_EXTRACT("bar_meta", '$.nulltype')
+       ELSE NULL
+       END AS nullvalue,
+       CASE WHEN "bar_meta" IS NOT NULL
+         THEN JSON_EXTRACT("bar_meta", '$.valid')
+       ELSE TRUE
+       END AS valid
+  FROM "table2";
+
+INSERT INTO "cell" ("table", "row", "column", "nullvalue", "valid")
+SELECT 'table2_alt',
+       row_number AS row,
+       'bar',
+       CASE WHEN "bar_meta" IS NOT NULL
+         THEN JSON_EXTRACT("bar_meta", '$.nulltype')
+       ELSE NULL
+       END AS nullvalue,
+       CASE WHEN "bar_meta" IS NOT NULL
+         THEN JSON_EXTRACT("bar_meta", '$.valid')
+       ELSE TRUE
+       END AS valid
+  FROM "table2_conflict";
 
 ------------------------------------------------
 

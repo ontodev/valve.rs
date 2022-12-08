@@ -128,6 +128,28 @@ def json_cell_separate(cursor, table, limit, offset, runs):
     }
 
 
+def alt_json_cell(cursor, table, limit, offset, runs):
+    query = f"""SELECT "table", "row", "column", "nullvalue", "valid"
+                FROM "cell"
+                WHERE "table" = \'{table}\' LIMIT {limit}"""
+    if offset:
+        query = f"{query} OFFSET {offset}"
+
+    headers = ["table", "row", "column", "nullvalue", "valid"]
+    return test_query(cursor, query, headers, runs)
+
+
+def alt_json_errors_cell(cursor, table, limit, offset, runs):
+    query = f"""SELECT "table", "row", "column", "level", "rule", "message"
+                FROM "message"
+                WHERE "table" = \'{table}\' LIMIT {limit}"""
+    if offset:
+        query = f"{query} OFFSET {offset}"
+
+    headers = ["table", "row", "column", "level", "rule", "message"]
+    return test_query(cursor, query, headers, runs)
+
+
 def json_errors_cell(cursor, table, table_suffix, limit, offset, runs):
     table = f"{table}_{table_suffix}" if table_suffix else table
     cursor.execute(f'PRAGMA TABLE_INFO("{table}")')
@@ -189,6 +211,25 @@ def query_tests(cursor, table, column, like, limit, offset, runs):
         "O_json_errors_cell_view_offset": json_errors_cell_view(cursor, table, limit, offset, runs),
         "P_json_errors_cell_separate_offset": json_errors_cell_separate(
             cursor, table, limit, offset, runs
+        ),
+        # Alternate schema
+        "Q_alt_count_view_all": count_view(cursor, f"{table}_alt", column, runs),
+        "R_alt_count_separate_all": count_separate(cursor, f"{table}_alt", column, runs),
+        "S_alt_count_view_like": count_view(cursor, f"{table}_alt", column, runs, like),
+        "T_alt_count_separate_like": count_separate(cursor, f"{table}_alt", column, runs, like),
+        "U_alt_json_simple_view": json_simple_view(cursor, f"{table}_alt", limit, 0, runs),
+        "V_alt_json_simple_separate": json_simple_separate(cursor, f"{table}_alt", limit, 0, runs),
+        "X_alt_json_simple_view_offset": json_simple_view(
+            cursor, f"{table}_alt", limit, offset, runs
+        ),
+        "W_alt_json_simple_separate_offset": json_simple_separate(
+            cursor, f"{table}_alt", limit, offset, runs
+        ),
+        "X_alt_json_cell": alt_json_cell(cursor, f"{table}_alt", limit, 0, runs),
+        "Y_alt_json_cell_offset": alt_json_cell(cursor, f"{table}_alt", limit, offset, runs),
+        "Z_alt_json_errors_cell": alt_json_errors_cell(cursor, f"{table}_alt", limit, 0, runs),
+        "ZA_alt_json_cell_offset": alt_json_errors_cell(
+            cursor, f"{table}_alt", limit, offset, runs
         ),
     }
     print(json.dumps(result))
