@@ -188,10 +188,9 @@ def alt_json_errors_cell(cursor, table, table_suffix, limit, offset, runs):
         FROM {table}_{table_suffix} t
       WHERE EXISTS (
         SELECT 1
-        FROM cell c
-        WHERE c."table" = '{table}'
-        AND c.row = t.row_number
-        AND c.valid = FALSE
+        FROM message m
+        WHERE m."table" = '{table}'
+        AND m.row = t.row_number
       )
       LIMIT 100
     """
