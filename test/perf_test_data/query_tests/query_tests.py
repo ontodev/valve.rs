@@ -153,8 +153,6 @@ def alt_json_cell(cursor, table, table_suffix, limit, offset, runs):
         SELECT h.row_number,
                '{column}' AS "column",
                h.{column} AS value,
-               c.nullvalue,
-               c.valid,
                m.level,
                m.rule,
                m.message
@@ -207,8 +205,6 @@ def alt_json_errors_cell(cursor, table, table_suffix, limit, offset, runs):
         SELECT h.row_number,
                '{column}' AS "column",
                h.{column} AS value,
-               c.nullvalue,
-               c.valid,
                m.level,
                m.rule,
                m.message
