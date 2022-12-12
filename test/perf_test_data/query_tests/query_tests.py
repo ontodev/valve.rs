@@ -159,8 +159,6 @@ def alt_json_cell(cursor, table, table_suffix, limit, offset, runs):
                m.rule,
                m.message
         FROM hundred h
-             INNER JOIN cell c ON h.row_number = c.row AND c."table" = '{table}'
-                                  AND c."column" = '{column}'
              LEFT JOIN message m ON h.row_number = m.row AND m."table" = '{table}'
                                   AND m."column" = '{column}'
         """
@@ -169,7 +167,7 @@ def alt_json_cell(cursor, table, table_suffix, limit, offset, runs):
     query = (
         main_select
         + """
-    UNION
+    UNION ALL
     """.join(
             sub_selects
         )
@@ -216,8 +214,6 @@ def alt_json_errors_cell(cursor, table, table_suffix, limit, offset, runs):
                m.rule,
                m.message
         FROM hundred h
-             INNER JOIN cell c ON h.row_number = c.row AND c."table" = '{table}'
-                                  AND c."column" = '{column}'
              LEFT JOIN message m ON h.row_number = m.row AND m."table" = '{table}'
                                   AND m."column" = '{column}'
         """
@@ -226,7 +222,7 @@ def alt_json_errors_cell(cursor, table, table_suffix, limit, offset, runs):
     query = (
         main_select
         + """
-    UNION
+    UNION ALL
     """.join(
             sub_selects
         )

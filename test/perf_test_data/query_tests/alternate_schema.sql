@@ -200,3 +200,4 @@ CREATE TABLE "message" (
   "message" TEXT,
   PRIMARY KEY ("table", "row", "column", "rule")
 );
+CREATE INDEX "message_idx" ON "message"("table", "row", "column");
