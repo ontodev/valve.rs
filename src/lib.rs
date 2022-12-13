@@ -878,6 +878,21 @@ fn read_tsv_into_vector(path: &str) -> Vec<ConfigMap> {
         panic!("No rows in {}", path);
     }
 
+    for (i, row) in rows.iter().enumerate() {
+        // enumerate() begins at 0 but we want to count rows from 1:
+        let i = i + 1;
+        for (col, val) in row {
+            let val = val.as_str().unwrap();
+            let trimmed_val = val.trim();
+            if trimmed_val != val {
+                eprintln!(
+                    "Warning: Value '{}' of column '{}' in row {} of table '{}' {}",
+                    val, col, i, path, "has leading and/or trailing whitespace."
+                );
+            }
+        }
+    }
+
     rows
 }
 
