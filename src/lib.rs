@@ -700,6 +700,9 @@ pub async fn configure_and_or_load(
         sqlx_query("PRAGMA foreign_keys = ON").execute(&pool).await?;
     }
 
+    // TODO: I have overridden this temporarily during the first part of the implementation of the
+    // new VALVE schema. The line below eventually needs to be removed.
+    let load = false;
     let (sorted_table_list, constraints_config) =
         configure_db(&mut tables_config, &mut datatypes_config, &pool, &parser, verbose, load)
             .await?;
@@ -1375,14 +1378,7 @@ fn create_table_statement(
 
     let mut colvals: Vec<ConfigMap> = vec![];
     for column_name in &column_names {
-        let column = tables_config
-            .get(normal_table_name.as_str())
-            .and_then(|c| c.as_object())
-            .and_then(|o| o.get("column"))
-            .and_then(|c| c.as_object())
-            .and_then(|c| c.get(column_name))
-            .and_then(|c| c.as_object())
-            .unwrap();
+        let column = columns.get(column_name).and_then(|c| c.as_object()).unwrap();
         colvals.push(column.clone());
     }
 
@@ -1535,10 +1531,6 @@ fn create_table_statement(
                 }
             }
         }
-        line.push_str(",");
-        create_lines.push(line);
-        let metacol = format!("{}_meta", column_name);
-        let mut line = format!(r#"  "{}" TEXT"#, metacol);
         if r >= c
             && table_constraints
                 .get("foreign")
