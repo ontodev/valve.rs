@@ -638,7 +638,27 @@ pub async fn configure_db(
     let sorted_tables = verify_table_deps_and_sort(&unsorted_tables, &constraints_config);
 
     if write_to_db || verbose {
-        for table in &sorted_tables {
+        // Generate DDL for the message table:
+        let mut message_statements = vec![];
+        message_statements.push(r#"DROP TABLE IF EXISTS "message";"#.to_string());
+        message_statements.push(r#"CREATE TABLE "message" ("#.to_string());
+        message_statements.push(r#"  "table" TEXT,"#.to_string());
+        message_statements.push(r#"  "row" BIGINT,"#.to_string());
+        message_statements.push(r#"  "column" TEXT,"#.to_string());
+        message_statements.push(r#"  "level" TEXT,"#.to_string());
+        message_statements.push(r#"  "rule" TEXT,"#.to_string());
+        message_statements.push(r#"  "message" TEXT,"#.to_string());
+        message_statements.push(r#"  PRIMARY KEY ("table", "row", "column", "rule")"#.to_string());
+        message_statements.push(r#");"#.to_string());
+        message_statements.push(
+            r#"CREATE INDEX "message_trc_idx" ON "message"("table", "row", "column");"#.to_string(),
+        );
+        setup_statements.insert("message".to_string(), message_statements);
+
+        // Add the message table to the list of tables to create:
+        let mut tables_to_create = sorted_tables.clone();
+        tables_to_create.push("message".to_string());
+        for table in &tables_to_create {
             let table_statements = setup_statements.get(table).unwrap();
             if write_to_db {
                 for stmt in table_statements {
