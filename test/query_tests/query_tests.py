@@ -128,6 +128,112 @@ def json_cell_separate(cursor, table, limit, offset, runs):
     }
 
 
+def alt_json_cell(cursor, table, table_suffix, limit, offset, runs):
+    cursor.execute(f'PRAGMA TABLE_INFO("{table}")')
+    columns_info = [d[0] for d in cursor.description]
+    pragma_rows = list(map(lambda r: dict(zip(columns_info, r)), cursor))
+    columns = [p["name"] for p in pragma_rows if p["name"] != "row_number"]
+    main_select = ", ".join(columns)
+    main_select = f"""
+    WITH hundred (row_number, child, parent, xyzzy, foo, bar) AS (
+      SELECT row_number, {main_select}
+        FROM {table}_{table_suffix}
+      LIMIT 100
+    """
+    if offset:
+        main_select = f"{main_select} OFFSET {offset}"
+    main_select = f"""
+    {main_select}
+    )"""
+
+    sub_selects = []
+    for column in columns:
+        sub_selects.append(
+            f"""
+        SELECT h.row_number,
+               '{column}' AS "column",
+               h.{column} AS value,
+               m.level,
+               m.rule,
+               m.message
+        FROM hundred h
+             LEFT JOIN message m ON h.row_number = m.row AND m."table" = '{table}'
+                                  AND m."column" = '{column}'
+        """
+        )
+
+    query = (
+        main_select
+        + """
+    UNION ALL
+    """.join(
+            sub_selects
+        )
+    )
+    headers = ["row_number", "column", "value", "valid", "level", "rule", "message"]
+    return test_query(cursor, query, headers, runs)
+
+
+def alt_json_errors_cell(cursor, table, table_suffix, limit, offset, runs):
+    cursor.execute(f'PRAGMA TABLE_INFO("{table}")')
+    columns_info = [d[0] for d in cursor.description]
+    pragma_rows = list(map(lambda r: dict(zip(columns_info, r)), cursor))
+    columns = [p["name"] for p in pragma_rows if p["name"] != "row_number"]
+    main_select = ", ".join(columns)
+    main_select = f"""
+    WITH hundred (row_number, child, parent, xyzzy, foo, bar) AS (
+      SELECT row_number, {main_select}
+        FROM {table}_{table_suffix} t
+      WHERE EXISTS (
+        SELECT 1
+        FROM message m
+        WHERE m."table" = '{table}'
+        AND m.row = t.row_number
+      )
+      LIMIT 100
+    """
+    if offset:
+        main_select = f"{main_select} OFFSET {offset}"
+    main_select = f"""
+    {main_select}
+    )"""
+
+    sub_selects = []
+    for column in columns:
+        sub_selects.append(
+            f"""
+        SELECT h.row_number,
+               '{column}' AS "column",
+               h.{column} AS value,
+               m.level,
+               m.rule,
+               m.message
+        FROM hundred h
+             LEFT JOIN message m ON h.row_number = m.row AND m."table" = '{table}'
+                                  AND m."column" = '{column}'
+        """
+        )
+
+    query = (
+        main_select
+        + """
+    UNION ALL
+    """.join(
+            sub_selects
+        )
+    )
+    headers = ["row_number", "column", "value", "valid", "level", "rule", "message"]
+    return test_query(cursor, query, headers, runs)
+
+
+def alt_json_cell_view(cursor, table, limit, offset, runs):
+    return alt_json_cell(cursor, table, "view", limit, offset, runs)
+
+
+def alt_json_errors_cell_view(cursor, table, limit, offset, runs):
+    return alt_json_errors_cell(cursor, table, "view", limit, offset, runs)
+
+
 def json_errors_cell(cursor, table, table_suffix, limit, offset, runs):
     table = f"{table}_{table_suffix}" if table_suffix else table
     cursor.execute(f'PRAGMA TABLE_INFO("{table}")')
@@ -180,6 +286,7 @@ def query_tests(cursor, table, column, like, limit, offset, runs):
         "F_json_simple_separate": json_simple_separate(cursor, table, limit, 0, runs),
         "G_json_simple_view_offset": json_simple_view(cursor, table, limit, offset, runs),
         "H_json_simple_separate_offset": json_simple_separate(cursor, table, limit, offset, runs),
+        # Cells
         "I_json_cell_view": json_cell_view(cursor, table, limit, 0, runs),
         "J_json_cell_separate": json_cell_separate(cursor, table, limit, 0, runs),
         "K_json_cell_view_offset": json_cell_view(cursor, table, limit, offset, runs),
@@ -190,8 +297,23 @@ def query_tests(cursor, table, column, like, limit, offset, runs):
         "P_json_errors_cell_separate_offset": json_errors_cell_separate(
             cursor, table, limit, offset, runs
         ),
+        # Cells (alternate schema): value, nulltype, valid, level, rule, message
+        "Q_alt_json_cell_view": alt_json_cell_view(cursor, f"{table}_alt", limit, 0, runs),
+        "R_alt_json_cell_view_offset": alt_json_cell_view(
+            cursor, f"{table}_alt", limit, offset, runs
+        ),
+        "S_alt_json_errors_cell_view": alt_json_errors_cell_view(
+            cursor, f"{table}_alt", limit, 0, runs
+        ),
+        "T_alt_json_errors_cell_view_offset": alt_json_errors_cell_view(
+            cursor, f"{table}_alt", limit, offset, runs
+        ),
     }
-    print(json.dumps(result))
+    for test in result:
+        print(f"Test: {test}")
+        for key in result[test]:
+            print(f"{key}: {result[test][key]}")
+        print()
 
 
 def main():

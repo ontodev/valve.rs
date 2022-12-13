@@ -15,8 +15,9 @@ def load_messages(cursor):
         table = row['"table"']
         column = row['"column"']
         row = row['"row"']
+        oldtable = table.removesuffix("_alt")
         query = f"""SELECT JSON_EXTRACT("{column}_meta", \'$.messages\') AS messages
-                    FROM "{table}"
+                    FROM "{oldtable}_view"
                     WHERE row_number = {row}"""
         cursor.execute(query)
         result = [row for row in map(lambda r: dict(zip(["messages"], r)), cursor)][0]["messages"]
