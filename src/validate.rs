@@ -25,23 +25,6 @@ pub struct ResultRow {
     pub contents: HashMap<String, ResultCell>,
 }
 
-/// Given a result row, convert it to a ConfigMap (an alias for serde_json::Value) and return it.
-/// Note that if the incoming result row has an associated row_number, this is ignored.
-fn result_row_to_config_map(incoming: &ResultRow) -> ConfigMap {
-    let mut outgoing = ConfigMap::new();
-    for (column, cell) in incoming.contents.iter() {
-        let mut cell_map = ConfigMap::new();
-        if let Some(nulltype) = &cell.nulltype {
-            cell_map.insert("nulltype".to_string(), SerdeValue::String(nulltype.to_string()));
-        }
-        cell_map.insert("value".to_string(), SerdeValue::String(cell.value.to_string()));
-        cell_map.insert("valid".to_string(), SerdeValue::Bool(cell.valid));
-        cell_map.insert("messages".to_string(), SerdeValue::Array(cell.messages.clone()));
-        outgoing.insert(column.to_string(), SerdeValue::Object(cell_map));
-    }
-    outgoing
-}
-
 /// Given a config map, maps of compiled datatype and rule conditions, a database connection
 /// pool, a table name, a row to validate, and a row number in case the row already exists,
 /// perform both intra- and inter-row validation and return the validated row.
@@ -361,871 +344,6 @@ pub async fn get_matching_values(
     }
 
     Ok(json!(typeahead_values))
-}
-
-/// Given a config map, compiled datatype and rule conditions, a table name, the headers for the
-/// table, and a number of rows to validate, validate all of the rows and return the validated
-/// versions.
-pub fn validate_rows_intra(
-    config: &ConfigMap,
-    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
-    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
-    table_name: &String,
-    headers: &csv::StringRecord,
-    rows: &Vec<Result<csv::StringRecord, csv::Error>>,
-) -> Vec<ResultRow> {
-    let mut result_rows = vec![];
-    for row in rows {
-        match row {
-            Err(err) => eprintln!("Error while processing row for '{}': {}", table_name, err),
-            Ok(row) => {
-                let mut result_row = ResultRow { row_number: None, contents: HashMap::new() };
-                for (i, value) in row.iter().enumerate() {
-                    let result_cell = ResultCell {
-                        nulltype: None,
-                        value: String::from(value),
-                        valid: true,
-                        messages: vec![],
-                    };
-                    let column = headers.get(i).unwrap();
-                    result_row.contents.insert(column.to_string(), result_cell);
-                }
-
-                let column_names = config
-                    .get("table")
-                    .and_then(|t| t.get(table_name))
-                    .and_then(|t| t.get("column_order"))
-                    .and_then(|c| c.as_array())
-                    .unwrap()
-                    .iter()
-                    .map(|v| v.as_str().unwrap().to_string())
-                    .collect::<Vec<_>>();
-
-                // We begin by determining the nulltype of all of the cells, since the rules
-                // validation step requires that all cells have this information.
-                for column_name in &column_names {
-                    let cell = result_row.contents.get_mut(column_name).unwrap();
-                    validate_cell_nulltype(
-                        config,
-                        compiled_datatype_conditions,
-                        table_name,
-                        &column_name,
-                        cell,
-                    );
-                }
-
-                for column_name in &column_names {
-                    let context = result_row.clone();
-                    let cell = result_row.contents.get_mut(column_name).unwrap();
-                    validate_cell_rules(
-                        config,
-                        compiled_rule_conditions,
-                        table_name,
-                        &column_name,
-                        &context,
-                        cell,
-                    );
-
-                    if cell.nulltype == None {
-                        validate_cell_datatype(
-                            config,
-                            compiled_datatype_conditions,
-                            table_name,
-                            &column_name,
-                            cell,
-                        );
-                    }
-                }
-                result_rows.push(result_row);
-            }
-        };
-    }
-
-    // Finally return the result rows:
-    result_rows
-}
-
-/// Given a message list, determine if it contains a message corresponding to a dataype violation
-fn contains_dt_violation(messages: &Vec<SerdeValue>) -> bool {
-    let mut contains_dt_violation = false;
-    for m in messages {
-        if m.get("rule").and_then(|r| r.as_str()).unwrap().starts_with("datatype:") {
-            contains_dt_violation = true;
-            break;
-        }
-    }
-    contains_dt_violation
-}
-
-/// Given a config map, a database connection pool, a table name, and a number of rows to validate,
-/// perform tree validation on the rows and return the validated results.
-pub async fn validate_rows_trees(
-    config: &ConfigMap,
-    pool: &AnyPool,
-    table_name: &String,
-    rows: &mut Vec<ResultRow>,
-) -> Result<(), sqlx::Error> {
-    let column_names = config
-        .get("table")
-        .and_then(|t| t.get(table_name))
-        .and_then(|t| t.get("column_order"))
-        .and_then(|c| c.as_array())
-        .unwrap()
-        .iter()
-        .map(|v| v.as_str().unwrap().to_string())
-        .collect::<Vec<_>>();
-
-    let mut result_rows = vec![];
-    for row in rows {
-        let mut result_row = ResultRow { row_number: None, contents: HashMap::new() };
-        for column_name in &column_names {
-            let context = row.clone();
-            let cell = row.contents.get_mut(column_name).unwrap();
-            // We don't do any further validation on cells that are legitimately empty, or on cells
-            // that have datatype violations. We exclude the latter because they can result in
-            // database errors when, for instance, we compare a numeric with a non-numeric type.
-            if cell.nulltype == None && (cell.valid || !contains_dt_violation(&cell.messages)) {
-                validate_cell_trees(
-                    config,
-                    pool,
-                    table_name,
-                    &column_name,
-                    cell,
-                    &context,
-                    &result_rows,
-                )
-                .await?;
-            }
-            result_row.contents.insert(column_name.to_string(), cell.clone());
-        }
-        // Note that in this implementation, the result rows are never actually returned, but we
-        // still need them because the validate_cell_trees() function needs a list of previous
-        // results, and this then requires that we generate the result rows to play that role. The
-        // call to cell.clone() above is required to make rust's borrow checker happy.
-        result_rows.push(result_row);
-    }
-
-    Ok(())
-}
-
-/// Given a config map, a database connection pool, a table name, and a number of rows to validate,
-/// validate foreign and unique constraints, where the latter include primary and "tree child" keys
-/// (which imply unique constraints) and return the validated results.
-pub async fn validate_rows_constraints(
-    config: &ConfigMap,
-    pool: &AnyPool,
-    table_name: &String,
-    rows: &mut Vec<ResultRow>,
-) -> Result<(), sqlx::Error> {
-    let column_names = config
-        .get("table")
-        .and_then(|t| t.get(table_name))
-        .and_then(|t| t.get("column_order"))
-        .and_then(|c| c.as_array())
-        .unwrap()
-        .iter()
-        .map(|v| v.as_str().unwrap().to_string())
-        .collect::<Vec<_>>();
-
-    let mut result_rows = vec![];
-    for row in rows.iter_mut() {
-        let mut result_row = ResultRow { row_number: None, contents: HashMap::new() };
-        for column_name in &column_names {
-            let cell = row.contents.get_mut(column_name).unwrap();
-            // We don't do any further validation on cells that are legitimately empty, or on cells
-            // that have datatype violations. We exclude the latter because they can result in
-            // database errors when, for instance, we compare a numeric with a non-numeric type.
-            if cell.nulltype == None && (cell.valid || !contains_dt_violation(&cell.messages)) {
-                validate_cell_foreign_constraints(config, pool, table_name, &column_name, cell)
-                    .await?;
-
-                validate_cell_unique_constraints(
-                    config,
-                    pool,
-                    table_name,
-                    &column_name,
-                    cell,
-                    &result_rows,
-                    false,
-                    None,
-                )
-                .await?;
-            }
-            result_row.contents.insert(column_name.to_string(), cell.clone());
-        }
-        // Note that in this implementation, the result rows are never actually returned, but we
-        // still need them because the validate_cell_unique_constraints() function needs a list of
-        // previous results, and this then requires that we generate the result rows to play that
-        // role. The call to cell.clone() above is required to make rust's borrow checker happy.
-        result_rows.push(result_row);
-    }
-
-    Ok(())
-}
-
-/// Given a map representing a tree constraint, a table name, a root from which to generate a
-/// sub-tree of the tree, and an extra SQL clause, generate the SQL for a WITH clause representing
-/// the sub-tree.
-fn with_tree_sql(
-    config: &ConfigMap,
-    tree: &ConfigMap,
-    table_name: &str,
-    effective_table_name: &str,
-    root: Option<String>,
-    extra_clause: Option<String>,
-) -> (String, Vec<String>) {
-    let extra_clause = extra_clause.unwrap_or(String::new());
-    let child_col = tree.get("child").and_then(|c| c.as_str()).unwrap();
-    let parent_col = tree.get("parent").and_then(|c| c.as_str()).unwrap();
-
-    let mut params = vec![];
-    let under_sql;
-    if let Some(root) = root {
-        let sql_type = get_sql_type_from_global_config(&config, table_name, &child_col).unwrap();
-        under_sql = format!(r#"WHERE "{}" = {}"#, child_col, cast_sql_param_from_text(&sql_type));
-        params.push(root.clone());
-    } else {
-        under_sql = String::new();
-    }
-
-    let sql = format!(
-        r#"WITH RECURSIVE "tree" AS (
-           {}
-               SELECT "{}", "{}" 
-                   FROM "{}" 
-                   {} 
-                   UNION ALL 
-               SELECT "t1"."{}", "t1"."{}" 
-                   FROM "{}" AS "t1" 
-                   JOIN "tree" AS "t2" ON "t2"."{}" = "t1"."{}"
-           )"#,
-        extra_clause,
-        child_col,
-        parent_col,
-        effective_table_name,
-        under_sql,
-        child_col,
-        parent_col,
-        effective_table_name,
-        parent_col,
-        child_col
-    );
-
-    (sql, params)
-}
-
-/// Given a config map, compiled datatype conditions, a table name, a column name, and a cell to
-/// validate, validate the cell's nulltype condition. If the cell's value is one of the allowable
-/// nulltype values for this column, then fill in the cell's nulltype value before returning the
-/// cell.
-fn validate_cell_nulltype(
-    config: &ConfigMap,
-    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
-    table_name: &String,
-    column_name: &String,
-    cell: &mut ResultCell,
-) {
-    let column = config
-        .get("table")
-        .and_then(|t| t.as_object())
-        .and_then(|o| o.get(table_name))
-        .and_then(|t| t.as_object())
-        .and_then(|o| o.get("column"))
-        .and_then(|c| c.as_object())
-        .and_then(|o| o.get(column_name))
-        .unwrap();
-    if let Some(SerdeValue::String(nt_name)) = column.get("nulltype") {
-        let nt_condition = &compiled_datatype_conditions.get(nt_name).unwrap().compiled;
-        let value = &cell.value;
-        if nt_condition(&value) {
-            cell.nulltype = Some(nt_name.to_string());
-        }
-    }
-}
-
-/// Given a config map, a db connection pool, a table name, a column name, and a cell to validate,
-/// check the cell value against any foreign keys that have been defined for the column. If there is
-/// a violation, indicate it with an error message attached to the cell.
-async fn validate_cell_foreign_constraints(
-    config: &ConfigMap,
-    pool: &AnyPool,
-    table_name: &String,
-    column_name: &String,
-    cell: &mut ResultCell,
-) -> Result<(), sqlx::Error> {
-    let fkeys = config
-        .get("constraints")
-        .and_then(|c| c.as_object())
-        .and_then(|o| o.get("foreign"))
-        .and_then(|t| t.as_object())
-        .and_then(|o| o.get(table_name))
-        .and_then(|t| t.as_array())
-        .unwrap()
-        .iter()
-        .filter(|t| {
-            t.as_object()
-                .and_then(|o| o.get("column"))
-                .and_then(|p| Some(p == column_name))
-                .unwrap()
-        })
-        .map(|v| v.as_object().unwrap())
-        .collect::<Vec<_>>();
-
-    for fkey in fkeys {
-        let ftable = fkey.get("ftable").and_then(|t| t.as_str()).unwrap();
-        let fcolumn = fkey.get("fcolumn").and_then(|c| c.as_str()).unwrap();
-        let sql_type = get_sql_type_from_global_config(&config, &ftable, &fcolumn).unwrap();
-        let sql_param = cast_sql_param_from_text(&sql_type);
-        let fsql = local_sql_syntax(
-            &pool,
-            &format!(r#"SELECT 1 FROM "{}" WHERE "{}" = {} LIMIT 1"#, ftable, fcolumn, sql_param),
-        );
-        let frows = sqlx_query(&fsql).bind(&cell.value).fetch_all(pool).await?;
-
-        if frows.is_empty() {
-            cell.valid = false;
-            let mut message = json!({
-                "rule": "key:foreign",
-                "level": "error",
-            });
-
-            let fsql = local_sql_syntax(
-                &pool,
-                &format!(
-                    r#"SELECT 1 FROM "{}_conflict" WHERE "{}" = {} LIMIT 1"#,
-                    ftable, fcolumn, sql_param
-                ),
-            );
-            let frows = sqlx_query(&fsql).bind(cell.value.clone()).fetch_all(pool).await?;
-
-            if frows.is_empty() {
-                message.as_object_mut().and_then(|m| {
-                    m.insert(
-                        "message".to_string(),
-                        SerdeValue::String(format!(
-                            "Value {} of column {} is not in {}.{}",
-                            cell.value, column_name, ftable, fcolumn
-                        )),
-                    )
-                });
-            } else {
-                message.as_object_mut().and_then(|m| {
-                    m.insert(
-                        "message".to_string(),
-                        SerdeValue::String(format!(
-                            "Value {} of column {} exists only in {}_conflict.{}",
-                            cell.value, column_name, ftable, fcolumn
-                        )),
-                    )
-                });
-            }
-            cell.messages.push(message);
-        }
-    }
-
-    Ok(())
-}
-
-/// Given a config map, a db connection pool, a table name, a column name, a cell to validate,
-/// the row, `context`, to which the cell belongs, and a list of previously validated rows,
-/// validate that none of the "tree" constraints on the column are violated, and indicate any
-/// violations by attaching error messages to the cell.
-async fn validate_cell_trees(
-    config: &ConfigMap,
-    pool: &AnyPool,
-    table_name: &String,
-    column_name: &String,
-    cell: &mut ResultCell,
-    context: &ResultRow,
-    prev_results: &Vec<ResultRow>,
-) -> Result<(), sqlx::Error> {
-    // If the current column is the parent column of a tree, validate that adding the current value
-    // will not result in a cycle between this and the parent column:
-    let tkeys = config
-        .get("constraints")
-        .and_then(|c| c.as_object())
-        .and_then(|o| o.get("tree"))
-        .and_then(|t| t.as_object())
-        .and_then(|o| o.get(table_name))
-        .and_then(|t| t.as_array())
-        .unwrap()
-        .iter()
-        .filter(|t| {
-            t.as_object()
-                .and_then(|o| o.get("parent"))
-                .and_then(|p| Some(p == column_name))
-                .unwrap()
-        })
-        .map(|v| v.as_object().unwrap())
-        .collect::<Vec<_>>();
-
-    let parent_col = column_name;
-    let parent_sql_type =
-        get_sql_type_from_global_config(&config, &table_name, &parent_col).unwrap();
-    let parent_sql_param = cast_sql_param_from_text(&parent_sql_type);
-    let parent_val = cell.value.clone();
-    for tkey in tkeys {
-        let child_col = tkey.get("child").and_then(|c| c.as_str()).unwrap();
-        let child_sql_type =
-            get_sql_type_from_global_config(&config, &table_name, &child_col).unwrap();
-        let child_sql_param = cast_sql_param_from_text(&child_sql_type);
-        let child_val =
-            context.contents.get(child_col).and_then(|c| Some(c.value.clone())).unwrap();
-
-        // In order to check if the current row will cause a dependency cycle, we need to query
-        // against all previously validated rows. Since previously validated rows belonging to the
-        // current batch will not have been inserted to the db yet, we explicitly add them in:
-        let mut params = vec![];
-        let prev_selects = prev_results
-            .iter()
-            .filter(|p| {
-                p.contents.get(child_col).unwrap().valid
-                    && p.contents.get(parent_col).unwrap().valid
-            })
-            .map(|p| {
-                params.push(p.contents.get(child_col).unwrap().value.clone());
-                params.push(p.contents.get(parent_col).unwrap().value.clone());
-                format!(
-                    r#"SELECT {} AS "{}", {} AS "{}""#,
-                    child_sql_param, child_col, parent_sql_param, parent_col
-                )
-            })
-            .collect::<Vec<_>>();
-        let prev_selects = prev_selects.join(" UNION ALL ");
-
-        let table_name_ext;
-        let extra_clause;
-        if prev_selects.is_empty() {
-            table_name_ext = table_name.clone();
-            extra_clause = String::from("");
-        } else {
-            table_name_ext = format!("{}_ext", table_name);
-            extra_clause = format!(
-                r#"WITH "{}" AS (
-                       SELECT "{}", "{}"
-                           FROM "{}"
-                           UNION ALL
-                       {}
-                   )"#,
-                table_name_ext, child_col, parent_col, table_name, prev_selects
-            );
-        }
-
-        let (tree_sql, mut tree_sql_params) = with_tree_sql(
-            &config,
-            &tkey,
-            &table_name,
-            &table_name_ext,
-            Some(parent_val.clone()),
-            Some(extra_clause),
-        );
-        params.append(&mut tree_sql_params);
-        let sql = local_sql_syntax(
-            &pool,
-            &format!(r#"{} SELECT "{}", "{}" FROM "tree""#, tree_sql, child_col, parent_col),
-        );
-
-        let mut query = sqlx_query(&sql);
-        for param in &params {
-            query = query.bind(param);
-        }
-        let rows = query.fetch_all(pool).await?;
-
-        // If there is a row in the tree whose parent is the to-be-inserted child, then inserting
-        // the new row would result in a cycle.
-        let cycle_detected = {
-            let cycle_row = rows.iter().find(|row| {
-                let raw_foo = row.try_get_raw(format!(r#"{}"#, parent_col).as_str()).unwrap();
-                if raw_foo.is_null() {
-                    false
-                } else {
-                    let parent = get_column_value(&row, &parent_col, &parent_sql_type);
-                    parent == child_val
-                }
-            });
-            match cycle_row {
-                None => false,
-                _ => true,
-            }
-        };
-
-        if cycle_detected {
-            let mut cycle_legs = vec![];
-            for row in &rows {
-                let child = get_column_value(&row, &child_col, &child_sql_type);
-                let parent = get_column_value(&row, &parent_col, &parent_sql_type);
-                cycle_legs.push((child, parent));
-            }
-            cycle_legs.push((child_val, parent_val.clone()));
-
-            let mut cycle_msg = vec![];
-            for cycle in &cycle_legs {
-                cycle_msg
-                    .push(format!("({}: {}, {}: {})", child_col, cycle.0, parent_col, cycle.1));
-            }
-            let cycle_msg = cycle_msg.join(", ");
-            cell.valid = false;
-            cell.messages.push(json!({
-                "rule": "tree:cycle",
-                "level": "error",
-                "message": format!("Cyclic dependency: {} for tree({}) of {}",
-                                   cycle_msg, parent_col, child_col),
-            }));
-        }
-    }
-
-    Ok(())
-}
-
-/// Given a config map, compiled datatype conditions, a table name, a column name, and a cell to
-/// validate, validate the cell's datatype and return the validated cell.
-fn validate_cell_datatype(
-    config: &ConfigMap,
-    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
-    table_name: &String,
-    column_name: &String,
-    cell: &mut ResultCell,
-) {
-    fn get_datatypes_to_check(
-        config: &ConfigMap,
-        compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
-        primary_dt_name: &str,
-        dt_name: Option<String>,
-    ) -> Vec<ConfigMap> {
-        let mut datatypes = vec![];
-        if let Some(dt_name) = dt_name {
-            let datatype = config
-                .get("datatype")
-                .and_then(|d| d.as_object())
-                .and_then(|o| o.get(&dt_name))
-                .and_then(|d| d.as_object())
-                .unwrap();
-            let dt_name = datatype.get("datatype").and_then(|d| d.as_str()).unwrap();
-            let dt_condition = compiled_datatype_conditions.get(dt_name);
-            let dt_parent = match datatype.get("parent") {
-                Some(SerdeValue::String(s)) => Some(s.clone()),
-                _ => None,
-            };
-            if dt_name != primary_dt_name {
-                if let Some(_) = dt_condition {
-                    datatypes.push(datatype.clone());
-                }
-            }
-            let mut more_datatypes = get_datatypes_to_check(
-                config,
-                compiled_datatype_conditions,
-                primary_dt_name,
-                dt_parent,
-            );
-            datatypes.append(&mut more_datatypes);
-        }
-        datatypes
-    }
-
-    let column = config
-        .get("table")
-        .and_then(|t| t.as_object())
-        .and_then(|o| o.get(table_name))
-        .and_then(|t| t.as_object())
-        .and_then(|o| o.get("column"))
-        .and_then(|c| c.as_object())
-        .and_then(|o| o.get(column_name))
-        .unwrap();
-    let primary_dt_name = column.get("datatype").and_then(|d| d.as_str()).unwrap();
-    let primary_datatype = config
-        .get("datatype")
-        .and_then(|d| d.as_object())
-        .and_then(|o| o.get(primary_dt_name))
-        .unwrap();
-    let primary_dt_description = primary_datatype.get("description").unwrap();
-    if let Some(primary_dt_condition_func) = compiled_datatype_conditions.get(primary_dt_name) {
-        let primary_dt_condition_func = &primary_dt_condition_func.compiled;
-        if !primary_dt_condition_func(&cell.value) {
-            cell.valid = false;
-            let mut parent_datatypes = get_datatypes_to_check(
-                config,
-                compiled_datatype_conditions,
-                primary_dt_name,
-                Some(primary_dt_name.to_string()),
-            );
-            // If this datatype has any parents, check them beginning from the most general to the
-            // most specific. We use while and pop instead of a for loop so as to check the
-            // conditions in LIFO order.
-            while !parent_datatypes.is_empty() {
-                let datatype = parent_datatypes.pop().unwrap();
-                let dt_name = datatype.get("datatype").and_then(|d| d.as_str()).unwrap();
-                let dt_description = datatype.get("description").and_then(|d| d.as_str()).unwrap();
-                let dt_condition = &compiled_datatype_conditions.get(dt_name).unwrap().compiled;
-                if !dt_condition(&cell.value) {
-                    let message = json!({
-                        "rule": format!("datatype:{}", dt_name),
-                        "level": "error",
-                        "message": format!("{} should be {}", column_name, dt_description)
-                    });
-                    cell.messages.push(message);
-                }
-            }
-            if primary_dt_description != "" {
-                let primary_dt_description = primary_dt_description.as_str().unwrap();
-                let message = json!({
-                    "rule": format!("datatype:{}", primary_dt_name),
-                    "level": "error",
-                    "message": format!("{} should be {}", column_name, primary_dt_description)
-                });
-                cell.messages.push(message);
-            }
-        }
-    }
-}
-
-/// Given a config map, compiled rule conditions, a table name, a column name, the row context,
-/// and the cell to validate, look in the rule table (if it exists) and validate the cell according
-/// to any applicable rules.
-fn validate_cell_rules(
-    config: &ConfigMap,
-    compiled_rules: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
-    table_name: &String,
-    column_name: &String,
-    context: &ResultRow,
-    cell: &mut ResultCell,
-) {
-    fn check_condition(
-        condition_type: &str,
-        cell: &ResultCell,
-        rule: &ConfigMap,
-        table_name: &String,
-        column_name: &String,
-        compiled_rules: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
-    ) -> bool {
-        let condition = rule
-            .get(format!("{} condition", condition_type).as_str())
-            .and_then(|c| c.as_str())
-            .unwrap();
-        if vec!["null", "not null"].contains(&condition) {
-            return (condition == "null" && cell.nulltype != None)
-                || (condition == "not null" && cell.nulltype == None);
-        } else {
-            let compiled_condition = compiled_rules
-                .get(table_name)
-                .and_then(|t| t.get(column_name))
-                .and_then(|v| {
-                    v.iter().find(|c| {
-                        if condition_type == "when" {
-                            c.when.original == condition
-                        } else {
-                            c.then.original == condition
-                        }
-                    })
-                })
-                .and_then(|c| {
-                    if condition_type == "when" {
-                        Some(c.when.compiled.clone())
-                    } else {
-                        Some(c.then.compiled.clone())
-                    }
-                })
-                .unwrap();
-            return compiled_condition(&cell.value);
-        }
-    }
-
-    let rules_config = config.get("rule").and_then(|r| r.as_object()).unwrap();
-    let applicable_rules;
-    match rules_config.get(table_name) {
-        Some(SerdeValue::Object(table_rules)) => {
-            match table_rules.get(column_name) {
-                Some(SerdeValue::Array(column_rules)) => {
-                    applicable_rules = column_rules;
-                }
-                _ => return,
-            };
-        }
-        _ => return,
-    };
-
-    for (rule_number, rule) in applicable_rules.iter().enumerate() {
-        // enumerate() begins at 0 by default but we need to begin with 1:
-        let rule_number = rule_number + 1;
-        let rule = rule.as_object().unwrap();
-        // Check the then condition only if the when condition is satisfied:
-        if check_condition("when", cell, rule, table_name, column_name, compiled_rules) {
-            let then_column = rule.get("then column").and_then(|c| c.as_str()).unwrap();
-            let then_cell = context.contents.get(then_column).unwrap();
-            if !check_condition("then", then_cell, rule, table_name, column_name, compiled_rules) {
-                cell.valid = false;
-                cell.messages.push(json!({
-                    "rule": format!("rule:{}-{}", column_name, rule_number),
-                    "level": rule.get("level").unwrap(),
-                    "message": rule.get("description").unwrap(),
-                }));
-            }
-        }
-    }
-}
-
-/// Given a config map, a db connection pool, a table name, a column name, a cell to validate,
-/// the row, `context`, to which the cell belongs, and a list of previously validated rows,
-/// check the cell value against any unique-type keys that have been defined for the column.
-/// If there is a violation, indicate it with an error message attached to the cell. If
-/// the `existing_row` flag is set to True, then checks will be made as if the given `row_number`
-/// does not exist in the table.
-async fn validate_cell_unique_constraints(
-    config: &ConfigMap,
-    pool: &AnyPool,
-    table_name: &String,
-    column_name: &String,
-    cell: &mut ResultCell,
-    prev_results: &Vec<ResultRow>,
-    existing_row: bool,
-    row_number: Option<u32>,
-) -> Result<(), sqlx::Error> {
-    // If existing_row is false, then override any row number provided with None:
-    let mut row_number = row_number.clone();
-    if !existing_row {
-        row_number = None;
-    }
-    // If the column has a primary or unique key constraint, or if it is the child associated with
-    // a tree, then if the value of the cell is a duplicate either of one of the previously
-    // validated rows in the batch, or a duplicate of a validated row that has already been inserted
-    // into the table, mark it with the corresponding error:
-    let primaries = config
-        .get("constraints")
-        .and_then(|c| c.as_object())
-        .and_then(|o| o.get("primary"))
-        .and_then(|t| t.as_object())
-        .and_then(|o| o.get(table_name))
-        .and_then(|t| t.as_array())
-        .unwrap();
-    let uniques = config
-        .get("constraints")
-        .and_then(|c| c.as_object())
-        .and_then(|o| o.get("unique"))
-        .and_then(|t| t.as_object())
-        .and_then(|o| o.get(table_name))
-        .and_then(|t| t.as_array())
-        .unwrap();
-    let trees = config
-        .get("constraints")
-        .and_then(|c| c.as_object())
-        .and_then(|o| o.get("tree"))
-        .and_then(|t| t.as_object())
-        .and_then(|o| o.get(table_name))
-        .and_then(|t| t.as_array())
-        .and_then(|a| Some(a.iter().map(|o| o.as_object().and_then(|o| o.get("child")).unwrap())))
-        .unwrap()
-        .collect::<Vec<_>>();
-
-    let is_primary = primaries.contains(&SerdeValue::String(column_name.to_string()));
-    let is_unique = !is_primary && uniques.contains(&SerdeValue::String(column_name.to_string()));
-    let is_tree_child = trees.contains(&&SerdeValue::String(column_name.to_string()));
-
-    fn make_error(rule: &str, column_name: &String) -> SerdeValue {
-        json!({
-            "rule": rule.to_string(),
-            "level": "error",
-            "message": format!("Values of {} must be unique", column_name.to_string()),
-        })
-    }
-
-    if is_primary || is_unique || is_tree_child {
-        let mut with_sql = String::new();
-        let except_table = format!("{}_exc", table_name);
-        if existing_row {
-            with_sql = format!(
-                r#"WITH "{}" AS (
-                       SELECT * FROM "{}"
-                       WHERE "row_number" != {}
-                   ) "#,
-                except_table,
-                table_name,
-                row_number.unwrap()
-            );
-        }
-
-        let query_table;
-        if !with_sql.is_empty() {
-            query_table = except_table;
-        } else {
-            query_table = table_name.to_string();
-        }
-
-        let sql_type = get_sql_type_from_global_config(&config, &table_name, &column_name).unwrap();
-        let sql_param = cast_sql_param_from_text(&sql_type);
-        let sql = local_sql_syntax(
-            &pool,
-            &format!(
-                r#"{} SELECT 1 FROM "{}" WHERE "{}" = {} LIMIT 1"#,
-                with_sql, query_table, column_name, sql_param
-            ),
-        );
-        let query = sqlx_query(&sql).bind(&cell.value);
-
-        let contained_in_prev_results = !prev_results
-            .iter()
-            .filter(|p| {
-                p.contents.get(column_name).unwrap().value == cell.value
-                    && p.contents.get(column_name).unwrap().valid
-            })
-            .collect::<Vec<_>>()
-            .is_empty();
-
-        if contained_in_prev_results || !query.fetch_all(pool).await?.is_empty() {
-            cell.valid = false;
-            if is_primary || is_unique {
-                let error_message;
-                if is_primary {
-                    error_message = make_error("key:primary", column_name);
-                } else {
-                    error_message = make_error("key:unique", column_name);
-                }
-                cell.messages.push(error_message);
-            }
-            if is_tree_child {
-                let error_message = make_error("tree:child-unique", column_name);
-                cell.messages.push(error_message);
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Generate a SQL Select clause that is a union of: (a) the literal values of the given extra row,
-/// and (b) a Select statement over `table_name` of all the fields in the extra row.
-fn select_with_extra_row(
-    config: &ConfigMap,
-    extra_row: &ResultRow,
-    table_name: &str,
-) -> (String, Vec<String>) {
-    let extra_row_len = extra_row.contents.keys().len();
-    let mut params = vec![];
-    let mut first_select;
-    match extra_row.row_number {
-        Some(rn) => first_select = format!(r#"SELECT {} AS "row_number", "#, rn),
-        _ => first_select = String::from(r#"SELECT NULL AS "row_number", "#),
-    };
-
-    let mut second_select = String::from(r#"SELECT "row_number", "#);
-    for (i, (key, content)) in extra_row.contents.iter().enumerate() {
-        let sql_type = get_sql_type_from_global_config(&config, &table_name, &key).unwrap();
-        let sql_param = cast_sql_param_from_text(&sql_type);
-        // enumerate() begins from 0 but we need to begin at 1:
-        let i = i + 1;
-        first_select.push_str(format!(r#"{} AS "{}", "#, sql_param, key).as_str());
-        params.push(content.value.to_string());
-        first_select.push_str(format!(r#"NULL AS "{}_meta""#, key).as_str());
-        second_select.push_str(format!(r#""{}", "{}_meta""#, key, key).as_str());
-        if i < extra_row_len {
-            first_select.push_str(", ");
-            second_select.push_str(", ");
-        } else {
-            second_select.push_str(format!(r#" FROM "{}""#, table_name).as_str());
-        }
-    }
-
-    (
-        format!(r#"WITH "{}_ext" AS ({} UNION ALL {})"#, table_name, first_select, second_select),
-        params,
-    )
 }
 
 /// Given a config map, a db connection pool, a table name, and an optional extra row, validate
@@ -1603,4 +721,886 @@ pub async fn validate_tree_foreign_keys(
     }
 
     Ok(results)
+}
+
+/// Given a config map, a database connection pool, a table name, and a number of rows to validate,
+/// perform tree validation on the rows and return the validated results.
+pub async fn validate_rows_trees(
+    config: &ConfigMap,
+    pool: &AnyPool,
+    table_name: &String,
+    rows: &mut Vec<ResultRow>,
+) -> Result<(), sqlx::Error> {
+    let column_names = config
+        .get("table")
+        .and_then(|t| t.get(table_name))
+        .and_then(|t| t.get("column_order"))
+        .and_then(|c| c.as_array())
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+
+    let mut result_rows = vec![];
+    for row in rows {
+        let mut result_row = ResultRow { row_number: None, contents: HashMap::new() };
+        for column_name in &column_names {
+            let context = row.clone();
+            let cell = row.contents.get_mut(column_name).unwrap();
+            // We don't do any further validation on cells that are legitimately empty, or on cells
+            // that have datatype violations. We exclude the latter because they can result in
+            // database errors when, for instance, we compare a numeric with a non-numeric type.
+            if cell.nulltype == None && (cell.valid || !contains_dt_violation(&cell.messages)) {
+                validate_cell_trees(
+                    config,
+                    pool,
+                    table_name,
+                    &column_name,
+                    cell,
+                    &context,
+                    &result_rows,
+                )
+                .await?;
+            }
+            result_row.contents.insert(column_name.to_string(), cell.clone());
+        }
+        // Note that in this implementation, the result rows are never actually returned, but we
+        // still need them because the validate_cell_trees() function needs a list of previous
+        // results, and this then requires that we generate the result rows to play that role. The
+        // call to cell.clone() above is required to make rust's borrow checker happy.
+        result_rows.push(result_row);
+    }
+
+    Ok(())
+}
+
+/// Given a config map, a database connection pool, a table name, and a number of rows to validate,
+/// validate foreign and unique constraints, where the latter include primary and "tree child" keys
+/// (which imply unique constraints) and return the validated results.
+pub async fn validate_rows_constraints(
+    config: &ConfigMap,
+    pool: &AnyPool,
+    table_name: &String,
+    rows: &mut Vec<ResultRow>,
+) -> Result<(), sqlx::Error> {
+    let column_names = config
+        .get("table")
+        .and_then(|t| t.get(table_name))
+        .and_then(|t| t.get("column_order"))
+        .and_then(|c| c.as_array())
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+
+    let mut result_rows = vec![];
+    for row in rows.iter_mut() {
+        let mut result_row = ResultRow { row_number: None, contents: HashMap::new() };
+        for column_name in &column_names {
+            let cell = row.contents.get_mut(column_name).unwrap();
+            // We don't do any further validation on cells that are legitimately empty, or on cells
+            // that have datatype violations. We exclude the latter because they can result in
+            // database errors when, for instance, we compare a numeric with a non-numeric type.
+            if cell.nulltype == None && (cell.valid || !contains_dt_violation(&cell.messages)) {
+                validate_cell_foreign_constraints(config, pool, table_name, &column_name, cell)
+                    .await?;
+
+                validate_cell_unique_constraints(
+                    config,
+                    pool,
+                    table_name,
+                    &column_name,
+                    cell,
+                    &result_rows,
+                    false,
+                    None,
+                )
+                .await?;
+            }
+            result_row.contents.insert(column_name.to_string(), cell.clone());
+        }
+        // Note that in this implementation, the result rows are never actually returned, but we
+        // still need them because the validate_cell_unique_constraints() function needs a list of
+        // previous results, and this then requires that we generate the result rows to play that
+        // role. The call to cell.clone() above is required to make rust's borrow checker happy.
+        result_rows.push(result_row);
+    }
+
+    Ok(())
+}
+
+/// Given a config map, compiled datatype and rule conditions, a table name, the headers for the
+/// table, and a number of rows to validate, validate all of the rows and return the validated
+/// versions.
+pub fn validate_rows_intra(
+    config: &ConfigMap,
+    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
+    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    table_name: &String,
+    headers: &csv::StringRecord,
+    rows: &Vec<Result<csv::StringRecord, csv::Error>>,
+) -> Vec<ResultRow> {
+    let mut result_rows = vec![];
+    for row in rows {
+        match row {
+            Err(err) => eprintln!("Error while processing row for '{}': {}", table_name, err),
+            Ok(row) => {
+                let mut result_row = ResultRow { row_number: None, contents: HashMap::new() };
+                for (i, value) in row.iter().enumerate() {
+                    let result_cell = ResultCell {
+                        nulltype: None,
+                        value: String::from(value),
+                        valid: true,
+                        messages: vec![],
+                    };
+                    let column = headers.get(i).unwrap();
+                    result_row.contents.insert(column.to_string(), result_cell);
+                }
+
+                let column_names = config
+                    .get("table")
+                    .and_then(|t| t.get(table_name))
+                    .and_then(|t| t.get("column_order"))
+                    .and_then(|c| c.as_array())
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.as_str().unwrap().to_string())
+                    .collect::<Vec<_>>();
+
+                // We begin by determining the nulltype of all of the cells, since the rules
+                // validation step requires that all cells have this information.
+                for column_name in &column_names {
+                    let cell = result_row.contents.get_mut(column_name).unwrap();
+                    validate_cell_nulltype(
+                        config,
+                        compiled_datatype_conditions,
+                        table_name,
+                        &column_name,
+                        cell,
+                    );
+                }
+
+                for column_name in &column_names {
+                    let context = result_row.clone();
+                    let cell = result_row.contents.get_mut(column_name).unwrap();
+                    validate_cell_rules(
+                        config,
+                        compiled_rule_conditions,
+                        table_name,
+                        &column_name,
+                        &context,
+                        cell,
+                    );
+
+                    if cell.nulltype == None {
+                        validate_cell_datatype(
+                            config,
+                            compiled_datatype_conditions,
+                            table_name,
+                            &column_name,
+                            cell,
+                        );
+                    }
+                }
+                result_rows.push(result_row);
+            }
+        };
+    }
+
+    // Finally return the result rows:
+    result_rows
+}
+
+/// Given a result row, convert it to a ConfigMap (an alias for serde_json::Value) and return it.
+/// Note that if the incoming result row has an associated row_number, this is ignored.
+fn result_row_to_config_map(incoming: &ResultRow) -> ConfigMap {
+    let mut outgoing = ConfigMap::new();
+    for (column, cell) in incoming.contents.iter() {
+        let mut cell_map = ConfigMap::new();
+        if let Some(nulltype) = &cell.nulltype {
+            cell_map.insert("nulltype".to_string(), SerdeValue::String(nulltype.to_string()));
+        }
+        cell_map.insert("value".to_string(), SerdeValue::String(cell.value.to_string()));
+        cell_map.insert("valid".to_string(), SerdeValue::Bool(cell.valid));
+        cell_map.insert("messages".to_string(), SerdeValue::Array(cell.messages.clone()));
+        outgoing.insert(column.to_string(), SerdeValue::Object(cell_map));
+    }
+    outgoing
+}
+
+/// Given a message list, determine if it contains a message corresponding to a dataype violation
+fn contains_dt_violation(messages: &Vec<SerdeValue>) -> bool {
+    let mut contains_dt_violation = false;
+    for m in messages {
+        if m.get("rule").and_then(|r| r.as_str()).unwrap().starts_with("datatype:") {
+            contains_dt_violation = true;
+            break;
+        }
+    }
+    contains_dt_violation
+}
+
+/// Generate a SQL Select clause that is a union of: (a) the literal values of the given extra row,
+/// and (b) a Select statement over `table_name` of all the fields in the extra row.
+fn select_with_extra_row(
+    config: &ConfigMap,
+    extra_row: &ResultRow,
+    table_name: &str,
+) -> (String, Vec<String>) {
+    let extra_row_len = extra_row.contents.keys().len();
+    let mut params = vec![];
+    let mut first_select;
+    match extra_row.row_number {
+        Some(rn) => first_select = format!(r#"SELECT {} AS "row_number", "#, rn),
+        _ => first_select = String::from(r#"SELECT NULL AS "row_number", "#),
+    };
+
+    let mut second_select = String::from(r#"SELECT "row_number", "#);
+    for (i, (key, content)) in extra_row.contents.iter().enumerate() {
+        let sql_type = get_sql_type_from_global_config(&config, &table_name, &key).unwrap();
+        let sql_param = cast_sql_param_from_text(&sql_type);
+        // enumerate() begins from 0 but we need to begin at 1:
+        let i = i + 1;
+        first_select.push_str(format!(r#"{} AS "{}", "#, sql_param, key).as_str());
+        params.push(content.value.to_string());
+        first_select.push_str(format!(r#"NULL AS "{}_meta""#, key).as_str());
+        second_select.push_str(format!(r#""{}", "{}_meta""#, key, key).as_str());
+        if i < extra_row_len {
+            first_select.push_str(", ");
+            second_select.push_str(", ");
+        } else {
+            second_select.push_str(format!(r#" FROM "{}""#, table_name).as_str());
+        }
+    }
+
+    (
+        format!(r#"WITH "{}_ext" AS ({} UNION ALL {})"#, table_name, first_select, second_select),
+        params,
+    )
+}
+
+/// Given a map representing a tree constraint, a table name, a root from which to generate a
+/// sub-tree of the tree, and an extra SQL clause, generate the SQL for a WITH clause representing
+/// the sub-tree.
+fn with_tree_sql(
+    config: &ConfigMap,
+    tree: &ConfigMap,
+    table_name: &str,
+    effective_table_name: &str,
+    root: Option<String>,
+    extra_clause: Option<String>,
+) -> (String, Vec<String>) {
+    let extra_clause = extra_clause.unwrap_or(String::new());
+    let child_col = tree.get("child").and_then(|c| c.as_str()).unwrap();
+    let parent_col = tree.get("parent").and_then(|c| c.as_str()).unwrap();
+
+    let mut params = vec![];
+    let under_sql;
+    if let Some(root) = root {
+        let sql_type = get_sql_type_from_global_config(&config, table_name, &child_col).unwrap();
+        under_sql = format!(r#"WHERE "{}" = {}"#, child_col, cast_sql_param_from_text(&sql_type));
+        params.push(root.clone());
+    } else {
+        under_sql = String::new();
+    }
+
+    let sql = format!(
+        r#"WITH RECURSIVE "tree" AS (
+           {}
+               SELECT "{}", "{}" 
+                   FROM "{}" 
+                   {} 
+                   UNION ALL 
+               SELECT "t1"."{}", "t1"."{}" 
+                   FROM "{}" AS "t1" 
+                   JOIN "tree" AS "t2" ON "t2"."{}" = "t1"."{}"
+           )"#,
+        extra_clause,
+        child_col,
+        parent_col,
+        effective_table_name,
+        under_sql,
+        child_col,
+        parent_col,
+        effective_table_name,
+        parent_col,
+        child_col
+    );
+
+    (sql, params)
+}
+
+/// Given a config map, compiled datatype conditions, a table name, a column name, and a cell to
+/// validate, validate the cell's nulltype condition. If the cell's value is one of the allowable
+/// nulltype values for this column, then fill in the cell's nulltype value before returning the
+/// cell.
+fn validate_cell_nulltype(
+    config: &ConfigMap,
+    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
+    table_name: &String,
+    column_name: &String,
+    cell: &mut ResultCell,
+) {
+    let column = config
+        .get("table")
+        .and_then(|t| t.as_object())
+        .and_then(|o| o.get(table_name))
+        .and_then(|t| t.as_object())
+        .and_then(|o| o.get("column"))
+        .and_then(|c| c.as_object())
+        .and_then(|o| o.get(column_name))
+        .unwrap();
+    if let Some(SerdeValue::String(nt_name)) = column.get("nulltype") {
+        let nt_condition = &compiled_datatype_conditions.get(nt_name).unwrap().compiled;
+        let value = &cell.value;
+        if nt_condition(&value) {
+            cell.nulltype = Some(nt_name.to_string());
+        }
+    }
+}
+
+/// Given a config map, compiled datatype conditions, a table name, a column name, and a cell to
+/// validate, validate the cell's datatype and return the validated cell.
+fn validate_cell_datatype(
+    config: &ConfigMap,
+    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
+    table_name: &String,
+    column_name: &String,
+    cell: &mut ResultCell,
+) {
+    fn get_datatypes_to_check(
+        config: &ConfigMap,
+        compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
+        primary_dt_name: &str,
+        dt_name: Option<String>,
+    ) -> Vec<ConfigMap> {
+        let mut datatypes = vec![];
+        if let Some(dt_name) = dt_name {
+            let datatype = config
+                .get("datatype")
+                .and_then(|d| d.as_object())
+                .and_then(|o| o.get(&dt_name))
+                .and_then(|d| d.as_object())
+                .unwrap();
+            let dt_name = datatype.get("datatype").and_then(|d| d.as_str()).unwrap();
+            let dt_condition = compiled_datatype_conditions.get(dt_name);
+            let dt_parent = match datatype.get("parent") {
+                Some(SerdeValue::String(s)) => Some(s.clone()),
+                _ => None,
+            };
+            if dt_name != primary_dt_name {
+                if let Some(_) = dt_condition {
+                    datatypes.push(datatype.clone());
+                }
+            }
+            let mut more_datatypes = get_datatypes_to_check(
+                config,
+                compiled_datatype_conditions,
+                primary_dt_name,
+                dt_parent,
+            );
+            datatypes.append(&mut more_datatypes);
+        }
+        datatypes
+    }
+
+    let column = config
+        .get("table")
+        .and_then(|t| t.as_object())
+        .and_then(|o| o.get(table_name))
+        .and_then(|t| t.as_object())
+        .and_then(|o| o.get("column"))
+        .and_then(|c| c.as_object())
+        .and_then(|o| o.get(column_name))
+        .unwrap();
+    let primary_dt_name = column.get("datatype").and_then(|d| d.as_str()).unwrap();
+    let primary_datatype = config
+        .get("datatype")
+        .and_then(|d| d.as_object())
+        .and_then(|o| o.get(primary_dt_name))
+        .unwrap();
+    let primary_dt_description = primary_datatype.get("description").unwrap();
+    if let Some(primary_dt_condition_func) = compiled_datatype_conditions.get(primary_dt_name) {
+        let primary_dt_condition_func = &primary_dt_condition_func.compiled;
+        if !primary_dt_condition_func(&cell.value) {
+            cell.valid = false;
+            let mut parent_datatypes = get_datatypes_to_check(
+                config,
+                compiled_datatype_conditions,
+                primary_dt_name,
+                Some(primary_dt_name.to_string()),
+            );
+            // If this datatype has any parents, check them beginning from the most general to the
+            // most specific. We use while and pop instead of a for loop so as to check the
+            // conditions in LIFO order.
+            while !parent_datatypes.is_empty() {
+                let datatype = parent_datatypes.pop().unwrap();
+                let dt_name = datatype.get("datatype").and_then(|d| d.as_str()).unwrap();
+                let dt_description = datatype.get("description").and_then(|d| d.as_str()).unwrap();
+                let dt_condition = &compiled_datatype_conditions.get(dt_name).unwrap().compiled;
+                if !dt_condition(&cell.value) {
+                    let message = json!({
+                        "rule": format!("datatype:{}", dt_name),
+                        "level": "error",
+                        "message": format!("{} should be {}", column_name, dt_description)
+                    });
+                    cell.messages.push(message);
+                }
+            }
+            if primary_dt_description != "" {
+                let primary_dt_description = primary_dt_description.as_str().unwrap();
+                let message = json!({
+                    "rule": format!("datatype:{}", primary_dt_name),
+                    "level": "error",
+                    "message": format!("{} should be {}", column_name, primary_dt_description)
+                });
+                cell.messages.push(message);
+            }
+        }
+    }
+}
+
+/// Given a config map, compiled rule conditions, a table name, a column name, the row context,
+/// and the cell to validate, look in the rule table (if it exists) and validate the cell according
+/// to any applicable rules.
+fn validate_cell_rules(
+    config: &ConfigMap,
+    compiled_rules: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    table_name: &String,
+    column_name: &String,
+    context: &ResultRow,
+    cell: &mut ResultCell,
+) {
+    fn check_condition(
+        condition_type: &str,
+        cell: &ResultCell,
+        rule: &ConfigMap,
+        table_name: &String,
+        column_name: &String,
+        compiled_rules: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    ) -> bool {
+        let condition = rule
+            .get(format!("{} condition", condition_type).as_str())
+            .and_then(|c| c.as_str())
+            .unwrap();
+        if vec!["null", "not null"].contains(&condition) {
+            return (condition == "null" && cell.nulltype != None)
+                || (condition == "not null" && cell.nulltype == None);
+        } else {
+            let compiled_condition = compiled_rules
+                .get(table_name)
+                .and_then(|t| t.get(column_name))
+                .and_then(|v| {
+                    v.iter().find(|c| {
+                        if condition_type == "when" {
+                            c.when.original == condition
+                        } else {
+                            c.then.original == condition
+                        }
+                    })
+                })
+                .and_then(|c| {
+                    if condition_type == "when" {
+                        Some(c.when.compiled.clone())
+                    } else {
+                        Some(c.then.compiled.clone())
+                    }
+                })
+                .unwrap();
+            return compiled_condition(&cell.value);
+        }
+    }
+
+    let rules_config = config.get("rule").and_then(|r| r.as_object()).unwrap();
+    let applicable_rules;
+    match rules_config.get(table_name) {
+        Some(SerdeValue::Object(table_rules)) => {
+            match table_rules.get(column_name) {
+                Some(SerdeValue::Array(column_rules)) => {
+                    applicable_rules = column_rules;
+                }
+                _ => return,
+            };
+        }
+        _ => return,
+    };
+
+    for (rule_number, rule) in applicable_rules.iter().enumerate() {
+        // enumerate() begins at 0 by default but we need to begin with 1:
+        let rule_number = rule_number + 1;
+        let rule = rule.as_object().unwrap();
+        // Check the then condition only if the when condition is satisfied:
+        if check_condition("when", cell, rule, table_name, column_name, compiled_rules) {
+            let then_column = rule.get("then column").and_then(|c| c.as_str()).unwrap();
+            let then_cell = context.contents.get(then_column).unwrap();
+            if !check_condition("then", then_cell, rule, table_name, column_name, compiled_rules) {
+                cell.valid = false;
+                cell.messages.push(json!({
+                    "rule": format!("rule:{}-{}", column_name, rule_number),
+                    "level": rule.get("level").unwrap(),
+                    "message": rule.get("description").unwrap(),
+                }));
+            }
+        }
+    }
+}
+
+/// Given a config map, a db connection pool, a table name, a column name, and a cell to validate,
+/// check the cell value against any foreign keys that have been defined for the column. If there is
+/// a violation, indicate it with an error message attached to the cell.
+async fn validate_cell_foreign_constraints(
+    config: &ConfigMap,
+    pool: &AnyPool,
+    table_name: &String,
+    column_name: &String,
+    cell: &mut ResultCell,
+) -> Result<(), sqlx::Error> {
+    let fkeys = config
+        .get("constraints")
+        .and_then(|c| c.as_object())
+        .and_then(|o| o.get("foreign"))
+        .and_then(|t| t.as_object())
+        .and_then(|o| o.get(table_name))
+        .and_then(|t| t.as_array())
+        .unwrap()
+        .iter()
+        .filter(|t| {
+            t.as_object()
+                .and_then(|o| o.get("column"))
+                .and_then(|p| Some(p == column_name))
+                .unwrap()
+        })
+        .map(|v| v.as_object().unwrap())
+        .collect::<Vec<_>>();
+
+    for fkey in fkeys {
+        let ftable = fkey.get("ftable").and_then(|t| t.as_str()).unwrap();
+        let fcolumn = fkey.get("fcolumn").and_then(|c| c.as_str()).unwrap();
+        let sql_type = get_sql_type_from_global_config(&config, &ftable, &fcolumn).unwrap();
+        let sql_param = cast_sql_param_from_text(&sql_type);
+        let fsql = local_sql_syntax(
+            &pool,
+            &format!(r#"SELECT 1 FROM "{}" WHERE "{}" = {} LIMIT 1"#, ftable, fcolumn, sql_param),
+        );
+        let frows = sqlx_query(&fsql).bind(&cell.value).fetch_all(pool).await?;
+
+        if frows.is_empty() {
+            cell.valid = false;
+            let mut message = json!({
+                "rule": "key:foreign",
+                "level": "error",
+            });
+
+            let fsql = local_sql_syntax(
+                &pool,
+                &format!(
+                    r#"SELECT 1 FROM "{}_conflict" WHERE "{}" = {} LIMIT 1"#,
+                    ftable, fcolumn, sql_param
+                ),
+            );
+            let frows = sqlx_query(&fsql).bind(cell.value.clone()).fetch_all(pool).await?;
+
+            if frows.is_empty() {
+                message.as_object_mut().and_then(|m| {
+                    m.insert(
+                        "message".to_string(),
+                        SerdeValue::String(format!(
+                            "Value {} of column {} is not in {}.{}",
+                            cell.value, column_name, ftable, fcolumn
+                        )),
+                    )
+                });
+            } else {
+                message.as_object_mut().and_then(|m| {
+                    m.insert(
+                        "message".to_string(),
+                        SerdeValue::String(format!(
+                            "Value {} of column {} exists only in {}_conflict.{}",
+                            cell.value, column_name, ftable, fcolumn
+                        )),
+                    )
+                });
+            }
+            cell.messages.push(message);
+        }
+    }
+
+    Ok(())
+}
+
+/// Given a config map, a db connection pool, a table name, a column name, a cell to validate,
+/// the row, `context`, to which the cell belongs, and a list of previously validated rows,
+/// validate that none of the "tree" constraints on the column are violated, and indicate any
+/// violations by attaching error messages to the cell.
+async fn validate_cell_trees(
+    config: &ConfigMap,
+    pool: &AnyPool,
+    table_name: &String,
+    column_name: &String,
+    cell: &mut ResultCell,
+    context: &ResultRow,
+    prev_results: &Vec<ResultRow>,
+) -> Result<(), sqlx::Error> {
+    // If the current column is the parent column of a tree, validate that adding the current value
+    // will not result in a cycle between this and the parent column:
+    let tkeys = config
+        .get("constraints")
+        .and_then(|c| c.as_object())
+        .and_then(|o| o.get("tree"))
+        .and_then(|t| t.as_object())
+        .and_then(|o| o.get(table_name))
+        .and_then(|t| t.as_array())
+        .unwrap()
+        .iter()
+        .filter(|t| {
+            t.as_object()
+                .and_then(|o| o.get("parent"))
+                .and_then(|p| Some(p == column_name))
+                .unwrap()
+        })
+        .map(|v| v.as_object().unwrap())
+        .collect::<Vec<_>>();
+
+    let parent_col = column_name;
+    let parent_sql_type =
+        get_sql_type_from_global_config(&config, &table_name, &parent_col).unwrap();
+    let parent_sql_param = cast_sql_param_from_text(&parent_sql_type);
+    let parent_val = cell.value.clone();
+    for tkey in tkeys {
+        let child_col = tkey.get("child").and_then(|c| c.as_str()).unwrap();
+        let child_sql_type =
+            get_sql_type_from_global_config(&config, &table_name, &child_col).unwrap();
+        let child_sql_param = cast_sql_param_from_text(&child_sql_type);
+        let child_val =
+            context.contents.get(child_col).and_then(|c| Some(c.value.clone())).unwrap();
+
+        // In order to check if the current row will cause a dependency cycle, we need to query
+        // against all previously validated rows. Since previously validated rows belonging to the
+        // current batch will not have been inserted to the db yet, we explicitly add them in:
+        let mut params = vec![];
+        let prev_selects = prev_results
+            .iter()
+            .filter(|p| {
+                p.contents.get(child_col).unwrap().valid
+                    && p.contents.get(parent_col).unwrap().valid
+            })
+            .map(|p| {
+                params.push(p.contents.get(child_col).unwrap().value.clone());
+                params.push(p.contents.get(parent_col).unwrap().value.clone());
+                format!(
+                    r#"SELECT {} AS "{}", {} AS "{}""#,
+                    child_sql_param, child_col, parent_sql_param, parent_col
+                )
+            })
+            .collect::<Vec<_>>();
+        let prev_selects = prev_selects.join(" UNION ALL ");
+
+        let table_name_ext;
+        let extra_clause;
+        if prev_selects.is_empty() {
+            table_name_ext = table_name.clone();
+            extra_clause = String::from("");
+        } else {
+            table_name_ext = format!("{}_ext", table_name);
+            extra_clause = format!(
+                r#"WITH "{}" AS (
+                       SELECT "{}", "{}"
+                           FROM "{}"
+                           UNION ALL
+                       {}
+                   )"#,
+                table_name_ext, child_col, parent_col, table_name, prev_selects
+            );
+        }
+
+        let (tree_sql, mut tree_sql_params) = with_tree_sql(
+            &config,
+            &tkey,
+            &table_name,
+            &table_name_ext,
+            Some(parent_val.clone()),
+            Some(extra_clause),
+        );
+        params.append(&mut tree_sql_params);
+        let sql = local_sql_syntax(
+            &pool,
+            &format!(r#"{} SELECT "{}", "{}" FROM "tree""#, tree_sql, child_col, parent_col),
+        );
+
+        let mut query = sqlx_query(&sql);
+        for param in &params {
+            query = query.bind(param);
+        }
+        let rows = query.fetch_all(pool).await?;
+
+        // If there is a row in the tree whose parent is the to-be-inserted child, then inserting
+        // the new row would result in a cycle.
+        let cycle_detected = {
+            let cycle_row = rows.iter().find(|row| {
+                let raw_foo = row.try_get_raw(format!(r#"{}"#, parent_col).as_str()).unwrap();
+                if raw_foo.is_null() {
+                    false
+                } else {
+                    let parent = get_column_value(&row, &parent_col, &parent_sql_type);
+                    parent == child_val
+                }
+            });
+            match cycle_row {
+                None => false,
+                _ => true,
+            }
+        };
+
+        if cycle_detected {
+            let mut cycle_legs = vec![];
+            for row in &rows {
+                let child = get_column_value(&row, &child_col, &child_sql_type);
+                let parent = get_column_value(&row, &parent_col, &parent_sql_type);
+                cycle_legs.push((child, parent));
+            }
+            cycle_legs.push((child_val, parent_val.clone()));
+
+            let mut cycle_msg = vec![];
+            for cycle in &cycle_legs {
+                cycle_msg
+                    .push(format!("({}: {}, {}: {})", child_col, cycle.0, parent_col, cycle.1));
+            }
+            let cycle_msg = cycle_msg.join(", ");
+            cell.valid = false;
+            cell.messages.push(json!({
+                "rule": "tree:cycle",
+                "level": "error",
+                "message": format!("Cyclic dependency: {} for tree({}) of {}",
+                                   cycle_msg, parent_col, child_col),
+            }));
+        }
+    }
+
+    Ok(())
+}
+
+/// Given a config map, a db connection pool, a table name, a column name, a cell to validate,
+/// the row, `context`, to which the cell belongs, and a list of previously validated rows,
+/// check the cell value against any unique-type keys that have been defined for the column.
+/// If there is a violation, indicate it with an error message attached to the cell. If
+/// the `existing_row` flag is set to True, then checks will be made as if the given `row_number`
+/// does not exist in the table.
+async fn validate_cell_unique_constraints(
+    config: &ConfigMap,
+    pool: &AnyPool,
+    table_name: &String,
+    column_name: &String,
+    cell: &mut ResultCell,
+    prev_results: &Vec<ResultRow>,
+    existing_row: bool,
+    row_number: Option<u32>,
+) -> Result<(), sqlx::Error> {
+    // If existing_row is false, then override any row number provided with None:
+    let mut row_number = row_number.clone();
+    if !existing_row {
+        row_number = None;
+    }
+    // If the column has a primary or unique key constraint, or if it is the child associated with
+    // a tree, then if the value of the cell is a duplicate either of one of the previously
+    // validated rows in the batch, or a duplicate of a validated row that has already been inserted
+    // into the table, mark it with the corresponding error:
+    let primaries = config
+        .get("constraints")
+        .and_then(|c| c.as_object())
+        .and_then(|o| o.get("primary"))
+        .and_then(|t| t.as_object())
+        .and_then(|o| o.get(table_name))
+        .and_then(|t| t.as_array())
+        .unwrap();
+    let uniques = config
+        .get("constraints")
+        .and_then(|c| c.as_object())
+        .and_then(|o| o.get("unique"))
+        .and_then(|t| t.as_object())
+        .and_then(|o| o.get(table_name))
+        .and_then(|t| t.as_array())
+        .unwrap();
+    let trees = config
+        .get("constraints")
+        .and_then(|c| c.as_object())
+        .and_then(|o| o.get("tree"))
+        .and_then(|t| t.as_object())
+        .and_then(|o| o.get(table_name))
+        .and_then(|t| t.as_array())
+        .and_then(|a| Some(a.iter().map(|o| o.as_object().and_then(|o| o.get("child")).unwrap())))
+        .unwrap()
+        .collect::<Vec<_>>();
+
+    let is_primary = primaries.contains(&SerdeValue::String(column_name.to_string()));
+    let is_unique = !is_primary && uniques.contains(&SerdeValue::String(column_name.to_string()));
+    let is_tree_child = trees.contains(&&SerdeValue::String(column_name.to_string()));
+
+    fn make_error(rule: &str, column_name: &String) -> SerdeValue {
+        json!({
+            "rule": rule.to_string(),
+            "level": "error",
+            "message": format!("Values of {} must be unique", column_name.to_string()),
+        })
+    }
+
+    if is_primary || is_unique || is_tree_child {
+        let mut with_sql = String::new();
+        let except_table = format!("{}_exc", table_name);
+        if existing_row {
+            with_sql = format!(
+                r#"WITH "{}" AS (
+                       SELECT * FROM "{}"
+                       WHERE "row_number" != {}
+                   ) "#,
+                except_table,
+                table_name,
+                row_number.unwrap()
+            );
+        }
+
+        let query_table;
+        if !with_sql.is_empty() {
+            query_table = except_table;
+        } else {
+            query_table = table_name.to_string();
+        }
+
+        let sql_type = get_sql_type_from_global_config(&config, &table_name, &column_name).unwrap();
+        let sql_param = cast_sql_param_from_text(&sql_type);
+        let sql = local_sql_syntax(
+            &pool,
+            &format!(
+                r#"{} SELECT 1 FROM "{}" WHERE "{}" = {} LIMIT 1"#,
+                with_sql, query_table, column_name, sql_param
+            ),
+        );
+        let query = sqlx_query(&sql).bind(&cell.value);
+
+        let contained_in_prev_results = !prev_results
+            .iter()
+            .filter(|p| {
+                p.contents.get(column_name).unwrap().value == cell.value
+                    && p.contents.get(column_name).unwrap().valid
+            })
+            .collect::<Vec<_>>()
+            .is_empty();
+
+        if contained_in_prev_results || !query.fetch_all(pool).await?.is_empty() {
+            cell.valid = false;
+            if is_primary || is_unique {
+                let error_message;
+                if is_primary {
+                    error_message = make_error("key:primary", column_name);
+                } else {
+                    error_message = make_error("key:unique", column_name);
+                }
+                cell.messages.push(error_message);
+            }
+            if is_tree_child {
+                let error_message = make_error("tree:child-unique", column_name);
+                cell.messages.push(error_message);
+            }
+        }
+    }
+    Ok(())
 }
