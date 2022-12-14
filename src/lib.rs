@@ -160,15 +160,13 @@ pub fn read_config_files(path: &str) -> (ConfigMap, ConfigMap, ConfigMap, Config
         }
 
         for column in vec!["table", "path"] {
-            if row.get(column).and_then(|c| c.as_str()).and_then(|c| Some(c.trim())).unwrap() == ""
-            {
+            if row.get(column).and_then(|c| c.as_str()).unwrap() == "" {
                 panic!("Missing required value for '{}' reading '{}'", column, path);
             }
         }
 
         for column in vec!["type"] {
-            if row.get(column).and_then(|c| c.as_str()).and_then(|c| Some(c.trim())).unwrap() == ""
-            {
+            if row.get(column).and_then(|c| c.as_str()).unwrap() == "" {
                 row.remove(&column.to_string());
             }
         }
@@ -226,15 +224,13 @@ pub fn read_config_files(path: &str) -> (ConfigMap, ConfigMap, ConfigMap, Config
         }
 
         for column in vec!["datatype"] {
-            if row.get(column).and_then(|c| c.as_str()).and_then(|c| Some(c.trim())).unwrap() == ""
-            {
+            if row.get(column).and_then(|c| c.as_str()).unwrap() == "" {
                 panic!("Missing required value for '{}' reading '{}'", column, path);
             }
         }
 
         for column in vec!["parent", "condition", "SQL type"] {
-            if row.get(column).and_then(|c| c.as_str()).and_then(|c| Some(c.trim())).unwrap() == ""
-            {
+            if row.get(column).and_then(|c| c.as_str()).unwrap() == "" {
                 row.remove(&column.to_string());
             }
         }
@@ -263,15 +259,13 @@ pub fn read_config_files(path: &str) -> (ConfigMap, ConfigMap, ConfigMap, Config
         }
 
         for column in vec!["table", "column", "datatype"] {
-            if row.get(column).and_then(|c| c.as_str()).and_then(|c| Some(c.trim())).unwrap() == ""
-            {
+            if row.get(column).and_then(|c| c.as_str()).unwrap() == "" {
                 panic!("Missing required value for '{}' reading '{}'", column, path);
             }
         }
 
         for column in vec!["nulltype"] {
-            if row.get(column).and_then(|c| c.as_str()).and_then(|c| Some(c.trim())).unwrap() == ""
-            {
+            if row.get(column).and_then(|c| c.as_str()).unwrap() == "" {
                 row.remove(&column.to_string());
             }
         }
@@ -327,9 +321,7 @@ pub fn read_config_files(path: &str) -> (ConfigMap, ConfigMap, ConfigMap, Config
                 if !row.contains_key(column) || row.get(column) == None {
                     panic!("Missing required column '{}' reading '{}'", column, path);
                 }
-                if row.get(column).and_then(|c| c.as_str()).and_then(|c| Some(c.trim())).unwrap()
-                    == ""
-                {
+                if row.get(column).and_then(|c| c.as_str()).unwrap() == "" {
                     panic!("Missing required value for '{}' reading '{}'", column, path);
                 }
             }
