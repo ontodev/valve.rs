@@ -46,6 +46,7 @@ use sqlx::{
 use std::{
     collections::{BTreeMap, HashMap},
     fs::File,
+    process,
     str::FromStr,
     sync::Arc,
 };
@@ -909,9 +910,10 @@ fn read_tsv_into_vector(path: &str) -> Vec<ConfigMap> {
             let trimmed_val = val.trim();
             if trimmed_val != val {
                 eprintln!(
-                    "Warning: Value '{}' of column '{}' in row {} of table '{}' {}",
+                    "Error: Value '{}' of column '{}' in row {} of table '{}' {}",
                     val, col, i, path, "has leading and/or trailing whitespace."
                 );
+                process::exit(1);
             }
         }
     }
