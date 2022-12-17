@@ -143,14 +143,16 @@ pub async fn validate_row(
         let vrow_number = violation.get("row_number").unwrap().as_i64().unwrap() as u32;
         if Some(vrow_number) == row_number || (row_number == None && Some(vrow_number) == Some(0)) {
             let column = violation.get("column").and_then(|c| c.as_str()).unwrap().to_string();
-            let column_meta = violation.get_mut("meta").unwrap();
-            // If there were any previous error messages for this cell, add them to the meta info
-            // that we just received:
+            let level = violation.get("level").and_then(|c| c.as_str()).unwrap().to_string();
+            let rule = violation.get("rule").and_then(|c| c.as_str()).unwrap().to_string();
+            let message = violation.get("message").and_then(|c| c.as_str()).unwrap().to_string();
             let result_cell = &mut result_row.contents.get_mut(&column).unwrap();
-            let column_meta_messages =
-                column_meta.get_mut("messages").and_then(|m| m.as_array_mut()).unwrap();
-            result_cell.messages.append(column_meta_messages);
-            if result_cell.messages.len() > 0 {
+            result_cell.messages.push(json!({
+                "level": level,
+                "rule": rule,
+                "message": message,
+            }));
+            if result_cell.valid {
                 result_cell.valid = false;
             }
         }
@@ -1013,7 +1015,7 @@ fn select_with_extra_row(
         let sql_param = cast_sql_param_from_text(&sql_type);
         // enumerate() begins from 0 but we need to begin at 1:
         let i = i + 1;
-        first_select.push_str(format!(r#"{} AS "{}", "#, sql_param, key).as_str());
+        first_select.push_str(format!(r#"{} AS "{}""#, sql_param, key).as_str());
         params.push(content.value.to_string());
         second_select.push_str(format!(r#""{}""#, key).as_str());
         if i < extra_row_len {

@@ -761,7 +761,7 @@ pub async fn insert_new_row(
     table_name: &str,
     row: &ConfigMap,
 ) -> Result<u32, sqlx::Error> {
-    let sql = format!(r#"SELECT MAX("row_number") AS "row_number" FROM "{}""#, table_name);
+    let sql = format!(r#"SELECT MAX("row_number") AS "row_number" FROM "{}_view""#, table_name);
     let query = sqlx_query(&sql);
     let result_row = query.fetch_one(pool).await?;
     let result = result_row.try_get_raw("row_number").unwrap();
@@ -776,33 +776,33 @@ pub async fn insert_new_row(
     let mut insert_columns = vec![];
     let mut insert_values = vec![];
     let mut insert_params = vec![];
+    let mut messages = vec![];
     for (column, cell) in row.iter() {
         let cell = cell.as_object().unwrap();
         let cell_valid = cell.get("valid").and_then(|v| v.as_bool()).unwrap();
         let mut cell_for_insert = cell.clone();
-        insert_columns
-            .append(&mut vec![format!(r#""{}""#, column), format!(r#""{}_meta""#, column)]);
+        insert_columns.append(&mut vec![format!(r#""{}""#, column)]);
 
-        // Normal column:
+        let cell_value = cell.get("value").and_then(|v| v.as_str()).unwrap();
         if cell_valid {
-            let value = cell.get("value").and_then(|v| v.as_str()).unwrap();
             cell_for_insert.remove("value");
             let sql_type =
                 get_sql_type_from_global_config(&global_config, &table_name.to_string(), &column)
                     .unwrap();
             insert_values.push(cast_sql_param_from_text(&sql_type));
-            insert_params.push(String::from(value));
+            insert_params.push(String::from(cell_value));
         } else {
             insert_values.push(String::from("NULL"));
-        }
-
-        // Meta column:
-        if cell_valid && cell.keys().collect::<Vec<_>>() == vec!["messages", "valid", "value"] {
-            insert_values.push(String::from("NULL"));
-        } else {
-            insert_values.push(String::from(format!("JSON({})", SQL_PARAM)));
-            let cell_for_insert = SerdeValue::Object(cell_for_insert.clone());
-            insert_params.push(format!("{}", cell_for_insert));
+            let cell_messages = cell.get("messages").and_then(|m| m.as_array()).unwrap();
+            for cell_message in cell_messages {
+                messages.push(json!({
+                    "column": String::from(column),
+                    "value": String::from(cell_value),
+                    "level": cell_message.get("level").and_then(|s| s.as_str()).unwrap(),
+                    "rule": cell_message.get("rule").and_then(|s| s.as_str()).unwrap(),
+                    "message": cell_message.get("message").and_then(|s| s.as_str()).unwrap(),
+                }));
+            }
         }
     }
 
@@ -823,6 +823,22 @@ pub async fn insert_new_row(
     }
     query.execute(pool).await?;
 
+    for m in messages {
+        let column = m.get("column").and_then(|c| c.as_str()).unwrap();
+        let value = m.get("value").and_then(|c| c.as_str()).unwrap();
+        let level = m.get("level").and_then(|c| c.as_str()).unwrap();
+        let rule = m.get("rule").and_then(|c| c.as_str()).unwrap();
+        let message = m.get("message").and_then(|c| c.as_str()).unwrap();
+        let message_sql = format!(
+            r#"INSERT INTO "message"
+               ("table", "row", "column", "value", "level", "rule", "message")
+               VALUES ('{}', {}, '{}', '{}', '{}', '{}', '{}')"#,
+            table_name, new_row_number, column, value, level, rule, message
+        );
+        let query = sqlx_query(&message_sql);
+        query.execute(pool).await?;
+    }
+
     Ok(new_row_number)
 }
 
@@ -837,28 +853,31 @@ pub async fn update_row(
 ) -> Result<(), sqlx::Error> {
     let mut assignments = vec![];
     let mut params = vec![];
+    let mut messages = vec![];
     for (column, cell) in row.iter() {
         let cell = cell.as_object().unwrap();
         let cell_valid = cell.get("valid").and_then(|v| v.as_bool()).unwrap();
         let mut cell_for_insert = cell.clone();
+        let cell_value = cell.get("value").and_then(|v| v.as_str()).unwrap();
         if cell_valid {
-            let value = cell.get("value").and_then(|v| v.as_str()).unwrap();
             cell_for_insert.remove("value");
             let sql_type =
                 get_sql_type_from_global_config(&global_config, &table_name.to_string(), &column)
                     .unwrap();
             assignments.push(format!(r#""{}" = {}"#, column, cast_sql_param_from_text(&sql_type)));
-            params.push(String::from(value));
+            params.push(String::from(cell_value));
         } else {
             assignments.push(format!(r#""{}" = NULL"#, column));
-        }
-
-        if cell_valid && cell.keys().collect::<Vec<_>>() == vec!["messages", "valid", "value"] {
-            assignments.push(format!(r#""{}_meta" = NULL"#, column));
-        } else {
-            assignments.push(format!(r#""{}_meta" = JSON({})"#, column, SQL_PARAM));
-            let cell_for_insert = SerdeValue::Object(cell_for_insert.clone());
-            params.push(format!("{}", cell_for_insert));
+            let cell_messages = cell.get("messages").and_then(|m| m.as_array()).unwrap();
+            for cell_message in cell_messages {
+                messages.push(json!({
+                    "column": String::from(column),
+                    "value": String::from(cell_value),
+                    "level": cell_message.get("level").and_then(|s| s.as_str()).unwrap(),
+                    "rule": cell_message.get("rule").and_then(|s| s.as_str()).unwrap(),
+                    "message": cell_message.get("message").and_then(|s| s.as_str()).unwrap(),
+                }));
+            }
         }
     }
 
@@ -872,6 +891,30 @@ pub async fn update_row(
         query = query.bind(param);
     }
     query.execute(pool).await?;
+
+    for m in messages {
+        let column = m.get("column").and_then(|c| c.as_str()).unwrap();
+        let value = m.get("value").and_then(|c| c.as_str()).unwrap();
+        let level = m.get("level").and_then(|c| c.as_str()).unwrap();
+        let rule = m.get("rule").and_then(|c| c.as_str()).unwrap();
+        let message = m.get("message").and_then(|c| c.as_str()).unwrap();
+
+        let delete_sql = format!(
+            r#"DELETE FROM "message" WHERE "table" = '{}' AND "row" = {} AND "column" = '{}'"#,
+            table_name, row_number, column
+        );
+        let query = sqlx_query(&delete_sql);
+        query.execute(pool).await?;
+
+        let insert_sql = format!(
+            r#"INSERT INTO "message"
+               ("table", "row", "column", "value", "level", "rule", "message")
+               VALUES ('{}', {}, '{}', '{}', '{}', '{}', '{}')"#,
+            table_name, row_number, column, value, level, rule, message
+        );
+        let query = sqlx_query(&insert_sql);
+        query.execute(pool).await?;
+    }
 
     Ok(())
 }
