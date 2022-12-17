@@ -30,6 +30,7 @@ use crate::validate::{
 use crate::{ast::Expression, valve_grammar::StartParser};
 use chrono::Utc;
 use crossbeam;
+use indoc::indoc;
 use itertools::{IntoChunks, Itertools};
 use lazy_static::lazy_static;
 use petgraph::{
@@ -634,15 +635,21 @@ pub async fn configure_db(
         // Generate DDL for the message table:
         let mut message_statements = vec![];
         message_statements.push(r#"DROP TABLE IF EXISTS "message";"#.to_string());
-        message_statements.push(r#"CREATE TABLE "message" ("#.to_string());
-        message_statements.push(r#"  "table" TEXT,"#.to_string());
-        message_statements.push(r#"  "row" BIGINT,"#.to_string());
-        message_statements.push(r#"  "column" TEXT,"#.to_string());
-        message_statements.push(r#"  "level" TEXT,"#.to_string());
-        message_statements.push(r#"  "rule" TEXT,"#.to_string());
-        message_statements.push(r#"  "message" TEXT,"#.to_string());
-        message_statements.push(r#"  PRIMARY KEY ("table", "row", "column", "rule")"#.to_string());
-        message_statements.push(r#");"#.to_string());
+        message_statements.push(
+            indoc! {r#"
+              CREATE TABLE "message" (
+                "table" TEXT,
+                "row" BIGINT,
+                "column" TEXT,
+                "value" TEXT,
+                "level" TEXT,
+                "rule" TEXT,
+                "message" TEXT,
+                PRIMARY KEY ("table", "row", "column", "rule")
+              );
+            "#}
+            .to_string(),
+        );
         message_statements.push(
             r#"CREATE INDEX "message_trc_idx" ON "message"("table", "row", "column");"#.to_string(),
         );
@@ -713,9 +720,6 @@ pub async fn configure_and_or_load(
         sqlx_query("PRAGMA foreign_keys = ON").execute(&pool).await?;
     }
 
-    // TODO: I have overridden this temporarily during the first part of the implementation of the
-    // new VALVE schema. The line below eventually needs to be removed.
-    let load = false;
     let (sorted_table_list, constraints_config) =
         configure_db(&mut tables_config, &mut datatypes_config, &pool, &parser, verbose, load)
             .await?;
@@ -1635,7 +1639,10 @@ async fn make_inserts(
     chunk_number: usize,
     messages_stats: &mut HashMap<String, usize>,
     verbose: bool,
-) -> Result<((String, Vec<String>), (String, Vec<String>)), sqlx::Error> {
+) -> Result<
+    ((String, Vec<String>, String, Vec<String>), (String, Vec<String>, String, Vec<String>)),
+    sqlx::Error,
+> {
     let conflict_columns = {
         let mut conflict_columns = vec![];
         let primaries = config
@@ -1687,15 +1694,18 @@ async fn make_inserts(
         rows: &Vec<ResultRow>,
         messages_stats: &mut HashMap<String, usize>,
         verbose: bool,
-    ) -> (String, Vec<String>) {
+    ) -> (String, Vec<String>, String, Vec<String>) {
         let mut lines = vec![];
         let mut params = vec![];
+        let mut message_lines = vec![];
+        let mut message_params = vec![];
         for row in rows.iter() {
             let mut values = vec![format!("{}", row.row_number.unwrap())];
             for column in column_names {
                 let cell = row.contents.get(column).unwrap();
-                // Insert the value of the cell into the column unless it is invalid, in which case
-                // insert NULL:
+
+                // Insert the value of the cell into the column unless it is invalid or has the
+                // nulltype field set, in which case insert NULL:
                 if cell.nulltype == None && cell.valid {
                     let sql_type =
                         get_sql_type_from_global_config(&config, &table_name, &column).unwrap();
@@ -1704,30 +1714,47 @@ async fn make_inserts(
                 } else {
                     values.push(String::from("NULL"));
                 }
-                // If the cell value is valid and there is no extra information (e.g., nulltype),
-                // then just set the metadata to None, which can be taken to represent a "plain"
-                // valid cell. Note that the only possible "extra information" is nulltype, but it's
-                // possible that in the future we may add further fields to ResultCell, so it's best
-                // to keep this if/else clause separate rather than merge it with the one above.
-                if cell.valid && cell.nulltype == None {
-                    values.push(String::from("NULL"));
-                } else {
+
+                if !cell.valid {
                     if verbose {
                         add_message_counts(&cell.messages, messages_stats);
                     }
-                    values.push(String::from(&format!("JSON({})", SQL_PARAM)));
-                    let mut param = json!({
-                        "value": cell.value.clone(),
-                        "valid": cell.valid.clone(),
-                        "messages": cell.messages.clone(),
-                    });
-                    if cell.nulltype != None {
-                        param.as_object_mut().unwrap().insert(
-                            String::from("nulltype"),
-                            SerdeValue::String(cell.nulltype.clone().unwrap()),
+                    for message in &cell.messages {
+                        let message_values = vec![
+                            SQL_PARAM.to_string(),
+                            format!("{}", row.row_number.unwrap()),
+                            SQL_PARAM.to_string(),
+                            SQL_PARAM.to_string(),
+                            SQL_PARAM.to_string(),
+                            SQL_PARAM.to_string(),
+                            SQL_PARAM.to_string(),
+                        ];
+
+                        let message = message.as_object().unwrap();
+                        message_params.push({
+                            let normal_table_name;
+                            if let Some(s) = table_name.strip_suffix("_conflict") {
+                                normal_table_name = String::from(s);
+                            } else {
+                                normal_table_name = table_name.to_string();
+                            }
+                            normal_table_name
+                        });
+                        message_params.push(column.clone());
+                        message_params.push(cell.value.clone());
+                        message_params.push(
+                            message.get("level").and_then(|l| l.as_str()).unwrap().to_string(),
                         );
+                        message_params.push(
+                            message.get("rule").and_then(|l| l.as_str()).unwrap().to_string(),
+                        );
+                        message_params.push(
+                            message.get("message").and_then(|l| l.as_str()).unwrap().to_string(),
+                        );
+                        let line = message_values.join(", ");
+                        let line = format!("({})", line);
+                        message_lines.push(line);
                     }
-                    params.push(param.to_string());
                 }
             }
             let line = values.join(", ");
@@ -1743,9 +1770,7 @@ async fn make_inserts(
                     let mut all_columns = vec![];
                     for column_name in column_names {
                         let quoted_column_name = format!(r#""{}""#, column_name);
-                        let quoted_meta_column_name = format!(r#""{}_meta""#, column_name);
                         all_columns.push(quoted_column_name);
-                        all_columns.push(quoted_meta_column_name);
                     }
                     all_columns.join(", ")
                 }
@@ -1755,7 +1780,18 @@ async fn make_inserts(
             output.push_str(";");
         }
 
-        (output, params)
+        let mut message_output = String::from("");
+        if !message_lines.is_empty() {
+            message_output.push_str(r#"INSERT INTO "message" "#);
+            message_output
+                .push_str(r#"("table", "row", "column", "value", "level", "rule", "message") "#);
+            message_output.push_str("VALUES");
+            message_output.push_str("\n");
+            message_output.push_str(&message_lines.join(",\n"));
+            message_output.push_str(";");
+        }
+
+        (output, params, message_output, message_params)
     }
 
     fn has_conflict(row: &ResultRow, conflict_columns: &Vec<SerdeValue>) -> bool {
@@ -1793,18 +1829,22 @@ async fn make_inserts(
         .map(|v| v.as_str().unwrap().to_string())
         .collect::<Vec<_>>();
 
-    let (main_sql, main_params) =
+    let (main_sql, main_params, main_message_sql, main_message_params) =
         generate_sql(&config, &table_name, &column_names, &main_rows, messages_stats, verbose);
-    let (conflict_sql, conflict_params) = generate_sql(
-        &config,
-        &format!("{}_conflict", table_name),
-        &column_names,
-        &conflict_rows,
-        messages_stats,
-        verbose,
-    );
+    let (conflict_sql, conflict_params, conflict_message_sql, conflict_message_params) =
+        generate_sql(
+            &config,
+            &format!("{}_conflict", table_name),
+            &column_names,
+            &conflict_rows,
+            messages_stats,
+            verbose,
+        );
 
-    Ok(((main_sql, main_params), (conflict_sql, conflict_params)))
+    Ok((
+        (main_sql, main_params, main_message_sql, main_message_params),
+        (conflict_sql, conflict_params, conflict_message_sql, conflict_message_params),
+    ))
 }
 
 /// Given a configuration map, a database connection pool, a table name, some rows to validate,
@@ -1836,9 +1876,11 @@ async fn validate_rows_inter_and_insert(
     tmp_messages_stats.insert("error".to_string(), 0);
     tmp_messages_stats.insert("warning".to_string(), 0);
     tmp_messages_stats.insert("info".to_string(), 0);
-    let ((main_sql, main_params), (conflict_sql, conflict_params)) =
-        make_inserts(config, table_name, rows, chunk_number, &mut tmp_messages_stats, verbose)
-            .await?;
+    let (
+        (main_sql, main_params, main_message_sql, main_message_params),
+        (conflict_sql, conflict_params, conflict_message_sql, conflict_message_params),
+    ) = make_inserts(config, table_name, rows, chunk_number, &mut tmp_messages_stats, verbose)
+        .await?;
 
     let main_sql = local_sql_syntax(&pool, &main_sql);
     let mut main_query = sqlx_query(&main_sql);
@@ -1854,6 +1896,20 @@ async fn validate_rows_inter_and_insert(
                 conflict_query = conflict_query.bind(param);
             }
             conflict_query.execute(pool).await?;
+
+            let main_message_sql = local_sql_syntax(&pool, &main_message_sql);
+            let mut main_message_query = sqlx_query(&main_message_sql);
+            for param in &main_message_params {
+                main_message_query = main_message_query.bind(param);
+            }
+            main_message_query.execute(pool).await?;
+
+            let conflict_message_sql = local_sql_syntax(&pool, &conflict_message_sql);
+            let mut conflict_message_query = sqlx_query(&conflict_message_sql);
+            for param in &conflict_message_params {
+                conflict_message_query = conflict_message_query.bind(param);
+            }
+            conflict_message_query.execute(pool).await?;
 
             if verbose {
                 let curr_errors = messages_stats.get("error").unwrap();
@@ -1876,9 +1932,11 @@ async fn validate_rows_inter_and_insert(
         Err(_) => {
             validate_rows_constraints(config, pool, table_name, rows).await?;
 
-            let ((main_sql, main_params), (conflict_sql, conflict_params)) =
-                make_inserts(config, table_name, rows, chunk_number, messages_stats, verbose)
-                    .await?;
+            let (
+                (main_sql, main_params, main_message_sql, main_message_params),
+                (conflict_sql, conflict_params, conflict_message_sql, conflict_message_params),
+            ) = make_inserts(config, table_name, rows, chunk_number, messages_stats, verbose)
+                .await?;
 
             let main_sql = local_sql_syntax(&pool, &main_sql);
             let mut main_query = sqlx_query(&main_sql);
@@ -1893,6 +1951,20 @@ async fn validate_rows_inter_and_insert(
                 conflict_query = conflict_query.bind(param);
             }
             conflict_query.execute(pool).await?;
+
+            let main_message_sql = local_sql_syntax(&pool, &main_message_sql);
+            let mut main_message_query = sqlx_query(&main_message_sql);
+            for param in &main_message_params {
+                main_message_query = main_message_query.bind(param);
+            }
+            main_message_query.execute(pool).await?;
+
+            let conflict_message_sql = local_sql_syntax(&pool, &conflict_message_sql);
+            let mut conflict_message_query = sqlx_query(&conflict_message_sql);
+            for param in &conflict_message_params {
+                conflict_message_query = conflict_message_query.bind(param);
+            }
+            conflict_message_query.execute(pool).await?;
         }
     };
 
@@ -2011,7 +2083,7 @@ async fn load_db(
     for table in config.get("sorted_table_list").and_then(|l| l.as_array()).unwrap() {
         table_list.push(table.as_str().and_then(|s| Some(s.to_string())).unwrap());
     }
-    let table_list = table_list;
+    let table_list = table_list; // Change the table_list to read only after populating it.
     let num_tables = table_list.len();
     let mut total_errors = 0;
     let mut total_warnings = 0;
@@ -2091,24 +2163,44 @@ async fn load_db(
         recs_to_update.append(&mut validate_under(config, pool, &table_name, None).await?);
 
         for record in recs_to_update {
-            let column_name = record.get("column").and_then(|c| c.as_str()).unwrap();
-            let meta_name = format!("{}_meta", column_name);
             let row_number = record.get("row_number").unwrap();
-            let meta = record.get("meta").unwrap();
-            let meta_str = format!("{}", meta);
+            let column_name = record.get("column").and_then(|s| s.as_str()).unwrap();
+            let value = record.get("value").and_then(|s| s.as_str()).unwrap();
+            let level = record.get("level").and_then(|s| s.as_str()).unwrap();
+            let rule = record.get("rule").and_then(|s| s.as_str()).unwrap();
+            let message = record.get("message").and_then(|s| s.as_str()).unwrap();
+
+            let sql = format!(
+                r#"UPDATE "{}" SET "{}" = NULL WHERE "row_number" = {}"#,
+                table_name, column_name, row_number
+            );
+            let query = sqlx_query(&sql);
+            query.execute(pool).await?;
+
             let sql = local_sql_syntax(
                 &pool,
                 &format!(
-                    r#"UPDATE "{}" SET "{}" = NULL, "{}" = JSON({}) WHERE "row_number" = {}"#,
-                    table_name, column_name, meta_name, SQL_PARAM, row_number
+                    r#"INSERT INTO "message"
+                       ("table", "row", "column", "value", "level", "rule", "message")
+                       VALUES ({}, {}, {}, {}, {}, {}, {})"#,
+                    SQL_PARAM, row_number, SQL_PARAM, SQL_PARAM, SQL_PARAM, SQL_PARAM, SQL_PARAM
                 ),
             );
-            let query = sqlx_query(&sql).bind(meta_str);
+            let mut query = sqlx_query(&sql);
+            query = query.bind(&table_name);
+            query = query.bind(&column_name);
+            query = query.bind(&value);
+            query = query.bind(&level);
+            query = query.bind(&rule);
+            query = query.bind(&message);
             query.execute(pool).await?;
 
             if verbose {
-                // Add any validation messages generated to messages_stats:
-                let messages = meta.get("messages").and_then(|m| m.as_array()).unwrap();
+                // Add the generated message to messages_stats:
+                let messages = vec![json!({
+                    "message": message,
+                    "level": level,
+                })];
                 add_message_counts(&messages, &mut messages_stats);
             }
         }
