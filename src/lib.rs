@@ -761,6 +761,7 @@ pub async fn insert_new_row(
     table_name: &str,
     row: &ConfigMap,
 ) -> Result<u32, sqlx::Error> {
+    // The new row number to insert is the current highest row number + 1.
     let sql = format!(r#"SELECT MAX("row_number") AS "row_number" FROM "{}_view""#, table_name);
     let query = sqlx_query(&sql);
     let result_row = query.fetch_one(pool).await?;
@@ -778,12 +779,11 @@ pub async fn insert_new_row(
     let mut insert_params = vec![];
     let mut messages = vec![];
     for (column, cell) in row.iter() {
+        insert_columns.append(&mut vec![format!(r#""{}""#, column)]);
         let cell = cell.as_object().unwrap();
         let cell_valid = cell.get("valid").and_then(|v| v.as_bool()).unwrap();
-        let mut cell_for_insert = cell.clone();
-        insert_columns.append(&mut vec![format!(r#""{}""#, column)]);
-
         let cell_value = cell.get("value").and_then(|v| v.as_str()).unwrap();
+        let mut cell_for_insert = cell.clone();
         if cell_valid {
             cell_for_insert.remove("value");
             let sql_type =
@@ -796,8 +796,8 @@ pub async fn insert_new_row(
             let cell_messages = cell.get("messages").and_then(|m| m.as_array()).unwrap();
             for cell_message in cell_messages {
                 messages.push(json!({
-                    "column": String::from(column),
-                    "value": String::from(cell_value),
+                    "column": column,
+                    "value": cell_value,
                     "level": cell_message.get("level").and_then(|s| s.as_str()).unwrap(),
                     "rule": cell_message.get("rule").and_then(|s| s.as_str()).unwrap(),
                     "message": cell_message.get("message").and_then(|s| s.as_str()).unwrap(),
@@ -806,6 +806,7 @@ pub async fn insert_new_row(
         }
     }
 
+    // First add the new row to the table:
     let insert_stmt = local_sql_syntax(
         &pool,
         &format!(
@@ -823,6 +824,7 @@ pub async fn insert_new_row(
     }
     query.execute(pool).await?;
 
+    // Next add any validation messages to the message table:
     for m in messages {
         let column = m.get("column").and_then(|c| c.as_str()).unwrap();
         let value = m.get("value").and_then(|c| c.as_str()).unwrap();
@@ -857,8 +859,8 @@ pub async fn update_row(
     for (column, cell) in row.iter() {
         let cell = cell.as_object().unwrap();
         let cell_valid = cell.get("valid").and_then(|v| v.as_bool()).unwrap();
-        let mut cell_for_insert = cell.clone();
         let cell_value = cell.get("value").and_then(|v| v.as_str()).unwrap();
+        let mut cell_for_insert = cell.clone();
         if cell_valid {
             cell_for_insert.remove("value");
             let sql_type =
@@ -881,6 +883,7 @@ pub async fn update_row(
         }
     }
 
+    // First update the given row in the table:
     let mut update_stmt = format!(r#"UPDATE "{}" SET "#, table_name);
     update_stmt.push_str(&assignments.join(", "));
     update_stmt.push_str(&format!(r#" WHERE "row_number" = {}"#, row_number));
@@ -892,20 +895,22 @@ pub async fn update_row(
     }
     query.execute(pool).await?;
 
+    // Next delete any messages that had been previously inserted to the message table for the old
+    // version of this row:
+    let delete_sql = format!(
+        r#"DELETE FROM "message" WHERE "table" = '{}' AND "row" = {}"#,
+        table_name, row_number
+    );
+    let query = sqlx_query(&delete_sql);
+    query.execute(pool).await?;
+
+    // Finally add the messages to the message table for the new version of this row:
     for m in messages {
         let column = m.get("column").and_then(|c| c.as_str()).unwrap();
         let value = m.get("value").and_then(|c| c.as_str()).unwrap();
         let level = m.get("level").and_then(|c| c.as_str()).unwrap();
         let rule = m.get("rule").and_then(|c| c.as_str()).unwrap();
         let message = m.get("message").and_then(|c| c.as_str()).unwrap();
-
-        let delete_sql = format!(
-            r#"DELETE FROM "message" WHERE "table" = '{}' AND "row" = {} AND "column" = '{}'"#,
-            table_name, row_number, column
-        );
-        let query = sqlx_query(&delete_sql);
-        query.execute(pool).await?;
-
         let insert_sql = format!(
             r#"INSERT INTO "message"
                ("table", "row", "column", "value", "level", "rule", "message")
@@ -1671,10 +1676,12 @@ fn add_message_counts(messages: &Vec<SerdeValue>, messages_stats: &mut HashMap<S
 }
 
 /// Given a configuration map, a table name, a number of rows, and their corresponding chunk number,
-/// return a three-place tuple containing: (i) SQL strings and params for INSERT statements with
-/// VALUES for the rows in the normal table, (ii) the same for the conflict versions of the table.
-/// If the verbose flag is set, the number of errors, warnings, and information messages generated
-/// are added to messages_stats, the contents of which will later be written to stderr.
+/// return two four-place tuples, corresponding to the normal and conflict tables, respectively.
+/// Each of these contains (i) a SQL string for an insert statement to the table, (ii) parameters
+/// to bind to that SQL statement, (iii) a SQL string for an insert statement the message table, and
+/// (iv) parameters to bind to that SQL statement. If the verbose flag is set, the number of errors,
+/// warnings, and information messages generated are added to messages_stats, the contents of which
+/// will later be written to stderr.
 async fn make_inserts(
     config: &ConfigMap,
     table_name: &String,
@@ -1758,19 +1765,16 @@ async fn make_inserts(
                     values.push(String::from("NULL"));
                 }
 
+                // If the cell isn't valid, generate values and params to be used for the insert to
+                // the message table:
                 if !cell.valid {
                     if verbose {
                         add_message_counts(&cell.messages, messages_stats);
                     }
                     for message in &cell.messages {
+                        let row = row.row_number.unwrap().to_string();
                         let message_values = vec![
-                            SQL_PARAM.to_string(),
-                            format!("{}", row.row_number.unwrap()),
-                            SQL_PARAM.to_string(),
-                            SQL_PARAM.to_string(),
-                            SQL_PARAM.to_string(),
-                            SQL_PARAM.to_string(),
-                            SQL_PARAM.to_string(),
+                            SQL_PARAM, &row, SQL_PARAM, SQL_PARAM, SQL_PARAM, SQL_PARAM, SQL_PARAM,
                         ];
 
                         let message = message.as_object().unwrap();
@@ -1786,13 +1790,13 @@ async fn make_inserts(
                         message_params.push(column.clone());
                         message_params.push(cell.value.clone());
                         message_params.push(
-                            message.get("level").and_then(|l| l.as_str()).unwrap().to_string(),
+                            message.get("level").and_then(|s| s.as_str()).unwrap().to_string(),
                         );
                         message_params.push(
-                            message.get("rule").and_then(|l| l.as_str()).unwrap().to_string(),
+                            message.get("rule").and_then(|s| s.as_str()).unwrap().to_string(),
                         );
                         message_params.push(
-                            message.get("message").and_then(|l| l.as_str()).unwrap().to_string(),
+                            message.get("message").and_then(|s| s.as_str()).unwrap().to_string(),
                         );
                         let line = message_values.join(", ");
                         let line = format!("({})", line);
@@ -1804,6 +1808,8 @@ async fn make_inserts(
             let line = format!("({})", line);
             lines.push(line);
         }
+
+        // Generate the SQL output for the insert to the table:
         let mut output = String::from("");
         if !lines.is_empty() {
             output.push_str(&format!(
@@ -1823,6 +1829,7 @@ async fn make_inserts(
             output.push_str(";");
         }
 
+        // Generate the output for the insert to the message table:
         let mut message_output = String::from("");
         if !message_lines.is_empty() {
             message_output.push_str(r#"INSERT INTO "message" "#);

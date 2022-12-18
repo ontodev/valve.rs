@@ -142,11 +142,11 @@ pub async fn validate_row(
     for violation in violations.iter_mut() {
         let vrow_number = violation.get("row_number").unwrap().as_i64().unwrap() as u32;
         if Some(vrow_number) == row_number || (row_number == None && Some(vrow_number) == Some(0)) {
-            let column = violation.get("column").and_then(|c| c.as_str()).unwrap().to_string();
-            let level = violation.get("level").and_then(|c| c.as_str()).unwrap().to_string();
-            let rule = violation.get("rule").and_then(|c| c.as_str()).unwrap().to_string();
-            let message = violation.get("message").and_then(|c| c.as_str()).unwrap().to_string();
-            let result_cell = &mut result_row.contents.get_mut(&column).unwrap();
+            let column = violation.get("column").and_then(|s| s.as_str()).unwrap();
+            let level = violation.get("level").and_then(|s| s.as_str()).unwrap();
+            let rule = violation.get("rule").and_then(|s| s.as_str()).unwrap();
+            let message = violation.get("message").and_then(|s| s.as_str()).unwrap();
+            let result_cell = &mut result_row.contents.get_mut(column).unwrap();
             result_cell.messages.push(json!({
                 "level": level,
                 "rule": rule,
@@ -488,19 +488,6 @@ pub async fn validate_under(
             let raw_column_val = row.try_get_raw(format!(r#"{}"#, column).as_str()).unwrap();
             let mut column_val = String::from("");
             if raw_column_val.is_null() {
-                if let Some(SerdeValue::String(_)) = config
-                    .get("table")
-                    .and_then(|t| t.as_object())
-                    .and_then(|o| o.get(table_name))
-                    .and_then(|t| t.as_object())
-                    .and_then(|o| o.get("column"))
-                    .and_then(|c| c.as_object())
-                    .and_then(|o| o.get(column))
-                    .and_then(|c| c.get("nulltype"))
-                {
-                    continue;
-                }
-                // TODO: This could probably be factored out.
                 // If the column value already contains a different error, its value will be null
                 // and it will be returned by the above query regardless of whether it actually
                 // violates the tree's foreign constraint. So we check the value from the message
@@ -521,28 +508,9 @@ pub async fn validate_under(
                 message_query = message_query.bind(&row_number);
                 message_query = message_query.bind(column);
                 let message_rows = message_query.fetch_all(pool).await?;
-                // If there are no rows in the message table then the cell is legitimately empty. In
-                // this case its column should have a configured nulltype. Double check this is true
-                // but in either case continue:
+                // If there are no rows in the message table then the cell is legitimately empty and
+                // we can skip this row:
                 if message_rows.is_empty() {
-                    if let None = config
-                        .get("table")
-                        .and_then(|t| t.as_object())
-                        .and_then(|o| o.get(table_name))
-                        .and_then(|t| t.as_object())
-                        .and_then(|o| o.get("column"))
-                        .and_then(|c| c.as_object())
-                        .and_then(|o| o.get(column))
-                        .and_then(|c| c.get("nulltype"))
-                    {
-                        eprintln!(
-                            "Warning: Column '{}' of row {} in table '{}' is empty but {} ",
-                            column,
-                            row_number,
-                            table_name,
-                            "there are no associated messages or nulltype."
-                        );
-                    }
                     continue;
                 }
 
@@ -679,7 +647,6 @@ pub async fn validate_tree_foreign_keys(
             if !raw_parent_val.is_null() {
                 parent_val = get_column_value(&row, &parent_col, &parent_sql_type);
             } else {
-                // TODO: This could probably be factored out.
                 // If the parent column already contains a different error, its value will be null
                 // and it will be returned by the above query regardless of whether it actually
                 // violates the tree's foreign constraint. So we check the value from the message
@@ -700,28 +667,9 @@ pub async fn validate_tree_foreign_keys(
                 message_query = message_query.bind(&row_number);
                 message_query = message_query.bind(parent_col);
                 let message_rows = message_query.fetch_all(pool).await?;
-                // If there are no rows in the message table then the cell is legitimately empty. In
-                // this case its column should have a configured nulltype. Double check this is true
-                // but in either case continue:
+                // If there are no rows in the message table then the cell is legitimately empty and
+                // we can skip this row:
                 if message_rows.is_empty() {
-                    if let None = config
-                        .get("table")
-                        .and_then(|t| t.as_object())
-                        .and_then(|o| o.get(table_name))
-                        .and_then(|t| t.as_object())
-                        .and_then(|o| o.get("column"))
-                        .and_then(|c| c.as_object())
-                        .and_then(|o| o.get(parent_col))
-                        .and_then(|c| c.get("nulltype"))
-                    {
-                        eprintln!(
-                            "Warning: Column '{}' of row {} in table '{}' is empty but {} ",
-                            parent_col,
-                            row_number,
-                            table_name,
-                            "there are no associated messages or nulltype."
-                        );
-                    }
                     continue;
                 }
 
