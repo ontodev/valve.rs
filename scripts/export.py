@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
 import csv
-import json
 import os.path
 import psycopg2
 import re
@@ -9,7 +8,6 @@ import sqlite3
 import sys
 
 from argparse import ArgumentParser
-from collections import OrderedDict
 
 
 def get_column_order_and_info_for_postgres(cursor, table):
@@ -37,36 +35,26 @@ def get_column_order_and_info_for_postgres(cursor, table):
 
     cursor.execute(
         f"""
-        SELECT column_name
+        SELECT column_name, data_type
         FROM information_schema.columns
         WHERE table_name = '{table}'
         ORDER BY ordinal_position
         """
     )
+    datatypes = {}
     if not primary_keys:
         sorted_columns = ["row_number"]
         unsorted_columns = [row[0] for row in cursor]
     else:
-
-        def add_meta(columns):
-            columns_with_meta = []
-            for column in columns:
-                columns_with_meta.append(column)
-                columns_with_meta.append(column + "_meta")
-            return columns_with_meta
-
         unsorted_columns = []
         non_pk_columns = []
         for row in cursor:
             column_name = row[0]
+            datatypes[column_name] = row[1]
             unsorted_columns.append(column_name)
-            if (
-                column_name not in primary_keys
-                and not column_name.endswith("_meta")
-                and not column_name == "row_number"
-            ):
+            if column_name not in primary_keys and not column_name == "row_number":
                 non_pk_columns.append(column_name)
-        sorted_columns = add_meta(primary_keys + non_pk_columns)
+        sorted_columns = primary_keys + non_pk_columns
 
     cursor.execute(constraints_query_template.format("UNIQUE"))
     unique_keys = [row[0] for row in cursor]
@@ -76,6 +64,7 @@ def get_column_order_and_info_for_postgres(cursor, table):
         "sorted_columns": sorted_columns,
         "primary_keys": primary_keys,
         "unique_keys": unique_keys,
+        "datatypes": datatypes,
     }
 
 
@@ -90,30 +79,22 @@ def get_column_order_and_info_for_sqlite(cursor, table):
     """
     cursor.execute(f'PRAGMA TABLE_INFO("{table}")')
     columns_info = [d[0] for d in cursor.description]
-    pragma_rows = list(map(lambda r: OrderedDict(zip(columns_info, r)), cursor))
-    primary_keys = OrderedDict()
+    pragma_rows = list(map(lambda r: dict(zip(columns_info, r)), cursor))
+    primary_keys = dict()
     if not any([row["pk"] == 1 for row in pragma_rows]):
         sorted_columns = ["row_number"]
         unsorted_columns = [p["name"] for p in pragma_rows]
     else:
-
-        def add_meta(columns):
-            columns_with_meta = []
-            for column in columns:
-                columns_with_meta.append(column)
-                columns_with_meta.append(column + "_meta")
-            return columns_with_meta
-
         unsorted_columns = []
         non_pk_columns = []
         for row in pragma_rows:
             unsorted_columns.append(row["name"])
             if row["pk"] != 0:
                 primary_keys[row["pk"]] = row["name"]
-            elif not row["name"].endswith("_meta") and not row["name"] == "row_number":
+            elif not row["name"] == "row_number":
                 non_pk_columns.append(row["name"])
-        primary_keys = OrderedDict(sorted(primary_keys.items()))
-        sorted_columns = add_meta([primary_keys[key] for key in primary_keys] + non_pk_columns)
+        primary_keys = dict(sorted(primary_keys.items()))
+        sorted_columns = [primary_keys[key] for key in primary_keys] + non_pk_columns
 
     # Two steps are needed (INDEX_LIST and INDEX_INFO) to get the list of unique keys:
     cursor.execute(f'PRAGMA INDEX_LIST("{table}")')
@@ -140,16 +121,13 @@ def get_column_order_and_info_for_sqlite(cursor, table):
 def export_data(cursor, is_sqlite, args):
     """
     Given a database cursor, a flag indicating whether this is a sqlite or postgres db, and a
-    dictionary containing: an output directory, "output", a list of tables, "tables", optionally
-    a flag, "raw" (which defaults to False), which if True indicates that the data should be
-    exported as is (i.e., including meta columns and simply sorted by row number), and optionally a
-    flag, "nosort", which if True indicates that the data should not be sorted by anything other
+    dictionary containing: an output directory, "output", a list of tables, "tables", and optionally
+    a flag, "nosort", which if True indicates that the data should not be sorted by anything other
     than the row number; given all of this, export all of the given database tables to .tsv files
-    in the output directory. Note that if "raw" is True, then "nosort" is ignored.
+    in the output directory.
     """
     output_dir = os.path.normpath(args["output_dir"])
     tables = args["tables"]
-    raw = bool(args.get("raw"))
     nosort = bool(args.get("nosort"))
 
     for table in tables:
@@ -163,27 +141,34 @@ def export_data(cursor, is_sqlite, args):
 
             select = []
             for column in unsorted_columns:
-                if raw or column == "row_number":
+                if column == "row_number":
                     select.append(f'"{column}"')
-                elif not column.endswith("_meta"):
-                    if is_sqlite:
-                        else_stmt = f"""JSON_EXTRACT("{column}_meta", '$.value')"""
-                    else:
-                        else_stmt = f"(JSON(\"{column}_meta\") ->> 'value')::TEXT"
+                else:
+                    cast = "" if is_sqlite else "::TEXT"
                     select.append(
                         f"""
                         CASE
-                          WHEN "{column}" IS NOT NULL THEN CAST("{column}" AS TEXT)
-                          ELSE {else_stmt}
-                          END AS "{column}"
+                          WHEN "{column}" IS NULL THEN (
+                            SELECT VALUE
+                            FROM "message"
+                            WHERE "row" = "row_number"
+                              AND "column" = '{column}'
+                              AND "table" = '{table}'
+                            LIMIT 1
+                          )
+                          ELSE "{column}"{cast}
+                        END AS "{column}"
                         """
                     )
             select = ", ".join(select)
 
-            if raw or nosort:
+            if nosort:
                 order_by = ["row_number"]
-            else:
+            elif is_sqlite:
                 order_by = list(map(lambda x: f'"{x}"', sorted_columns))
+            else:
+                datatypes = columns_info["datatypes"]
+                order_by = list(map(lambda x: f'"{x}"::{datatypes[x]}', sorted_columns))
             order_by = ", ".join(order_by)
 
             # Fetch the rows from the table and write them to a corresponding TSV file in the
@@ -191,11 +176,7 @@ def export_data(cursor, is_sqlite, args):
             cursor.execute(f'SELECT {select} FROM "{table}_view" ORDER BY {order_by}')
             colnames = [d[0] for d in cursor.description]
             rows = map(lambda r: dict(zip(colnames, r)), cursor)
-
-            if raw:
-                fieldnames = [c for c in colnames if c != "row_number"]
-            else:
-                fieldnames = [c for c in colnames if not c.endswith("_meta") and c != "row_number"]
+            fieldnames = [c for c in colnames if c != "row_number"]
             with open(f"{output_dir}/{table}.tsv", "w", newline="\n") as csvfile:
                 writer = csv.DictWriter(
                     csvfile,
@@ -239,63 +220,10 @@ def export_messages(cursor, is_sqlite, args):
             columnid = chr(mod + 64) + columnid
         return columnid
 
-    def create_message_rows(table, row, primary_keys):
-        if a1 or not primary_keys:
-            row_number = "{}".format(row["row_number"])
-        else:
-            row_number = []
-            for pk in primary_keys:
-                rn = str(row[pk]) if type(row[pk]) == int else row[pk]
-                if not rn:
-                    if is_sqlite:
-                        rn = json.loads(row[f"{pk}_meta"]).get("value") or "0"
-                    else:
-                        rn = row[f"{pk}_meta"].get("value") or "0"
-                row_number.append(rn)
-            row_number = "###".join(row_number)
-
-        message_rows = []
-        for column_key in [ckey for ckey in row if ckey.endswith("_meta")]:
-            meta = json.loads(row[column_key]) if is_sqlite else row[column_key]
-            if not meta["valid"]:
-                columnid = re.sub("_meta", "", column_key)
-                if a1:
-                    columnid = col_to_a1(
-                        columnid, [c for c in row if c != "row_number" and not c.endswith("_meta")]
-                    )
-
-                for message in meta["messages"]:
-                    m = {
-                        "table": table,
-                        "level": message["level"],
-                        "rule_id": message["rule"],
-                        "message": message["message"],
-                        "value": meta["value"],
-                    }
-                    if not a1:
-                        m.update({"row": row_number, "column": columnid})
-                    else:
-                        m.update({"cell": f"{columnid}{row_number}"})
-                    message_rows.append(m)
-        return message_rows
-
-    def select_column(column):
-        if not column.endswith("_meta"):
-            sql = f'"{column}"'
-        else:
-            json_func = "JSON" if is_sqlite else "JSONB"
-            sql = (
-                f'CASE WHEN "{column}" IS NOT NULL THEN {json_func}("{column}") '
-                f'ELSE {json_func}(\'{{"valid": true, "messages": []}}\') '
-                f'END AS "{column}"'
-            )
-
-        return sql
-
     if a1:
-        fieldnames = ["table", "cell", "level", "rule_id", "message", "value"]
+        fieldnames = ["table", "cell", "level", "rule", "message", "value"]
     else:
-        fieldnames = ["table", "row", "column", "level", "rule_id", "message", "value"]
+        fieldnames = ["table", "row", "column", "level", "rule", "message", "value"]
     with open(f"{output_dir}/messages.tsv", "w", newline="\n") as csvfile:
         writer = csv.DictWriter(
             csvfile,
@@ -309,29 +237,51 @@ def export_messages(cursor, is_sqlite, args):
             quotechar="",
         )
         writer.writeheader()
-        for table in tables:
-            try:
-                if is_sqlite:
-                    columns_info = get_column_order_and_info_for_sqlite(cursor, table)
-                else:
-                    columns_info = get_column_order_and_info_for_postgres(cursor, table)
-                unsorted_columns = columns_info["unsorted_columns"]
-                sorted_columns = columns_info["sorted_columns"]
-                primary_keys = columns_info["primary_keys"]
 
-                select = ", ".join([select_column(c) for c in unsorted_columns])
-                # For PostgreSQL we need to explicitly cast to TEXT, otherwise it will complain
-                # when we try to call LOWER() on non-character fields like row_number.
-                cast = "" if is_sqlite else "::TEXT"
-                order_by = ", ".join([f'LOWER("{c}"{cast}) NULLS FIRST' for c in sorted_columns])
-                cursor.execute(f'SELECT {select} FROM "{table}_view" ORDER BY {order_by}')
-                columns_info = [d[0] for d in cursor.description]
-                rows = map(lambda r: OrderedDict(zip(columns_info, r)), cursor)
-                for row in rows:
-                    message_rows = create_message_rows(table, row, primary_keys)
-                    writer.writerows(message_rows)
-            except sqlite3.OperationalError as e:
-                print(f"ERROR while exporting messages for {table}: {e}", file=sys.stderr)
+        quoted_tables = [f"'{t}'" for t in tables]
+        table_list = ", ".join(quoted_tables)
+        message_select = f'''SELECT "table", "row", "column", "level", "rule", "message", "value"
+                             FROM "message"
+                             WHERE "table" in ({table_list})
+                             ORDER by "table", "row", "column", "rule"'''
+        try:
+            if not a1:
+                cursor.execute(message_select)
+                message_columns_info = [d[0] for d in cursor.description]
+                message_rows = map(lambda r: dict(zip(message_columns_info, r)), cursor)
+                writer.writerows(message_rows)
+            else:
+                table_columns = {}
+                for table in tables:
+                    if is_sqlite:
+                        columns = get_column_order_and_info_for_sqlite(cursor, table)
+                    else:
+                        columns = get_column_order_and_info_for_postgres(cursor, table)
+                    columns = [c for c in columns["unsorted_columns"] if c != "row_number"]
+                    table_columns[table] = columns
+
+                cursor.execute(message_select)
+                message_columns_info = [d[0] for d in cursor.description]
+                message_rows = map(lambda r: dict(zip(message_columns_info, r)), cursor)
+                a1_rows = []
+                for row in message_rows:
+                    columns = table_columns[row["table"]]
+                    column_id = col_to_a1(row["column"], columns)
+                    row_number = row["row"]
+                    column_id = f"{column_id}{row_number}"
+                    a1_rows.append(
+                        {
+                            "table": row["table"],
+                            "cell": column_id,
+                            "level": row["level"],
+                            "rule": row["rule"],
+                            "message": row["message"],
+                            "value": row["value"],
+                        }
+                    )
+                writer.writerows(a1_rows)
+        except sqlite3.OperationalError as e:
+            print(f"ERROR while exporting messages for {table}: {e}", file=sys.stderr)
 
 
 if __name__ == "__main__":
@@ -344,9 +294,6 @@ if __name__ == "__main__":
         help="Export table data. For command-line options, run: `%(prog)s data --help`",
     )
 
-    sub1.add_argument(
-        "--raw", action="store_true", help="Include _meta columns in table data export"
-    )
     sub1.add_argument("--nosort", action="store_true", help="Do not sort the data by primary key")
     sub1.set_defaults(func=export_data)
 
