@@ -9,3 +9,4 @@ table3	test/src/ontology/table3.tsv	The third data table
 table4	test/src/ontology/table4.tsv	The fourth data table	
 table5	test/src/ontology/table5.tsv	The fifth data table	
 table6	test/src/ontology/table6.tsv	The sixth data table (like table2 but all numeric)	
+table7	test/src/ontology/table7.tsv	The seventh data table	

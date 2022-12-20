@@ -123,33 +123,6 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
     update_row(&config, &pool, "table2", &result_row, 1).await?;
 
     let row = json!({
-        "child": {"messages": [], "valid": true, "value": 2},
-        "parent": {"messages": [], "valid": true, "value": 6},
-        "xyzzy": {"messages": [], "valid": true, "value": 23},
-        "foo": {"messages": [], "valid": true, "value": 'a'},
-        "bar": {
-            "messages": [
-                {"level": "error", "message": "An unrelated error", "rule": "custom:unrelated"}
-            ],
-            "valid": false,
-            "value": 2,
-        },
-    });
-
-    let result_row = validate_row(
-        &config,
-        &compiled_datatype_conditions,
-        &compiled_rule_conditions,
-        &pool,
-        "table6",
-        row.as_object().unwrap(),
-        true,
-        Some(1),
-    )
-    .await?;
-    update_row(&config, &pool, "table6", &result_row, 1).await?;
-
-    let row = json!({
         "id": {"messages": [], "valid": true, "value": "BFO:0000027"},
         "label": {"messages": [], "valid": true, "value": "bazaar"},
         "parent": {
@@ -175,6 +148,33 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
     )
     .await?;
     let _new_row_num = insert_new_row(&config, &pool, "table3", &result_row).await?;
+
+    let row = json!({
+        "child": {"messages": [], "valid": true, "value": 2},
+        "parent": {"messages": [], "valid": true, "value": 6},
+        "xyzzy": {"messages": [], "valid": true, "value": 23},
+        "foo": {"messages": [], "valid": true, "value": 'a'},
+        "bar": {
+            "messages": [
+                {"level": "error", "message": "An unrelated error", "rule": "custom:unrelated"}
+            ],
+            "valid": false,
+            "value": 2,
+        },
+    });
+
+    let result_row = validate_row(
+        &config,
+        &compiled_datatype_conditions,
+        &compiled_rule_conditions,
+        &pool,
+        "table6",
+        row.as_object().unwrap(),
+        true,
+        Some(1),
+    )
+    .await?;
+    update_row(&config, &pool, "table6", &result_row, 1).await?;
 
     let row = json!({
         "child": {"messages": [], "valid": true, "value": 2},

@@ -25,7 +25,7 @@ do
     table_path=$pwd/output/$table_path
     table_file=$(basename $table_path)
     table=${table_file%.*}
-    ${export_script} data --nosort $db $output_dir $table
+    ${export_script} data $db $output_dir $table
     diff -q $expected_dir/${table}.tsv ${table_path}
     ret_value=$(expr $ret_value + $?)
 done

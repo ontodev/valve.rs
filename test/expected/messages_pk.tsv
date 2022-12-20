@@ -1,0 +1,2 @@
+table	primary_key	row	column	level	rule	message	value
+table7	zork	c	planetfall	error	datatype:integer	planetfall should be a positive or negative integer	e
