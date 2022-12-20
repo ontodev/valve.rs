@@ -12,12 +12,12 @@ from argparse import ArgumentParser
 
 def get_column_order_and_info_for_postgres(cursor, table):
     """
-    Given a database cursor (for a PostgreSQL database) and a table name, determine which columns
-    rows should be sorted by. For tables with primary keys, sort by primary key first, then by all
-    other columns from left to right. For tables without primary keys, sort by row_number. Returns a
-    dictionary consisting of an unsorted and a sorted list of column names, a list of the table's
-    primary keys sorted by priority, and a list of the table's unique keys. I.e., returns a dict of
-    the form: {"unsorted_columns": [], "sorted_columns": [], "primary_keys": [], "unique_keys": []}
+    Given a database cursor (for a PostgreSQL database) and a table name, returns a dictionary
+    consisting of an unsorted and a sorted list of column names, a list of the table's primary keys
+    sorted by priority, and a list of the table's unique keys. I.e., returns a dict of the form:
+    {"unsorted_columns": [], "sorted_columns": [], "primary_keys": [], "unique_keys": []}. Note that
+    for tables with primary keys, we sort by primary key first, then by all other columns from left
+    to right. For tables without primary keys, we sort by row_number.
     """
     constraints_query_template = f"""
         SELECT kcu.column_name
@@ -35,13 +35,12 @@ def get_column_order_and_info_for_postgres(cursor, table):
 
     cursor.execute(
         f"""
-        SELECT column_name, data_type
+        SELECT column_name
         FROM information_schema.columns
         WHERE table_name = '{table}'
         ORDER BY ordinal_position
         """
     )
-    datatypes = {}
     if not primary_keys:
         sorted_columns = ["row_number"]
         unsorted_columns = [row[0] for row in cursor]
@@ -50,7 +49,6 @@ def get_column_order_and_info_for_postgres(cursor, table):
         non_pk_columns = []
         for row in cursor:
             column_name = row[0]
-            datatypes[column_name] = row[1]
             unsorted_columns.append(column_name)
             if column_name not in primary_keys and not column_name == "row_number":
                 non_pk_columns.append(column_name)
@@ -64,18 +62,17 @@ def get_column_order_and_info_for_postgres(cursor, table):
         "sorted_columns": sorted_columns,
         "primary_keys": primary_keys,
         "unique_keys": unique_keys,
-        "datatypes": datatypes,
     }
 
 
 def get_column_order_and_info_for_sqlite(cursor, table):
     """
-    Given a database cursor (for a SQLite database) and a table name, determine which columns rows
-    should be sorted by. For tables with primary keys, sort by primary key first, then by all other
-    columns from left to right. For tables without primary keys, sort by row_number. Returns a
-    dictionary consisting of an unsorted and a sorted list of column names, a list of the table's
-    primary keys sorted by priority, and a list of the table's unique keys. I.e., returns a dict of
-    the form: {"unsorted_columns": [], "sorted_columns": [], "primary_keys": [], "unique_keys": []}
+    Given a database cursor (for a SQLite database) and a table name, returns a dictionary
+    consisting of an unsorted and a sorted list of column names, a list of the table's primary keys
+    sorted by priority, and a list of the table's unique keys. I.e., returns a dict of the form:
+    {"unsorted_columns": [], "sorted_columns": [], "primary_keys": [], "unique_keys": []}. Note that
+    for tables with primary keys, we sort by primary key first, then by all other columns from left
+    to right. For tables without primary keys, we sort by row_number.
     """
     cursor.execute(f'PRAGMA TABLE_INFO("{table}")')
     columns_info = [d[0] for d in cursor.description]
@@ -121,14 +118,11 @@ def get_column_order_and_info_for_sqlite(cursor, table):
 def export_data(cursor, is_sqlite, args):
     """
     Given a database cursor, a flag indicating whether this is a sqlite or postgres db, and a
-    dictionary containing: an output directory, "output", a list of tables, "tables", and optionally
-    a flag, "nosort", which if True indicates that the data should not be sorted by anything other
-    than the row number; given all of this, export all of the given database tables to .tsv files
-    in the output directory.
+    dictionary containing: an output directory, "output", and a list of tables, "tables": export all
+    of the given database tables to .tsv files in the output directory.
     """
     output_dir = os.path.normpath(args["output_dir"])
     tables = args["tables"]
-    nosort = bool(args.get("nosort"))
 
     for table in tables:
         try:
@@ -136,7 +130,6 @@ def export_data(cursor, is_sqlite, args):
                 columns_info = get_column_order_and_info_for_sqlite(cursor, table)
             else:
                 columns_info = get_column_order_and_info_for_postgres(cursor, table)
-            sorted_columns = columns_info["sorted_columns"]
             unsorted_columns = columns_info["unsorted_columns"]
 
             select = []
@@ -162,18 +155,9 @@ def export_data(cursor, is_sqlite, args):
                     )
             select = ", ".join(select)
 
-            if nosort:
-                order_by = ["row_number"]
-            elif is_sqlite:
-                order_by = list(map(lambda x: f'"{x}"', sorted_columns))
-            else:
-                datatypes = columns_info["datatypes"]
-                order_by = list(map(lambda x: f'"{x}"::{datatypes[x]}', sorted_columns))
-            order_by = ", ".join(order_by)
-
             # Fetch the rows from the table and write them to a corresponding TSV file in the
             # output directory:
-            cursor.execute(f'SELECT {select} FROM "{table}_view" ORDER BY {order_by}')
+            cursor.execute(f'SELECT {select} FROM "{table}_view" ORDER BY "row_number"')
             colnames = [d[0] for d in cursor.description]
             rows = map(lambda r: dict(zip(colnames, r)), cursor)
             fieldnames = [c for c in colnames if c != "row_number"]
@@ -200,13 +184,15 @@ def export_data(cursor, is_sqlite, args):
 def export_messages(cursor, is_sqlite, args):
     """
     Given a database cursor, a flag indicating whether this is a sqlite or postgres db, and a
-    dictionary containing: an output directory, "output", a list of tables, "tables", and a flag,
-    "a1", indicating whether to use A1 format, export all of the error messages contained in the
-    given database tables to a file called messages.tsv in the output directory.
+    dictionary containing: an output directory, "output", a list of tables, "tables", a flag, "pk",
+    indicating whether rows should be identified using the primary key value(s) for their table, and
+    a flag, "a1", indicating whether to use A1 format: export all of the error messages contained in
+    the given database tables to a file called messages.tsv in the output directory.
     """
     output_dir = os.path.normpath(args["output_dir"])
     tables = args["tables"]
     a1 = args["a1"]
+    pk = args["pk"]
 
     def col_to_a1(column, columns):
         col = columns.index(column) + 1
@@ -222,6 +208,8 @@ def export_messages(cursor, is_sqlite, args):
 
     if a1:
         fieldnames = ["table", "cell", "level", "rule", "message", "value"]
+    elif pk:
+        fieldnames = ["table", "primary_key", "row", "column", "level", "rule", "message", "value"]
     else:
         fieldnames = ["table", "row", "column", "level", "rule", "message", "value"]
     with open(f"{output_dir}/messages.tsv", "w", newline="\n") as csvfile:
@@ -238,48 +226,84 @@ def export_messages(cursor, is_sqlite, args):
         )
         writer.writeheader()
 
-        quoted_tables = [f"'{t}'" for t in tables]
-        table_list = ", ".join(quoted_tables)
-        message_select = f'''SELECT "table", "row", "column", "level", "rule", "message", "value"
-                             FROM "message"
-                             WHERE "table" in ({table_list})
-                             ORDER by "table", "row", "column", "rule"'''
+        in_clause = [f"'{t}'" for t in tables]
+        in_clause = ", ".join(in_clause)
         try:
-            if not a1:
-                cursor.execute(message_select)
-                message_columns_info = [d[0] for d in cursor.description]
-                message_rows = map(lambda r: dict(zip(message_columns_info, r)), cursor)
-                writer.writerows(message_rows)
+            if not pk:
+                message_select = f"""
+                SELECT "table", "row", "column", "level", "rule", "message", "value"
+                FROM "message"
+                WHERE "table" in ({in_clause})
+                ORDER by "table", "row", "column", "rule"
+                """
+                if not a1:
+                    cursor.execute(message_select)
+                    message_columns_info = [d[0] for d in cursor.description]
+                    message_rows = map(lambda r: dict(zip(message_columns_info, r)), cursor)
+                    writer.writerows(message_rows)
+                else:
+                    table_columns = {}
+                    for table in tables:
+                        if is_sqlite:
+                            columns = get_column_order_and_info_for_sqlite(cursor, table)
+                        else:
+                            columns = get_column_order_and_info_for_postgres(cursor, table)
+                        columns = [c for c in columns["unsorted_columns"] if c != "row_number"]
+                        table_columns[table] = columns
+
+                    cursor.execute(message_select)
+                    message_columns_info = [d[0] for d in cursor.description]
+                    message_rows = map(lambda r: dict(zip(message_columns_info, r)), cursor)
+                    a1_rows = []
+                    for row in message_rows:
+                        columns = table_columns[row["table"]]
+                        column_id = col_to_a1(row["column"], columns)
+                        row_number = row["row"]
+                        column_id = f"{column_id}{row_number}"
+                        a1_rows.append(
+                            {
+                                "table": row["table"],
+                                "cell": column_id,
+                                "level": row["level"],
+                                "rule": row["rule"],
+                                "message": row["message"],
+                                "value": row["value"],
+                            }
+                        )
+                    writer.writerows(a1_rows)
             else:
-                table_columns = {}
-                for table in tables:
+                for table in sorted(tables):
+                    cast = ""
                     if is_sqlite:
                         columns = get_column_order_and_info_for_sqlite(cursor, table)
                     else:
                         columns = get_column_order_and_info_for_postgres(cursor, table)
-                    columns = [c for c in columns["unsorted_columns"] if c != "row_number"]
-                    table_columns[table] = columns
 
-                cursor.execute(message_select)
-                message_columns_info = [d[0] for d in cursor.description]
-                message_rows = map(lambda r: dict(zip(message_columns_info, r)), cursor)
-                a1_rows = []
-                for row in message_rows:
-                    columns = table_columns[row["table"]]
-                    column_id = col_to_a1(row["column"], columns)
-                    row_number = row["row"]
-                    column_id = f"{column_id}{row_number}"
-                    a1_rows.append(
-                        {
-                            "table": row["table"],
-                            "cell": column_id,
-                            "level": row["level"],
-                            "rule": row["rule"],
-                            "message": row["message"],
-                            "value": row["value"],
-                        }
-                    )
-                writer.writerows(a1_rows)
+                    if not is_sqlite and len(columns["primary_keys"]) > 1:
+                        cast = "::TEXT"
+                    pk_name = "###".join(columns["primary_keys"])
+                    pk_name = f"'{pk_name}'" if pk_name else "'row_number'"
+                    pk_value = [f't."{k}"{cast}' for k in columns["primary_keys"]]
+                    pk_value = " || '###' || ".join(pk_value) if pk_value else 't."row_number"'
+                    message_select = f"""
+                    SELECT
+                      m."table",
+                      {pk_name} AS "primary_key",
+                      {pk_value} AS "row",
+                      m."column",
+                      m."level",
+                      m."rule",
+                      m."message",
+                      m."value"
+                    FROM "message" m
+                      INNER JOIN "{table}_view" t ON m."row" = t."row_number"
+                    WHERE m."table" = '{table}'
+                    ORDER by "row", m."column", m."rule"
+                    """
+                    cursor.execute(message_select)
+                    message_columns_info = [d[0] for d in cursor.description]
+                    message_rows = map(lambda r: dict(zip(message_columns_info, r)), cursor)
+                    writer.writerows(message_rows)
         except sqlite3.OperationalError as e:
             print(f"ERROR while exporting messages for {table}: {e}", file=sys.stderr)
 
@@ -294,7 +318,6 @@ if __name__ == "__main__":
         help="Export table data. For command-line options, run: `%(prog)s data --help`",
     )
 
-    sub1.add_argument("--nosort", action="store_true", help="Do not sort the data by primary key")
     sub1.set_defaults(func=export_data)
 
     sub2 = sub_parsers.add_parser(
@@ -302,7 +325,9 @@ if __name__ == "__main__":
         description="Export error messages",
         help="Export error messages. For command-line options, run: `%(prog)s messages --help`",
     )
-    sub2.add_argument("--a1", action="store_true", help="Output error messages in A1 format")
+    sub2_group = sub2.add_mutually_exclusive_group()
+    sub2_group.add_argument("--a1", action="store_true", help="Output error messages in A1 format")
+    sub2_group.add_argument("--pk", action="store_true", help="Identify rows using primary keys")
     sub2.set_defaults(func=export_messages)
 
     for sub in [sub1, sub2]:
