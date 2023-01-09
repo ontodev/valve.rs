@@ -393,7 +393,7 @@ if __name__ == "__main__":
                 print(f"The database '{path}' does not exist.", file=sys.stderr)
                 sys.exit(1)
             params = m[4] or ""
-            db = f"file:{path}{params}"
+            db = f"{path}{params}"
             with sqlite3.connect(db) as conn:
                 cursor = conn.cursor()
                 func(cursor, True, args)
