@@ -142,15 +142,17 @@ pub async fn validate_row(
     for violation in violations.iter_mut() {
         let vrow_number = violation.get("row_number").unwrap().as_i64().unwrap() as u32;
         if Some(vrow_number) == row_number || (row_number == None && Some(vrow_number) == Some(0)) {
-            let column = violation.get("column").and_then(|c| c.as_str()).unwrap().to_string();
-            let column_meta = violation.get_mut("meta").unwrap();
-            // If there were any previous error messages for this cell, add them to the meta info
-            // that we just received:
-            let result_cell = &mut result_row.contents.get_mut(&column).unwrap();
-            let column_meta_messages =
-                column_meta.get_mut("messages").and_then(|m| m.as_array_mut()).unwrap();
-            result_cell.messages.append(column_meta_messages);
-            if result_cell.messages.len() > 0 {
+            let column = violation.get("column").and_then(|s| s.as_str()).unwrap();
+            let level = violation.get("level").and_then(|s| s.as_str()).unwrap();
+            let rule = violation.get("rule").and_then(|s| s.as_str()).unwrap();
+            let message = violation.get("message").and_then(|s| s.as_str()).unwrap();
+            let result_cell = &mut result_row.contents.get_mut(column).unwrap();
+            result_cell.messages.push(json!({
+                "level": level,
+                "rule": rule,
+                "message": message,
+            }));
+            if result_cell.valid {
                 result_cell.valid = false;
             }
         }
@@ -441,11 +443,6 @@ pub async fn validate_under(
                     "row_number",
                     "{}"."{}",
                     CASE
-                      WHEN "{}"."{}_meta" IS NOT NULL
-                        THEN JSON("{}"."{}_meta")
-                       ELSE JSON('{{"valid": true, "messages": []}}')
-                    END AS "{}_meta",
-                    CASE
                       WHEN "{}"."{}" IN (
                         SELECT "{}" FROM "{}"
                       )
@@ -464,11 +461,6 @@ pub async fn validate_under(
                 column,
                 effective_table,
                 column,
-                effective_table,
-                column,
-                column,
-                effective_table,
-                column,
                 tree_child,
                 effective_tree,
                 effective_table,
@@ -483,30 +475,62 @@ pub async fn validate_under(
             query = query.bind(param);
         }
         let rows = query.fetch_all(pool).await?;
+
         for row in rows {
-            let meta: &str = row.get_unchecked(format!(r#"{}_meta"#, column).as_str());
-            let meta: SerdeValue = serde_json::from_str(meta).unwrap();
-            let meta = meta.as_object().unwrap();
-            // If the value in the parent column is legitimately empty, or if it is invalid
-            // because of a datatype error, then just skip this row. In the latter case this is
-            // to avoid potential datatype errors that might arise if we compare a numeric with a
-            // non-numeric type.
-            if meta.contains_key("nulltype")
-                || (meta.get("valid").unwrap() == false
-                    && contains_dt_violation(
-                        &meta.get("messages").and_then(|m| m.as_array()).unwrap(),
-                    ))
-            {
-                continue;
+            let raw_row_number = row.try_get_raw("row_number").unwrap();
+            let row_number: i64;
+            if raw_row_number.is_null() {
+                row_number = 0;
+            } else {
+                row_number = row.get("row_number");
             }
 
-            // If the value in the column already contains a different error, its value will be null
-            // and it will be returned by the above query regardless of whether it is valid or
-            // invalid. So we need to check the value from the meta column instead.
             let raw_column_val = row.try_get_raw(format!(r#"{}"#, column).as_str()).unwrap();
-            let column_val: String;
+            let mut column_val = String::from("");
             if raw_column_val.is_null() {
-                column_val = meta.get("value").and_then(|v| v.as_str()).unwrap().to_string();
+                // If the column value already contains a different error, its value will be null
+                // and it will be returned by the above query regardless of whether it actually
+                // violates the tree's foreign constraint. So we check the value from the message
+                // table instead:
+                let message_sql = local_sql_syntax(
+                    &pool,
+                    &format!(
+                        r#"SELECT "value", "level", "rule", "message"
+                           FROM "message"
+                           WHERE "table" = {}
+                             AND "row" = {}
+                             AND "column" = {}"#,
+                        SQL_PARAM, SQL_PARAM, SQL_PARAM
+                    ),
+                );
+                let mut message_query = sqlx_query(&message_sql);
+                message_query = message_query.bind(&table_name);
+                message_query = message_query.bind(&row_number);
+                message_query = message_query.bind(column);
+                let message_rows = message_query.fetch_all(pool).await?;
+                // If there are no rows in the message table then the cell is legitimately empty and
+                // we can skip this row:
+                if message_rows.is_empty() {
+                    continue;
+                }
+
+                let mut has_dt_violation = false;
+                for mrow in &message_rows {
+                    let rule: &str = mrow.get_unchecked("rule");
+                    if rule.starts_with("datatype:") {
+                        has_dt_violation = true;
+                        break;
+                    } else {
+                        let value: &str = mrow.get_unchecked("value");
+                        column_val = value.to_string();
+                    }
+                }
+                // If the value in the column has already been deemed to be invalid because
+                // of a datatype error, then just skip this row. This is to avoid potential database
+                // errors that might arise if we compare a numeric with a non-numeric type.
+                if has_dt_violation {
+                    continue;
+                }
             } else {
                 column_val = get_column_value(&row, &column, &sql_type);
             }
@@ -516,55 +540,25 @@ pub async fn validate_under(
             let is_in_tree: i32 = row.get("is_in_tree");
             let is_under: i32 = row.get("is_under");
             if is_in_tree == 0 {
-                let mut meta = meta.clone();
-                meta.insert("valid".to_string(), SerdeValue::Bool(false));
-                meta.insert("value".to_string(), SerdeValue::String(column_val.to_string()));
-                let message = json!({
-                    "rule": "under:not-in-tree",
+                results.push(json!({
+                    "row_number": row_number as u32,
+                    "column": column,
+                    "value": column_val,
                     "level": "error",
+                    "rule": "under:not-in-tree",
                     "message": format!("Value {} of column {} is not in {}.{}",
                                        column_val, column, tree_table, tree_child).as_str(),
-                });
-                meta.get_mut("messages")
-                    .and_then(|m| m.as_array_mut())
-                    .and_then(|a| Some(a.push(message)));
-
-                let raw_row_number = row.try_get_raw("row_number").unwrap();
-                let row_number: i64;
-                if raw_row_number.is_null() {
-                    row_number = 0;
-                } else {
-                    row_number = row.get("row_number");
-                }
-
-                let row_number = row_number as u32;
-                let result = json!({
-                    "row_number": row_number,
-                    "column": column,
-                    "meta": meta,
-                });
-                results.push(result);
+                }));
             } else if is_under == 0 {
-                let mut meta = meta.clone();
-                meta.insert("valid".to_string(), SerdeValue::Bool(false));
-                meta.insert("value".to_string(), SerdeValue::String(column_val.to_string()));
-                let message = json!({
-                    "rule": "under:not-under",
+                results.push(json!({
+                    "row_number": row_number as u32,
+                    "column": column,
+                    "value": column_val,
                     "level": "error",
+                    "rule": "under:not-under",
                     "message": format!("Value '{}' of column {} is not under '{}'",
                                        column_val, column, uval.clone()).as_str(),
-                });
-                meta.get_mut("messages")
-                    .and_then(|m| m.as_array_mut())
-                    .and_then(|a| Some(a.push(message)));
-                let row_number: i64 = row.get("row_number");
-                let row_number = row_number as u32;
-                let result = json!({
-                    "row_number": row_number,
-                    "column": column,
-                    "meta": meta,
-                });
-                results.push(result);
+                }));
             }
         }
     }
@@ -619,12 +613,7 @@ pub async fn validate_tree_foreign_keys(
             &format!(
                 r#"{}
                    SELECT
-                     t1."row_number", t1."{}",
-                     CASE
-                       WHEN t1."{}_meta" IS NOT NULL
-                         THEN JSON(t1."{}_meta")
-                       ELSE JSON('{{"valid": true, "messages": []}}')
-                     END AS "{}_meta"
+                     t1."row_number", t1."{}"
                    FROM "{}" t1
                    WHERE NOT EXISTS (
                      SELECT 1
@@ -632,9 +621,6 @@ pub async fn validate_tree_foreign_keys(
                      WHERE t2."{}" = t1."{}"
                    )"#,
                 with_clause,
-                parent_col,
-                parent_col,
-                parent_col,
                 parent_col,
                 effective_table_name,
                 effective_table_name,
@@ -649,37 +635,72 @@ pub async fn validate_tree_foreign_keys(
         }
         let rows = query.fetch_all(pool).await?;
         for row in rows {
-            let meta: &str = row.get_unchecked(format!(r#"{}_meta"#, parent_col).as_str());
-            let meta: SerdeValue = serde_json::from_str(meta).unwrap();
-            let meta = meta.as_object().unwrap();
-            // If the value in the parent column is legitimately empty, or if it is invalid
-            // because of a datatype error, then just skip this row. In the latter case this is
-            // to avoid potential datatype errors that might arise if we compare a numeric with a
-            // non-numeric type.
-            if meta.contains_key("nulltype")
-                || (meta.get("valid").unwrap() == false
-                    && contains_dt_violation(
-                        &meta.get("messages").and_then(|m| m.as_array()).unwrap(),
-                    ))
-            {
-                continue;
+            let raw_row_number = row.try_get_raw("row_number").unwrap();
+            let row_number: i64;
+            if raw_row_number.is_null() {
+                row_number = 0;
+            } else {
+                row_number = row.get("row_number");
             }
-
-            // If the parent column already contains a different error, its value will be null and
-            // it will be returned by the above query regardless of whether it actually violates the
-            // tree's foreign constraint. So we check the value from the meta column instead.
-
             let raw_parent_val = row.try_get_raw(format!(r#"{}"#, parent_col).as_str()).unwrap();
-            let parent_val;
+            let mut parent_val = String::from("");
             if !raw_parent_val.is_null() {
                 parent_val = get_column_value(&row, &parent_col, &parent_sql_type);
             } else {
-                parent_val = meta.get("value").and_then(|v| v.as_str()).unwrap().to_string();
+                // If the parent column already contains a different error, its value will be null
+                // and it will be returned by the above query regardless of whether it actually
+                // violates the tree's foreign constraint. So we check the value from the message
+                // table instead:
+                let message_sql = local_sql_syntax(
+                    &pool,
+                    &format!(
+                        r#"SELECT "value", "level", "rule", "message"
+                           FROM "message"
+                           WHERE "table" = {}
+                             AND "row" = {}
+                             AND "column" = {}"#,
+                        SQL_PARAM, SQL_PARAM, SQL_PARAM
+                    ),
+                );
+                let mut message_query = sqlx_query(&message_sql);
+                message_query = message_query.bind(&table_name);
+                message_query = message_query.bind(&row_number);
+                message_query = message_query.bind(parent_col);
+                let message_rows = message_query.fetch_all(pool).await?;
+                // If there are no rows in the message table then the cell is legitimately empty and
+                // we can skip this row:
+                if message_rows.is_empty() {
+                    continue;
+                }
+
+                let mut has_dt_violation = false;
+                for mrow in &message_rows {
+                    let rule: &str = mrow.get_unchecked("rule");
+                    if rule.starts_with("datatype:") {
+                        has_dt_violation = true;
+                        break;
+                    } else {
+                        let value: &str = mrow.get_unchecked("value");
+                        parent_val = value.to_string();
+                    }
+                }
+                // If the value in the parent column has already been deemed to be invalid because
+                // of a datatype error, then just skip this row. This is to avoid potential database
+                // errors that might arise if we compare a numeric with a non-numeric type.
+                if has_dt_violation {
+                    continue;
+                }
+
+                // Otherwise check if the value from the message table is in the child column. If it
+                // is there then we are fine, and we can go on to the next row.
+                let sql_type =
+                    get_sql_type_from_global_config(&config, &table_name, &parent_col).unwrap();
+                let sql_param = cast_sql_param_from_text(&sql_type);
                 let sql = local_sql_syntax(
                     &pool,
                     &format!(
                         r#"SELECT 1 FROM "{}" WHERE "{}" = {} LIMIT 1"#,
-                        table_name, child_col, SQL_PARAM
+                        table_name, child_col, sql_param
                     ),
                 );
                 let query = sqlx_query(&sql).bind(parent_val.to_string());
@@ -689,34 +710,15 @@ pub async fn validate_tree_foreign_keys(
                 }
             }
 
-            let mut meta = meta.clone();
-            meta.insert("valid".to_string(), SerdeValue::Bool(false));
-            meta.insert("value".to_string(), SerdeValue::String(parent_val.to_string()));
-            let message = json!({
-                "rule": "tree:foreign",
+            results.push(json!({
+                "row_number": row_number as u32,
+                "column": parent_col,
+                "value": parent_val,
                 "level": "error",
+                "rule": "tree:foreign",
                 "message": format!("Value {} of column {} is not in column {}",
                                    parent_val, parent_col, child_col).as_str(),
-            });
-            meta.get_mut("messages")
-                .and_then(|m| m.as_array_mut())
-                .and_then(|a| Some(a.push(message)));
-
-            let raw_row_number = row.try_get_raw("row_number").unwrap();
-            let row_number: i64;
-            if raw_row_number.is_null() {
-                row_number = 0;
-            } else {
-                row_number = row.get("row_number");
-            }
-
-            let row_number = row_number as u32;
-            let result = json!({
-                "row_number": row_number,
-                "column": parent_col,
-                "meta": meta,
-            });
-            results.push(result);
+            }));
         }
     }
 
@@ -961,10 +963,9 @@ fn select_with_extra_row(
         let sql_param = cast_sql_param_from_text(&sql_type);
         // enumerate() begins from 0 but we need to begin at 1:
         let i = i + 1;
-        first_select.push_str(format!(r#"{} AS "{}", "#, sql_param, key).as_str());
+        first_select.push_str(format!(r#"{} AS "{}""#, sql_param, key).as_str());
         params.push(content.value.to_string());
-        first_select.push_str(format!(r#"NULL AS "{}_meta""#, key).as_str());
-        second_select.push_str(format!(r#""{}", "{}_meta""#, key, key).as_str());
+        second_select.push_str(format!(r#""{}""#, key).as_str());
         if i < extra_row_len {
             first_select.push_str(", ");
             second_select.push_str(", ");
@@ -1360,6 +1361,12 @@ async fn validate_cell_trees(
         })
         .map(|v| v.as_object().unwrap())
         .collect::<Vec<_>>();
+
+    // If there are no tree keys, just silently return so as to save the cost of finding the
+    // parent sql type etc, which will add up if we have to do it for every cell of every row.
+    if tkeys.is_empty() {
+        return Ok(());
+    }
 
     let parent_col = column_name;
     let parent_sql_type =

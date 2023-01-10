@@ -43,3 +43,5 @@ table6	parent	empty	integer	tree(child)
 table6	xyzzy	empty	integer	under(table6.child, 4)	
 table6	foo	empty	text		
 table6	bar	empty	integer		
+table7	zork		text	primary	
+table7	planetfall		integer		

@@ -28,7 +28,7 @@ do
     table_path=$pwd/$table_path
     table_file=$(basename $table_path)
     table=${table_file%.*}
-    ${export_script} data --nosort $db $output_dir $table
+    ${export_script} data $db $output_dir $table
     diff --strip-trailing-cr -q ${table_path} $output_dir/${table}.tsv
     ret_value=$(expr $ret_value + $?)
 done

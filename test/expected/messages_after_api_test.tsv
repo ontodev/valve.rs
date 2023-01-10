@@ -4,8 +4,9 @@ table1	5	base	error	key:unique	Values of base must be unique	http://purl.obolibr
 table1	5	prefix	error	key:primary	Values of prefix must be unique	VO
 table1	10	base	error	key:unique	Values of base must be unique	http://www.w3.org/1999/02/22-rdf-syntax-ns#
 table1	10	prefix	error	key:primary	Values of prefix must be unique	rdf
-table2	1	foo	error	rule:foo-2	bar cannot be null if foo is not null	5
-table2	1	foo	error	rule:foo-4	bar must be 'y' or 'z' if foo = 5	5
+table2	1	bar	error	custom:unrelated	An unrelated error	B
+table2	1	child	error	tree:child-unique	Values of child must be unique	b
+table2	1	xyzzy	error	under:not-in-tree	Value w of column xyzzy is not in table2.child	w
 table2	2	foo	error	rule:foo-1	bar must be null whenever foo is null	
 table2	2	xyzzy	error	under:not-under	Value 'e' of column xyzzy is not under 'd'	e
 table2	3	xyzzy	error	under:not-under	Value 'f' of column xyzzy is not under 'd'	f
@@ -31,11 +32,15 @@ table3	10	id	error	key:unique	Values of id must be unique	VO:0000001
 table3	10	label	error	key:primary	Values of label must be unique	vaccine
 table3	10	label	error	tree:child-unique	Values of label must be unique	vaccine
 table3	10	source	error	key:foreign	Value BOB of column source is not in table1.prefix	BOB
+table3	11	parent	error	custom:unrelated	An unrelated error	barrie
+table3	11	parent	error	tree:foreign	Value barrie of column parent is not in column label	barrie
+table3	11	source	error	key:foreign	Value BFOBBER of column source is not in table1.prefix	BFOBBER
 table4	9	foreign_column	error	key:unique	Values of foreign_column must be unique	a
 table4	10	foreign_column	error	key:unique	Values of foreign_column must be unique	b
 table4	10	numeric_foreign_column	error	key:primary	Values of numeric_foreign_column must be unique	9
-table6	1	foo	error	rule:foo-2	bar cannot be null if foo is not null	e
-table6	1	foo	error	rule:foo-4	bar must be 25 or 26 if foo = 'e'	e
+table6	1	bar	error	custom:unrelated	An unrelated error	2
+table6	1	child	error	tree:child-unique	Values of child must be unique	2
+table6	1	xyzzy	error	under:not-in-tree	Value 23 of column xyzzy is not in table6.child	23
 table6	2	foo	error	rule:foo-1	bar must be null whenever foo is null	
 table6	2	xyzzy	error	under:not-under	Value '5' of column xyzzy is not under '4'	5
 table6	3	xyzzy	error	under:not-under	Value '6' of column xyzzy is not under '4'	6
@@ -44,4 +49,7 @@ table6	4	xyzzy	error	under:not-under	Value '7' of column xyzzy is not under '4'	
 table6	5	xyzzy	error	under:not-under	Value '8' of column xyzzy is not under '4'	8
 table6	7	xyzzy	error	under:not-in-tree	Value 26 of column xyzzy is not in table6.child	26
 table6	9	child	error	key:foreign	Value 9 of column child exists only in table4_conflict.numeric_foreign_column	9
+table6	10	bar	error	custom:unrelated	An unrelated error	2
+table6	10	child	error	tree:child-unique	Values of child must be unique	2
+table6	10	xyzzy	error	under:not-in-tree	Value 23 of column xyzzy is not in table6.child	23
 table7	3	planetfall	error	datatype:integer	planetfall should be a positive or negative integer	e
