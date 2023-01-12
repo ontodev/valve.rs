@@ -1,12 +1,13 @@
 use enquote::unquote;
+use ontodev_sqlrest::local_sql_syntax;
 use serde_json::{json, Value as SerdeValue};
 use sqlx::{any::AnyPool, query as sqlx_query, Row, ValueRef};
 use std::collections::HashMap;
 
 use crate::{
     ast::Expression, cast_column_sql_to_text, cast_sql_param_from_text, get_column_value,
-    get_sql_type_from_global_config, local_sql_syntax, ColumnRule, CompiledCondition, ConfigMap,
-    ParsedStructure, SQL_PARAM,
+    get_sql_type_from_global_config, ColumnRule, CompiledCondition, ConfigMap, ParsedStructure,
+    SQL_PARAM,
 };
 
 /// Represents a particular cell in a particular row of data with vaildation results.
@@ -249,6 +250,7 @@ pub async fn get_matching_values(
                                 let fcolumn_text = cast_column_sql_to_text(&fcolumn, &sql_type);
                                 let sql = local_sql_syntax(
                                     &pool,
+                                    &SQL_PARAM,
                                     &format!(
                                         r#"SELECT "{}" FROM "{}" WHERE {} LIKE {}"#,
                                         fcolumn, ftable, fcolumn_text, SQL_PARAM
@@ -309,6 +311,7 @@ pub async fn get_matching_values(
                                 cast_column_sql_to_text(&child_column, &sql_type);
                             let sql = local_sql_syntax(
                                 &pool,
+                                &SQL_PARAM,
                                 &format!(
                                     r#"{} SELECT "{}" FROM "tree" WHERE {} LIKE {}"#,
                                     tree_sql, child_column, child_column_text, SQL_PARAM
@@ -437,6 +440,7 @@ pub async fn validate_under(
         }
         let sql = local_sql_syntax(
             &pool,
+            &SQL_PARAM,
             &format!(
                 r#"{} {}
                    SELECT
@@ -494,6 +498,7 @@ pub async fn validate_under(
                 // table instead:
                 let message_sql = local_sql_syntax(
                     &pool,
+                    &SQL_PARAM,
                     &format!(
                         r#"SELECT "value", "level", "rule", "message"
                            FROM "message"
@@ -610,6 +615,7 @@ pub async fn validate_tree_foreign_keys(
 
         let sql = local_sql_syntax(
             &pool,
+            &SQL_PARAM,
             &format!(
                 r#"{}
                    SELECT
@@ -653,6 +659,7 @@ pub async fn validate_tree_foreign_keys(
                 // table instead:
                 let message_sql = local_sql_syntax(
                     &pool,
+                    &SQL_PARAM,
                     &format!(
                         r#"SELECT "value", "level", "rule", "message"
                            FROM "message"
@@ -698,6 +705,7 @@ pub async fn validate_tree_foreign_keys(
                 let sql_param = cast_sql_param_from_text(&sql_type);
                 let sql = local_sql_syntax(
                     &pool,
+                    &SQL_PARAM,
                     &format!(
                         r#"SELECT 1 FROM "{}" WHERE "{}" = {} LIMIT 1"#,
                         table_name, child_col, sql_param
@@ -1281,6 +1289,7 @@ async fn validate_cell_foreign_constraints(
         let sql_param = cast_sql_param_from_text(&sql_type);
         let fsql = local_sql_syntax(
             &pool,
+            &SQL_PARAM,
             &format!(r#"SELECT 1 FROM "{}" WHERE "{}" = {} LIMIT 1"#, ftable, fcolumn, sql_param),
         );
         let frows = sqlx_query(&fsql).bind(&cell.value).fetch_all(pool).await?;
@@ -1294,6 +1303,7 @@ async fn validate_cell_foreign_constraints(
 
             let fsql = local_sql_syntax(
                 &pool,
+                &SQL_PARAM,
                 &format!(
                     r#"SELECT 1 FROM "{}_conflict" WHERE "{}" = {} LIMIT 1"#,
                     ftable, fcolumn, sql_param
@@ -1431,6 +1441,7 @@ async fn validate_cell_trees(
         params.append(&mut tree_sql_params);
         let sql = local_sql_syntax(
             &pool,
+            &SQL_PARAM,
             &format!(r#"{} SELECT "{}", "{}" FROM "tree""#, tree_sql, child_col, parent_col),
         );
 
@@ -1576,6 +1587,7 @@ async fn validate_cell_unique_constraints(
         let sql_param = cast_sql_param_from_text(&sql_type);
         let sql = local_sql_syntax(
             &pool,
+            &SQL_PARAM,
             &format!(
                 r#"{} SELECT 1 FROM "{}" WHERE "{}" = {} LIMIT 1"#,
                 with_sql, query_table, column_name, sql_param

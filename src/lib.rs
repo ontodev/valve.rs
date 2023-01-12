@@ -33,6 +33,7 @@ use crossbeam;
 use indoc::indoc;
 use itertools::{IntoChunks, Itertools};
 use lazy_static::lazy_static;
+use ontodev_sqlrest::local_sql_syntax;
 use petgraph::{
     algo::{all_simple_paths, toposort},
     graphmap::DiGraphMap,
@@ -58,10 +59,6 @@ static CHUNK_SIZE: usize = 500;
 /// Run valve in multi-threaded mode.
 static MULTI_THREADED: bool = true;
 
-// Note that SQL_PARAM must be a 'word' (from the point of view of regular expressions) since in the
-// local_sql_syntax() function below we are matchng against it using '\b' which represents a word
-// boundary. If you want to use a non-word placeholder then you must also change '\b' in the regex
-// to '\B'.
 /// The word (in the regex sense) placeholder to use for query parameters when binding using sqlx.
 static SQL_PARAM: &str = "VALVEPARAM";
 
@@ -809,6 +806,7 @@ pub async fn insert_new_row(
     // First add the new row to the table:
     let insert_stmt = local_sql_syntax(
         &pool,
+        &SQL_PARAM,
         &format!(
             r#"INSERT INTO "{}" ("row_number", {}) VALUES ({}, {})"#,
             table_name,
@@ -887,7 +885,7 @@ pub async fn update_row(
     let mut update_stmt = format!(r#"UPDATE "{}" SET "#, table_name);
     update_stmt.push_str(&assignments.join(", "));
     update_stmt.push_str(&format!(r#" WHERE "row_number" = {}"#, row_number));
-    let update_stmt = local_sql_syntax(&pool, &update_stmt);
+    let update_stmt = local_sql_syntax(&pool, &SQL_PARAM, &update_stmt);
 
     let mut query = sqlx_query(&update_stmt);
     for param in &params {
@@ -1181,40 +1179,6 @@ fn get_column_value(row: &AnyRow, column: &str, sql_type: &str) -> String {
         let value: &str = row.get(format!(r#"{}"#, column).as_str());
         value.to_string()
     }
-}
-
-/// Given a SQL string, possibly with unbound parameters represented by the placeholder string
-/// SQL_PARAM, and given a database pool, if the pool is of type Sqlite, then change the syntax used
-/// for unbound parameters to Sqlite syntax, which uses "?", otherwise use Postgres syntax, which
-/// uses numbered parameters, i.e., $1, $2, ...
-fn local_sql_syntax(pool: &AnyPool, sql: &String) -> String {
-    // Do not replace instances of SQL_PARAM if they are within quotation marks.
-    let rx = Regex::new(&format!(
-        r#"('[^'\\]*(?:\\.[^'\\]*)*'|"[^"\\]*(?:\\.[^"\\]*)*")|\b{}\b"#,
-        SQL_PARAM
-    ))
-    .unwrap();
-
-    let mut final_sql = String::from("");
-    let mut pg_param_idx = 1;
-    let mut saved_start = 0;
-    for m in rx.find_iter(sql) {
-        let this_match = &sql[m.start()..m.end()];
-        final_sql.push_str(&sql[saved_start..m.start()]);
-        if this_match == SQL_PARAM {
-            if pool.any_kind() == AnyKind::Postgres {
-                final_sql.push_str(&format!("${}", pg_param_idx));
-                pg_param_idx += 1;
-            } else {
-                final_sql.push_str(&format!("?"));
-            }
-        } else {
-            final_sql.push_str(&format!("{}", this_match));
-        }
-        saved_start = m.start() + this_match.len();
-    }
-    final_sql.push_str(&sql[saved_start..]);
-    final_sql
 }
 
 /// Takes as arguments a list of tables and a configuration map describing all of the constraints
@@ -1932,7 +1896,7 @@ async fn validate_rows_inter_and_insert(
     ) = make_inserts(config, table_name, rows, chunk_number, &mut tmp_messages_stats, verbose)
         .await?;
 
-    let main_sql = local_sql_syntax(&pool, &main_sql);
+    let main_sql = local_sql_syntax(&pool, &SQL_PARAM, &main_sql);
     let mut main_query = sqlx_query(&main_sql);
     for param in &main_params {
         main_query = main_query.bind(param);
@@ -1940,21 +1904,21 @@ async fn validate_rows_inter_and_insert(
     let main_result = main_query.execute(pool).await;
     match main_result {
         Ok(_) => {
-            let conflict_sql = local_sql_syntax(&pool, &conflict_sql);
+            let conflict_sql = local_sql_syntax(&pool, &SQL_PARAM, &conflict_sql);
             let mut conflict_query = sqlx_query(&conflict_sql);
             for param in &conflict_params {
                 conflict_query = conflict_query.bind(param);
             }
             conflict_query.execute(pool).await?;
 
-            let main_message_sql = local_sql_syntax(&pool, &main_message_sql);
+            let main_message_sql = local_sql_syntax(&pool, &SQL_PARAM, &main_message_sql);
             let mut main_message_query = sqlx_query(&main_message_sql);
             for param in &main_message_params {
                 main_message_query = main_message_query.bind(param);
             }
             main_message_query.execute(pool).await?;
 
-            let conflict_message_sql = local_sql_syntax(&pool, &conflict_message_sql);
+            let conflict_message_sql = local_sql_syntax(&pool, &SQL_PARAM, &conflict_message_sql);
             let mut conflict_message_query = sqlx_query(&conflict_message_sql);
             for param in &conflict_message_params {
                 conflict_message_query = conflict_message_query.bind(param);
@@ -1988,28 +1952,28 @@ async fn validate_rows_inter_and_insert(
             ) = make_inserts(config, table_name, rows, chunk_number, messages_stats, verbose)
                 .await?;
 
-            let main_sql = local_sql_syntax(&pool, &main_sql);
+            let main_sql = local_sql_syntax(&pool, &SQL_PARAM, &main_sql);
             let mut main_query = sqlx_query(&main_sql);
             for param in &main_params {
                 main_query = main_query.bind(param);
             }
             main_query.execute(pool).await?;
 
-            let conflict_sql = local_sql_syntax(&pool, &conflict_sql);
+            let conflict_sql = local_sql_syntax(&pool, &SQL_PARAM, &conflict_sql);
             let mut conflict_query = sqlx_query(&conflict_sql);
             for param in &conflict_params {
                 conflict_query = conflict_query.bind(param);
             }
             conflict_query.execute(pool).await?;
 
-            let main_message_sql = local_sql_syntax(&pool, &main_message_sql);
+            let main_message_sql = local_sql_syntax(&pool, &SQL_PARAM, &main_message_sql);
             let mut main_message_query = sqlx_query(&main_message_sql);
             for param in &main_message_params {
                 main_message_query = main_message_query.bind(param);
             }
             main_message_query.execute(pool).await?;
 
-            let conflict_message_sql = local_sql_syntax(&pool, &conflict_message_sql);
+            let conflict_message_sql = local_sql_syntax(&pool, &SQL_PARAM, &conflict_message_sql);
             let mut conflict_message_query = sqlx_query(&conflict_message_sql);
             for param in &conflict_message_params {
                 conflict_message_query = conflict_message_query.bind(param);
@@ -2229,6 +2193,7 @@ async fn load_db(
 
             let sql = local_sql_syntax(
                 &pool,
+                &SQL_PARAM,
                 &format!(
                     r#"INSERT INTO "message"
                        ("table", "row", "column", "value", "level", "rule", "message")

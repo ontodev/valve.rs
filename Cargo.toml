@@ -30,5 +30,7 @@ regex = "1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0" }
 sqlx = { version = "0.5", features = [ "runtime-async-std-rustls", "any", "postgres", "sqlite" ] }
+# TODO: Remove this later. Eventually make ontodev_sqlrest available via crates.io
+ontodev_sqlrest = { path = "../../sqlrest.rs" }
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

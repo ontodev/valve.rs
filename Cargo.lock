@@ -1156,6 +1156,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "86f0b0d4bf799edbc74508c1e8bf170ff5f41238e5f8225603ca7caaae2b7860"
 
 [[package]]
+name = "ontodev_sqlrest"
+version = "0.1.0"
+dependencies = [
+ "regex",
+ "sqlx",
+]
+
+[[package]]
 name = "ontodev_valve"
 version = "0.2.0"
 dependencies = [
@@ -1173,6 +1181,7 @@ dependencies = [
  "lalrpop-util",
  "lazy_static",
  "num_cpus",
+ "ontodev_sqlrest",
  "petgraph",
  "regex",
  "serde",
