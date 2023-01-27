@@ -1,4 +1,6 @@
 use enquote::unquote;
+// provides `try_next`
+use futures::TryStreamExt;
 use serde_json::{json, Value as SerdeValue};
 use sqlx::{any::AnyPool, query as sqlx_query, Row, ValueRef};
 use std::collections::HashMap;
@@ -254,9 +256,9 @@ pub async fn get_matching_values(
                                         fcolumn, ftable, fcolumn_text, SQL_PARAM
                                     ),
                                 );
-                                let rows =
-                                    sqlx_query(&sql).bind(&matching_string).fetch_all(pool).await?;
-                                for row in rows.iter() {
+                                let mut rows =
+                                    sqlx_query(&sql).bind(&matching_string).fetch(pool);
+                                while let Some(row) = rows.try_next().await? {
                                     values.push(get_column_value(&row, &fcolumn, &sql_type));
                                 }
                             }
@@ -321,8 +323,8 @@ pub async fn get_matching_values(
                                 query = query.bind(param);
                             }
 
-                            let rows = query.fetch_all(pool).await?;
-                            for row in rows.iter() {
+                            let mut rows = query.fetch(pool);
+                            while let Some(row) = rows.try_next().await? {
                                 values.push(get_column_value(&row, &child_column, &sql_type));
                             }
                         }
@@ -474,9 +476,9 @@ pub async fn validate_under(
         for param in &params {
             query = query.bind(param);
         }
-        let rows = query.fetch_all(pool).await?;
+        let mut rows = query.fetch(pool);
 
-        for row in rows {
+        while let Some(row) = rows.try_next().await? {
             let raw_row_number = row.try_get_raw("row_number").unwrap();
             let row_number: i64;
             if raw_row_number.is_null() {
@@ -633,8 +635,8 @@ pub async fn validate_tree_foreign_keys(
         for param in &params {
             query = query.bind(param);
         }
-        let rows = query.fetch_all(pool).await?;
-        for row in rows {
+        let mut rows = query.fetch(pool);
+        while let Some(row) = rows.try_next().await? {
             let raw_row_number = row.try_get_raw("row_number").unwrap();
             let row_number: i64;
             if raw_row_number.is_null() {
@@ -1438,35 +1440,26 @@ async fn validate_cell_trees(
         for param in &params {
             query = query.bind(param);
         }
-        let rows = query.fetch_all(pool).await?;
+        let mut rows = query.fetch(pool);
 
         // If there is a row in the tree whose parent is the to-be-inserted child, then inserting
         // the new row would result in a cycle.
-        let cycle_detected = {
-            let cycle_row = rows.iter().find(|row| {
-                let raw_foo = row.try_get_raw(format!(r#"{}"#, parent_col).as_str()).unwrap();
-                if raw_foo.is_null() {
-                    false
-                } else {
-                    let parent = get_column_value(&row, &parent_col, &parent_sql_type);
-                    parent == child_val
-                }
-            });
-            match cycle_row {
-                None => false,
-                _ => true,
-            }
-        };
-
-        if cycle_detected {
-            let mut cycle_legs = vec![];
-            for row in &rows {
+        let mut cycle_legs = vec![];
+        let mut cycle_detected = false;
+        while let Some(row) = rows.try_next().await? {
+            let raw_parent = row.try_get_raw(format!(r#"{}"#, parent_col).as_str()).unwrap();
+            if !raw_parent.is_null() {
                 let child = get_column_value(&row, &child_col, &child_sql_type);
                 let parent = get_column_value(&row, &parent_col, &parent_sql_type);
-                cycle_legs.push((child, parent));
+                cycle_legs.push((child, parent.to_string()));
+                if !cycle_detected && parent == child_val {
+                    cycle_detected = true;
+                }
             }
-            cycle_legs.push((child_val, parent_val.clone()));
+        }
 
+        if cycle_detected {
+            cycle_legs.push((child_val, parent_val.clone()));
             let mut cycle_msg = vec![];
             for cycle in &cycle_legs {
                 cycle_msg
