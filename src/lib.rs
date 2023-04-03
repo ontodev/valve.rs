@@ -229,7 +229,7 @@ pub fn read_config_files(path: &str) -> (ConfigMap, ConfigMap, ConfigMap, Config
     );
     let rows = read_tsv_into_vector(&path.to_string());
     for mut row in rows {
-        for column in vec!["datatype", "parent", "condition", "SQL type"] {
+        for column in vec!["datatype", "parent", "condition", "SQLite type", "PostgreSQL type"] {
             if !row.contains_key(column) || row.get(column) == None {
                 panic!("Missing required column '{}' reading '{}'", column, path);
             }
@@ -241,7 +241,7 @@ pub fn read_config_files(path: &str) -> (ConfigMap, ConfigMap, ConfigMap, Config
             }
         }
 
-        for column in vec!["parent", "condition", "SQL type"] {
+        for column in vec!["parent", "condition", "SQLite type", "PostgreSQL type"] {
             if row.get(column).and_then(|c| c.as_str()).unwrap() == "" {
                 row.remove(&column.to_string());
             }
@@ -798,9 +798,13 @@ pub async fn insert_new_row(
         let mut cell_for_insert = cell.clone();
         if cell_valid {
             cell_for_insert.remove("value");
-            let sql_type =
-                get_sql_type_from_global_config(&global_config, &table_name.to_string(), &column)
-                    .unwrap();
+            let sql_type = get_sql_type_from_global_config(
+                &global_config,
+                &table_name.to_string(),
+                &column,
+                pool,
+            )
+            .unwrap();
             insert_values.push(cast_sql_param_from_text(&sql_type));
             insert_params.push(String::from(cell_value));
         } else {
@@ -875,9 +879,13 @@ pub async fn update_row(
         let mut cell_for_insert = cell.clone();
         if cell_valid {
             cell_for_insert.remove("value");
-            let sql_type =
-                get_sql_type_from_global_config(&global_config, &table_name.to_string(), &column)
-                    .unwrap();
+            let sql_type = get_sql_type_from_global_config(
+                &global_config,
+                &table_name.to_string(),
+                &column,
+                pool,
+            )
+            .unwrap();
             assignments.push(format!(r#""{}" = {}"#, column, cast_sql_param_from_text(&sql_type)));
             params.push(String::from(cell_value));
         } else {
@@ -1123,19 +1131,27 @@ fn compile_condition(
 
 /// Given the config map and the name of a datatype, climb the datatype tree (as required),
 /// and return the first 'SQL type' found.
-fn get_sql_type(dt_config: &ConfigMap, datatype: &String) -> Option<String> {
+fn get_sql_type(dt_config: &ConfigMap, datatype: &String, pool: &AnyPool) -> Option<String> {
     if !dt_config.contains_key(datatype) {
         return None;
     }
 
-    if let Some(sql_type) = dt_config.get(datatype).and_then(|d| d.get("SQL type")) {
+    let sql_type_column = {
+        if pool.any_kind() == AnyKind::Sqlite {
+            "SQLite type"
+        } else {
+            "PostgreSQL type"
+        }
+    };
+
+    if let Some(sql_type) = dt_config.get(datatype).and_then(|d| d.get(sql_type_column)) {
         return Some(sql_type.as_str().and_then(|s| Some(s.to_string())).unwrap());
     }
 
     let parent_datatype =
         dt_config.get(datatype).and_then(|d| d.get("parent")).and_then(|p| p.as_str()).unwrap();
 
-    return get_sql_type(dt_config, &parent_datatype.to_string());
+    return get_sql_type(dt_config, &parent_datatype.to_string(), pool);
 }
 
 /// Given the global config map, a table name, and a column name, return the column's SQL type.
@@ -1143,6 +1159,7 @@ fn get_sql_type_from_global_config(
     global_config: &ConfigMap,
     table: &str,
     column: &str,
+    pool: &AnyPool,
 ) -> Option<String> {
     let dt_config = global_config.get("datatype").and_then(|d| d.as_object()).unwrap();
     let normal_table_name;
@@ -1160,7 +1177,7 @@ fn get_sql_type_from_global_config(
         .and_then(|d| d.as_str())
         .and_then(|d| Some(d.to_string()))
         .unwrap();
-    get_sql_type(&dt_config, &dt)
+    get_sql_type(&dt_config, &dt, pool)
 }
 
 /// Given a SQL type, return the appropriate CAST(...) statement for casting the SQL_PARAM
@@ -1470,6 +1487,7 @@ fn create_table_statement(
                 .and_then(|d| d.as_str())
                 .and_then(|s| Some(s.to_string()))
                 .unwrap(),
+            pool,
         );
 
         if let None = sql_type {
@@ -1547,9 +1565,12 @@ fn create_table_statement(
                                     }
                                     let child_datatype = child_datatype.unwrap();
                                     let parent = column_name;
-                                    let child_sql_type =
-                                        get_sql_type(datatypes_config, &child_datatype.to_string())
-                                            .unwrap();
+                                    let child_sql_type = get_sql_type(
+                                        datatypes_config,
+                                        &child_datatype.to_string(),
+                                        pool,
+                                    )
+                                    .unwrap();
                                     if sql_type != child_sql_type {
                                         panic!(
                                             "SQL type '{}' of '{}' in 'tree({})' for table \
@@ -1701,6 +1722,7 @@ async fn make_inserts(
     chunk_number: usize,
     messages_stats: &mut HashMap<String, usize>,
     verbose: bool,
+    pool: &AnyPool,
 ) -> Result<
     ((String, Vec<String>, String, Vec<String>), (String, Vec<String>, String, Vec<String>)),
     sqlx::Error,
@@ -1756,6 +1778,7 @@ async fn make_inserts(
         rows: &Vec<ResultRow>,
         messages_stats: &mut HashMap<String, usize>,
         verbose: bool,
+        pool: &AnyPool,
     ) -> (String, Vec<String>, String, Vec<String>) {
         let mut lines = vec![];
         let mut params = vec![];
@@ -1770,7 +1793,8 @@ async fn make_inserts(
                 // nulltype field set, in which case insert NULL:
                 if cell.nulltype == None && cell.valid {
                     let sql_type =
-                        get_sql_type_from_global_config(&config, &table_name, &column).unwrap();
+                        get_sql_type_from_global_config(&config, &table_name, &column, pool)
+                            .unwrap();
                     values.push(cast_sql_param_from_text(&sql_type));
                     params.push(cell.value.clone());
                 } else {
@@ -1891,8 +1915,15 @@ async fn make_inserts(
         .map(|v| v.as_str().unwrap().to_string())
         .collect::<Vec<_>>();
 
-    let (main_sql, main_params, main_message_sql, main_message_params) =
-        generate_sql(&config, &table_name, &column_names, &main_rows, messages_stats, verbose);
+    let (main_sql, main_params, main_message_sql, main_message_params) = generate_sql(
+        &config,
+        &table_name,
+        &column_names,
+        &main_rows,
+        messages_stats,
+        verbose,
+        pool,
+    );
     let (conflict_sql, conflict_params, conflict_message_sql, conflict_message_params) =
         generate_sql(
             &config,
@@ -1901,6 +1932,7 @@ async fn make_inserts(
             &conflict_rows,
             messages_stats,
             verbose,
+            pool,
         );
 
     Ok((
@@ -1941,8 +1973,16 @@ async fn validate_rows_inter_and_insert(
     let (
         (main_sql, main_params, main_message_sql, main_message_params),
         (conflict_sql, conflict_params, conflict_message_sql, conflict_message_params),
-    ) = make_inserts(config, table_name, rows, chunk_number, &mut tmp_messages_stats, verbose)
-        .await?;
+    ) = make_inserts(
+        config,
+        table_name,
+        rows,
+        chunk_number,
+        &mut tmp_messages_stats,
+        verbose,
+        pool,
+    )
+    .await?;
 
     let main_sql = local_sql_syntax(&pool, &main_sql);
     let mut main_query = sqlx_query(&main_sql);
@@ -1997,7 +2037,7 @@ async fn validate_rows_inter_and_insert(
             let (
                 (main_sql, main_params, main_message_sql, main_message_params),
                 (conflict_sql, conflict_params, conflict_message_sql, conflict_message_params),
-            ) = make_inserts(config, table_name, rows, chunk_number, messages_stats, verbose)
+            ) = make_inserts(config, table_name, rows, chunk_number, messages_stats, verbose, pool)
                 .await?;
 
             let main_sql = local_sql_syntax(&pool, &main_sql);
