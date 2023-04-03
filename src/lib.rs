@@ -134,19 +134,9 @@ impl std::fmt::Debug for ColumnRule {
     }
 }
 
-/// Possible VALVE commands
-#[derive(Debug, PartialEq, Eq)]
-pub enum ValveCommand {
-    /// Configure but do not create or load.
-    Config,
-    /// Configure and create but do not load.
-    Create,
-    /// Configure, create, and load.
-    Load,
-}
-
-/// Given the path to a table.tsv file, load and check the 'table', 'column', and 'datatype'
-/// tables, and return ConfigMaps corresponding to specials, tables, datatypes, and rules.
+/// Given the path to a configuration table (either a table.tsv file or a database containing a
+/// table named "table"), load and check the 'table', 'column', and 'datatype' tables, and return
+/// ConfigMaps corresponding to specials, tables, datatypes, and rules.
 pub fn read_config_files(path: &str) -> (ConfigMap, ConfigMap, ConfigMap, ConfigMap) {
     let special_table_types = json!({
         "table": {"required": true},
@@ -698,9 +688,21 @@ pub async fn configure_db(
     return Ok((sorted_tables, constraints_config));
 }
 
-/// Given a path to a table table file (table.tsv), a directory in which to find/create a database:
-/// configure the database using the configuration which can be looked up using the table table,
-/// and optionally create and/or load it according to the value of `command`. If the `verbose` flag
+/// Various VALVE commands, used with [valve()](valve).
+#[derive(Debug, PartialEq, Eq)]
+pub enum ValveCommand {
+    /// Configure but do not create or load.
+    Config,
+    /// Configure and create but do not load.
+    Create,
+    /// Configure, create, and load.
+    Load,
+}
+
+/// Given a path to a configuration table (either a table.tsv file or a database containing a
+/// table named "table"), and a directory in which to find/create a database: configure the
+/// database using the configuration which can be looked up using the table table, and
+/// optionally create and/or load it according to the value of `command`. If the `verbose` flag
 /// is set to true, output status messages while loading. Returns the configuration map as a String.
 pub async fn valve(
     table_table: &str,
@@ -1012,7 +1014,7 @@ fn read_db_table_into_vector(database: &str) -> Vec<ConfigMap> {
     let pool = block_on(AnyPoolOptions::new().max_connections(5).connect_with(connection_options))
         .unwrap();
 
-    let sql = "SELECT * from \"table\"";
+    let sql = "SELECT * FROM \"table\"";
     let rows = block_on(sqlx_query(&sql).fetch_all(&pool)).unwrap();
     let mut table_rows = vec![];
     for row in rows {
@@ -1173,8 +1175,8 @@ fn compile_condition(
     };
 }
 
-/// Given the config map and the name of a datatype, climb the datatype tree (as required),
-/// and return the first 'SQL type' found.
+/// Given the config map, the name of a datatype, and a database connection pool used to determine
+/// the database type, climb the datatype tree (as required), and return the first 'SQL type' found.
 fn get_sql_type(dt_config: &ConfigMap, datatype: &String, pool: &AnyPool) -> Option<String> {
     if !dt_config.contains_key(datatype) {
         return None;
@@ -1198,7 +1200,8 @@ fn get_sql_type(dt_config: &ConfigMap, datatype: &String, pool: &AnyPool) -> Opt
     return get_sql_type(dt_config, &parent_datatype.to_string(), pool);
 }
 
-/// Given the global config map, a table name, and a column name, return the column's SQL type.
+/// Given the global config map, a table name, a column name, and a database connection pool
+/// used to determine the database type return the column's SQL type.
 fn get_sql_type_from_global_config(
     global_config: &ConfigMap,
     table: &str,
@@ -1752,13 +1755,14 @@ fn add_message_counts(messages: &Vec<SerdeValue>, messages_stats: &mut HashMap<S
     }
 }
 
-/// Given a configuration map, a table name, a number of rows, and their corresponding chunk number,
-/// return two four-place tuples, corresponding to the normal and conflict tables, respectively.
-/// Each of these contains (i) a SQL string for an insert statement to the table, (ii) parameters
-/// to bind to that SQL statement, (iii) a SQL string for an insert statement the message table, and
-/// (iv) parameters to bind to that SQL statement. If the verbose flag is set, the number of errors,
-/// warnings, and information messages generated are added to messages_stats, the contents of which
-/// will later be written to stderr.
+/// Given a configuration map, a table name, a number of rows, their corresponding chunk number,
+/// and a database connection pool used to determine the database type, return two four-place
+/// tuples, corresponding to the normal and conflict tables, respectively. Each of these contains
+/// (i) a SQL string for an insert statement to the table, (ii) parameters to bind to that SQL
+/// statement, (iii) a SQL string for an insert statement the message table, and (iv) parameters
+/// to bind to that SQL statement. If the verbose flag is set, the number of errors, warnings,
+/// and information messages generated are added to messages_stats, the contents of which will
+/// later be written to stderr.
 async fn make_inserts(
     config: &ConfigMap,
     table_name: &String,
