@@ -1,8 +1,10 @@
 use ontodev_valve::{
-    configure_and_or_load, get_compiled_datatype_conditions, get_compiled_rule_conditions,
+    get_compiled_datatype_conditions, get_compiled_rule_conditions,
     get_parsed_structure_conditions, insert_new_row, update_row,
     validate::{get_matching_values, validate_row},
+    valve,
     valve_grammar::StartParser,
+    ValveCommand,
 };
 use serde_json::{json, Value as SerdeValue};
 use sqlx::{
@@ -12,7 +14,7 @@ use sqlx::{
 use std::str::FromStr;
 
 pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Error> {
-    let config = configure_and_or_load(table, database, false, false).await?;
+    let config = valve(table, database, &ValveCommand::Config, false).await?;
     let config: SerdeValue = serde_json::from_str(config.as_str()).unwrap();
     let config = config.as_object().unwrap();
 

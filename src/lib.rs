@@ -133,6 +133,17 @@ impl std::fmt::Debug for ColumnRule {
     }
 }
 
+/// Possible VALVE commands
+#[derive(Debug, PartialEq, Eq)]
+pub enum ValveCommand {
+    /// Configure but do not create or load.
+    Config,
+    /// Configure and create but do not load.
+    Create,
+    /// Configure, create, and load.
+    Load,
+}
+
 /// Given the path to a table.tsv file, load and check the 'table', 'column', and 'datatype'
 /// tables, and return ConfigMaps corresponding to specials, tables, datatypes, and rules.
 pub fn read_config_files(path: &str) -> (ConfigMap, ConfigMap, ConfigMap, ConfigMap) {
@@ -507,15 +518,16 @@ pub fn get_parsed_structure_conditions(
 /// information to fill in constraints information into a new config map that is then returned along
 /// with a list of the tables in the database sorted according to their mutual dependencies. If
 /// the flag `verbose` is set to true, emit SQL to create the database schema to STDOUT.
-/// If the flag `write_to_db` is set to true, execute the SQL in the database using the given
-/// connection pool.
+/// If `command` is set to [ValveCommand::Create], execute the SQL statements to create the
+/// database using the given connection pool. If it is set to [ValveCommand::Load], execute the SQL
+/// to load it as well.
 pub async fn configure_db(
     tables_config: &mut ConfigMap,
     datatypes_config: &mut ConfigMap,
     pool: &AnyPool,
     parser: &StartParser,
     verbose: bool,
-    write_to_db: bool,
+    command: &ValveCommand,
 ) -> Result<(Vec<String>, ConfigMap), sqlx::Error> {
     // This is the ConfigMap that we will be returning:
     let mut constraints_config = ConfigMap::new();
@@ -631,7 +643,7 @@ pub async fn configure_db(
     let unsorted_tables: Vec<String> = setup_statements.keys().cloned().collect();
     let sorted_tables = verify_table_deps_and_sort(&unsorted_tables, &constraints_config);
 
-    if write_to_db || verbose {
+    if *command != ValveCommand::Config || verbose {
         // Generate DDL for the message table:
         let mut message_statements = vec![];
         message_statements.push(r#"DROP TABLE IF EXISTS "message";"#.to_string());
@@ -660,7 +672,7 @@ pub async fn configure_db(
         tables_to_create.push("message".to_string());
         for table in &tables_to_create {
             let table_statements = setup_statements.get(table).unwrap();
-            if write_to_db {
+            if *command != ValveCommand::Config {
                 for stmt in table_statements {
                     sqlx_query(stmt)
                         .execute(pool)
@@ -680,12 +692,12 @@ pub async fn configure_db(
 
 /// Given a path to a table table file (table.tsv), a directory in which to find/create a database:
 /// configure the database using the configuration which can be looked up using the table table,
-/// and optionally load it if the `load` flag is set to true. If the `verbose` flag is set to true,
-/// output status messages while loading.
-pub async fn configure_and_or_load(
+/// and optionally create and/or load it according to the value of `command`. If the `verbose` flag
+/// is set to true, output status messages while loading. Returns the configuration map as a String.
+pub async fn valve(
     table_table: &str,
     database: &str,
-    load: bool,
+    command: &ValveCommand,
     verbose: bool,
 ) -> Result<String, sqlx::Error> {
     let parser = StartParser::new();
@@ -716,12 +728,12 @@ pub async fn configure_and_or_load(
     }
 
     let pool = AnyPoolOptions::new().max_connections(5).connect_with(connection_options).await?;
-    if load && pool.any_kind() == AnyKind::Sqlite {
+    if *command == ValveCommand::Load && pool.any_kind() == AnyKind::Sqlite {
         sqlx_query("PRAGMA foreign_keys = ON").execute(&pool).await?;
     }
 
     let (sorted_table_list, constraints_config) =
-        configure_db(&mut tables_config, &mut datatypes_config, &pool, &parser, verbose, load)
+        configure_db(&mut tables_config, &mut datatypes_config, &pool, &parser, verbose, command)
             .await?;
 
     let mut config = ConfigMap::new();
@@ -741,7 +753,7 @@ pub async fn configure_and_or_load(
     let compiled_rule_conditions =
         get_compiled_rule_conditions(&config, compiled_datatype_conditions.clone(), &parser);
 
-    if load {
+    if *command == ValveCommand::Load {
         if verbose {
             eprintln!("{} - Processing {} tables.", Utc::now(), sorted_table_list.len());
         }
