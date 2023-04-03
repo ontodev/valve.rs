@@ -30,6 +30,7 @@ use crate::validate::{
 use crate::{ast::Expression, valve_grammar::StartParser};
 use chrono::Utc;
 use crossbeam;
+use futures::executor::block_on;
 use indoc::indoc;
 use itertools::{IntoChunks, Itertools};
 use lazy_static::lazy_static;
@@ -42,7 +43,7 @@ use regex::Regex;
 use serde_json::{json, Value as SerdeValue};
 use sqlx::{
     any::{AnyConnectOptions, AnyKind, AnyPool, AnyPoolOptions, AnyRow},
-    query as sqlx_query, Row, ValueRef,
+    query as sqlx_query, Column, Row, ValueRef,
 };
 use std::{
     collections::{BTreeMap, HashMap},
@@ -163,7 +164,14 @@ pub fn read_config_files(path: &str) -> (ConfigMap, ConfigMap, ConfigMap, Config
 
     // Load the table table from the given path:
     let mut tables_config = ConfigMap::new();
-    let rows = read_tsv_into_vector(path);
+    let rows = {
+        if path.to_lowercase().ends_with(".tsv") {
+            read_tsv_into_vector(path)
+        } else {
+            read_db_table_into_vector(path)
+        }
+    };
+
     for mut row in rows {
         for column in vec!["table", "path", "type"] {
             if !row.contains_key(column) || row.get(column) == None {
@@ -186,7 +194,7 @@ pub fn read_config_files(path: &str) -> (ConfigMap, ConfigMap, ConfigMap, Config
         if let Some(SerdeValue::String(row_type)) = row.get("type") {
             if row_type == "table" {
                 let row_path = row.get("path").unwrap();
-                if row_path != path {
+                if path.to_lowercase().ends_with(".tsv") && row_path != path {
                     panic!(
                         "Special 'table' path '{}' does not match this path '{}'",
                         row_path, path
@@ -983,6 +991,42 @@ fn read_tsv_into_vector(path: &str) -> Vec<ConfigMap> {
     }
 
     rows
+}
+
+/// Given a database at the specified location, query the "table" table and return a vector of rows
+/// represented as ConfigMaps.
+fn read_db_table_into_vector(database: &str) -> Vec<ConfigMap> {
+    let connection_options;
+    if database.starts_with("postgresql://") {
+        connection_options = AnyConnectOptions::from_str(database).unwrap();
+    } else {
+        let connection_string;
+        if !database.starts_with("sqlite://") {
+            connection_string = format!("sqlite://{}?mode=ro", database);
+        } else {
+            connection_string = database.to_string();
+        }
+        connection_options = AnyConnectOptions::from_str(connection_string.as_str()).unwrap();
+    }
+
+    let pool = block_on(AnyPoolOptions::new().max_connections(5).connect_with(connection_options))
+        .unwrap();
+
+    let sql = "SELECT * from \"table\"";
+    let rows = block_on(sqlx_query(&sql).fetch_all(&pool)).unwrap();
+    let mut table_rows = vec![];
+    for row in rows {
+        let mut table_row = ConfigMap::new();
+        for column in row.columns() {
+            let cname = column.name();
+            if cname != "row_number" {
+                let value: &str = row.get(format!(r#"{}"#, cname).as_str());
+                table_row.insert(column.name().to_string(), json!(value));
+            }
+        }
+        table_rows.push(table_row);
+    }
+    table_rows
 }
 
 /// Given a condition on a datatype, if the condition is a Function, then parse it using
