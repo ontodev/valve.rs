@@ -253,11 +253,14 @@ pub fn read_config_files(
             return read_tsv_into_vector(&path.to_string());
         } else {
             let mut db_table = None;
-            for (table_name, value) in tables_config {
-                let this_table_type = value.get("type").and_then(|t| t.as_str()).unwrap();
-                if this_table_type == table_type {
-                    db_table = Some(table_name);
-                    break;
+            for (table_name, table_config) in tables_config {
+                let this_type = table_config.get("type");
+                if let Some(this_type) = this_type {
+                    let this_type = this_type.as_str().unwrap();
+                    if this_type == table_type {
+                        db_table = Some(table_name);
+                        break;
+                    }
                 }
             }
             if db_table == None {
@@ -1057,8 +1060,13 @@ fn read_db_table_into_vector(database: &str, config_table: &str) -> Vec<ConfigMa
         for column in row.columns() {
             let cname = column.name();
             if cname != "row_number" {
-                let value: &str = row.get(format!(r#"{}"#, cname).as_str());
-                table_row.insert(column.name().to_string(), json!(value));
+                let raw_value = row.try_get_raw(format!(r#"{}"#, cname).as_str()).unwrap();
+                if !raw_value.is_null() {
+                    let value = get_column_value(&row, &cname, "text");
+                    table_row.insert(cname.to_string(), json!(value));
+                } else {
+                    table_row.insert(cname.to_string(), json!(""));
+                }
             }
         }
         table_rows.push(table_row);
@@ -1283,7 +1291,7 @@ fn cast_column_sql_to_text(column: &str, sql_type: &str) -> String {
 }
 
 /// Given a database row, the name of a column, and it's SQL type, return the value of that column
-// from the given row as a String.
+/// from the given row as a String.
 fn get_column_value(row: &AnyRow, column: &str, sql_type: &str) -> String {
     if sql_type.to_lowercase() == "integer" {
         let value: i32 = row.get(format!(r#"{}"#, column).as_str());
