@@ -137,7 +137,10 @@ impl std::fmt::Debug for ColumnRule {
 /// Given the path to a configuration table (either a table.tsv file or a database containing a
 /// table named "table"), load and check the 'table', 'column', and 'datatype' tables, and return
 /// ConfigMaps corresponding to specials, tables, datatypes, and rules.
-pub fn read_config_files(path: &str) -> (ConfigMap, ConfigMap, ConfigMap, ConfigMap) {
+pub fn read_config_files(
+    path: &str,
+    config_table: &str,
+) -> (ConfigMap, ConfigMap, ConfigMap, ConfigMap) {
     let special_table_types = json!({
         "table": {"required": true},
         "column": {"required": true},
@@ -152,13 +155,19 @@ pub fn read_config_files(path: &str) -> (ConfigMap, ConfigMap, ConfigMap, Config
         specials_config.insert(t.to_string(), SerdeValue::Null);
     }
 
+    // If the path is a TSV read from the file otherwise read from the configuration tables in the
+    // database:
+    let is_file = path.to_lowercase().ends_with(".tsv");
+
     // Load the table table from the given path:
     let mut tables_config = ConfigMap::new();
     let rows = {
-        if path.to_lowercase().ends_with(".tsv") {
+        // Read in the configuration entry point (the "table table") from either a file or a
+        // database table.
+        if is_file {
             read_tsv_into_vector(path)
         } else {
-            read_db_table_into_vector(path)
+            read_db_table_into_vector(path, config_table)
         }
     };
 
@@ -219,13 +228,49 @@ pub fn read_config_files(path: &str) -> (ConfigMap, ConfigMap, ConfigMap, Config
         }
     }
 
+    // Helper function for extracting special configuration (other than the main 'table'
+    // configuration) from either a file or a table in the database, depending on the value of
+    // `is_file`. When `is_file` is true, the path of the config table corresponding to
+    // `table_type` is looked up, the TSV is read, and the rows are returned. When `is_file` is
+    // false, the table name corresponding to `table_type` is looked up in the database indicated
+    // by `path`, the table is read, and the rows are returned.
+    fn get_special_config(
+        table_type: &str,
+        specials_config: &ConfigMap,
+        tables_config: &ConfigMap,
+        path: &str,
+        is_file: bool,
+    ) -> Vec<ConfigMap> {
+        if is_file {
+            let table_name = specials_config.get(table_type).and_then(|d| d.as_str()).unwrap();
+            let path = String::from(
+                tables_config
+                    .get(table_name)
+                    .and_then(|t| t.get("path"))
+                    .and_then(|p| p.as_str())
+                    .unwrap(),
+            );
+            return read_tsv_into_vector(&path.to_string());
+        } else {
+            let mut db_table = None;
+            for (table_name, value) in tables_config {
+                let this_table_type = value.get("type").and_then(|t| t.as_str()).unwrap();
+                if this_table_type == table_type {
+                    db_table = Some(table_name);
+                    break;
+                }
+            }
+            if db_table == None {
+                panic!("Could not determine special table name for type '{}'.", table_type);
+            }
+            let db_table = db_table.unwrap();
+            read_db_table_into_vector(path, db_table)
+        }
+    }
+
     // Load datatype table
     let mut datatypes_config = ConfigMap::new();
-    let table_name = specials_config.get("datatype").and_then(|d| d.as_str()).unwrap();
-    let path = String::from(
-        tables_config.get(table_name).and_then(|t| t.get("path")).and_then(|p| p.as_str()).unwrap(),
-    );
-    let rows = read_tsv_into_vector(&path.to_string());
+    let rows = get_special_config("datatype", &specials_config, &tables_config, path, is_file);
     for mut row in rows {
         for column in vec!["datatype", "parent", "condition", "SQLite type", "PostgreSQL type"] {
             if !row.contains_key(column) || row.get(column) == None {
@@ -256,11 +301,7 @@ pub fn read_config_files(path: &str) -> (ConfigMap, ConfigMap, ConfigMap, Config
     }
 
     // Load column table
-    let table_name = specials_config.get("column").and_then(|d| d.as_str()).unwrap();
-    let path = String::from(
-        tables_config.get(table_name).and_then(|t| t.get("path")).and_then(|p| p.as_str()).unwrap(),
-    );
-    let rows = read_tsv_into_vector(&path.to_string());
+    let rows = get_special_config("column", &specials_config, &tables_config, path, is_file);
     for mut row in rows {
         for column in vec!["table", "column", "nulltype", "datatype"] {
             if !row.contains_key(column) || row.get(column) == None {
@@ -310,14 +351,7 @@ pub fn read_config_files(path: &str) -> (ConfigMap, ConfigMap, ConfigMap, Config
     // Load rule table if it exists
     let mut rules_config = ConfigMap::new();
     if let Some(SerdeValue::String(table_name)) = specials_config.get("rule") {
-        let path = String::from(
-            tables_config
-                .get(table_name)
-                .and_then(|t| t.get("path"))
-                .and_then(|p| p.as_str())
-                .unwrap(),
-        );
-        let rows = read_tsv_into_vector(&path.to_string());
+        let rows = get_special_config(table_name, &specials_config, &tables_config, path, is_file);
         for row in rows {
             for column in vec![
                 "table",
@@ -709,11 +743,12 @@ pub async fn valve(
     database: &str,
     command: &ValveCommand,
     verbose: bool,
+    config_table: &str,
 ) -> Result<String, sqlx::Error> {
     let parser = StartParser::new();
 
     let (specials_config, mut tables_config, mut datatypes_config, rules_config) =
-        read_config_files(&table_table.to_string());
+        read_config_files(&table_table.to_string(), config_table);
 
     // To connect to a postgresql database listening to a unix domain socket:
     // ----------------------------------------------------------------------
@@ -997,7 +1032,7 @@ fn read_tsv_into_vector(path: &str) -> Vec<ConfigMap> {
 
 /// Given a database at the specified location, query the "table" table and return a vector of rows
 /// represented as ConfigMaps.
-fn read_db_table_into_vector(database: &str) -> Vec<ConfigMap> {
+fn read_db_table_into_vector(database: &str, config_table: &str) -> Vec<ConfigMap> {
     let connection_options;
     if database.starts_with("postgresql://") {
         connection_options = AnyConnectOptions::from_str(database).unwrap();
@@ -1014,7 +1049,7 @@ fn read_db_table_into_vector(database: &str) -> Vec<ConfigMap> {
     let pool = block_on(AnyPoolOptions::new().max_connections(5).connect_with(connection_options))
         .unwrap();
 
-    let sql = "SELECT * FROM \"table\"";
+    let sql = format!("SELECT * FROM \"{}\"", config_table);
     let rows = block_on(sqlx_query(&sql).fetch_all(&pool)).unwrap();
     let mut table_rows = vec![];
     for row in rows {

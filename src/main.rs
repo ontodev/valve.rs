@@ -20,6 +20,7 @@ async fn main() -> Result<(), sqlx::Error> {
     let mut api_test = false;
     let mut dump_config = false;
     let mut create_only = false;
+    let mut config_table = String::new();
     let mut verbose = false;
     let mut source = String::new();
     let mut destination = String::new();
@@ -52,6 +53,12 @@ async fn main() -> Result<(), sqlx::Error> {
             r#"Read the configuration referred to by SOURCE, and create a corresponding database in
                DESTINATION but do not load it."#,
         );
+        ap.refer(&mut config_table).add_option(
+            &["--config_table"],
+            Store,
+            r#"When reading configuration from a database, the name to use to refer to the main
+               configuration table (defaults to "table")"#,
+        );
         ap.refer(&mut verbose).add_option(
             &["--verbose"],
             StoreTrue,
@@ -61,8 +68,11 @@ async fn main() -> Result<(), sqlx::Error> {
         ap.refer(&mut source).add_argument(
             "SOURCE",
             Store,
-            // TODO: Generalize this to also accept a database connection.
-            "(Required.) A filename referring to a specific valve configuration.",
+            r#"(Required.) The location of the valve configuration entrypoint. Can be
+               one of (A) A URL of the form `postgresql://...` or `sqlite://...` indicating a
+               database connection where the valve configuration can be read from a table named
+               "table"; (B) The filename (including path) of the table file (usually called
+               table.tsv)."#,
         );
         ap.refer(&mut destination).add_argument(
             "DESTINATION",
@@ -87,11 +97,16 @@ async fn main() -> Result<(), sqlx::Error> {
         process::exit(1);
     }
 
+    if config_table.trim() == "" {
+        config_table = "table".to_string();
+    }
+
     if api_test {
         run_api_tests(&source, &destination).await?;
     } else if dump_config {
         let config =
-            valve(&source, &String::from(":memory:"), &ValveCommand::Config, false).await?;
+            valve(&source, &String::from(":memory:"), &ValveCommand::Config, false, &config_table)
+                .await?;
         let mut config: SerdeValue = serde_json::from_str(config.as_str()).unwrap();
         let config = config.as_object_mut().unwrap();
         let parser = StartParser::new();
@@ -116,9 +131,9 @@ async fn main() -> Result<(), sqlx::Error> {
         let config = serde_json::to_string(config).unwrap();
         println!("{}", config);
     } else if create_only {
-        valve(&source, &destination, &ValveCommand::Create, verbose).await?;
+        valve(&source, &destination, &ValveCommand::Create, verbose, &config_table).await?;
     } else {
-        valve(&source, &destination, &ValveCommand::Load, verbose).await?;
+        valve(&source, &destination, &ValveCommand::Load, verbose, &config_table).await?;
     }
 
     Ok(())
