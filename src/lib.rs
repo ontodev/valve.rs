@@ -155,16 +155,12 @@ pub fn read_config_files(
         specials_config.insert(t.to_string(), SerdeValue::Null);
     }
 
-    // If the path is a TSV read from the file otherwise read from the configuration tables in the
-    // database:
-    let is_file = path.to_lowercase().ends_with(".tsv");
-
     // Load the table table from the given path:
     let mut tables_config = ConfigMap::new();
     let rows = {
         // Read in the configuration entry point (the "table table") from either a file or a
         // database table.
-        if is_file {
+        if path.to_lowercase().ends_with(".tsv") {
             read_tsv_into_vector(path)
         } else {
             read_db_table_into_vector(path, config_table)
@@ -230,18 +226,17 @@ pub fn read_config_files(
 
     // Helper function for extracting special configuration (other than the main 'table'
     // configuration) from either a file or a table in the database, depending on the value of
-    // `is_file`. When `is_file` is true, the path of the config table corresponding to
-    // `table_type` is looked up, the TSV is read, and the rows are returned. When `is_file` is
-    // false, the table name corresponding to `table_type` is looked up in the database indicated
-    // by `path`, the table is read, and the rows are returned.
+    // `path`. When `path` ends in '.tsv', the path of the config table corresponding to
+    // `table_type` is looked up, the TSV is read, and the rows are returned. When `path` does not
+    // end in '.tsv', the table name corresponding to `table_type` is looked up in the database
+    // indicated by `path`, the table is read, and the rows are returned.
     fn get_special_config(
         table_type: &str,
         specials_config: &ConfigMap,
         tables_config: &ConfigMap,
         path: &str,
-        is_file: bool,
     ) -> Vec<ConfigMap> {
-        if is_file {
+        if path.to_lowercase().ends_with(".tsv") {
             let table_name = specials_config.get(table_type).and_then(|d| d.as_str()).unwrap();
             let path = String::from(
                 tables_config
@@ -273,7 +268,7 @@ pub fn read_config_files(
 
     // Load datatype table
     let mut datatypes_config = ConfigMap::new();
-    let rows = get_special_config("datatype", &specials_config, &tables_config, path, is_file);
+    let rows = get_special_config("datatype", &specials_config, &tables_config, path);
     for mut row in rows {
         for column in vec!["datatype", "parent", "condition", "SQLite type", "PostgreSQL type"] {
             if !row.contains_key(column) || row.get(column) == None {
@@ -304,7 +299,7 @@ pub fn read_config_files(
     }
 
     // Load column table
-    let rows = get_special_config("column", &specials_config, &tables_config, path, is_file);
+    let rows = get_special_config("column", &specials_config, &tables_config, path);
     for mut row in rows {
         for column in vec!["table", "column", "nulltype", "datatype"] {
             if !row.contains_key(column) || row.get(column) == None {
@@ -354,7 +349,7 @@ pub fn read_config_files(
     // Load rule table if it exists
     let mut rules_config = ConfigMap::new();
     if let Some(SerdeValue::String(table_name)) = specials_config.get("rule") {
-        let rows = get_special_config(table_name, &specials_config, &tables_config, path, is_file);
+        let rows = get_special_config(table_name, &specials_config, &tables_config, path);
         for row in rows {
             for column in vec![
                 "table",
