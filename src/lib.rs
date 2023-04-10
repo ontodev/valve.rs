@@ -67,8 +67,8 @@ static MULTI_THREADED: bool = true;
 static SQL_PARAM: &str = "VALVEPARAM";
 
 lazy_static! {
-    // TODO: include synonyms?
-    static ref SQL_TYPES: Vec<&'static str> = vec!["text", "integer", "real", "blob"];
+    static ref PG_SQL_TYPES: Vec<&'static str> = vec!["text", "varchar", "integer"];
+    static ref SL_SQL_TYPES: Vec<&'static str> = vec!["text", "integer"];
 }
 
 /// An alias for [serde_json::Map](..//serde_json/struct.Map.html)<String, [serde_json::Value](../serde_json/enum.Value.html)>.
@@ -1579,8 +1579,35 @@ fn create_table_statement(
             panic!("Missing SQL type for {}", row.get("datatype").unwrap());
         }
         let sql_type = sql_type.unwrap();
-        if !SQL_TYPES.contains(&sql_type.to_lowercase().as_str()) {
-            panic!("Unrecognized SQL type '{}' for {}", sql_type, row.get("datatype").unwrap());
+
+        let short_sql_type = {
+            if sql_type.to_lowercase().as_str().starts_with("varchar(") {
+                "VARCHAR"
+            } else {
+                &sql_type
+            }
+        };
+
+        if pool.any_kind() == AnyKind::Postgres {
+            if !PG_SQL_TYPES.contains(&short_sql_type.to_lowercase().as_str()) {
+                panic!(
+                    "Unrecognized PostgreSQL SQL type '{}' for datatype: '{}'. \
+                     Accepted SQL types for PostgreSQL are: {}",
+                    sql_type,
+                    row.get("datatype").and_then(|d| d.as_str()).unwrap(),
+                    PG_SQL_TYPES.join(", ")
+                );
+            }
+        } else {
+            if !SL_SQL_TYPES.contains(&short_sql_type.to_lowercase().as_str()) {
+                panic!(
+                    "Unrecognized SQLite SQL type '{}' for datatype '{}'. \
+                     Accepted SQL datatypes for SQLite are: {}",
+                    sql_type,
+                    row.get("datatype").and_then(|d| d.as_str()).unwrap(),
+                    SL_SQL_TYPES.join(", ")
+                );
+            }
         }
 
         let column_name = row.get("column").and_then(|s| s.as_str()).unwrap();
