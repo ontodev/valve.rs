@@ -654,13 +654,59 @@ pub async fn configure_db(
 
         // Create a view as the union of the regular and conflict versions of the table:
         let mut drop_view_sql = format!(r#"DROP VIEW IF EXISTS "{}_view""#, table_name);
+        let inner_t;
         if pool.any_kind() == AnyKind::Postgres {
             drop_view_sql.push_str(" CASCADE");
+            inner_t = format!(
+                indoc! {r#"
+                    (
+                      SELECT JSON_AGG(t)::TEXT FROM (
+                        SELECT "column", "value", "level", "rule", "message"
+                        FROM "message"
+                        WHERE "table" = '{t}'
+                          AND "row" = inner_t."row_number"
+                      ) t
+                    )
+                "#},
+                t = table_name,
+            );
+        } else {
+            inner_t = format!(
+                indoc! {r#"
+                    (
+                      SELECT JSON_GROUP_ARRAY(
+                        JSON_OBJECT(
+                          'column', "column",
+                          'value', "value",
+                          'level', "level",
+                          'rule', "rule",
+                          'message', "message"
+                        )
+                      )
+                      FROM "message"
+                      WHERE "table" = '{t}'
+                        AND "row" = inner_t."row_number"
+                    )
+                "#},
+                t = table_name,
+            );
         }
         drop_view_sql.push_str(";");
+
         let create_view_sql = format!(
-            r#"CREATE VIEW "{t}_view" AS SELECT * FROM "{t}" UNION ALL SELECT * FROM "{t}_conflict";"#,
+            indoc! {r#"
+              CREATE VIEW "{t}_view" AS
+                SELECT
+                  inner_t.*,
+                  {inner_t} AS "message"
+                FROM (
+                  SELECT * FROM "{t}"
+                  UNION ALL
+                  SELECT * FROM "{t}_conflict"
+                ) as inner_t;
+            "#},
             t = table_name,
+            inner_t = inner_t,
         );
         table_statements.push(drop_view_sql);
         table_statements.push(create_view_sql);
@@ -676,7 +722,15 @@ pub async fn configure_db(
     if *command != ValveCommand::Config || verbose {
         // Generate DDL for the message table:
         let mut message_statements = vec![];
-        message_statements.push(r#"DROP TABLE IF EXISTS "message";"#.to_string());
+        let drop_sql = {
+            let mut sql = r#"DROP TABLE IF EXISTS "message""#.to_string();
+            if pool.any_kind() == AnyKind::Postgres {
+                sql.push_str(" CASCADE");
+            }
+            sql.push_str(";");
+            sql
+        };
+        message_statements.push(drop_sql);
         message_statements.push(
             indoc! {r#"
               CREATE TABLE "message" (
@@ -697,9 +751,10 @@ pub async fn configure_db(
         );
         setup_statements.insert("message".to_string(), message_statements);
 
-        // Add the message table to the list of tables to create:
-        let mut tables_to_create = sorted_tables.clone();
-        tables_to_create.push("message".to_string());
+        // Add the message table to the beginning of the list of tables to create (we add it to the
+        // beginning since the table views all reference it).
+        let mut tables_to_create = vec!["message".to_string()];
+        tables_to_create.append(&mut sorted_tables.clone());
         for table in &tables_to_create {
             let table_statements = setup_statements.get(table).unwrap();
             if *command != ValveCommand::Config {
@@ -734,8 +789,10 @@ pub enum ValveCommand {
 /// Given a path to a configuration table (either a table.tsv file or a database containing a
 /// table named "table"), and a directory in which to find/create a database: configure the
 /// database using the configuration which can be looked up using the table table, and
-/// optionally create and/or load it according to the value of `command`. If the `verbose` flag
-/// is set to true, output status messages while loading. Returns the configuration map as a String.
+/// optionally create and/or load it according to the value of `command` (see [ValveCommand]).
+/// If the `verbose` flag is set to true, output status messages while loading. If `config_table`
+/// is given and `table_table` indicates a database, query the table called `config_table` for the
+/// table table information. Returns the configuration map as a String.
 pub async fn valve(
     table_table: &str,
     database: &str,
