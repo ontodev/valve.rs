@@ -664,7 +664,7 @@ pub async fn configure_db(
                         SELECT "column", "value", "level", "rule", "message"
                         FROM "message"
                         WHERE "table" = '{t}'
-                          AND "row" = inner_t."row_number"
+                          AND "row" = union_t."row_number"
                       ) t
                     )
                 "#},
@@ -674,18 +674,21 @@ pub async fn configure_db(
             inner_t = format!(
                 indoc! {r#"
                     (
-                      SELECT JSON_GROUP_ARRAY(
-                        JSON_OBJECT(
-                          'column', "column",
-                          'value', "value",
-                          'level', "level",
-                          'rule', "rule",
-                          'message', "message"
-                        )
+                      SELECT NULLIF(
+                        JSON_GROUP_ARRAY(
+                          JSON_OBJECT(
+                            'column', "column",
+                            'value', "value",
+                            'level', "level",
+                            'rule', "rule",
+                            'message', "message"
+                          )
+                        ),
+                        '[]'
                       )
                       FROM "message"
                       WHERE "table" = '{t}'
-                        AND "row" = inner_t."row_number"
+                        AND "row" = union_t."row_number"
                     )
                 "#},
                 t = table_name,
@@ -697,13 +700,13 @@ pub async fn configure_db(
             indoc! {r#"
               CREATE VIEW "{t}_view" AS
                 SELECT
-                  inner_t.*,
+                  union_t.*,
                   {inner_t} AS "message"
                 FROM (
                   SELECT * FROM "{t}"
                   UNION ALL
                   SELECT * FROM "{t}_conflict"
-                ) as inner_t;
+                ) as union_t;
             "#},
             t = table_name,
             inner_t = inner_t,
