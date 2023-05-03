@@ -665,6 +665,7 @@ pub async fn configure_db(
                         FROM "message"
                         WHERE "table" = '{t}'
                           AND "row" = union_t."row_number"
+                        ORDER BY "column", "message_id"
                       ) t
                     )
                 "#},
@@ -689,6 +690,7 @@ pub async fn configure_db(
                       FROM "message"
                       WHERE "table" = '{t}'
                         AND "row" = union_t."row_number"
+                      ORDER BY "column", "message_id"
                     )
                 "#},
                 t = table_name,
@@ -734,21 +736,28 @@ pub async fn configure_db(
             sql
         };
         message_statements.push(drop_sql);
-        message_statements.push(
+        message_statements.push(format!(
             indoc! {r#"
-              CREATE TABLE "message" (
-                "table" TEXT,
-                "row" BIGINT,
-                "column" TEXT,
-                "value" TEXT,
-                "level" TEXT,
-                "rule" TEXT,
-                "message" TEXT,
-                PRIMARY KEY ("table", "row", "column", "rule")
-              );
-            "#}
-            .to_string(),
-        );
+                CREATE TABLE "message" (
+                  {}
+                  "table" TEXT,
+                  "row" BIGINT,
+                  "column" TEXT,
+                  "value" TEXT,
+                  "level" TEXT,
+                  "rule" TEXT,
+                  "message" TEXT,
+                  UNIQUE ("table", "row", "column", "rule")
+                );
+              "#},
+            {
+                if pool.any_kind() == AnyKind::Sqlite {
+                    "\"message_id\" INTEGER PRIMARY KEY,"
+                } else {
+                    "\"message_id\" SERIAL PRIMARY KEY,"
+                }
+            },
+        ));
         message_statements.push(
             r#"CREATE INDEX "message_trc_idx" ON "message"("table", "row", "column");"#.to_string(),
         );
