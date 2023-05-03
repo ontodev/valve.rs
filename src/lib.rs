@@ -902,6 +902,7 @@ pub async fn insert_new_row(
     let mut insert_values = vec![];
     let mut insert_params = vec![];
     let mut messages = vec![];
+    let sorted_datatypes = get_sorted_datatypes(global_config);
     for (column, cell) in row.iter() {
         insert_columns.append(&mut vec![format!(r#""{}""#, column)]);
         let cell = cell.as_object().unwrap();
@@ -921,7 +922,10 @@ pub async fn insert_new_row(
             insert_params.push(String::from(cell_value));
         } else {
             insert_values.push(String::from("NULL"));
-            let cell_messages = cell.get("messages").and_then(|m| m.as_array()).unwrap();
+            let cell_messages = sort_messages(
+                &sorted_datatypes,
+                cell.get("messages").and_then(|m| m.as_array()).unwrap(),
+            );
             for cell_message in cell_messages {
                 messages.push(json!({
                     "column": column,
@@ -984,6 +988,7 @@ pub async fn update_row(
     let mut assignments = vec![];
     let mut params = vec![];
     let mut messages = vec![];
+    let sorted_datatypes = get_sorted_datatypes(global_config);
     for (column, cell) in row.iter() {
         let cell = cell.as_object().unwrap();
         let cell_valid = cell.get("valid").and_then(|v| v.as_bool()).unwrap();
@@ -1002,7 +1007,10 @@ pub async fn update_row(
             params.push(String::from(cell_value));
         } else {
             assignments.push(format!(r#""{}" = NULL"#, column));
-            let cell_messages = cell.get("messages").and_then(|m| m.as_array()).unwrap();
+            let cell_messages = sort_messages(
+                &sorted_datatypes,
+                cell.get("messages").and_then(|m| m.as_array()).unwrap(),
+            );
             for cell_message in cell_messages {
                 messages.push(json!({
                     "column": String::from(column),
@@ -1889,6 +1897,91 @@ fn add_message_counts(messages: &Vec<SerdeValue>, messages_stats: &mut HashMap<S
     }
 }
 
+/// Given a global config map, return a list of defined datatype names sorted from the most generic
+/// to the most specific. This function will panic if circular dependencies are encountered.
+fn get_sorted_datatypes(global_config: &ConfigMap) -> Vec<&str> {
+    let mut graph = DiGraphMap::<&str, ()>::new();
+    let dt_config = global_config.get("datatype").and_then(|d| d.as_object()).unwrap();
+    for (dt_name, dt_obj) in dt_config.iter() {
+        let d_index = graph.add_node(dt_name);
+        if let Some(parent) = dt_obj.get("parent").and_then(|p| p.as_str()) {
+            let p_index = graph.add_node(parent);
+            graph.add_edge(d_index, p_index, ());
+        }
+    }
+
+    let mut cycles = vec![];
+    match toposort(&graph, None) {
+        Err(cycle) => {
+            let problem_node = cycle.node_id();
+            let neighbours = graph.neighbors_directed(problem_node, Direction::Outgoing);
+            for neighbour in neighbours {
+                let ways_to_problem_node =
+                    all_simple_paths::<Vec<_>, _>(&graph, neighbour, problem_node, 0, None);
+                for mut way in ways_to_problem_node {
+                    let mut cycle = vec![problem_node];
+                    cycle.append(&mut way);
+                    let cycle = cycle.iter().map(|&item| item.to_string()).collect::<Vec<_>>();
+                    cycles.push(cycle);
+                }
+            }
+            panic!("Defined datatypes contain circular dependencies: {:?}", cycles);
+        }
+        Ok(mut sorted) => {
+            sorted.reverse();
+            sorted
+        }
+    }
+}
+
+/// Given a sorted list of datatypes and a list of messages for a given cell of some table, sort
+/// the messages in the following way and return the sorted list of messages:
+/// 1. Messages pertaining to datatype rule violations, sorted according to the order specified in
+///    `sorted_datatypes`, followed by:
+/// 2. Messages pertaining to violations of one of the rules in the rule table, followed by:
+/// 3. Messages pertaining to structure violations.
+fn sort_messages(sorted_datatypes: &Vec<&str>, cell_messages: &Vec<SerdeValue>) -> Vec<SerdeValue> {
+    let mut datatype_messages = vec![];
+    let mut structure_messages = vec![];
+    let mut rule_messages = vec![];
+    for message in cell_messages {
+        let rule = message
+            .get("rule")
+            .and_then(|r| Some(r.as_str().unwrap().splitn(2, ":").collect::<Vec<_>>()))
+            .unwrap();
+        if rule[0] == "rule" {
+            rule_messages.push(message.clone());
+        } else if rule[0] == "datatype" {
+            datatype_messages.push(message.clone());
+        } else {
+            structure_messages.push(message.clone());
+        }
+    }
+
+    if datatype_messages.len() > 0 {
+        datatype_messages = {
+            let mut sorted_messages = vec![];
+            for datatype in sorted_datatypes {
+                let mut messages = datatype_messages
+                    .iter()
+                    .filter(|m| {
+                        m.get("rule").and_then(|r| r.as_str()).unwrap()
+                            == format!("datatype:{}", datatype)
+                    })
+                    .map(|m| m.clone())
+                    .collect::<Vec<_>>();
+                sorted_messages.append(&mut messages);
+            }
+            sorted_messages
+        }
+    }
+
+    let mut messages = datatype_messages;
+    messages.append(&mut rule_messages);
+    messages.append(&mut structure_messages);
+    messages
+}
+
 /// Given a configuration map, a table name, a number of rows, their corresponding chunk number,
 /// and a database connection pool used to determine the database type, return two four-place
 /// tuples, corresponding to the normal and conflict tables, respectively. Each of these contains
@@ -1966,6 +2059,7 @@ async fn make_inserts(
         let mut params = vec![];
         let mut message_lines = vec![];
         let mut message_params = vec![];
+        let sorted_datatypes = get_sorted_datatypes(config);
         for row in rows.iter() {
             let mut values = vec![format!("{}", row.row_number.unwrap())];
             for column in column_names {
@@ -1989,7 +2083,7 @@ async fn make_inserts(
                     if verbose {
                         add_message_counts(&cell.messages, messages_stats);
                     }
-                    for message in &cell.messages {
+                    for message in sort_messages(&sorted_datatypes, &cell.messages) {
                         let row = row.row_number.unwrap().to_string();
                         let message_values = vec![
                             SQL_PARAM, &row, SQL_PARAM, SQL_PARAM, SQL_PARAM, SQL_PARAM, SQL_PARAM,
