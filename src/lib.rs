@@ -30,6 +30,7 @@ use crate::validate::{
 use crate::{ast::Expression, valve_grammar::StartParser};
 use chrono::Utc;
 use crossbeam;
+use futures::executor::block_on;
 use indoc::indoc;
 use itertools::{IntoChunks, Itertools};
 use lazy_static::lazy_static;
@@ -42,7 +43,7 @@ use regex::Regex;
 use serde_json::{json, Value as SerdeValue};
 use sqlx::{
     any::{AnyConnectOptions, AnyKind, AnyPool, AnyPoolOptions, AnyRow},
-    query as sqlx_query, Row, ValueRef,
+    query as sqlx_query, Column, Row, ValueRef,
 };
 use std::{
     collections::{BTreeMap, HashMap},
@@ -66,8 +67,8 @@ static MULTI_THREADED: bool = true;
 static SQL_PARAM: &str = "VALVEPARAM";
 
 lazy_static! {
-    // TODO: include synonyms?
-    static ref SQL_TYPES: Vec<&'static str> = vec!["text", "integer", "real", "blob"];
+    static ref PG_SQL_TYPES: Vec<&'static str> = vec!["text", "varchar", "integer"];
+    static ref SL_SQL_TYPES: Vec<&'static str> = vec!["text", "integer"];
 }
 
 /// An alias for [serde_json::Map](..//serde_json/struct.Map.html)<String, [serde_json::Value](../serde_json/enum.Value.html)>.
@@ -133,9 +134,13 @@ impl std::fmt::Debug for ColumnRule {
     }
 }
 
-/// Given the path to a table.tsv file, load and check the 'table', 'column', and 'datatype'
-/// tables, and return ConfigMaps corresponding to specials, tables, datatypes, and rules.
-pub fn read_config_files(path: &str) -> (ConfigMap, ConfigMap, ConfigMap, ConfigMap) {
+/// Given the path to a configuration table (either a table.tsv file or a database containing a
+/// table named "table"), load and check the 'table', 'column', and 'datatype' tables, and return
+/// ConfigMaps corresponding to specials, tables, datatypes, and rules.
+pub fn read_config_files(
+    path: &str,
+    config_table: &str,
+) -> (ConfigMap, ConfigMap, ConfigMap, ConfigMap) {
     let special_table_types = json!({
         "table": {"required": true},
         "column": {"required": true},
@@ -152,7 +157,16 @@ pub fn read_config_files(path: &str) -> (ConfigMap, ConfigMap, ConfigMap, Config
 
     // Load the table table from the given path:
     let mut tables_config = ConfigMap::new();
-    let rows = read_tsv_into_vector(path);
+    let rows = {
+        // Read in the configuration entry point (the "table table") from either a file or a
+        // database table.
+        if path.to_lowercase().ends_with(".tsv") {
+            read_tsv_into_vector(path)
+        } else {
+            read_db_table_into_vector(path, config_table)
+        }
+    };
+
     for mut row in rows {
         for column in vec!["table", "path", "type"] {
             if !row.contains_key(column) || row.get(column) == None {
@@ -175,7 +189,7 @@ pub fn read_config_files(path: &str) -> (ConfigMap, ConfigMap, ConfigMap, Config
         if let Some(SerdeValue::String(row_type)) = row.get("type") {
             if row_type == "table" {
                 let row_path = row.get("path").unwrap();
-                if row_path != path {
+                if path.to_lowercase().ends_with(".tsv") && row_path != path {
                     panic!(
                         "Special 'table' path '{}' does not match this path '{}'",
                         row_path, path
@@ -210,15 +224,53 @@ pub fn read_config_files(path: &str) -> (ConfigMap, ConfigMap, ConfigMap, Config
         }
     }
 
+    // Helper function for extracting special configuration (other than the main 'table'
+    // configuration) from either a file or a table in the database, depending on the value of
+    // `path`. When `path` ends in '.tsv', the path of the config table corresponding to
+    // `table_type` is looked up, the TSV is read, and the rows are returned. When `path` does not
+    // end in '.tsv', the table name corresponding to `table_type` is looked up in the database
+    // indicated by `path`, the table is read, and the rows are returned.
+    fn get_special_config(
+        table_type: &str,
+        specials_config: &ConfigMap,
+        tables_config: &ConfigMap,
+        path: &str,
+    ) -> Vec<ConfigMap> {
+        if path.to_lowercase().ends_with(".tsv") {
+            let table_name = specials_config.get(table_type).and_then(|d| d.as_str()).unwrap();
+            let path = String::from(
+                tables_config
+                    .get(table_name)
+                    .and_then(|t| t.get("path"))
+                    .and_then(|p| p.as_str())
+                    .unwrap(),
+            );
+            return read_tsv_into_vector(&path.to_string());
+        } else {
+            let mut db_table = None;
+            for (table_name, table_config) in tables_config {
+                let this_type = table_config.get("type");
+                if let Some(this_type) = this_type {
+                    let this_type = this_type.as_str().unwrap();
+                    if this_type == table_type {
+                        db_table = Some(table_name);
+                        break;
+                    }
+                }
+            }
+            if db_table == None {
+                panic!("Could not determine special table name for type '{}'.", table_type);
+            }
+            let db_table = db_table.unwrap();
+            read_db_table_into_vector(path, db_table)
+        }
+    }
+
     // Load datatype table
     let mut datatypes_config = ConfigMap::new();
-    let table_name = specials_config.get("datatype").and_then(|d| d.as_str()).unwrap();
-    let path = String::from(
-        tables_config.get(table_name).and_then(|t| t.get("path")).and_then(|p| p.as_str()).unwrap(),
-    );
-    let rows = read_tsv_into_vector(&path.to_string());
+    let rows = get_special_config("datatype", &specials_config, &tables_config, path);
     for mut row in rows {
-        for column in vec!["datatype", "parent", "condition", "SQL type"] {
+        for column in vec!["datatype", "parent", "condition", "SQLite type", "PostgreSQL type"] {
             if !row.contains_key(column) || row.get(column) == None {
                 panic!("Missing required column '{}' reading '{}'", column, path);
             }
@@ -230,7 +282,7 @@ pub fn read_config_files(path: &str) -> (ConfigMap, ConfigMap, ConfigMap, Config
             }
         }
 
-        for column in vec!["parent", "condition", "SQL type"] {
+        for column in vec!["parent", "condition", "SQLite type", "PostgreSQL type"] {
             if row.get(column).and_then(|c| c.as_str()).unwrap() == "" {
                 row.remove(&column.to_string());
             }
@@ -247,11 +299,7 @@ pub fn read_config_files(path: &str) -> (ConfigMap, ConfigMap, ConfigMap, Config
     }
 
     // Load column table
-    let table_name = specials_config.get("column").and_then(|d| d.as_str()).unwrap();
-    let path = String::from(
-        tables_config.get(table_name).and_then(|t| t.get("path")).and_then(|p| p.as_str()).unwrap(),
-    );
-    let rows = read_tsv_into_vector(&path.to_string());
+    let rows = get_special_config("column", &specials_config, &tables_config, path);
     for mut row in rows {
         for column in vec!["table", "column", "nulltype", "datatype"] {
             if !row.contains_key(column) || row.get(column) == None {
@@ -301,14 +349,7 @@ pub fn read_config_files(path: &str) -> (ConfigMap, ConfigMap, ConfigMap, Config
     // Load rule table if it exists
     let mut rules_config = ConfigMap::new();
     if let Some(SerdeValue::String(table_name)) = specials_config.get("rule") {
-        let path = String::from(
-            tables_config
-                .get(table_name)
-                .and_then(|t| t.get("path"))
-                .and_then(|p| p.as_str())
-                .unwrap(),
-        );
-        let rows = read_tsv_into_vector(&path.to_string());
+        let rows = get_special_config(table_name, &specials_config, &tables_config, path);
         for row in rows {
             for column in vec![
                 "table",
@@ -507,15 +548,16 @@ pub fn get_parsed_structure_conditions(
 /// information to fill in constraints information into a new config map that is then returned along
 /// with a list of the tables in the database sorted according to their mutual dependencies. If
 /// the flag `verbose` is set to true, emit SQL to create the database schema to STDOUT.
-/// If the flag `write_to_db` is set to true, execute the SQL in the database using the given
-/// connection pool.
+/// If `command` is set to [ValveCommand::Create], execute the SQL statements to create the
+/// database using the given connection pool. If it is set to [ValveCommand::Load], execute the SQL
+/// to load it as well.
 pub async fn configure_db(
     tables_config: &mut ConfigMap,
     datatypes_config: &mut ConfigMap,
     pool: &AnyPool,
     parser: &StartParser,
     verbose: bool,
-    write_to_db: bool,
+    command: &ValveCommand,
 ) -> Result<(Vec<String>, ConfigMap), sqlx::Error> {
     // This is the ConfigMap that we will be returning:
     let mut constraints_config = ConfigMap::new();
@@ -631,7 +673,7 @@ pub async fn configure_db(
     let unsorted_tables: Vec<String> = setup_statements.keys().cloned().collect();
     let sorted_tables = verify_table_deps_and_sort(&unsorted_tables, &constraints_config);
 
-    if write_to_db || verbose {
+    if *command != ValveCommand::Config || verbose {
         // Generate DDL for the message table:
         let mut message_statements = vec![];
         message_statements.push(r#"DROP TABLE IF EXISTS "message";"#.to_string());
@@ -660,7 +702,7 @@ pub async fn configure_db(
         tables_to_create.push("message".to_string());
         for table in &tables_to_create {
             let table_statements = setup_statements.get(table).unwrap();
-            if write_to_db {
+            if *command != ValveCommand::Config {
                 for stmt in table_statements {
                     sqlx_query(stmt)
                         .execute(pool)
@@ -678,20 +720,33 @@ pub async fn configure_db(
     return Ok((sorted_tables, constraints_config));
 }
 
-/// Given a path to a table table file (table.tsv), a directory in which to find/create a database:
-/// configure the database using the configuration which can be looked up using the table table,
-/// and optionally load it if the `load` flag is set to true. If the `verbose` flag is set to true,
-/// output status messages while loading.
-pub async fn configure_and_or_load(
+/// Various VALVE commands, used with [valve()](valve).
+#[derive(Debug, PartialEq, Eq)]
+pub enum ValveCommand {
+    /// Configure but do not create or load.
+    Config,
+    /// Configure and create but do not load.
+    Create,
+    /// Configure, create, and load.
+    Load,
+}
+
+/// Given a path to a configuration table (either a table.tsv file or a database containing a
+/// table named "table"), and a directory in which to find/create a database: configure the
+/// database using the configuration which can be looked up using the table table, and
+/// optionally create and/or load it according to the value of `command`. If the `verbose` flag
+/// is set to true, output status messages while loading. Returns the configuration map as a String.
+pub async fn valve(
     table_table: &str,
     database: &str,
-    load: bool,
+    command: &ValveCommand,
     verbose: bool,
+    config_table: &str,
 ) -> Result<String, sqlx::Error> {
     let parser = StartParser::new();
 
     let (specials_config, mut tables_config, mut datatypes_config, rules_config) =
-        read_config_files(&table_table.to_string());
+        read_config_files(&table_table.to_string(), config_table);
 
     // To connect to a postgresql database listening to a unix domain socket:
     // ----------------------------------------------------------------------
@@ -716,12 +771,12 @@ pub async fn configure_and_or_load(
     }
 
     let pool = AnyPoolOptions::new().max_connections(5).connect_with(connection_options).await?;
-    if load && pool.any_kind() == AnyKind::Sqlite {
+    if *command == ValveCommand::Load && pool.any_kind() == AnyKind::Sqlite {
         sqlx_query("PRAGMA foreign_keys = ON").execute(&pool).await?;
     }
 
     let (sorted_table_list, constraints_config) =
-        configure_db(&mut tables_config, &mut datatypes_config, &pool, &parser, verbose, load)
+        configure_db(&mut tables_config, &mut datatypes_config, &pool, &parser, verbose, command)
             .await?;
 
     let mut config = ConfigMap::new();
@@ -741,7 +796,7 @@ pub async fn configure_and_or_load(
     let compiled_rule_conditions =
         get_compiled_rule_conditions(&config, compiled_datatype_conditions.clone(), &parser);
 
-    if load {
+    if *command == ValveCommand::Load {
         if verbose {
             eprintln!("{} - Processing {} tables.", Utc::now(), sorted_table_list.len());
         }
@@ -786,9 +841,13 @@ pub async fn insert_new_row(
         let mut cell_for_insert = cell.clone();
         if cell_valid {
             cell_for_insert.remove("value");
-            let sql_type =
-                get_sql_type_from_global_config(&global_config, &table_name.to_string(), &column)
-                    .unwrap();
+            let sql_type = get_sql_type_from_global_config(
+                &global_config,
+                &table_name.to_string(),
+                &column,
+                pool,
+            )
+            .unwrap();
             insert_values.push(cast_sql_param_from_text(&sql_type));
             insert_params.push(String::from(cell_value));
         } else {
@@ -863,9 +922,13 @@ pub async fn update_row(
         let mut cell_for_insert = cell.clone();
         if cell_valid {
             cell_for_insert.remove("value");
-            let sql_type =
-                get_sql_type_from_global_config(&global_config, &table_name.to_string(), &column)
-                    .unwrap();
+            let sql_type = get_sql_type_from_global_config(
+                &global_config,
+                &table_name.to_string(),
+                &column,
+                pool,
+            )
+            .unwrap();
             assignments.push(format!(r#""{}" = {}"#, column, cast_sql_param_from_text(&sql_type)));
             params.push(String::from(cell_value));
         } else {
@@ -963,6 +1026,47 @@ fn read_tsv_into_vector(path: &str) -> Vec<ConfigMap> {
     }
 
     rows
+}
+
+/// Given a database at the specified location, query the "table" table and return a vector of rows
+/// represented as ConfigMaps.
+fn read_db_table_into_vector(database: &str, config_table: &str) -> Vec<ConfigMap> {
+    let connection_options;
+    if database.starts_with("postgresql://") {
+        connection_options = AnyConnectOptions::from_str(database).unwrap();
+    } else {
+        let connection_string;
+        if !database.starts_with("sqlite://") {
+            connection_string = format!("sqlite://{}?mode=ro", database);
+        } else {
+            connection_string = database.to_string();
+        }
+        connection_options = AnyConnectOptions::from_str(connection_string.as_str()).unwrap();
+    }
+
+    let pool = block_on(AnyPoolOptions::new().max_connections(5).connect_with(connection_options))
+        .unwrap();
+
+    let sql = format!("SELECT * FROM \"{}\"", config_table);
+    let rows = block_on(sqlx_query(&sql).fetch_all(&pool)).unwrap();
+    let mut table_rows = vec![];
+    for row in rows {
+        let mut table_row = ConfigMap::new();
+        for column in row.columns() {
+            let cname = column.name();
+            if cname != "row_number" {
+                let raw_value = row.try_get_raw(format!(r#"{}"#, cname).as_str()).unwrap();
+                if !raw_value.is_null() {
+                    let value = get_column_value(&row, &cname, "text");
+                    table_row.insert(cname.to_string(), json!(value));
+                } else {
+                    table_row.insert(cname.to_string(), json!(""));
+                }
+            }
+        }
+        table_rows.push(table_row);
+    }
+    table_rows
 }
 
 /// Given a condition on a datatype, if the condition is a Function, then parse it using
@@ -1109,28 +1213,38 @@ fn compile_condition(
     };
 }
 
-/// Given the config map and the name of a datatype, climb the datatype tree (as required),
-/// and return the first 'SQL type' found.
-fn get_sql_type(dt_config: &ConfigMap, datatype: &String) -> Option<String> {
+/// Given the config map, the name of a datatype, and a database connection pool used to determine
+/// the database type, climb the datatype tree (as required), and return the first 'SQL type' found.
+fn get_sql_type(dt_config: &ConfigMap, datatype: &String, pool: &AnyPool) -> Option<String> {
     if !dt_config.contains_key(datatype) {
         return None;
     }
 
-    if let Some(sql_type) = dt_config.get(datatype).and_then(|d| d.get("SQL type")) {
+    let sql_type_column = {
+        if pool.any_kind() == AnyKind::Sqlite {
+            "SQLite type"
+        } else {
+            "PostgreSQL type"
+        }
+    };
+
+    if let Some(sql_type) = dt_config.get(datatype).and_then(|d| d.get(sql_type_column)) {
         return Some(sql_type.as_str().and_then(|s| Some(s.to_string())).unwrap());
     }
 
     let parent_datatype =
         dt_config.get(datatype).and_then(|d| d.get("parent")).and_then(|p| p.as_str()).unwrap();
 
-    return get_sql_type(dt_config, &parent_datatype.to_string());
+    return get_sql_type(dt_config, &parent_datatype.to_string(), pool);
 }
 
-/// Given the global config map, a table name, and a column name, return the column's SQL type.
+/// Given the global config map, a table name, a column name, and a database connection pool
+/// used to determine the database type return the column's SQL type.
 fn get_sql_type_from_global_config(
     global_config: &ConfigMap,
     table: &str,
     column: &str,
+    pool: &AnyPool,
 ) -> Option<String> {
     let dt_config = global_config.get("datatype").and_then(|d| d.as_object()).unwrap();
     let normal_table_name;
@@ -1148,7 +1262,7 @@ fn get_sql_type_from_global_config(
         .and_then(|d| d.as_str())
         .and_then(|d| Some(d.to_string()))
         .unwrap();
-    get_sql_type(&dt_config, &dt)
+    get_sql_type(&dt_config, &dt, pool)
 }
 
 /// Given a SQL type, return the appropriate CAST(...) statement for casting the SQL_PARAM
@@ -1172,7 +1286,7 @@ fn cast_column_sql_to_text(column: &str, sql_type: &str) -> String {
 }
 
 /// Given a database row, the name of a column, and it's SQL type, return the value of that column
-// from the given row as a String.
+/// from the given row as a String.
 fn get_column_value(row: &AnyRow, column: &str, sql_type: &str) -> String {
     if sql_type.to_lowercase() == "integer" {
         let value: i32 = row.get(format!(r#"{}"#, column).as_str());
@@ -1458,14 +1572,42 @@ fn create_table_statement(
                 .and_then(|d| d.as_str())
                 .and_then(|s| Some(s.to_string()))
                 .unwrap(),
+            pool,
         );
 
         if let None = sql_type {
             panic!("Missing SQL type for {}", row.get("datatype").unwrap());
         }
         let sql_type = sql_type.unwrap();
-        if !SQL_TYPES.contains(&sql_type.to_lowercase().as_str()) {
-            panic!("Unrecognized SQL type '{}' for {}", sql_type, row.get("datatype").unwrap());
+
+        let short_sql_type = {
+            if sql_type.to_lowercase().as_str().starts_with("varchar(") {
+                "VARCHAR"
+            } else {
+                &sql_type
+            }
+        };
+
+        if pool.any_kind() == AnyKind::Postgres {
+            if !PG_SQL_TYPES.contains(&short_sql_type.to_lowercase().as_str()) {
+                panic!(
+                    "Unrecognized PostgreSQL SQL type '{}' for datatype: '{}'. \
+                     Accepted SQL types for PostgreSQL are: {}",
+                    sql_type,
+                    row.get("datatype").and_then(|d| d.as_str()).unwrap(),
+                    PG_SQL_TYPES.join(", ")
+                );
+            }
+        } else {
+            if !SL_SQL_TYPES.contains(&short_sql_type.to_lowercase().as_str()) {
+                panic!(
+                    "Unrecognized SQLite SQL type '{}' for datatype '{}'. \
+                     Accepted SQL datatypes for SQLite are: {}",
+                    sql_type,
+                    row.get("datatype").and_then(|d| d.as_str()).unwrap(),
+                    SL_SQL_TYPES.join(", ")
+                );
+            }
         }
 
         let column_name = row.get("column").and_then(|s| s.as_str()).unwrap();
@@ -1535,9 +1677,12 @@ fn create_table_statement(
                                     }
                                     let child_datatype = child_datatype.unwrap();
                                     let parent = column_name;
-                                    let child_sql_type =
-                                        get_sql_type(datatypes_config, &child_datatype.to_string())
-                                            .unwrap();
+                                    let child_sql_type = get_sql_type(
+                                        datatypes_config,
+                                        &child_datatype.to_string(),
+                                        pool,
+                                    )
+                                    .unwrap();
                                     if sql_type != child_sql_type {
                                         panic!(
                                             "SQL type '{}' of '{}' in 'tree({})' for table \
@@ -1675,13 +1820,14 @@ fn add_message_counts(messages: &Vec<SerdeValue>, messages_stats: &mut HashMap<S
     }
 }
 
-/// Given a configuration map, a table name, a number of rows, and their corresponding chunk number,
-/// return two four-place tuples, corresponding to the normal and conflict tables, respectively.
-/// Each of these contains (i) a SQL string for an insert statement to the table, (ii) parameters
-/// to bind to that SQL statement, (iii) a SQL string for an insert statement the message table, and
-/// (iv) parameters to bind to that SQL statement. If the verbose flag is set, the number of errors,
-/// warnings, and information messages generated are added to messages_stats, the contents of which
-/// will later be written to stderr.
+/// Given a configuration map, a table name, a number of rows, their corresponding chunk number,
+/// and a database connection pool used to determine the database type, return two four-place
+/// tuples, corresponding to the normal and conflict tables, respectively. Each of these contains
+/// (i) a SQL string for an insert statement to the table, (ii) parameters to bind to that SQL
+/// statement, (iii) a SQL string for an insert statement the message table, and (iv) parameters
+/// to bind to that SQL statement. If the verbose flag is set, the number of errors, warnings,
+/// and information messages generated are added to messages_stats, the contents of which will
+/// later be written to stderr.
 async fn make_inserts(
     config: &ConfigMap,
     table_name: &String,
@@ -1689,6 +1835,7 @@ async fn make_inserts(
     chunk_number: usize,
     messages_stats: &mut HashMap<String, usize>,
     verbose: bool,
+    pool: &AnyPool,
 ) -> Result<
     ((String, Vec<String>, String, Vec<String>), (String, Vec<String>, String, Vec<String>)),
     sqlx::Error,
@@ -1744,6 +1891,7 @@ async fn make_inserts(
         rows: &Vec<ResultRow>,
         messages_stats: &mut HashMap<String, usize>,
         verbose: bool,
+        pool: &AnyPool,
     ) -> (String, Vec<String>, String, Vec<String>) {
         let mut lines = vec![];
         let mut params = vec![];
@@ -1758,7 +1906,8 @@ async fn make_inserts(
                 // nulltype field set, in which case insert NULL:
                 if cell.nulltype == None && cell.valid {
                     let sql_type =
-                        get_sql_type_from_global_config(&config, &table_name, &column).unwrap();
+                        get_sql_type_from_global_config(&config, &table_name, &column, pool)
+                            .unwrap();
                     values.push(cast_sql_param_from_text(&sql_type));
                     params.push(cell.value.clone());
                 } else {
@@ -1879,8 +2028,15 @@ async fn make_inserts(
         .map(|v| v.as_str().unwrap().to_string())
         .collect::<Vec<_>>();
 
-    let (main_sql, main_params, main_message_sql, main_message_params) =
-        generate_sql(&config, &table_name, &column_names, &main_rows, messages_stats, verbose);
+    let (main_sql, main_params, main_message_sql, main_message_params) = generate_sql(
+        &config,
+        &table_name,
+        &column_names,
+        &main_rows,
+        messages_stats,
+        verbose,
+        pool,
+    );
     let (conflict_sql, conflict_params, conflict_message_sql, conflict_message_params) =
         generate_sql(
             &config,
@@ -1889,6 +2045,7 @@ async fn make_inserts(
             &conflict_rows,
             messages_stats,
             verbose,
+            pool,
         );
 
     Ok((
@@ -1929,8 +2086,16 @@ async fn validate_rows_inter_and_insert(
     let (
         (main_sql, main_params, main_message_sql, main_message_params),
         (conflict_sql, conflict_params, conflict_message_sql, conflict_message_params),
-    ) = make_inserts(config, table_name, rows, chunk_number, &mut tmp_messages_stats, verbose)
-        .await?;
+    ) = make_inserts(
+        config,
+        table_name,
+        rows,
+        chunk_number,
+        &mut tmp_messages_stats,
+        verbose,
+        pool,
+    )
+    .await?;
 
     let main_sql = local_sql_syntax(&pool, &main_sql);
     let mut main_query = sqlx_query(&main_sql);
@@ -1985,7 +2150,7 @@ async fn validate_rows_inter_and_insert(
             let (
                 (main_sql, main_params, main_message_sql, main_message_params),
                 (conflict_sql, conflict_params, conflict_message_sql, conflict_message_params),
-            ) = make_inserts(config, table_name, rows, chunk_number, messages_stats, verbose)
+            ) = make_inserts(config, table_name, rows, chunk_number, messages_stats, verbose, pool)
                 .await?;
 
             let main_sql = local_sql_syntax(&pool, &main_sql);

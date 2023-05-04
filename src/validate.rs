@@ -231,7 +231,7 @@ pub async fn get_matching_values(
             );
 
             let sql_type =
-                get_sql_type_from_global_config(&config, table_name, &column_name).unwrap();
+                get_sql_type_from_global_config(&config, table_name, &column_name, pool).unwrap();
 
             match structure {
                 Some(ParsedStructure { original, parsed }) => {
@@ -304,6 +304,7 @@ pub async fn get_matching_values(
                                 &table_name.to_string(),
                                 under_val,
                                 None,
+                                pool,
                             );
                             let child_column_text =
                                 cast_column_sql_to_text(&child_column, &sql_type);
@@ -371,7 +372,8 @@ pub async fn validate_under(
         let tree_table = ukey.get("ttable").and_then(|tt| tt.as_str()).unwrap();
         let tree_child = ukey.get("tcolumn").and_then(|tc| tc.as_str()).unwrap();
         let column = ukey.get("column").and_then(|c| c.as_str()).unwrap();
-        let sql_type = get_sql_type_from_global_config(&config, &table_name, &column).unwrap();
+        let sql_type =
+            get_sql_type_from_global_config(&config, &table_name, &column, pool).unwrap();
         let tree = config
             .get("constraints")
             .and_then(|c| c.as_object())
@@ -393,7 +395,7 @@ pub async fn validate_under(
         let mut extra_clause;
         let mut params;
         if let Some(ref extra_row) = extra_row {
-            (extra_clause, params) = select_with_extra_row(&config, extra_row, table_name);
+            (extra_clause, params) = select_with_extra_row(&config, extra_row, table_name, pool);
         } else {
             extra_clause = String::new();
             params = vec![];
@@ -424,8 +426,15 @@ pub async fn validate_under(
         }
 
         let uval = ukey.get("value").and_then(|v| v.as_str()).unwrap().to_string();
-        let (tree_sql, mut tree_params) =
-            with_tree_sql(&config, tree, &table_name, &effective_tree, Some(uval.clone()), None);
+        let (tree_sql, mut tree_params) = with_tree_sql(
+            &config,
+            tree,
+            &table_name,
+            &effective_tree,
+            Some(uval.clone()),
+            None,
+            pool,
+        );
         // Add the tree params to the beginning of the parameter list:
         tree_params.append(&mut params);
         params = tree_params;
@@ -591,11 +600,11 @@ pub async fn validate_tree_foreign_keys(
         let child_col = tkey.get("child").and_then(|c| c.as_str()).unwrap();
         let parent_col = tkey.get("parent").and_then(|p| p.as_str()).unwrap();
         let parent_sql_type =
-            get_sql_type_from_global_config(&config, &table_name, &parent_col).unwrap();
+            get_sql_type_from_global_config(&config, &table_name, &parent_col, pool).unwrap();
         let with_clause;
         let params;
         if let Some(ref extra_row) = extra_row {
-            (with_clause, params) = select_with_extra_row(&config, extra_row, table_name);
+            (with_clause, params) = select_with_extra_row(&config, extra_row, table_name, pool);
         } else {
             with_clause = String::new();
             params = vec![];
@@ -694,7 +703,8 @@ pub async fn validate_tree_foreign_keys(
                 // Otherwise check if the value from the message table is in the child column. If it
                 // is there then we are fine, and we can go on to the next row.
                 let sql_type =
-                    get_sql_type_from_global_config(&config, &table_name, &parent_col).unwrap();
+                    get_sql_type_from_global_config(&config, &table_name, &parent_col, pool)
+                        .unwrap();
                 let sql_param = cast_sql_param_from_text(&sql_type);
                 let sql = local_sql_syntax(
                     &pool,
@@ -948,6 +958,7 @@ fn select_with_extra_row(
     config: &ConfigMap,
     extra_row: &ResultRow,
     table_name: &str,
+    pool: &AnyPool,
 ) -> (String, Vec<String>) {
     let extra_row_len = extra_row.contents.keys().len();
     let mut params = vec![];
@@ -959,7 +970,7 @@ fn select_with_extra_row(
 
     let mut second_select = String::from(r#"SELECT "row_number", "#);
     for (i, (key, content)) in extra_row.contents.iter().enumerate() {
-        let sql_type = get_sql_type_from_global_config(&config, &table_name, &key).unwrap();
+        let sql_type = get_sql_type_from_global_config(&config, &table_name, &key, pool).unwrap();
         let sql_param = cast_sql_param_from_text(&sql_type);
         // enumerate() begins from 0 but we need to begin at 1:
         let i = i + 1;
@@ -990,6 +1001,7 @@ fn with_tree_sql(
     effective_table_name: &str,
     root: Option<String>,
     extra_clause: Option<String>,
+    pool: &AnyPool,
 ) -> (String, Vec<String>) {
     let extra_clause = extra_clause.unwrap_or(String::new());
     let child_col = tree.get("child").and_then(|c| c.as_str()).unwrap();
@@ -998,7 +1010,8 @@ fn with_tree_sql(
     let mut params = vec![];
     let under_sql;
     if let Some(root) = root {
-        let sql_type = get_sql_type_from_global_config(&config, table_name, &child_col).unwrap();
+        let sql_type =
+            get_sql_type_from_global_config(&config, table_name, &child_col, pool).unwrap();
         under_sql = format!(r#"WHERE "{}" = {}"#, child_col, cast_sql_param_from_text(&sql_type));
         params.push(root.clone());
     } else {
@@ -1277,7 +1290,7 @@ async fn validate_cell_foreign_constraints(
     for fkey in fkeys {
         let ftable = fkey.get("ftable").and_then(|t| t.as_str()).unwrap();
         let fcolumn = fkey.get("fcolumn").and_then(|c| c.as_str()).unwrap();
-        let sql_type = get_sql_type_from_global_config(&config, &ftable, &fcolumn).unwrap();
+        let sql_type = get_sql_type_from_global_config(&config, &ftable, &fcolumn, pool).unwrap();
         let sql_param = cast_sql_param_from_text(&sql_type);
         let fsql = local_sql_syntax(
             &pool,
@@ -1370,13 +1383,13 @@ async fn validate_cell_trees(
 
     let parent_col = column_name;
     let parent_sql_type =
-        get_sql_type_from_global_config(&config, &table_name, &parent_col).unwrap();
+        get_sql_type_from_global_config(&config, &table_name, &parent_col, pool).unwrap();
     let parent_sql_param = cast_sql_param_from_text(&parent_sql_type);
     let parent_val = cell.value.clone();
     for tkey in tkeys {
         let child_col = tkey.get("child").and_then(|c| c.as_str()).unwrap();
         let child_sql_type =
-            get_sql_type_from_global_config(&config, &table_name, &child_col).unwrap();
+            get_sql_type_from_global_config(&config, &table_name, &child_col, pool).unwrap();
         let child_sql_param = cast_sql_param_from_text(&child_sql_type);
         let child_val =
             context.contents.get(child_col).and_then(|c| Some(c.value.clone())).unwrap();
@@ -1427,6 +1440,7 @@ async fn validate_cell_trees(
             &table_name_ext,
             Some(parent_val.clone()),
             Some(extra_clause),
+            pool,
         );
         params.append(&mut tree_sql_params);
         let sql = local_sql_syntax(
@@ -1572,7 +1586,8 @@ async fn validate_cell_unique_constraints(
             query_table = table_name.to_string();
         }
 
-        let sql_type = get_sql_type_from_global_config(&config, &table_name, &column_name).unwrap();
+        let sql_type =
+            get_sql_type_from_global_config(&config, &table_name, &column_name, pool).unwrap();
         let sql_param = cast_sql_param_from_text(&sql_type);
         let sql = local_sql_syntax(
             &pool,

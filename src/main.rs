@@ -5,23 +5,25 @@ use crate::api_test::run_api_tests;
 use argparse::{ArgumentParser, Store, StoreTrue};
 
 use ontodev_valve::{
-    configure_and_or_load, get_compiled_datatype_conditions, get_compiled_rule_conditions,
-    get_parsed_structure_conditions, valve_grammar::StartParser,
+    get_compiled_datatype_conditions, get_compiled_rule_conditions,
+    get_parsed_structure_conditions, valve, valve_grammar::StartParser, ValveCommand,
 };
 use serde_json::{from_str, Value as SerdeValue};
 use std::{env, process};
 
-fn cli_args_valid(table: &str, database: &str, dump_config: bool) -> bool {
-    table != "" && (dump_config || database != "")
+fn cli_args_valid(source: &str, destination: &str, dump_config: bool) -> bool {
+    source != "" && (dump_config || destination != "")
 }
 
 #[async_std::main]
 async fn main() -> Result<(), sqlx::Error> {
     let mut api_test = false;
     let mut dump_config = false;
+    let mut create_only = false;
+    let mut config_table = String::new();
     let mut verbose = false;
-    let mut table = String::new();
-    let mut database = String::new();
+    let mut source = String::new();
+    let mut destination = String::new();
 
     {
         // this block limits scope of borrows by ap.refer() method
@@ -29,21 +31,33 @@ async fn main() -> Result<(), sqlx::Error> {
         ap.set_description(
             r#"A lightweight validation engine written in rust. If neither
                --api_test nor --dump_config is specified, the configuration referred
-               to by TABLE will be read and a new database will be created and loaded
+               to by SOURCE will be read and a new database will be created and loaded
                with the indicated data."#,
         );
         ap.refer(&mut api_test).add_option(
             &["--api_test"],
             StoreTrue,
-            r#"Read the configuration referred to by TABLE and test the functions that
+            r#"Read the configuration referred to by SOURCE and test the functions that
                are callable externally on the existing, pre-loaded database indicated by
-               DATABASE."#,
+               DESTINATION."#,
         );
         ap.refer(&mut dump_config).add_option(
             &["--dump_config"],
             StoreTrue,
-            r#"Read the configuration referred to by TABLE and send it to stdout as a
+            r#"Read the configuration referred to by SOURCE and send it to stdout as a
                JSON-formatted string."#,
+        );
+        ap.refer(&mut create_only).add_option(
+            &["--create_only"],
+            StoreTrue,
+            r#"Read the configuration referred to by SOURCE, and create a corresponding database in
+               DESTINATION but do not load it."#,
+        );
+        ap.refer(&mut config_table).add_option(
+            &["--config_table"],
+            Store,
+            r#"When reading configuration from a database, the name to use to refer to the main
+               configuration table (defaults to "table")"#,
         );
         ap.refer(&mut verbose).add_option(
             &["--verbose"],
@@ -51,13 +65,17 @@ async fn main() -> Result<(), sqlx::Error> {
             r#"Write the SQL used to create the database to stdout after configuring it, and then
                while loading the database, write progress messages to stderr."#,
         );
-        ap.refer(&mut table).add_argument(
-            "TABLE",
+        ap.refer(&mut source).add_argument(
+            "SOURCE",
             Store,
-            "(Required.) A filename referring to a specific valve configuration.",
+            r#"(Required.) The location of the valve configuration entrypoint. Can be
+               one of (A) A URL of the form `postgresql://...` or `sqlite://...` indicating a
+               database connection where the valve configuration can be read from a table named
+               "table"; (B) The filename (including path) of the table file (usually called
+               table.tsv)."#,
         );
-        ap.refer(&mut database).add_argument(
-            "DATABASE",
+        ap.refer(&mut destination).add_argument(
+            "DESTINATION",
             Store,
             r#"(Required unless the --dump_config option has been specified.) Can be
                one of (A) A URL of the form `postgresql://...` or `sqlite://...`
@@ -69,20 +87,26 @@ async fn main() -> Result<(), sqlx::Error> {
 
     let args: Vec<String> = env::args().collect();
     let program_name = &args[0];
-    if !cli_args_valid(&table, &database, dump_config) {
-        if table == "" {
-            eprintln!("Parameter TABLE is required.");
-        } else if database == "" {
-            eprintln!("Parameter DATABASE is required.");
+    if !cli_args_valid(&source, &destination, dump_config) {
+        if source == "" {
+            eprintln!("Parameter SOURCE is required.");
+        } else if destination == "" {
+            eprintln!("Parameter DESTINATION is required.");
         }
         eprintln!("To see command-line usage, run {} --help", program_name);
         process::exit(1);
     }
 
+    if config_table.trim() == "" {
+        config_table = "table".to_string();
+    }
+
     if api_test {
-        run_api_tests(&table, &database).await?;
+        run_api_tests(&source, &destination).await?;
     } else if dump_config {
-        let config = configure_and_or_load(&table, &String::from(":memory:"), false, false).await?;
+        let config =
+            valve(&source, &String::from(":memory:"), &ValveCommand::Config, false, &config_table)
+                .await?;
         let mut config: SerdeValue = serde_json::from_str(config.as_str()).unwrap();
         let config = config.as_object_mut().unwrap();
         let parser = StartParser::new();
@@ -106,8 +130,10 @@ async fn main() -> Result<(), sqlx::Error> {
 
         let config = serde_json::to_string(config).unwrap();
         println!("{}", config);
+    } else if create_only {
+        valve(&source, &destination, &ValveCommand::Create, verbose, &config_table).await?;
     } else {
-        configure_and_or_load(&table, &database, true, verbose).await?;
+        valve(&source, &destination, &ValveCommand::Load, verbose, &config_table).await?;
     }
 
     Ok(())
