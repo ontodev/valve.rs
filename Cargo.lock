@@ -1202,7 +1202,7 @@ checksum = "86f0b0d4bf799edbc74508c1e8bf170ff5f41238e5f8225603ca7caaae2b7860"
 
 [[package]]
 name = "ontodev_valve"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "argparse",
  "async-scoped",
