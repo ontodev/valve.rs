@@ -654,13 +654,64 @@ pub async fn configure_db(
 
         // Create a view as the union of the regular and conflict versions of the table:
         let mut drop_view_sql = format!(r#"DROP VIEW IF EXISTS "{}_view""#, table_name);
+        let inner_t;
         if pool.any_kind() == AnyKind::Postgres {
             drop_view_sql.push_str(" CASCADE");
+            inner_t = format!(
+                indoc! {r#"
+                    (
+                      SELECT JSON_AGG(t)::TEXT FROM (
+                        SELECT "column", "value", "level", "rule", "message"
+                        FROM "message"
+                        WHERE "table" = '{t}'
+                          AND "row" = union_t."row_number"
+                        ORDER BY "column", "message_id"
+                      ) t
+                    )
+                "#},
+                t = table_name,
+            );
+        } else {
+            inner_t = format!(
+                indoc! {r#"
+                    (
+                      SELECT NULLIF(
+                        JSON_GROUP_ARRAY(
+                          JSON_OBJECT(
+                            'column', "column",
+                            'value', "value",
+                            'level', "level",
+                            'rule', "rule",
+                            'message', "message"
+                          )
+                        ),
+                        '[]'
+                      )
+                      FROM "message"
+                      WHERE "table" = '{t}'
+                        AND "row" = union_t."row_number"
+                      ORDER BY "column", "message_id"
+                    )
+                "#},
+                t = table_name,
+            );
         }
         drop_view_sql.push_str(";");
+
         let create_view_sql = format!(
-            r#"CREATE VIEW "{t}_view" AS SELECT * FROM "{t}" UNION ALL SELECT * FROM "{t}_conflict";"#,
+            indoc! {r#"
+              CREATE VIEW "{t}_view" AS
+                SELECT
+                  union_t.*,
+                  {inner_t} AS "message"
+                FROM (
+                  SELECT * FROM "{t}"
+                  UNION ALL
+                  SELECT * FROM "{t}_conflict"
+                ) as union_t;
+            "#},
             t = table_name,
+            inner_t = inner_t,
         );
         table_statements.push(drop_view_sql);
         table_statements.push(create_view_sql);
@@ -676,30 +727,46 @@ pub async fn configure_db(
     if *command != ValveCommand::Config || verbose {
         // Generate DDL for the message table:
         let mut message_statements = vec![];
-        message_statements.push(r#"DROP TABLE IF EXISTS "message";"#.to_string());
-        message_statements.push(
+        let drop_sql = {
+            let mut sql = r#"DROP TABLE IF EXISTS "message""#.to_string();
+            if pool.any_kind() == AnyKind::Postgres {
+                sql.push_str(" CASCADE");
+            }
+            sql.push_str(";");
+            sql
+        };
+        message_statements.push(drop_sql);
+        message_statements.push(format!(
             indoc! {r#"
-              CREATE TABLE "message" (
-                "table" TEXT,
-                "row" BIGINT,
-                "column" TEXT,
-                "value" TEXT,
-                "level" TEXT,
-                "rule" TEXT,
-                "message" TEXT,
-                PRIMARY KEY ("table", "row", "column", "rule")
-              );
-            "#}
-            .to_string(),
-        );
+                CREATE TABLE "message" (
+                  {}
+                  "table" TEXT,
+                  "row" BIGINT,
+                  "column" TEXT,
+                  "value" TEXT,
+                  "level" TEXT,
+                  "rule" TEXT,
+                  "message" TEXT,
+                  UNIQUE ("table", "row", "column", "rule")
+                );
+              "#},
+            {
+                if pool.any_kind() == AnyKind::Sqlite {
+                    "\"message_id\" INTEGER PRIMARY KEY,"
+                } else {
+                    "\"message_id\" SERIAL PRIMARY KEY,"
+                }
+            },
+        ));
         message_statements.push(
             r#"CREATE INDEX "message_trc_idx" ON "message"("table", "row", "column");"#.to_string(),
         );
         setup_statements.insert("message".to_string(), message_statements);
 
-        // Add the message table to the list of tables to create:
-        let mut tables_to_create = sorted_tables.clone();
-        tables_to_create.push("message".to_string());
+        // Add the message table to the beginning of the list of tables to create (we add it to the
+        // beginning since the table views all reference it).
+        let mut tables_to_create = vec!["message".to_string()];
+        tables_to_create.append(&mut sorted_tables.clone());
         for table in &tables_to_create {
             let table_statements = setup_statements.get(table).unwrap();
             if *command != ValveCommand::Config {
@@ -734,8 +801,10 @@ pub enum ValveCommand {
 /// Given a path to a configuration table (either a table.tsv file or a database containing a
 /// table named "table"), and a directory in which to find/create a database: configure the
 /// database using the configuration which can be looked up using the table table, and
-/// optionally create and/or load it according to the value of `command`. If the `verbose` flag
-/// is set to true, output status messages while loading. Returns the configuration map as a String.
+/// optionally create and/or load it according to the value of `command` (see [ValveCommand]).
+/// If the `verbose` flag is set to true, output status messages while loading. If `config_table`
+/// is given and `table_table` indicates a database, query the table called `config_table` for the
+/// table table information. Returns the configuration map as a String.
 pub async fn valve(
     table_table: &str,
     database: &str,
@@ -833,6 +902,7 @@ pub async fn insert_new_row(
     let mut insert_values = vec![];
     let mut insert_params = vec![];
     let mut messages = vec![];
+    let sorted_datatypes = get_sorted_datatypes(global_config);
     for (column, cell) in row.iter() {
         insert_columns.append(&mut vec![format!(r#""{}""#, column)]);
         let cell = cell.as_object().unwrap();
@@ -852,7 +922,10 @@ pub async fn insert_new_row(
             insert_params.push(String::from(cell_value));
         } else {
             insert_values.push(String::from("NULL"));
-            let cell_messages = cell.get("messages").and_then(|m| m.as_array()).unwrap();
+            let cell_messages = sort_messages(
+                &sorted_datatypes,
+                cell.get("messages").and_then(|m| m.as_array()).unwrap(),
+            );
             for cell_message in cell_messages {
                 messages.push(json!({
                     "column": column,
@@ -915,6 +988,7 @@ pub async fn update_row(
     let mut assignments = vec![];
     let mut params = vec![];
     let mut messages = vec![];
+    let sorted_datatypes = get_sorted_datatypes(global_config);
     for (column, cell) in row.iter() {
         let cell = cell.as_object().unwrap();
         let cell_valid = cell.get("valid").and_then(|v| v.as_bool()).unwrap();
@@ -933,7 +1007,10 @@ pub async fn update_row(
             params.push(String::from(cell_value));
         } else {
             assignments.push(format!(r#""{}" = NULL"#, column));
-            let cell_messages = cell.get("messages").and_then(|m| m.as_array()).unwrap();
+            let cell_messages = sort_messages(
+                &sorted_datatypes,
+                cell.get("messages").and_then(|m| m.as_array()).unwrap(),
+            );
             for cell_message in cell_messages {
                 messages.push(json!({
                     "column": String::from(column),
@@ -1820,6 +1897,91 @@ fn add_message_counts(messages: &Vec<SerdeValue>, messages_stats: &mut HashMap<S
     }
 }
 
+/// Given a global config map, return a list of defined datatype names sorted from the most generic
+/// to the most specific. This function will panic if circular dependencies are encountered.
+fn get_sorted_datatypes(global_config: &ConfigMap) -> Vec<&str> {
+    let mut graph = DiGraphMap::<&str, ()>::new();
+    let dt_config = global_config.get("datatype").and_then(|d| d.as_object()).unwrap();
+    for (dt_name, dt_obj) in dt_config.iter() {
+        let d_index = graph.add_node(dt_name);
+        if let Some(parent) = dt_obj.get("parent").and_then(|p| p.as_str()) {
+            let p_index = graph.add_node(parent);
+            graph.add_edge(d_index, p_index, ());
+        }
+    }
+
+    let mut cycles = vec![];
+    match toposort(&graph, None) {
+        Err(cycle) => {
+            let problem_node = cycle.node_id();
+            let neighbours = graph.neighbors_directed(problem_node, Direction::Outgoing);
+            for neighbour in neighbours {
+                let ways_to_problem_node =
+                    all_simple_paths::<Vec<_>, _>(&graph, neighbour, problem_node, 0, None);
+                for mut way in ways_to_problem_node {
+                    let mut cycle = vec![problem_node];
+                    cycle.append(&mut way);
+                    let cycle = cycle.iter().map(|&item| item.to_string()).collect::<Vec<_>>();
+                    cycles.push(cycle);
+                }
+            }
+            panic!("Defined datatypes contain circular dependencies: {:?}", cycles);
+        }
+        Ok(mut sorted) => {
+            sorted.reverse();
+            sorted
+        }
+    }
+}
+
+/// Given a sorted list of datatypes and a list of messages for a given cell of some table, sort
+/// the messages in the following way and return the sorted list of messages:
+/// 1. Messages pertaining to datatype rule violations, sorted according to the order specified in
+///    `sorted_datatypes`, followed by:
+/// 2. Messages pertaining to violations of one of the rules in the rule table, followed by:
+/// 3. Messages pertaining to structure violations.
+fn sort_messages(sorted_datatypes: &Vec<&str>, cell_messages: &Vec<SerdeValue>) -> Vec<SerdeValue> {
+    let mut datatype_messages = vec![];
+    let mut structure_messages = vec![];
+    let mut rule_messages = vec![];
+    for message in cell_messages {
+        let rule = message
+            .get("rule")
+            .and_then(|r| Some(r.as_str().unwrap().splitn(2, ":").collect::<Vec<_>>()))
+            .unwrap();
+        if rule[0] == "rule" {
+            rule_messages.push(message.clone());
+        } else if rule[0] == "datatype" {
+            datatype_messages.push(message.clone());
+        } else {
+            structure_messages.push(message.clone());
+        }
+    }
+
+    if datatype_messages.len() > 0 {
+        datatype_messages = {
+            let mut sorted_messages = vec![];
+            for datatype in sorted_datatypes {
+                let mut messages = datatype_messages
+                    .iter()
+                    .filter(|m| {
+                        m.get("rule").and_then(|r| r.as_str()).unwrap()
+                            == format!("datatype:{}", datatype)
+                    })
+                    .map(|m| m.clone())
+                    .collect::<Vec<_>>();
+                sorted_messages.append(&mut messages);
+            }
+            sorted_messages
+        }
+    }
+
+    let mut messages = datatype_messages;
+    messages.append(&mut rule_messages);
+    messages.append(&mut structure_messages);
+    messages
+}
+
 /// Given a configuration map, a table name, a number of rows, their corresponding chunk number,
 /// and a database connection pool used to determine the database type, return two four-place
 /// tuples, corresponding to the normal and conflict tables, respectively. Each of these contains
@@ -1897,6 +2059,7 @@ async fn make_inserts(
         let mut params = vec![];
         let mut message_lines = vec![];
         let mut message_params = vec![];
+        let sorted_datatypes = get_sorted_datatypes(config);
         for row in rows.iter() {
             let mut values = vec![format!("{}", row.row_number.unwrap())];
             for column in column_names {
@@ -1920,7 +2083,7 @@ async fn make_inserts(
                     if verbose {
                         add_message_counts(&cell.messages, messages_stats);
                     }
-                    for message in &cell.messages {
+                    for message in sort_messages(&sorted_datatypes, &cell.messages) {
                         let row = row.row_number.unwrap().to_string();
                         let message_values = vec![
                             SQL_PARAM, &row, SQL_PARAM, SQL_PARAM, SQL_PARAM, SQL_PARAM, SQL_PARAM,

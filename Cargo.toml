@@ -2,13 +2,13 @@
 name = "ontodev_valve"
 description = "A lightweight validation engine written in rust"
 license = "BSD-3-Clause"
-version = "0.2.0"
+version = "0.2.1"
 repository = "https://github.com/ontodev/valve.rs"
 edition = "2021"
 build = "build.rs"
 
 [build-dependencies]
-lalrpop = { version = "0.19.7", features = ["lexer"] }
+lalrpop = { version = "0.19.9", features = ["lexer"] }
 
 [dependencies]
 argparse = "0.2.2"
