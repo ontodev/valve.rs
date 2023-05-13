@@ -2,7 +2,7 @@
 name = "ontodev_valve"
 description = "A lightweight validation engine written in rust"
 license = "BSD-3-Clause"
-version = "0.2.1"
+version = "0.2.2"
 repository = "https://github.com/ontodev/valve.rs"
 edition = "2021"
 build = "build.rs"
@@ -29,6 +29,6 @@ petgraph = "0.6.0"
 regex = "1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0" }
-sqlx = { version = "0.5", features = [ "runtime-async-std-rustls", "any", "postgres", "sqlite" ] }
+sqlx = { version = "0.6", features = [ "runtime-async-std-rustls", "any", "postgres", "sqlite" ] }
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
