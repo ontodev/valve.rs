@@ -74,7 +74,7 @@ lazy_static! {
 /// An alias for [serde_json::Map](..//serde_json/struct.Map.html)<String, [serde_json::Value](../serde_json/enum.Value.html)>.
 // Note: serde_json::Map is
 // [backed by a BTreeMap by default](https://docs.serde.rs/serde_json/map/index.html)
-pub type ConfigMap = serde_json::Map<String, SerdeValue>;
+pub type SerdeMap = serde_json::Map<String, SerdeValue>;
 
 /// Represents a structure such as those found in the `structure` column of the `column` table in
 /// both its parsed format (i.e., as an [Expression](ast/enum.Expression.html)) as well as in its
@@ -136,11 +136,11 @@ impl std::fmt::Debug for ColumnRule {
 
 /// Given the path to a configuration table (either a table.tsv file or a database containing a
 /// table named "table"), load and check the 'table', 'column', and 'datatype' tables, and return
-/// ConfigMaps corresponding to specials, tables, datatypes, and rules.
+/// SerdeMaps corresponding to specials, tables, datatypes, and rules.
 pub fn read_config_files(
     path: &str,
     config_table: &str,
-) -> (ConfigMap, ConfigMap, ConfigMap, ConfigMap) {
+) -> (SerdeMap, SerdeMap, SerdeMap, SerdeMap) {
     let special_table_types = json!({
         "table": {"required": true},
         "column": {"required": true},
@@ -150,13 +150,13 @@ pub fn read_config_files(
     let special_table_types = special_table_types.as_object().unwrap();
 
     // Initialize the special table entries in the specials config map:
-    let mut specials_config = ConfigMap::new();
+    let mut specials_config = SerdeMap::new();
     for t in special_table_types.keys() {
         specials_config.insert(t.to_string(), SerdeValue::Null);
     }
 
     // Load the table table from the given path:
-    let mut tables_config = ConfigMap::new();
+    let mut tables_config = SerdeMap::new();
     let rows = {
         // Read in the configuration entry point (the "table table") from either a file or a
         // database table.
@@ -210,7 +210,7 @@ pub fn read_config_files(
             }
         }
 
-        row.insert(String::from("column"), SerdeValue::Object(ConfigMap::new()));
+        row.insert(String::from("column"), SerdeValue::Object(SerdeMap::new()));
         let row_table = row.get("table").and_then(|t| t.as_str()).unwrap();
         tables_config.insert(row_table.to_string(), SerdeValue::Object(row));
     }
@@ -232,10 +232,10 @@ pub fn read_config_files(
     // indicated by `path`, the table is read, and the rows are returned.
     fn get_special_config(
         table_type: &str,
-        specials_config: &ConfigMap,
-        tables_config: &ConfigMap,
+        specials_config: &SerdeMap,
+        tables_config: &SerdeMap,
         path: &str,
-    ) -> Vec<ConfigMap> {
+    ) -> Vec<SerdeMap> {
         if path.to_lowercase().ends_with(".tsv") {
             let table_name = specials_config.get(table_type).and_then(|d| d.as_str()).unwrap();
             let path = String::from(
@@ -267,7 +267,7 @@ pub fn read_config_files(
     }
 
     // Load datatype table
-    let mut datatypes_config = ConfigMap::new();
+    let mut datatypes_config = SerdeMap::new();
     let rows = get_special_config("datatype", &specials_config, &tables_config, path);
     for mut row in rows {
         for column in vec!["datatype", "parent", "condition", "SQLite type", "PostgreSQL type"] {
@@ -347,7 +347,7 @@ pub fn read_config_files(
     }
 
     // Load rule table if it exists
-    let mut rules_config = ConfigMap::new();
+    let mut rules_config = SerdeMap::new();
     if let Some(SerdeValue::String(table_name)) = specials_config.get("rule") {
         let rows = get_special_config(table_name, &specials_config, &tables_config, path);
         for row in rows {
@@ -377,7 +377,7 @@ pub fn read_config_files(
             // value of the when column:
             let row_when_column = row.get("when column").and_then(|c| c.as_str()).unwrap();
             if !rules_config.contains_key(row_table) {
-                rules_config.insert(String::from(row_table), SerdeValue::Object(ConfigMap::new()));
+                rules_config.insert(String::from(row_table), SerdeValue::Object(SerdeMap::new()));
             }
 
             let table_rule_config =
@@ -401,7 +401,7 @@ pub fn read_config_files(
 /// add them to a hash map whose keys are the text versions of the conditions and whose values
 /// are the compiled conditions, and then finally return the hash map.
 pub fn get_compiled_datatype_conditions(
-    config: &ConfigMap,
+    config: &SerdeMap,
     parser: &StartParser,
 ) -> HashMap<String, CompiledCondition> {
     let mut compiled_datatype_conditions: HashMap<String, CompiledCondition> = HashMap::new();
@@ -433,7 +433,7 @@ pub fn get_compiled_datatype_conditions(
 /// }
 /// ```
 pub fn get_compiled_rule_conditions(
-    config: &ConfigMap,
+    config: &SerdeMap,
     compiled_datatype_conditions: HashMap<String, CompiledCondition>,
     parser: &StartParser,
 ) -> HashMap<String, HashMap<String, Vec<ColumnRule>>> {
@@ -505,7 +505,7 @@ pub fn get_compiled_rule_conditions(
 /// a hash map whose keys are given by the text versions of the conditions and whose values are
 /// given by the parsed versions, and finally return the hashmap.
 pub fn get_parsed_structure_conditions(
-    config: &ConfigMap,
+    config: &SerdeMap,
     parser: &StartParser,
 ) -> HashMap<String, ParsedStructure> {
     let mut parsed_structure_conditions = HashMap::new();
@@ -552,20 +552,20 @@ pub fn get_parsed_structure_conditions(
 /// database using the given connection pool. If it is set to [ValveCommand::Load], execute the SQL
 /// to load it as well.
 pub async fn configure_db(
-    tables_config: &mut ConfigMap,
-    datatypes_config: &mut ConfigMap,
+    tables_config: &mut SerdeMap,
+    datatypes_config: &mut SerdeMap,
     pool: &AnyPool,
     parser: &StartParser,
     verbose: bool,
     command: &ValveCommand,
-) -> Result<(Vec<String>, ConfigMap), sqlx::Error> {
-    // This is the ConfigMap that we will be returning:
-    let mut constraints_config = ConfigMap::new();
-    constraints_config.insert(String::from("foreign"), SerdeValue::Object(ConfigMap::new()));
-    constraints_config.insert(String::from("unique"), SerdeValue::Object(ConfigMap::new()));
-    constraints_config.insert(String::from("primary"), SerdeValue::Object(ConfigMap::new()));
-    constraints_config.insert(String::from("tree"), SerdeValue::Object(ConfigMap::new()));
-    constraints_config.insert(String::from("under"), SerdeValue::Object(ConfigMap::new()));
+) -> Result<(Vec<String>, SerdeMap), sqlx::Error> {
+    // This is the SerdeMap that we will be returning:
+    let mut constraints_config = SerdeMap::new();
+    constraints_config.insert(String::from("foreign"), SerdeValue::Object(SerdeMap::new()));
+    constraints_config.insert(String::from("unique"), SerdeValue::Object(SerdeMap::new()));
+    constraints_config.insert(String::from("primary"), SerdeValue::Object(SerdeMap::new()));
+    constraints_config.insert(String::from("tree"), SerdeValue::Object(SerdeMap::new()));
+    constraints_config.insert(String::from("under"), SerdeValue::Object(SerdeMap::new()));
 
     // Begin by reading in the TSV files corresponding to the tables defined in tables_config, and
     // use that information to create the associated database tables, while saving constraint
@@ -607,11 +607,11 @@ pub async fn configure_db(
         // We use column_order to explicitly indicate the order in which the columns should appear
         // in the table, for later reference.
         let mut column_order = vec![];
-        let mut all_columns: ConfigMap = ConfigMap::new();
+        let mut all_columns: SerdeMap = SerdeMap::new();
         for column_name in &actual_columns {
             let column;
             if !defined_columns.contains(&column_name.to_string()) {
-                let mut cmap = ConfigMap::new();
+                let mut cmap = SerdeMap::new();
                 cmap.insert(String::from("table"), SerdeValue::String(table_name.to_string()));
                 cmap.insert(String::from("column"), SerdeValue::String(column_name.to_string()));
                 cmap.insert(String::from("nulltype"), SerdeValue::String(String::from("empty")));
@@ -848,7 +848,7 @@ pub async fn valve(
         configure_db(&mut tables_config, &mut datatypes_config, &pool, &parser, verbose, command)
             .await?;
 
-    let mut config = ConfigMap::new();
+    let mut config = SerdeMap::new();
     config.insert(String::from("special"), SerdeValue::Object(specials_config.clone()));
     config.insert(String::from("table"), SerdeValue::Object(tables_config.clone()));
     config.insert(String::from("datatype"), SerdeValue::Object(datatypes_config.clone()));
@@ -880,10 +880,10 @@ pub async fn valve(
 /// Given a global config map, a database connection pool, a table name, and a row, assign a new
 /// row number to the row and insert it to the database, then return the new row number.
 pub async fn insert_new_row(
-    global_config: &ConfigMap,
+    global_config: &SerdeMap,
     pool: &AnyPool,
     table_name: &str,
-    row: &ConfigMap,
+    row: &SerdeMap,
 ) -> Result<u32, sqlx::Error> {
     // The new row number to insert is the current highest row number + 1.
     let sql = format!(r#"SELECT MAX("row_number") AS "row_number" FROM "{}_view""#, table_name);
@@ -979,10 +979,10 @@ pub async fn insert_new_row(
 /// Given global config map, a database connection pool, a table name, a row, and the row number to
 /// update, update the corresponding row in the database with new values as specified by `row`.
 pub async fn update_row(
-    global_config: &ConfigMap,
+    global_config: &SerdeMap,
     pool: &AnyPool,
     table_name: &str,
-    row: &ConfigMap,
+    row: &SerdeMap,
     row_number: u32,
 ) -> Result<(), sqlx::Error> {
     let mut assignments = vec![];
@@ -1064,10 +1064,10 @@ pub async fn update_row(
     Ok(())
 }
 
-/// Given a path, read a TSV file and return a vector of rows represented as ConfigMaps.
+/// Given a path, read a TSV file and return a vector of rows represented as SerdeMaps.
 /// Note: Use this function to read "small" TSVs only. In particular, use this for the special
 /// configuration tables.
-fn read_tsv_into_vector(path: &str) -> Vec<ConfigMap> {
+fn read_tsv_into_vector(path: &str) -> Vec<SerdeMap> {
     let mut rdr = csv::ReaderBuilder::new().delimiter(b'\t').from_reader(
         File::open(path).unwrap_or_else(|err| {
             panic!("Unable to open '{}': {}", path, err);
@@ -1077,7 +1077,7 @@ fn read_tsv_into_vector(path: &str) -> Vec<ConfigMap> {
     let rows: Vec<_> = rdr
         .deserialize()
         .map(|result| {
-            let row: ConfigMap = result.expect(format!("Error reading: {}", path).as_str());
+            let row: SerdeMap = result.expect(format!("Error reading: {}", path).as_str());
             row
         })
         .collect();
@@ -1106,8 +1106,8 @@ fn read_tsv_into_vector(path: &str) -> Vec<ConfigMap> {
 }
 
 /// Given a database at the specified location, query the "table" table and return a vector of rows
-/// represented as ConfigMaps.
-fn read_db_table_into_vector(database: &str, config_table: &str) -> Vec<ConfigMap> {
+/// represented as SerdeMaps.
+fn read_db_table_into_vector(database: &str, config_table: &str) -> Vec<SerdeMap> {
     let connection_options;
     if database.starts_with("postgresql://") {
         connection_options = AnyConnectOptions::from_str(database).unwrap();
@@ -1128,7 +1128,7 @@ fn read_db_table_into_vector(database: &str, config_table: &str) -> Vec<ConfigMa
     let rows = block_on(sqlx_query(&sql).fetch_all(&pool)).unwrap();
     let mut table_rows = vec![];
     for row in rows {
-        let mut table_row = ConfigMap::new();
+        let mut table_row = SerdeMap::new();
         for column in row.columns() {
             let cname = column.name();
             if cname != "row_number" {
@@ -1292,7 +1292,7 @@ fn compile_condition(
 
 /// Given the config map, the name of a datatype, and a database connection pool used to determine
 /// the database type, climb the datatype tree (as required), and return the first 'SQL type' found.
-fn get_sql_type(dt_config: &ConfigMap, datatype: &String, pool: &AnyPool) -> Option<String> {
+fn get_sql_type(dt_config: &SerdeMap, datatype: &String, pool: &AnyPool) -> Option<String> {
     if !dt_config.contains_key(datatype) {
         return None;
     }
@@ -1318,7 +1318,7 @@ fn get_sql_type(dt_config: &ConfigMap, datatype: &String, pool: &AnyPool) -> Opt
 /// Given the global config map, a table name, a column name, and a database connection pool
 /// used to determine the database type return the column's SQL type.
 fn get_sql_type_from_global_config(
-    global_config: &ConfigMap,
+    global_config: &SerdeMap,
     table: &str,
     column: &str,
     pool: &AnyPool,
@@ -1413,7 +1413,7 @@ fn local_sql_syntax(pool: &AnyPool, sql: &String) -> String {
 /// under dependencies, returns the list of tables sorted according to their foreign key
 /// dependencies, such that if table_a depends on table_b, then table_b comes before table_a in the
 /// list that is returned.
-fn verify_table_deps_and_sort(table_list: &Vec<String>, constraints: &ConfigMap) -> Vec<String> {
+fn verify_table_deps_and_sort(table_list: &Vec<String>, constraints: &SerdeMap) -> Vec<String> {
     fn get_cycles(g: &DiGraphMap<&str, ()>) -> Result<Vec<String>, Vec<Vec<String>>> {
         let mut cycles = vec![];
         match toposort(&g, None) {
@@ -1585,8 +1585,8 @@ fn verify_table_deps_and_sort(table_list: &Vec<String>, constraints: &ConfigMap)
 /// including each column C and its matching C_meta column, then return the schema string as well as
 /// a list of the table's constraints.
 fn create_table_statement(
-    tables_config: &mut ConfigMap,
-    datatypes_config: &mut ConfigMap,
+    tables_config: &mut SerdeMap,
+    datatypes_config: &mut SerdeMap,
     parser: &StartParser,
     table_name: &String,
     pool: &AnyPool,
@@ -1633,7 +1633,7 @@ fn create_table_statement(
         "under": [],
     });
 
-    let mut colvals: Vec<ConfigMap> = vec![];
+    let mut colvals: Vec<SerdeMap> = vec![];
     for column_name in &column_names {
         let column = columns.get(column_name).and_then(|c| c.as_object()).unwrap();
         colvals.push(column.clone());
@@ -1899,7 +1899,7 @@ fn add_message_counts(messages: &Vec<SerdeValue>, messages_stats: &mut HashMap<S
 
 /// Given a global config map, return a list of defined datatype names sorted from the most generic
 /// to the most specific. This function will panic if circular dependencies are encountered.
-fn get_sorted_datatypes(global_config: &ConfigMap) -> Vec<&str> {
+fn get_sorted_datatypes(global_config: &SerdeMap) -> Vec<&str> {
     let mut graph = DiGraphMap::<&str, ()>::new();
     let dt_config = global_config.get("datatype").and_then(|d| d.as_object()).unwrap();
     for (dt_name, dt_obj) in dt_config.iter() {
@@ -1991,7 +1991,7 @@ fn sort_messages(sorted_datatypes: &Vec<&str>, cell_messages: &Vec<SerdeValue>) 
 /// and information messages generated are added to messages_stats, the contents of which will
 /// later be written to stderr.
 async fn make_inserts(
-    config: &ConfigMap,
+    config: &SerdeMap,
     table_name: &String,
     rows: &mut Vec<ResultRow>,
     chunk_number: usize,
@@ -2047,7 +2047,7 @@ async fn make_inserts(
     };
 
     fn generate_sql(
-        config: &ConfigMap,
+        config: &SerdeMap,
         table_name: &String,
         column_names: &Vec<String>,
         rows: &Vec<ResultRow>,
@@ -2222,7 +2222,7 @@ async fn make_inserts(
 /// them to the table. If the verbose flag is set to true, error/warning/info stats will be
 /// collected in messages_stats and later written to stderr.
 async fn validate_rows_inter_and_insert(
-    config: &ConfigMap,
+    config: &SerdeMap,
     pool: &AnyPool,
     table_name: &String,
     rows: &mut Vec<ResultRow>,
@@ -2355,7 +2355,7 @@ async fn validate_rows_inter_and_insert(
 /// to the table. If the verbose flag is set to true, error/warning/info stats will be collected in
 /// messages_stats and later written to stderr.
 async fn validate_and_insert_chunks(
-    config: &ConfigMap,
+    config: &SerdeMap,
     pool: &AnyPool,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
@@ -2451,7 +2451,7 @@ async fn validate_and_insert_chunks(
 /// the corresponding data rows. If the verbose flag is set to true, output progress messages to
 /// stderr during load.
 async fn load_db(
-    config: &ConfigMap,
+    config: &SerdeMap,
     pool: &AnyPool,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,

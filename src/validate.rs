@@ -5,8 +5,8 @@ use std::collections::HashMap;
 
 use crate::{
     ast::Expression, cast_column_sql_to_text, cast_sql_param_from_text, get_column_value,
-    get_sql_type_from_global_config, local_sql_syntax, ColumnRule, CompiledCondition, ConfigMap,
-    ParsedStructure, SQL_PARAM,
+    get_sql_type_from_global_config, local_sql_syntax, ColumnRule, CompiledCondition,
+    ParsedStructure, SerdeMap, SQL_PARAM,
 };
 
 /// Represents a particular cell in a particular row of data with vaildation results.
@@ -29,15 +29,15 @@ pub struct ResultRow {
 /// pool, a table name, a row to validate, and a row number in case the row already exists,
 /// perform both intra- and inter-row validation and return the validated row.
 pub async fn validate_row(
-    config: &ConfigMap,
+    config: &SerdeMap,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     pool: &AnyPool,
     table_name: &str,
-    row: &ConfigMap,
+    row: &SerdeMap,
     existing_row: bool,
     row_number: Option<u32>,
-) -> Result<ConfigMap, sqlx::Error> {
+) -> Result<SerdeMap, sqlx::Error> {
     // If existing_row is false, then override any row number provided with None:
     let mut row_number = row_number.clone();
     if !existing_row {
@@ -169,7 +169,7 @@ pub async fn validate_row(
 /// no matching string is given). The JSON array returned is formatted for Typeahead, i.e., it takes
 /// the form: `[{"id": id, "label": label, "order": order}, ...]`.
 pub async fn get_matching_values(
-    config: &ConfigMap,
+    config: &SerdeMap,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     parsed_structure_conditions: &HashMap<String, ParsedStructure>,
     pool: &AnyPool,
@@ -352,7 +352,7 @@ pub async fn get_matching_values(
 /// Given a config map, a db connection pool, a table name, and an optional extra row, validate
 /// any associated under constraints for the current column.
 pub async fn validate_under(
-    config: &ConfigMap,
+    config: &SerdeMap,
     pool: &AnyPool,
     table_name: &String,
     extra_row: Option<ResultRow>,
@@ -580,7 +580,7 @@ pub async fn validate_under(
 /// has a given parent column, validate that all of the values in the parent column are in the child
 /// column.
 pub async fn validate_tree_foreign_keys(
-    config: &ConfigMap,
+    config: &SerdeMap,
     pool: &AnyPool,
     table_name: &String,
     extra_row: Option<ResultRow>,
@@ -738,7 +738,7 @@ pub async fn validate_tree_foreign_keys(
 /// Given a config map, a database connection pool, a table name, and a number of rows to validate,
 /// perform tree validation on the rows and return the validated results.
 pub async fn validate_rows_trees(
-    config: &ConfigMap,
+    config: &SerdeMap,
     pool: &AnyPool,
     table_name: &String,
     rows: &mut Vec<ResultRow>,
@@ -790,7 +790,7 @@ pub async fn validate_rows_trees(
 /// validate foreign and unique constraints, where the latter include primary and "tree child" keys
 /// (which imply unique constraints) and return the validated results.
 pub async fn validate_rows_constraints(
-    config: &ConfigMap,
+    config: &SerdeMap,
     pool: &AnyPool,
     table_name: &String,
     rows: &mut Vec<ResultRow>,
@@ -845,7 +845,7 @@ pub async fn validate_rows_constraints(
 /// table, and a number of rows to validate, validate all of the rows and return the validated
 /// versions.
 pub fn validate_rows_intra(
-    config: &ConfigMap,
+    config: &SerdeMap,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     table_name: &String,
@@ -923,12 +923,12 @@ pub fn validate_rows_intra(
     result_rows
 }
 
-/// Given a result row, convert it to a ConfigMap (an alias for serde_json::Value) and return it.
+/// Given a result row, convert it to a SerdeMap and return it.
 /// Note that if the incoming result row has an associated row_number, this is ignored.
-fn result_row_to_config_map(incoming: &ResultRow) -> ConfigMap {
-    let mut outgoing = ConfigMap::new();
+fn result_row_to_config_map(incoming: &ResultRow) -> SerdeMap {
+    let mut outgoing = SerdeMap::new();
     for (column, cell) in incoming.contents.iter() {
-        let mut cell_map = ConfigMap::new();
+        let mut cell_map = SerdeMap::new();
         if let Some(nulltype) = &cell.nulltype {
             cell_map.insert("nulltype".to_string(), SerdeValue::String(nulltype.to_string()));
         }
@@ -955,7 +955,7 @@ fn contains_dt_violation(messages: &Vec<SerdeValue>) -> bool {
 /// Generate a SQL Select clause that is a union of: (a) the literal values of the given extra row,
 /// and (b) a Select statement over `table_name` of all the fields in the extra row.
 fn select_with_extra_row(
-    config: &ConfigMap,
+    config: &SerdeMap,
     extra_row: &ResultRow,
     table_name: &str,
     pool: &AnyPool,
@@ -995,8 +995,8 @@ fn select_with_extra_row(
 /// sub-tree of the tree, and an extra SQL clause, generate the SQL for a WITH clause representing
 /// the sub-tree.
 fn with_tree_sql(
-    config: &ConfigMap,
-    tree: &ConfigMap,
+    config: &SerdeMap,
+    tree: &SerdeMap,
     table_name: &str,
     effective_table_name: &str,
     root: Option<String>,
@@ -1049,7 +1049,7 @@ fn with_tree_sql(
 /// nulltype values for this column, then fill in the cell's nulltype value before returning the
 /// cell.
 fn validate_cell_nulltype(
-    config: &ConfigMap,
+    config: &SerdeMap,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     table_name: &String,
     column_name: &String,
@@ -1076,18 +1076,18 @@ fn validate_cell_nulltype(
 /// Given a config map, compiled datatype conditions, a table name, a column name, and a cell to
 /// validate, validate the cell's datatype and return the validated cell.
 fn validate_cell_datatype(
-    config: &ConfigMap,
+    config: &SerdeMap,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     table_name: &String,
     column_name: &String,
     cell: &mut ResultCell,
 ) {
     fn get_datatypes_to_check(
-        config: &ConfigMap,
+        config: &SerdeMap,
         compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
         primary_dt_name: &str,
         dt_name: Option<String>,
-    ) -> Vec<ConfigMap> {
+    ) -> Vec<SerdeMap> {
         let mut datatypes = vec![];
         if let Some(dt_name) = dt_name {
             let datatype = config
@@ -1178,7 +1178,7 @@ fn validate_cell_datatype(
 /// and the cell to validate, look in the rule table (if it exists) and validate the cell according
 /// to any applicable rules.
 fn validate_cell_rules(
-    config: &ConfigMap,
+    config: &SerdeMap,
     compiled_rules: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     table_name: &String,
     column_name: &String,
@@ -1188,7 +1188,7 @@ fn validate_cell_rules(
     fn check_condition(
         condition_type: &str,
         cell: &ResultCell,
-        rule: &ConfigMap,
+        rule: &SerdeMap,
         table_name: &String,
         column_name: &String,
         compiled_rules: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
@@ -1263,7 +1263,7 @@ fn validate_cell_rules(
 /// check the cell value against any foreign keys that have been defined for the column. If there is
 /// a violation, indicate it with an error message attached to the cell.
 async fn validate_cell_foreign_constraints(
-    config: &ConfigMap,
+    config: &SerdeMap,
     pool: &AnyPool,
     table_name: &String,
     column_name: &String,
@@ -1347,7 +1347,7 @@ async fn validate_cell_foreign_constraints(
 /// validate that none of the "tree" constraints on the column are violated, and indicate any
 /// violations by attaching error messages to the cell.
 async fn validate_cell_trees(
-    config: &ConfigMap,
+    config: &SerdeMap,
     pool: &AnyPool,
     table_name: &String,
     column_name: &String,
@@ -1507,7 +1507,7 @@ async fn validate_cell_trees(
 /// the `existing_row` flag is set to True, then checks will be made as if the given `row_number`
 /// does not exist in the table.
 async fn validate_cell_unique_constraints(
-    config: &ConfigMap,
+    config: &SerdeMap,
     pool: &AnyPool,
     table_name: &String,
     column_name: &String,
