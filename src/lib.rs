@@ -18,7 +18,7 @@
 #[macro_use]
 extern crate lalrpop_util;
 
-mod ast;
+pub mod ast;
 pub mod validate;
 
 lalrpop_mod!(pub valve_grammar);
