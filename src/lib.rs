@@ -81,8 +81,8 @@ pub type SerdeMap = serde_json::Map<String, SerdeValue>;
 /// original format (i.e., as a plain String).
 #[derive(Clone)]
 pub struct ParsedStructure {
-    original: String,
-    parsed: Expression,
+    pub original: String,
+    pub parsed: Expression,
 }
 
 // We use Debug here instead of Display because we have only implemented Debug for Expressions.
@@ -101,9 +101,9 @@ impl std::fmt::Debug for ParsedStructure {
 /// [Expression](ast/enum.Expression.html), and (iii) as a pre-compiled regular expression.
 #[derive(Clone)]
 pub struct CompiledCondition {
-    original: String,
-    parsed: Expression,
-    compiled: Arc<dyn Fn(&str) -> bool + Sync + Send>,
+    pub original: String,
+    pub parsed: Expression,
+    pub compiled: Arc<dyn Fn(&str) -> bool + Sync + Send>,
 }
 
 // We use Debug here instead of Display because we have only implemented Debug for Expressions.
@@ -121,9 +121,10 @@ impl std::fmt::Debug for CompiledCondition {
 /// Represents a 'when-then' condition, as found in the `rule` table, as two
 /// [CompiledCondition](struct.CompiledCondition.html) structs corresponding to the when and then
 /// parts of the given rule.
+#[derive(Clone)]
 pub struct ColumnRule {
-    when: CompiledCondition,
-    then: CompiledCondition,
+    pub when: CompiledCondition,
+    pub then: CompiledCondition,
 }
 
 // We use Debug here instead of Display because we have only implemented Debug for Expressions.
