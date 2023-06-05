@@ -48,6 +48,7 @@ use sqlx::{
 use std::{
     collections::{BTreeMap, HashMap},
     fs::File,
+    path::Path,
     process,
     str::FromStr,
     sync::Arc,
@@ -394,6 +395,84 @@ pub fn read_config_files(
         }
     }
 
+    // Manually add the messsage config:
+    tables_config.insert(
+        "message".to_string(),
+        json!({
+            "table": "message",
+            "description": "Validation messages for all of the tables and columns",
+            "type": "message",
+            "column_order": [
+                "message_id",
+                "table",
+                "row",
+                "column",
+                "value",
+                "level",
+                "rule",
+                "message",
+            ],
+            "column": {
+                "message_id": {
+                    "table": "message",
+                    "column": "message_id",
+                    "description": "The unique ID of this message",
+                    "datatype": "natural_number",
+                    "structure": ""
+                },
+                "table": {
+                    "table": "message",
+                    "column": "table",
+                    "description": "The table referred to by the message",
+                    "datatype": "table_name",
+                    "structure": ""
+                },
+                "row": {
+                    "table": "message",
+                    "column": "row",
+                    "description": "The row number of the table referred to by the message",
+                    "datatype": "natural_number",
+                    "structure": ""
+                },
+                "column": {
+                    "table": "message",
+                    "column": "column",
+                    "description": "The column of the table referred to by the message",
+                    "datatype": "column_name",
+                    "structure": ""
+                },
+                "value": {
+                    "table": "message",
+                    "column": "value",
+                    "description": "The value that is the reason for the message",
+                    "datatype": "text",
+                    "structure": ""
+                },
+                "level": {
+                    "table": "message",
+                    "column": "level",
+                    "description": "The severity of the violation",
+                    "datatype": "word",
+                    "structure": ""
+                },
+                "rule": {
+                    "table": "message",
+                    "column": "rule",
+                    "description": "The rule violated by the value",
+                    "datatype": "CURIE",
+                    "structure": ""
+                },
+                "message": {
+                    "table": "message",
+                    "column": "message",
+                    "description": "The message",
+                    "datatype": "line",
+                    "structure": ""
+                }
+            }
+        }),
+    );
+
     // Finally, return all the configs:
     (specials_config, tables_config, datatypes_config, rules_config)
 }
@@ -574,11 +653,20 @@ pub async fn configure_db(
     let mut setup_statements = HashMap::new();
     let table_names: Vec<String> = tables_config.keys().cloned().collect();
     for table_name in table_names {
-        let path = tables_config
-            .get(&table_name)
-            .and_then(|r| r.get("path"))
-            .and_then(|p| p.as_str())
-            .unwrap();
+        let optional_path =
+            tables_config.get(&table_name).and_then(|r| r.get("path")).and_then(|p| p.as_str());
+
+        let path;
+        match optional_path {
+            // If an entry of the tables_config has no path then it is an internal table which need
+            // not be configured explicitly. Currently the only example is the message table.
+            None => continue,
+            Some(p) if !Path::new(p).canonicalize()?.is_file() => {
+                eprintln!("WARN: File does not exist {}", p);
+                continue;
+            }
+            Some(p) => path = p.to_string(),
+        };
 
         // Get the columns that have been previously configured:
         let defined_columns: Vec<String> = tables_config

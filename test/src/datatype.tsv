@@ -9,6 +9,7 @@ empty	text		equals('')		the empty string	NULL	NULL	null
 integer	nonspace		match(/-?\d+/)		a positive or negative integer	INTEGER	INTEGER		
 label	trimmed_line		match(/\S([^\n]*\S)*/)						
 line	text		exclude(/\n/)		a line of text				input
+natural_number	integer		match(/\d+/)		a natural number, including zero	INTEGER	INTEGER		
 nonspace	trimmed_line		exclude(/\s/)		text without whitespace				
 path	line		exclude(/\n/)		a path to a file				
 prefix	word		exclude(/\W/)		a prefix for a CURIE				
