@@ -403,7 +403,6 @@ pub fn read_config_files(
             "description": "Validation messages for all of the tables and columns",
             "type": "message",
             "column_order": [
-                "message_id",
                 "table",
                 "row",
                 "column",
@@ -413,13 +412,6 @@ pub fn read_config_files(
                 "message",
             ],
             "column": {
-                "message_id": {
-                    "table": "message",
-                    "column": "message_id",
-                    "description": "The unique ID of this message",
-                    "datatype": "natural_number",
-                    "structure": ""
-                },
                 "table": {
                     "table": "message",
                     "column": "table",
