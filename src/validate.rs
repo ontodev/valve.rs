@@ -56,7 +56,7 @@ pub async fn validate_row(
             value: match cell.get("value") {
                 Some(SerdeValue::String(s)) => s.to_string(),
                 Some(SerdeValue::Number(n)) => format!("{}", n),
-                _ => panic!("Cell value is neither a number nor a string."),
+                _ => panic!("Field 'value' of: {:#?} is neither a number nor a string.", cell),
             },
             valid: cell.get("valid").and_then(|v| v.as_bool()).unwrap(),
             messages: cell.get("messages").and_then(|m| m.as_array()).unwrap().to_vec(),
