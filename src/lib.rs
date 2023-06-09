@@ -67,8 +67,9 @@ static MULTI_THREADED: bool = true;
 static SQL_PARAM: &str = "VALVEPARAM";
 
 lazy_static! {
-    static ref PG_SQL_TYPES: Vec<&'static str> = vec!["text", "varchar", "integer"];
-    static ref SL_SQL_TYPES: Vec<&'static str> = vec!["text", "integer"];
+    static ref PG_SQL_TYPES: Vec<&'static str> =
+        vec!["text", "varchar", "numeric", "integer", "real"];
+    static ref SL_SQL_TYPES: Vec<&'static str> = vec!["text", "numeric", "integer", "real"];
 }
 
 /// An alias for [serde_json::Map](..//serde_json/struct.Map.html)<String, [serde_json::Value](../serde_json/enum.Value.html)>.
@@ -1346,8 +1347,13 @@ fn get_sql_type_from_global_config(
 /// Given a SQL type, return the appropriate CAST(...) statement for casting the SQL_PARAM
 /// from a TEXT column.
 fn cast_sql_param_from_text(sql_type: &str) -> String {
-    if sql_type.to_lowercase() == "integer" {
+    let s = sql_type.to_lowercase();
+    if s == "numeric" {
+        format!("CAST(NULLIF({}, '') AS NUMERIC)", SQL_PARAM)
+    } else if s == "integer" {
         format!("CAST(NULLIF({}, '') AS INTEGER)", SQL_PARAM)
+    } else if s == "real" {
+        format!("CAST(NULLIF({}, '') AS REAL)", SQL_PARAM)
     } else {
         String::from(SQL_PARAM)
     }
@@ -1356,18 +1362,25 @@ fn cast_sql_param_from_text(sql_type: &str) -> String {
 /// Given a SQL type, return the appropriate CAST(...) statement for casting the SQL_PARAM
 /// to a TEXT column.
 fn cast_column_sql_to_text(column: &str, sql_type: &str) -> String {
-    if sql_type.to_lowercase() == "integer" {
-        format!(r#"CAST("{}" AS TEXT)"#, column)
-    } else {
+    if sql_type.to_lowercase() == "text" {
         format!(r#""{}""#, column)
+    } else {
+        format!(r#"CAST("{}" AS TEXT)"#, column)
     }
 }
 
 /// Given a database row, the name of a column, and it's SQL type, return the value of that column
 /// from the given row as a String.
 fn get_column_value(row: &AnyRow, column: &str, sql_type: &str) -> String {
-    if sql_type.to_lowercase() == "integer" {
+    let s = sql_type.to_lowercase();
+    if s == "numeric" {
+        let value: f64 = row.get(format!(r#"{}"#, column).as_str());
+        value.to_string()
+    } else if s == "integer" {
         let value: i32 = row.get(format!(r#"{}"#, column).as_str());
+        value.to_string()
+    } else if s == "real" {
+        let value: f64 = row.get(format!(r#"{}"#, column).as_str());
         value.to_string()
     } else {
         let value: &str = row.get(format!(r#"{}"#, column).as_str());

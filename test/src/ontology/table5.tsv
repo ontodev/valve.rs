@@ -1,4 +1,4 @@
-foo	bar
-cat	123
-dog	-55
-rat	0
+text	int	real	num
+cat	123	0.0001	123
+dog	-55	1.2	1.2
+rat	0	-10.01	-10
