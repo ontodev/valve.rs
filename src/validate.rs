@@ -1,4 +1,5 @@
 use enquote::unquote;
+use indexmap::IndexMap;
 use serde_json::{json, Value as SerdeValue};
 use sqlx::{any::AnyPool, query as sqlx_query, Row, ValueRef};
 use std::collections::HashMap;
@@ -22,7 +23,7 @@ pub struct ResultCell {
 #[derive(Clone, Debug)]
 pub struct ResultRow {
     pub row_number: Option<u32>,
-    pub contents: HashMap<String, ResultCell>,
+    pub contents: IndexMap<String, ResultCell>,
 }
 
 /// Given a config map, maps of compiled datatype and rule conditions, a database connection
@@ -45,7 +46,7 @@ pub async fn validate_row(
     }
 
     // Initialize the result row with the values from the given row:
-    let mut result_row = ResultRow { row_number: row_number, contents: HashMap::new() };
+    let mut result_row = ResultRow { row_number: row_number, contents: IndexMap::new() };
     for (column, cell) in row.iter() {
         let result_cell = ResultCell {
             nulltype: cell
@@ -55,7 +56,7 @@ pub async fn validate_row(
             value: match cell.get("value") {
                 Some(SerdeValue::String(s)) => s.to_string(),
                 Some(SerdeValue::Number(n)) => format!("{}", n),
-                _ => panic!("Cell value is neither a number nor a string."),
+                _ => panic!("Field 'value' of: {:#?} is neither a number nor a string.", cell),
             },
             valid: cell.get("valid").and_then(|v| v.as_bool()).unwrap(),
             messages: cell.get("messages").and_then(|m| m.as_array()).unwrap().to_vec(),
@@ -755,7 +756,7 @@ pub async fn validate_rows_trees(
 
     let mut result_rows = vec![];
     for row in rows {
-        let mut result_row = ResultRow { row_number: None, contents: HashMap::new() };
+        let mut result_row = ResultRow { row_number: None, contents: IndexMap::new() };
         for column_name in &column_names {
             let context = row.clone();
             let cell = row.contents.get_mut(column_name).unwrap();
@@ -807,7 +808,7 @@ pub async fn validate_rows_constraints(
 
     let mut result_rows = vec![];
     for row in rows.iter_mut() {
-        let mut result_row = ResultRow { row_number: None, contents: HashMap::new() };
+        let mut result_row = ResultRow { row_number: None, contents: IndexMap::new() };
         for column_name in &column_names {
             let cell = row.contents.get_mut(column_name).unwrap();
             // We don't do any further validation on cells that are legitimately empty, or on cells
@@ -857,7 +858,7 @@ pub fn validate_rows_intra(
         match row {
             Err(err) => eprintln!("Error while processing row for '{}': {}", table_name, err),
             Ok(row) => {
-                let mut result_row = ResultRow { row_number: None, contents: HashMap::new() };
+                let mut result_row = ResultRow { row_number: None, contents: IndexMap::new() };
                 for (i, value) in row.iter().enumerate() {
                     let result_cell = ResultCell {
                         nulltype: None,
