@@ -1,7 +1,7 @@
 use enquote::unquote;
 use indexmap::IndexMap;
 use serde_json::{json, Value as SerdeValue};
-use sqlx::{any::AnyPool, query as sqlx_query, Error::ColumnNotFound, Row, ValueRef};
+use sqlx::{any::AnyPool, query as sqlx_query, Error::Configuration, Row, ValueRef};
 use std::collections::HashMap;
 
 use crate::{
@@ -192,10 +192,10 @@ pub async fn get_matching_values(
     {
         Some(dt_name) => dt_name,
         None => {
-            return Err(ColumnNotFound(format!(
-                "No column config for '{}.{}' in VALVE config",
-                table_name, column_name
-            )))
+            return Err(Configuration(
+                format!("No column config for '{}.{}' in VALVE config", table_name, column_name)
+                    .into(),
+            ))
         }
     };
 
@@ -238,10 +238,13 @@ pub async fn get_matching_values(
             {
                 Some(s) => s,
                 None => {
-                    return Err(ColumnNotFound(format!(
-                        "No structure constraint for '{}.{}' in VALVE config",
-                        table_name, column_name
-                    )))
+                    return Err(Configuration(
+                        format!(
+                            "No structure constraint for '{}.{}' in VALVE config",
+                            table_name, column_name
+                        )
+                        .into(),
+                    ))
                 }
             };
             let structure = parsed_structure_conditions.get(structure_name);
@@ -250,10 +253,13 @@ pub async fn get_matching_values(
                 match get_sql_type_from_global_config(&config, table_name, &column_name, pool) {
                     Some(t) => t,
                     None => {
-                        return Err(ColumnNotFound(format!(
-                            "Unable to determine SQL type for '{}.{}' from VALVE config",
-                            table_name, column_name
-                        )))
+                        return Err(Configuration(
+                            format!(
+                                "Unable to determine SQL type for '{}.{}' from VALVE config",
+                                table_name, column_name
+                            )
+                            .into(),
+                        ))
                     }
                 };
 
@@ -320,19 +326,18 @@ pub async fn get_matching_values(
                             {
                                 Some(t) => t,
                                 None => {
-                                    return Err(ColumnNotFound(format!(
-                                        "No tree: '{}.{}' found",
-                                        table_name, tree_col
-                                    )))
+                                    return Err(Configuration(
+                                        format!("No tree: '{}.{}' found", table_name, tree_col)
+                                            .into(),
+                                    ))
                                 }
                             };
                             let child_column = match tree.get("child").and_then(|c| c.as_str()) {
                                 Some(c) => c,
                                 None => {
-                                    return Err(ColumnNotFound(format!(
-                                        "No 'child' in tree {:?}",
-                                        tree
-                                    )))
+                                    return Err(Configuration(
+                                        format!("No 'child' in tree {:?}", tree).into(),
+                                    ))
                                 }
                             };
 
@@ -367,10 +372,9 @@ pub async fn get_matching_values(
                             }
                         }
                         _ => {
-                            return Err(ColumnNotFound(format!(
-                                "Unrecognised structure: {}",
-                                original
-                            )))
+                            return Err(Configuration(
+                                format!("Unrecognised structure: {}", original).into(),
+                            ))
                         }
                     };
                 }
