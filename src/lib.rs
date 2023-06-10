@@ -142,7 +142,7 @@ impl std::fmt::Debug for ColumnRule {
 pub fn read_config_files(
     path: &str,
     config_table: &str,
-) -> (SerdeMap, SerdeMap, SerdeMap, SerdeMap) {
+) -> Result<(SerdeMap, SerdeMap, SerdeMap, SerdeMap), String> {
     let special_table_types = json!({
         "table": {"required": true},
         "column": {"required": true},
@@ -172,48 +172,59 @@ pub fn read_config_files(
     for mut row in rows {
         for column in vec!["table", "path", "type"] {
             if !row.contains_key(column) || row.get(column) == None {
-                panic!("Missing required column '{}' reading '{}'", column, path);
+                return Err(format!("Missing required column '{}' reading '{}'", column, path));
             }
         }
 
         for column in vec!["table", "path"] {
-            if row.get(column).and_then(|c| c.as_str()).unwrap() == "" {
-                panic!("Missing required value for '{}' reading '{}'", column, path);
+            if row.get(column).and_then(|c| c.as_str()).unwrap_or("") == "" {
+                return Err(format!("Missing required value for '{}' reading '{}'", column, path));
             }
         }
 
         for column in vec!["type"] {
-            if row.get(column).and_then(|c| c.as_str()).unwrap() == "" {
+            if row.get(column).and_then(|c| c.as_str()).unwrap_or("") == "" {
                 row.remove(&column.to_string());
             }
         }
 
         if let Some(SerdeValue::String(row_type)) = row.get("type") {
             if row_type == "table" {
-                let row_path = row.get("path").unwrap();
+                let row_path = row.get("path").ok_or(format!("No 'path' in {:?}", row))?;
                 if path.to_lowercase().ends_with(".tsv") && row_path != path {
-                    panic!(
+                    return Err(format!(
                         "Special 'table' path '{}' does not match this path '{}'",
                         row_path, path
-                    );
+                    ));
                 }
             }
 
             if special_table_types.contains_key(row_type) {
                 match specials_config.get(row_type) {
                     Some(SerdeValue::Null) => (),
-                    _ => panic!("Multiple tables with type '{}' declared in '{}'", row_type, path),
+                    _ => {
+                        return Err(format!(
+                            "Multiple tables with type '{}' declared in '{}'",
+                            row_type, path
+                        ))
+                    }
                 }
-                let row_table = row.get("table").and_then(|t| t.as_str()).unwrap();
+                let row_table = row
+                    .get("table")
+                    .and_then(|t| t.as_str())
+                    .ok_or(format!("No 'table' in {:?}", row))?;
                 specials_config
                     .insert(row_type.to_string(), SerdeValue::String(row_table.to_string()));
             } else {
-                panic!("Unrecognized table type '{}' in '{}'", row_type, path);
+                return Err(format!("Unrecognized table type '{}' in '{}'", row_type, path));
             }
         }
 
         row.insert(String::from("column"), SerdeValue::Object(SerdeMap::new()));
-        let row_table = row.get("table").and_then(|t| t.as_str()).unwrap();
+        let row_table = row
+            .get("table")
+            .and_then(|t| t.as_str())
+            .ok_or(format!("No string 'table' in {:?}", row))?;
         tables_config.insert(row_table.to_string(), SerdeValue::Object(row));
     }
 
@@ -221,7 +232,7 @@ pub fn read_config_files(
     for (table_type, table_spec) in special_table_types.iter() {
         if let Some(SerdeValue::Bool(true)) = table_spec.get("required") {
             if let Some(SerdeValue::Null) = specials_config.get(table_type) {
-                panic!("Missing required '{}' table in '{}'", table_type, path);
+                return Err(format!("Missing required '{}' table in '{}'", table_type, path));
             }
         }
     }
@@ -237,121 +248,140 @@ pub fn read_config_files(
         specials_config: &SerdeMap,
         tables_config: &SerdeMap,
         path: &str,
-    ) -> Vec<SerdeMap> {
+    ) -> Result<Vec<SerdeMap>, String> {
         if path.to_lowercase().ends_with(".tsv") {
-            let table_name = specials_config.get(table_type).and_then(|d| d.as_str()).unwrap();
+            let table_name = specials_config
+                .get(table_type)
+                .and_then(|d| d.as_str())
+                .ok_or(format!("No string '{}' in specials config", table_type))?;
             let path = String::from(
                 tables_config
                     .get(table_name)
                     .and_then(|t| t.get("path"))
                     .and_then(|p| p.as_str())
-                    .unwrap(),
+                    .ok_or(format!("No string 'path' in table config for '{}'", table_name))?,
             );
-            return read_tsv_into_vector(&path.to_string());
+            return Ok(read_tsv_into_vector(&path.to_string()));
         } else {
             let mut db_table = None;
             for (table_name, table_config) in tables_config {
                 let this_type = table_config.get("type");
                 if let Some(this_type) = this_type {
-                    let this_type = this_type.as_str().unwrap();
+                    let this_type =
+                        this_type.as_str().ok_or(format!("'{}' is not a string", this_type))?;
                     if this_type == table_type {
                         db_table = Some(table_name);
                         break;
                     }
                 }
             }
-            if db_table == None {
-                panic!("Could not determine special table name for type '{}'.", table_type);
-            }
-            let db_table = db_table.unwrap();
-            read_db_table_into_vector(path, db_table)
+            let db_table = db_table.ok_or(format!(
+                "Could not determine special table name for type '{}'.",
+                table_type
+            ))?;
+            Ok(read_db_table_into_vector(path, db_table))
         }
     }
 
     // Load datatype table
     let mut datatypes_config = SerdeMap::new();
-    let rows = get_special_config("datatype", &specials_config, &tables_config, path);
+    let rows = get_special_config("datatype", &specials_config, &tables_config, path)?;
     for mut row in rows {
         for column in vec!["datatype", "parent", "condition", "SQLite type", "PostgreSQL type"] {
             if !row.contains_key(column) || row.get(column) == None {
-                panic!("Missing required column '{}' reading '{}'", column, path);
+                return Err(format!("Missing required column '{}' reading '{}'", column, path));
             }
         }
 
         for column in vec!["datatype"] {
-            if row.get(column).and_then(|c| c.as_str()).unwrap() == "" {
-                panic!("Missing required value for '{}' reading '{}'", column, path);
+            if row.get(column).and_then(|c| c.as_str()).unwrap_or("") == "" {
+                return Err(format!("Missing required value for '{}' reading '{}'", column, path));
             }
         }
 
         for column in vec!["parent", "condition", "SQLite type", "PostgreSQL type"] {
-            if row.get(column).and_then(|c| c.as_str()).unwrap() == "" {
+            if row.get(column).and_then(|c| c.as_str()).unwrap_or("") == "" {
                 row.remove(&column.to_string());
             }
         }
 
-        let dt_name = row.get("datatype").and_then(|d| d.as_str()).unwrap();
+        let dt_name = row
+            .get("datatype")
+            .and_then(|d| d.as_str())
+            .ok_or(format!("No string 'datatype' in {:?}", row))?;
         datatypes_config.insert(dt_name.to_string(), SerdeValue::Object(row));
     }
 
     for dt in vec!["text", "empty", "line", "word"] {
         if !datatypes_config.contains_key(dt) {
-            panic!("Missing required datatype: '{}'", dt);
+            return Err(format!("Missing required datatype: '{}'", dt));
         }
     }
 
     // Load column table
-    let rows = get_special_config("column", &specials_config, &tables_config, path);
+    let rows = get_special_config("column", &specials_config, &tables_config, path)?;
     for mut row in rows {
         for column in vec!["table", "column", "nulltype", "datatype"] {
             if !row.contains_key(column) || row.get(column) == None {
-                panic!("Missing required column '{}' reading '{}'", column, path);
+                return Err(format!("Missing required column '{}' reading '{}'", column, path));
             }
         }
 
         for column in vec!["table", "column", "datatype"] {
-            if row.get(column).and_then(|c| c.as_str()).unwrap() == "" {
-                panic!("Missing required value for '{}' reading '{}'", column, path);
+            if row.get(column).and_then(|c| c.as_str()).unwrap_or("") == "" {
+                return Err(format!("Missing required value for '{}' reading '{}'", column, path));
             }
         }
 
         for column in vec!["nulltype"] {
-            if row.get(column).and_then(|c| c.as_str()).unwrap() == "" {
+            if row.get(column).and_then(|c| c.as_str()).unwrap_or("") == "" {
                 row.remove(&column.to_string());
             }
         }
 
-        let row_table = row.get("table").and_then(|t| t.as_str()).unwrap();
+        let row_table = row
+            .get("table")
+            .and_then(|t| t.as_str())
+            .ok_or(format!("No string 'table' in {:?}", row))?;
         if !tables_config.contains_key(row_table) {
-            panic!("Undefined table '{}' reading '{}'", row_table, path);
+            return Err(format!("Undefined table '{}' reading '{}'", row_table, path));
         }
 
         if let Some(SerdeValue::String(nulltype)) = row.get("nulltype") {
             if !datatypes_config.contains_key(nulltype) {
-                panic!("Undefined nulltype '{}' reading '{}'", nulltype, path);
+                return Err(format!("Undefined nulltype '{}' reading '{}'", nulltype, path));
             }
         }
 
-        let datatype = row.get("datatype").and_then(|d| d.as_str()).unwrap();
+        let datatype = row
+            .get("datatype")
+            .and_then(|d| d.as_str())
+            .ok_or(format!("No string 'datatype' in {:?}", row))?;
         if !datatypes_config.contains_key(datatype) {
-            panic!("Undefined datatype '{}' reading '{}'", datatype, path);
+            return Err(format!("Undefined datatype '{}' reading '{}'", datatype, path));
         }
 
-        let row_table = row.get("table").and_then(|t| t.as_str()).unwrap();
-        let column_name = row.get("column").and_then(|c| c.as_str()).unwrap();
+        let row_table = row
+            .get("table")
+            .and_then(|t| t.as_str())
+            .ok_or(format!("No string 'table' in {:?}", row))?;
+        let column_name = row
+            .get("column")
+            .and_then(|c| c.as_str())
+            .ok_or(format!("No string 'column' in {:?}", row))?;
 
         let columns_config = tables_config
             .get_mut(row_table)
             .and_then(|t| t.get_mut("column"))
             .and_then(|c| c.as_object_mut())
-            .unwrap();
+            .ok_or(format!("Could not extract column config from valve config"))?;
         columns_config.insert(column_name.to_string(), SerdeValue::Object(row));
     }
 
     // Load rule table if it exists
     let mut rules_config = SerdeMap::new();
     if let Some(SerdeValue::String(table_name)) = specials_config.get("rule") {
-        let rows = get_special_config(table_name, &specials_config, &tables_config, path);
+        let rows = get_special_config(table_name, &specials_config, &tables_config, path)?;
         for row in rows {
             for column in vec![
                 "table",
@@ -363,34 +393,48 @@ pub fn read_config_files(
                 "description",
             ] {
                 if !row.contains_key(column) || row.get(column) == None {
-                    panic!("Missing required column '{}' reading '{}'", column, path);
+                    return Err(format!("Missing required column '{}' reading '{}'", column, path));
                 }
-                if row.get(column).and_then(|c| c.as_str()).unwrap() == "" {
-                    panic!("Missing required value for '{}' reading '{}'", column, path);
+                if row.get(column).and_then(|c| c.as_str()).unwrap_or("") == "" {
+                    return Err(format!(
+                        "Missing required value for '{}' reading '{}'",
+                        column, path
+                    ));
                 }
             }
 
-            let row_table = row.get("table").and_then(|t| t.as_str()).unwrap();
+            let row_table = row
+                .get("table")
+                .and_then(|t| t.as_str())
+                .ok_or(format!("No string 'table' in {:?}", row))?;
             if !tables_config.contains_key(row_table) {
-                panic!("Undefined table '{}' reading '{}'", row_table, path);
+                return Err(format!("Undefined table '{}' reading '{}'", row_table, path));
             }
 
             // Add the rule specified in the given row to the list of rules associated with the
             // value of the when column:
-            let row_when_column = row.get("when column").and_then(|c| c.as_str()).unwrap();
+            let row_when_column = row
+                .get("when column")
+                .and_then(|c| c.as_str())
+                .ok_or(format!("No 'when column' in {:?}", row))?;
             if !rules_config.contains_key(row_table) {
                 rules_config.insert(String::from(row_table), SerdeValue::Object(SerdeMap::new()));
             }
 
-            let table_rule_config =
-                rules_config.get_mut(row_table).and_then(|t| t.as_object_mut()).unwrap();
+            let table_rule_config = rules_config
+                .get_mut(row_table)
+                .and_then(|t| t.as_object_mut())
+                .ok_or(format!("No object '{}' in rules config", row_table))?;
             if !table_rule_config.contains_key(row_when_column) {
                 table_rule_config.insert(String::from(row_when_column), SerdeValue::Array(vec![]));
             }
             let column_rule_config = table_rule_config
                 .get_mut(&row_when_column.to_string())
                 .and_then(|w| w.as_array_mut())
-                .unwrap();
+                .ok_or(format!(
+                    "No array '{}' in rule configuration for '{}'",
+                    row_when_column, row_table
+                ))?;
             column_rule_config.push(SerdeValue::Object(row));
         }
     }
@@ -466,7 +510,7 @@ pub fn read_config_files(
     );
 
     // Finally, return all the configs:
-    (specials_config, tables_config, datatypes_config, rules_config)
+    Ok((specials_config, tables_config, datatypes_config, rules_config))
 }
 
 /// Given the global configuration map and a parser, compile all of the datatype conditions,
@@ -893,10 +937,11 @@ pub async fn valve(
     verbose: bool,
     config_table: &str,
 ) -> Result<String, sqlx::Error> {
-    let parser = StartParser::new();
-
     let (specials_config, mut tables_config, mut datatypes_config, rules_config) =
-        read_config_files(&table_table.to_string(), config_table);
+        read_config_files(&table_table.to_string(), config_table)
+            .map_err(|x| sqlx::Error::Configuration(x.into()))?;
+
+    let parser = StartParser::new();
 
     // To connect to a postgresql database listening to a unix domain socket:
     // ----------------------------------------------------------------------
@@ -917,7 +962,7 @@ pub async fn valve(
         } else {
             connection_string = database.to_string();
         }
-        connection_options = AnyConnectOptions::from_str(connection_string.as_str()).unwrap();
+        connection_options = AnyConnectOptions::from_str(connection_string.as_str())?;
     }
 
     let pool = AnyPoolOptions::new().max_connections(5).connect_with(connection_options).await?;
