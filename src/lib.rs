@@ -748,21 +748,22 @@ pub async fn configure_db(
             .and_then(|o| Some(o.keys()))
             .and_then(|k| Some(k.cloned()))
             .and_then(|k| Some(k.collect()))
-            .unwrap();
+            .ok_or(Configuration(
+                "Unable to get defined columns from valve config".to_string().into(),
+            ))?;
 
         // Get the actual columns from the data itself. Note that we set has_headers to false
         // (even though the files have header rows) in order to explicitly read the header row.
-        let mut rdr = csv::ReaderBuilder::new().has_headers(false).delimiter(b'\t').from_reader(
-            File::open(path.clone()).unwrap_or_else(|err| {
-                panic!("Unable to open '{}': {}", path.clone(), err);
-            }),
-        );
+        let mut rdr = csv::ReaderBuilder::new()
+            .has_headers(false)
+            .delimiter(b'\t')
+            .from_reader(File::open(path.clone()).map_err(|x| Configuration(x.into()))?);
         let mut iter = rdr.records();
         let actual_columns;
         if let Some(result) = iter.next() {
-            actual_columns = result.unwrap();
+            actual_columns = result.map_err(|x| Configuration(x.into()))?
         } else {
-            panic!("'{}' is empty", path);
+            return Err(Configuration(format!("'{}' is empty", path).into()));
         }
 
         // We use column_order to explicitly indicate the order in which the columns should appear
@@ -784,7 +785,10 @@ pub async fn configure_db(
                     .and_then(|r| r.get("column"))
                     .and_then(|v| v.as_object())
                     .and_then(|o| o.get(column_name))
-                    .unwrap()
+                    .ok_or(Configuration(
+                        format!("No '{}' in column config for '{}'", column_name, table_name)
+                            .into(),
+                    ))?
                     .clone();
             }
             column_order.push(SerdeValue::String(column_name.to_string()));
@@ -804,7 +808,16 @@ pub async fn configure_db(
             table_statements.append(&mut statements);
             if !table.ends_with("_conflict") {
                 for constraint_type in vec!["foreign", "unique", "primary", "tree", "under"] {
-                    let table_constraints = table_constraints.get(constraint_type).unwrap().clone();
+                    let table_constraints = table_constraints
+                        .get(constraint_type)
+                        .ok_or(Configuration(
+                            format!(
+                                "No {} constraints in table constraints for {}",
+                                constraint_type, table
+                            )
+                            .into(),
+                        ))?
+                        .clone();
                     constraints_config
                         .get_mut(constraint_type)
                         .and_then(|o| o.as_object_mut())
@@ -929,7 +942,9 @@ pub async fn configure_db(
         let mut tables_to_create = vec!["message".to_string()];
         tables_to_create.append(&mut sorted_tables.clone());
         for table in &tables_to_create {
-            let table_statements = setup_statements.get(table).unwrap();
+            let table_statements = setup_statements
+                .get(table)
+                .ok_or(Configuration(format!("No '{}' in setup statements", table).into()))?;
             if *command != ValveCommand::Config {
                 for stmt in table_statements {
                     sqlx_query(stmt)
