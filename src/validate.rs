@@ -283,7 +283,7 @@ pub async fn get_matching_values(
                                         r#"SELECT "{}" FROM "{}" WHERE {} LIKE {}"#,
                                         fcolumn, ftable, fcolumn_text, SQL_PARAM
                                     ),
-                                );
+                                )?;
                                 let rows =
                                     sqlx_query(&sql).bind(&matching_string).fetch_all(pool).await?;
                                 for row in rows.iter() {
@@ -358,7 +358,7 @@ pub async fn get_matching_values(
                                     r#"{} SELECT "{}" FROM "tree" WHERE {} LIKE {}"#,
                                     tree_sql, child_column, child_column_text, SQL_PARAM
                                 ),
-                            );
+                            )?;
                             params.push(matching_string);
 
                             let mut query = sqlx_query(&sql);
@@ -525,7 +525,7 @@ pub async fn validate_under(
                 tree_parent,
                 effective_table,
             ),
-        );
+        )?;
 
         let mut query = sqlx_query(&sql);
         for param in &params {
@@ -559,7 +559,7 @@ pub async fn validate_under(
                              AND "column" = {}"#,
                         SQL_PARAM, SQL_PARAM, SQL_PARAM
                     ),
-                );
+                )?;
                 let mut message_query = sqlx_query(&message_sql);
                 message_query = message_query.bind(&table_name);
                 message_query = message_query.bind(&row_number);
@@ -684,7 +684,7 @@ pub async fn validate_tree_foreign_keys(
                 child_col,
                 parent_col
             ),
-        );
+        )?;
 
         let mut query = sqlx_query(&sql);
         for param in &params {
@@ -718,7 +718,7 @@ pub async fn validate_tree_foreign_keys(
                              AND "column" = {}"#,
                         SQL_PARAM, SQL_PARAM, SQL_PARAM
                     ),
-                );
+                )?;
                 let mut message_query = sqlx_query(&message_sql);
                 message_query = message_query.bind(&table_name);
                 message_query = message_query.bind(&row_number);
@@ -760,7 +760,7 @@ pub async fn validate_tree_foreign_keys(
                         r#"SELECT 1 FROM "{}" WHERE "{}" = {} LIMIT 1"#,
                         table_name, child_col, sql_param
                     ),
-                );
+                )?;
                 let query = sqlx_query(&sql).bind(parent_val.to_string());
                 let rows = query.fetch_all(pool).await?;
                 if rows.len() > 0 {
@@ -1343,7 +1343,7 @@ async fn validate_cell_foreign_constraints(
         let fsql = local_sql_syntax(
             &pool,
             &format!(r#"SELECT 1 FROM "{}" WHERE "{}" = {} LIMIT 1"#, ftable, fcolumn, sql_param),
-        );
+        )?;
         let frows = sqlx_query(&fsql).bind(&cell.value).fetch_all(pool).await?;
 
         if frows.is_empty() {
@@ -1359,7 +1359,7 @@ async fn validate_cell_foreign_constraints(
                     r#"SELECT 1 FROM "{}_conflict" WHERE "{}" = {} LIMIT 1"#,
                     ftable, fcolumn, sql_param
                 ),
-            );
+            )?;
             let frows = sqlx_query(&fsql).bind(cell.value.clone()).fetch_all(pool).await?;
 
             if frows.is_empty() {
@@ -1494,7 +1494,7 @@ async fn validate_cell_trees(
         let sql = local_sql_syntax(
             &pool,
             &format!(r#"{} SELECT "{}", "{}" FROM "tree""#, tree_sql, child_col, parent_col),
-        );
+        )?;
 
         let mut query = sqlx_query(&sql);
         for param in &params {
@@ -1643,7 +1643,7 @@ async fn validate_cell_unique_constraints(
                 r#"{} SELECT 1 FROM "{}" WHERE "{}" = {} LIMIT 1"#,
                 with_sql, query_table, column_name, sql_param
             ),
-        );
+        )?;
         let query = sqlx_query(&sql).bind(&cell.value);
 
         let contained_in_prev_results = !prev_results
