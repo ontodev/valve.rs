@@ -1068,7 +1068,7 @@ pub async fn insert_new_row(
     let sql = format!(r#"SELECT MAX("row_number") AS "row_number" FROM "{}_view""#, table_name);
     let query = sqlx_query(&sql);
     let result_row = query.fetch_one(pool).await?;
-    let result = result_row.try_get_raw("row_number").unwrap();
+    let result = result_row.try_get_raw("row_number")?;
     let new_row_number: i64;
     if result.is_null() {
         new_row_number = 1;
@@ -1084,9 +1084,17 @@ pub async fn insert_new_row(
     let sorted_datatypes = get_sorted_datatypes(global_config);
     for (column, cell) in row.iter() {
         insert_columns.append(&mut vec![format!(r#""{}""#, column)]);
-        let cell = cell.as_object().unwrap();
-        let cell_valid = cell.get("valid").and_then(|v| v.as_bool()).unwrap();
-        let cell_value = cell.get("value").and_then(|v| v.as_str()).unwrap();
+        let cell = cell
+            .as_object()
+            .ok_or(Configuration(format!("'{:?}' is not an object", cell).into()))?;
+        let cell_valid = cell
+            .get("valid")
+            .and_then(|v| v.as_bool())
+            .ok_or(Configuration(format!("No flag 'valid' in {:?}", cell).into()))?;
+        let cell_value = cell
+            .get("value")
+            .and_then(|v| v.as_str())
+            .ok_or(Configuration(format!("No string 'value' in {:?}", cell).into()))?;
         let mut cell_for_insert = cell.clone();
         if cell_valid {
             cell_for_insert.remove("value");
@@ -1096,22 +1104,27 @@ pub async fn insert_new_row(
                 &column,
                 pool,
             )
-            .unwrap();
+            .ok_or(Configuration(format!("No SQL type for {}.{}", table_name, column).into()))?;
             insert_values.push(cast_sql_param_from_text(&sql_type));
             insert_params.push(String::from(cell_value));
         } else {
             insert_values.push(String::from("NULL"));
             let cell_messages = sort_messages(
                 &sorted_datatypes,
-                cell.get("messages").and_then(|m| m.as_array()).unwrap(),
+                cell.get("messages")
+                    .and_then(|m| m.as_array())
+                    .ok_or(Configuration(format!("No 'messages' in {:?}", cell).into()))?,
             );
             for cell_message in cell_messages {
                 messages.push(json!({
                     "column": column,
                     "value": cell_value,
-                    "level": cell_message.get("level").and_then(|s| s.as_str()).unwrap(),
-                    "rule": cell_message.get("rule").and_then(|s| s.as_str()).unwrap(),
-                    "message": cell_message.get("message").and_then(|s| s.as_str()).unwrap(),
+                    "level": cell_message.get("level").and_then(|s| s.as_str())
+                        .ok_or(Configuration(format!("No string 'level' in {:?}", cell).into()))?,
+                    "rule": cell_message.get("rule").and_then(|s| s.as_str())
+                        .ok_or(Configuration(format!("No string 'rule' in {:?}", cell).into()))?,
+                    "message": cell_message.get("message").and_then(|s| s.as_str())
+                        .ok_or(Configuration(format!("No string 'message' in {:?}", cell).into()))?,
                 }));
             }
         }
@@ -1137,11 +1150,26 @@ pub async fn insert_new_row(
 
     // Next add any validation messages to the message table:
     for m in messages {
-        let column = m.get("column").and_then(|c| c.as_str()).unwrap();
-        let value = m.get("value").and_then(|c| c.as_str()).unwrap();
-        let level = m.get("level").and_then(|c| c.as_str()).unwrap();
-        let rule = m.get("rule").and_then(|c| c.as_str()).unwrap();
-        let message = m.get("message").and_then(|c| c.as_str()).unwrap();
+        let column = m
+            .get("column")
+            .and_then(|c| c.as_str())
+            .ok_or(Configuration(format!("No 'column' in {:?}", m).into()))?;
+        let value = m
+            .get("value")
+            .and_then(|c| c.as_str())
+            .ok_or(Configuration(format!("No 'value' in {:?}", m).into()))?;
+        let level = m
+            .get("level")
+            .and_then(|c| c.as_str())
+            .ok_or(Configuration(format!("No 'level' in {:?}", m).into()))?;
+        let rule = m
+            .get("rule")
+            .and_then(|c| c.as_str())
+            .ok_or(Configuration(format!("No 'rule' in {:?}", m).into()))?;
+        let message = m
+            .get("message")
+            .and_then(|c| c.as_str())
+            .ok_or(Configuration(format!("No 'message' in {:?}", m).into()))?;
         let message_sql = format!(
             r#"INSERT INTO "message"
                ("table", "row", "column", "value", "level", "rule", "message")
@@ -1169,9 +1197,16 @@ pub async fn update_row(
     let mut messages = vec![];
     let sorted_datatypes = get_sorted_datatypes(global_config);
     for (column, cell) in row.iter() {
-        let cell = cell.as_object().unwrap();
-        let cell_valid = cell.get("valid").and_then(|v| v.as_bool()).unwrap();
-        let cell_value = cell.get("value").and_then(|v| v.as_str()).unwrap();
+        let cell =
+            cell.as_object().ok_or(Configuration(format!("{:?} is not an object", cell).into()))?;
+        let cell_valid = cell
+            .get("valid")
+            .and_then(|v| v.as_bool())
+            .ok_or(Configuration(format!("No flag 'valid' in {:?}", cell).into()))?;
+        let cell_value = cell
+            .get("value")
+            .and_then(|v| v.as_str())
+            .ok_or(Configuration(format!("No string 'value' in {:?}", cell).into()))?;
         let mut cell_for_insert = cell.clone();
         if cell_valid {
             cell_for_insert.remove("value");
@@ -1181,22 +1216,27 @@ pub async fn update_row(
                 &column,
                 pool,
             )
-            .unwrap();
+            .ok_or(Configuration(format!("No SQL type for {}.{}", table_name, column).into()))?;
             assignments.push(format!(r#""{}" = {}"#, column, cast_sql_param_from_text(&sql_type)));
             params.push(String::from(cell_value));
         } else {
             assignments.push(format!(r#""{}" = NULL"#, column));
             let cell_messages = sort_messages(
                 &sorted_datatypes,
-                cell.get("messages").and_then(|m| m.as_array()).unwrap(),
+                cell.get("messages")
+                    .and_then(|m| m.as_array())
+                    .ok_or(Configuration(format!("No array 'messages' in {:?}", cell).into()))?,
             );
-            for cell_message in cell_messages {
+            for cmessage in cell_messages {
                 messages.push(json!({
                     "column": String::from(column),
                     "value": String::from(cell_value),
-                    "level": cell_message.get("level").and_then(|s| s.as_str()).unwrap(),
-                    "rule": cell_message.get("rule").and_then(|s| s.as_str()).unwrap(),
-                    "message": cell_message.get("message").and_then(|s| s.as_str()).unwrap(),
+                    "level": cmessage.get("level").and_then(|s| s.as_str())
+                        .ok_or(Configuration(format!("No 'level' in {:?}", cmessage).into()))?,
+                    "rule": cmessage.get("rule").and_then(|s| s.as_str())
+                        .ok_or(Configuration(format!("No 'rule' in {:?}", cmessage).into()))?,
+                    "message": cmessage.get("message").and_then(|s| s.as_str())
+                        .ok_or(Configuration(format!("No 'message' in {:?}", cmessage).into()))?,
                 }));
             }
         }
@@ -1225,11 +1265,26 @@ pub async fn update_row(
 
     // Finally add the messages to the message table for the new version of this row:
     for m in messages {
-        let column = m.get("column").and_then(|c| c.as_str()).unwrap();
-        let value = m.get("value").and_then(|c| c.as_str()).unwrap();
-        let level = m.get("level").and_then(|c| c.as_str()).unwrap();
-        let rule = m.get("rule").and_then(|c| c.as_str()).unwrap();
-        let message = m.get("message").and_then(|c| c.as_str()).unwrap();
+        let column = m
+            .get("column")
+            .and_then(|c| c.as_str())
+            .ok_or(Configuration(format!("No 'column' in {:?}", m).into()))?;
+        let value = m
+            .get("value")
+            .and_then(|c| c.as_str())
+            .ok_or(Configuration(format!("No 'value' in {:?}", m).into()))?;
+        let level = m
+            .get("level")
+            .and_then(|c| c.as_str())
+            .ok_or(Configuration(format!("No 'level' in {:?}", m).into()))?;
+        let rule = m
+            .get("rule")
+            .and_then(|c| c.as_str())
+            .ok_or(Configuration(format!("No 'rule' in {:?}", m).into()))?;
+        let message = m
+            .get("message")
+            .and_then(|c| c.as_str())
+            .ok_or(Configuration(format!("No 'message' in {:?}", m).into()))?;
         let insert_sql = format!(
             r#"INSERT INTO "message"
                ("table", "row", "column", "value", "level", "rule", "message")
