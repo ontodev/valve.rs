@@ -9,6 +9,7 @@ use ontodev_valve::{
     get_parsed_structure_conditions, valve, valve_grammar::StartParser, ValveCommand,
 };
 use serde_json::{from_str, Value as SerdeValue};
+use sqlx::Error::Configuration;
 use std::{env, process};
 
 fn cli_args_valid(source: &str, destination: &str, dump_config: bool) -> bool {
@@ -111,7 +112,8 @@ async fn main() -> Result<(), sqlx::Error> {
         let config = config.as_object_mut().unwrap();
         let parser = StartParser::new();
 
-        let datatype_conditions = get_compiled_datatype_conditions(&config, &parser);
+        let datatype_conditions = get_compiled_datatype_conditions(&config, &parser)
+            .map_err(|x| Configuration(x.into()))?;
         let structure_conditions = get_parsed_structure_conditions(&config, &parser);
         let rule_conditions =
             get_compiled_rule_conditions(&config, datatype_conditions.clone(), &parser);
