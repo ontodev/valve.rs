@@ -51,6 +51,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     fs::File,
     path::Path,
+    process,
     str::FromStr,
     sync::Arc,
 };
@@ -164,9 +165,9 @@ pub fn read_config_files(
         // Read in the configuration entry point (the "table table") from either a file or a
         // database table.
         if path.to_lowercase().ends_with(".tsv") {
-            read_tsv_into_vector(path)?
+            read_tsv_into_vector(path)
         } else {
-            read_db_table_into_vector(path, config_table).map_err(|e| e.to_string())?
+            read_db_table_into_vector(path, config_table)
         }
     };
 
@@ -262,7 +263,7 @@ pub fn read_config_files(
                     .and_then(|p| p.as_str())
                     .ok_or(format!("No string 'path' in table config for '{}'", table_name))?,
             );
-            return Ok(read_tsv_into_vector(&path.to_string())?);
+            return Ok(read_tsv_into_vector(&path.to_string()));
         } else {
             let mut db_table = None;
             for (table_name, table_config) in tables_config {
@@ -280,7 +281,7 @@ pub fn read_config_files(
                 "Could not determine special table name for type '{}'.",
                 table_type
             ))?;
-            read_db_table_into_vector(path, db_table).map_err(|e| e.to_string())
+            Ok(read_db_table_into_vector(path, db_table))
         }
     }
 
@@ -534,7 +535,7 @@ pub fn get_compiled_datatype_conditions(
             .ok_or(format!("No string 'datatype' in {:?}", row))?;
         let condition = row.get("condition").and_then(|c| c.as_str());
         let compiled_condition =
-            compile_condition(condition, parser, &compiled_datatype_conditions)?;
+            compile_condition(condition, parser, &compiled_datatype_conditions);
         if let Some(_) = condition {
             compiled_datatype_conditions.insert(dt_name.to_string(), compiled_condition);
         }
@@ -611,7 +612,7 @@ pub fn get_compiled_rule_conditions(
                             condition_option,
                             parser,
                             &compiled_datatype_conditions,
-                        )?;
+                        );
                         if column == "when condition" {
                             when_compiled = Some(compiled_condition);
                         } else if column == "then condition" {
@@ -803,7 +804,7 @@ pub async fn configure_db(
         let mut table_statements = vec![];
         for table in vec![table_name.to_string(), format!("{}_conflict", table_name)] {
             let (mut statements, table_constraints) =
-                create_table_statement(tables_config, datatypes_config, parser, &table, &pool)?;
+                create_table_statement(tables_config, datatypes_config, parser, &table, &pool);
             table_statements.append(&mut statements);
             if !table.ends_with("_conflict") {
                 for constraint_type in vec!["foreign", "unique", "primary", "tree", "under"] {
@@ -895,7 +896,7 @@ pub async fn configure_db(
     // Sort the tables according to their foreign key dependencies so that tables are always loaded
     // after the tables they depend on:
     let unsorted_tables: Vec<String> = setup_statements.keys().cloned().collect();
-    let sorted_tables = verify_table_deps_and_sort(&unsorted_tables, &constraints_config)?;
+    let sorted_tables = verify_table_deps_and_sort(&unsorted_tables, &constraints_config);
 
     if *command != ValveCommand::Config || verbose {
         // Generate DDL for the message table:
@@ -1080,7 +1081,7 @@ pub async fn insert_new_row(
     let mut insert_values = vec![];
     let mut insert_params = vec![];
     let mut messages = vec![];
-    let sorted_datatypes = get_sorted_datatypes(global_config)?;
+    let sorted_datatypes = get_sorted_datatypes(global_config);
     for (column, cell) in row.iter() {
         insert_columns.append(&mut vec![format!(r#""{}""#, column)]);
         let cell = cell
@@ -1113,8 +1114,7 @@ pub async fn insert_new_row(
                 cell.get("messages")
                     .and_then(|m| m.as_array())
                     .ok_or(Configuration(format!("No 'messages' in {:?}", cell).into()))?,
-            )
-            .map_err(|e| Configuration(e.into()))?;
+            );
             for cell_message in cell_messages {
                 messages.push(json!({
                     "column": column,
@@ -1140,7 +1140,7 @@ pub async fn insert_new_row(
             new_row_number,
             insert_values.join(", "),
         ),
-    )?;
+    );
 
     let mut query = sqlx_query(&insert_stmt);
     for param in &insert_params {
@@ -1195,7 +1195,7 @@ pub async fn update_row(
     let mut assignments = vec![];
     let mut params = vec![];
     let mut messages = vec![];
-    let sorted_datatypes = get_sorted_datatypes(global_config)?;
+    let sorted_datatypes = get_sorted_datatypes(global_config);
     for (column, cell) in row.iter() {
         let cell =
             cell.as_object().ok_or(Configuration(format!("{:?} is not an object", cell).into()))?;
@@ -1226,8 +1226,7 @@ pub async fn update_row(
                 cell.get("messages")
                     .and_then(|m| m.as_array())
                     .ok_or(Configuration(format!("No array 'messages' in {:?}", cell).into()))?,
-            )
-            .map_err(|e| Configuration(e.into()))?;
+            );
             for cmessage in cell_messages {
                 messages.push(json!({
                     "column": String::from(column),
@@ -1247,7 +1246,7 @@ pub async fn update_row(
     let mut update_stmt = format!(r#"UPDATE "{}" SET "#, table_name);
     update_stmt.push_str(&assignments.join(", "));
     update_stmt.push_str(&format!(r#" WHERE "row_number" = {}"#, row_number));
-    let update_stmt = local_sql_syntax(&pool, &update_stmt)?;
+    let update_stmt = local_sql_syntax(&pool, &update_stmt);
 
     let mut query = sqlx_query(&update_stmt);
     for param in &params {
@@ -1302,9 +1301,11 @@ pub async fn update_row(
 /// Given a path, read a TSV file and return a vector of rows represented as SerdeMaps.
 /// Note: Use this function to read "small" TSVs only. In particular, use this for the special
 /// configuration tables.
-fn read_tsv_into_vector(path: &str) -> Result<Vec<SerdeMap>, String> {
+fn read_tsv_into_vector(path: &str) -> Vec<SerdeMap> {
     let mut rdr = csv::ReaderBuilder::new().delimiter(b'\t').from_reader(
-        File::open(path.clone()).map_err(|e| format!("Unable to open '{}': {}", path, e))?,
+        File::open(path).unwrap_or_else(|err| {
+            panic!("Unable to open '{}': {}", path, err);
+        }),
     );
 
     let rows: Vec<_> = rdr
@@ -1316,36 +1317,34 @@ fn read_tsv_into_vector(path: &str) -> Result<Vec<SerdeMap>, String> {
         .collect();
 
     if rows.len() < 1 {
-        return Err(format!("No rows in {}", path));
+        panic!("No rows in {}", path);
     }
 
     for (i, row) in rows.iter().enumerate() {
         // enumerate() begins at 0 but we want to count rows from 1:
         let i = i + 1;
         for (col, val) in row {
-            let val = val.as_str().ok_or(format!("{:?} is not a string", val))?;
+            let val = val.as_str().unwrap();
             let trimmed_val = val.trim();
             if trimmed_val != val {
-                return Err(format!(
+                eprintln!(
                     "Error: Value '{}' of column '{}' in row {} of table '{}' {}",
                     val, col, i, path, "has leading and/or trailing whitespace."
-                ));
+                );
+                process::exit(1);
             }
         }
     }
 
-    Ok(rows)
+    rows
 }
 
 /// Given a database at the specified location, query the "table" table and return a vector of rows
 /// represented as SerdeMaps.
-fn read_db_table_into_vector(
-    database: &str,
-    config_table: &str,
-) -> Result<Vec<SerdeMap>, sqlx::Error> {
+fn read_db_table_into_vector(database: &str, config_table: &str) -> Vec<SerdeMap> {
     let connection_options;
     if database.starts_with("postgresql://") {
-        connection_options = AnyConnectOptions::from_str(database)?;
+        connection_options = AnyConnectOptions::from_str(database).unwrap();
     } else {
         let connection_string;
         if !database.starts_with("sqlite://") {
@@ -1353,20 +1352,21 @@ fn read_db_table_into_vector(
         } else {
             connection_string = database.to_string();
         }
-        connection_options = AnyConnectOptions::from_str(connection_string.as_str())?;
+        connection_options = AnyConnectOptions::from_str(connection_string.as_str()).unwrap();
     }
 
-    let pool = block_on(AnyPoolOptions::new().max_connections(5).connect_with(connection_options))?;
+    let pool = block_on(AnyPoolOptions::new().max_connections(5).connect_with(connection_options))
+        .unwrap();
 
     let sql = format!("SELECT * FROM \"{}\"", config_table);
-    let rows = block_on(sqlx_query(&sql).fetch_all(&pool))?;
+    let rows = block_on(sqlx_query(&sql).fetch_all(&pool)).unwrap();
     let mut table_rows = vec![];
     for row in rows {
         let mut table_row = SerdeMap::new();
         for column in row.columns() {
             let cname = column.name();
             if cname != "row_number" {
-                let raw_value = row.try_get_raw(format!(r#"{}"#, cname).as_str())?;
+                let raw_value = row.try_get_raw(format!(r#"{}"#, cname).as_str()).unwrap();
                 if !raw_value.is_null() {
                     let value = get_column_value(&row, &cname, "text");
                     table_row.insert(cname.to_string(), json!(value));
@@ -1377,7 +1377,7 @@ fn read_db_table_into_vector(
         }
         table_rows.push(table_row);
     }
-    Ok(table_rows)
+    table_rows
 }
 
 /// Given a condition on a datatype, if the condition is a Function, then parse it using
@@ -1388,43 +1388,45 @@ fn compile_condition(
     condition_option: Option<&str>,
     parser: &StartParser,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
-) -> Result<CompiledCondition, String> {
-    let unquoted_re = Regex::new(r#"^['"](?P<unquoted>.*)['"]$"#).map_err(|e| e.to_string())?;
+) -> CompiledCondition {
+    let unquoted_re = Regex::new(r#"^['"](?P<unquoted>.*)['"]$"#).unwrap();
     match condition_option {
         // The case of no condition, or a "null" or "not null" condition, will be treated specially
         // later during the validation phase in a way that does not utilise the associated closure.
         // Since we still have to assign some closure in these cases, we use a constant closure that
         // always returns true:
         None => {
-            return Ok(CompiledCondition {
+            return CompiledCondition {
                 original: String::from(""),
                 parsed: Expression::None,
                 compiled: Arc::new(|_| true),
-            })
+            }
         }
         Some("null") => {
-            return Ok(CompiledCondition {
+            return CompiledCondition {
                 original: String::from("null"),
                 parsed: Expression::Null,
                 compiled: Arc::new(|_| true),
-            })
+            }
         }
         Some("not null") => {
-            return Ok(CompiledCondition {
+            return CompiledCondition {
                 original: String::from("not null"),
                 parsed: Expression::NotNull,
                 compiled: Arc::new(|_| true),
-            })
+            }
         }
         Some(condition) => {
-            let parsed_condition = parser
-                .parse(condition)
-                .map_err(|e| format!("ERROR: Could not parse condition '{}': {}", condition, e))?;
+            let parsed_condition = parser.parse(condition);
+            if let Err(_) = parsed_condition {
+                panic!("ERROR: Could not parse condition: {}", condition);
+            }
+            let parsed_condition = parsed_condition.unwrap();
             if parsed_condition.len() != 1 {
-                return Err(format!(
+                panic!(
                     "ERROR: Invalid condition: '{}'. Only one condition per column is allowed.",
                     condition
-                ));
+                );
             }
             let parsed_condition = &parsed_condition[0];
             match &**parsed_condition {
@@ -1432,13 +1434,13 @@ fn compile_condition(
                     if name == "equals" {
                         if let Expression::Label(label) = &*args[0] {
                             let label = String::from(unquoted_re.replace(label, "$unquoted"));
-                            return Ok(CompiledCondition {
+                            return CompiledCondition {
                                 original: condition.to_string(),
                                 parsed: *parsed_condition.clone(),
                                 compiled: Arc::new(move |x| x == label),
-                            });
+                            };
                         } else {
-                            return Err(format!("ERROR: Invalid condition: {}", condition));
+                            panic!("ERROR: Invalid condition: {}", condition);
                         }
                     } else if vec!["exclude", "match", "search"].contains(&name.as_str()) {
                         if let Expression::RegexMatch(pattern, flags) = &*args[0] {
@@ -1451,41 +1453,38 @@ fn compile_condition(
                             match name.as_str() {
                                 "exclude" => {
                                     pattern = format!("{}{}", flags, pattern);
-                                    let re =
-                                        Regex::new(pattern.as_str()).map_err(|e| e.to_string())?;
-                                    return Ok(CompiledCondition {
+                                    let re = Regex::new(pattern.as_str()).unwrap();
+                                    return CompiledCondition {
                                         original: condition.to_string(),
                                         parsed: *parsed_condition.clone(),
                                         compiled: Arc::new(move |x| !re.is_match(x)),
-                                    });
+                                    };
                                 }
                                 "match" => {
                                     pattern = format!("^{}{}$", flags, pattern);
-                                    let re =
-                                        Regex::new(pattern.as_str()).map_err(|e| e.to_string())?;
-                                    return Ok(CompiledCondition {
+                                    let re = Regex::new(pattern.as_str()).unwrap();
+                                    return CompiledCondition {
                                         original: condition.to_string(),
                                         parsed: *parsed_condition.clone(),
                                         compiled: Arc::new(move |x| re.is_match(x)),
-                                    });
+                                    };
                                 }
                                 "search" => {
                                     pattern = format!("{}{}", flags, pattern);
-                                    let re =
-                                        Regex::new(pattern.as_str()).map_err(|e| e.to_string())?;
-                                    return Ok(CompiledCondition {
+                                    let re = Regex::new(pattern.as_str()).unwrap();
+                                    return CompiledCondition {
                                         original: condition.to_string(),
                                         parsed: *parsed_condition.clone(),
                                         compiled: Arc::new(move |x| re.is_match(x)),
-                                    });
+                                    };
                                 }
-                                _ => return Err(format!("Unrecognized function name: {}", name)),
+                                _ => panic!("Unrecognized function name: {}", name),
                             };
                         } else {
-                            return Err(format!(
+                            panic!(
                                 "Argument to condition: {} is not a regular expression",
                                 condition
-                            ));
+                            );
                         }
                     } else if name == "in" {
                         let mut alternatives: Vec<String> = vec![];
@@ -1494,35 +1493,31 @@ fn compile_condition(
                                 let value = unquoted_re.replace(value, "$unquoted");
                                 alternatives.push(value.to_string());
                             } else {
-                                return Err(format!(
-                                    "Argument: {:?} to function 'in' is not a label",
-                                    arg
-                                ));
+                                panic!("Argument: {:?} to function 'in' is not a label", arg);
                             }
                         }
-                        return Ok(CompiledCondition {
+                        return CompiledCondition {
                             original: condition.to_string(),
                             parsed: *parsed_condition.clone(),
                             compiled: Arc::new(move |x| alternatives.contains(&x.to_string())),
-                        });
+                        };
                     } else {
-                        return Err(format!("Unrecognized function name: {}", name));
+                        panic!("Unrecognized function name: {}", name);
                     }
                 }
                 Expression::Label(value)
                     if compiled_datatype_conditions.contains_key(&value.to_string()) =>
                 {
-                    let compiled_datatype_condition = compiled_datatype_conditions
-                        .get(&value.to_string())
-                        .ok_or(format!("No '{}' in compiled datatype conditions", value))?;
-                    return Ok(CompiledCondition {
+                    let compiled_datatype_condition =
+                        compiled_datatype_conditions.get(&value.to_string()).unwrap();
+                    return CompiledCondition {
                         original: value.to_string(),
                         parsed: compiled_datatype_condition.parsed.clone(),
                         compiled: compiled_datatype_condition.compiled.clone(),
-                    });
+                    };
                 }
                 _ => {
-                    return Err(format!("Unrecognized condition: {}", condition));
+                    panic!("Unrecognized condition: {}", condition);
                 }
             };
         }
@@ -1545,17 +1540,11 @@ fn get_sql_type(dt_config: &SerdeMap, datatype: &String, pool: &AnyPool) -> Opti
     };
 
     if let Some(sql_type) = dt_config.get(datatype).and_then(|d| d.get(sql_type_column)) {
-        return sql_type.as_str().and_then(|s| Some(s.to_string()));
+        return Some(sql_type.as_str().and_then(|s| Some(s.to_string())).unwrap());
     }
 
     let parent_datatype =
-        match dt_config.get(datatype).and_then(|d| d.get("parent")).and_then(|p| p.as_str()) {
-            Some(p) => p,
-            None => {
-                eprintln!("WARN: No parent datatype for datatype '{}'", datatype);
-                return None;
-            }
-        };
+        dt_config.get(datatype).and_then(|d| d.get("parent")).and_then(|p| p.as_str()).unwrap();
 
     return get_sql_type(dt_config, &parent_datatype.to_string(), pool);
 }
@@ -1568,20 +1557,14 @@ fn get_sql_type_from_global_config(
     column: &str,
     pool: &AnyPool,
 ) -> Option<String> {
-    let dt_config = match global_config.get("datatype").and_then(|d| d.as_object()) {
-        Some(d) => d,
-        None => {
-            eprintln!("WARN: no object 'datatype' in valve config");
-            return None;
-        }
-    };
+    let dt_config = global_config.get("datatype").and_then(|d| d.as_object()).unwrap();
     let normal_table_name;
     if let Some(s) = table.strip_suffix("_conflict") {
         normal_table_name = String::from(s);
     } else {
         normal_table_name = table.to_string();
     }
-    let dt = match global_config
+    let dt = global_config
         .get("table")
         .and_then(|t| t.get(normal_table_name))
         .and_then(|t| t.get("column"))
@@ -1589,13 +1572,7 @@ fn get_sql_type_from_global_config(
         .and_then(|c| c.get("datatype"))
         .and_then(|d| d.as_str())
         .and_then(|d| Some(d.to_string()))
-    {
-        Some(dt) => dt,
-        None => {
-            eprintln!("WARN: No datatype for column '{}' found in valve config", column);
-            return None;
-        }
-    };
+        .unwrap();
     get_sql_type(&dt_config, &dt, pool)
 }
 
@@ -1635,13 +1612,13 @@ fn get_column_value(row: &AnyRow, column: &str, sql_type: &str) -> String {
 /// SQL_PARAM, and given a database pool, if the pool is of type Sqlite, then change the syntax used
 /// for unbound parameters to Sqlite syntax, which uses "?", otherwise use Postgres syntax, which
 /// uses numbered parameters, i.e., $1, $2, ...
-fn local_sql_syntax(pool: &AnyPool, sql: &String) -> Result<String, sqlx::Error> {
+fn local_sql_syntax(pool: &AnyPool, sql: &String) -> String {
     // Do not replace instances of SQL_PARAM if they are within quotation marks.
     let rx = Regex::new(&format!(
         r#"('[^'\\]*(?:\\.[^'\\]*)*'|"[^"\\]*(?:\\.[^"\\]*)*")|\b{}\b"#,
         SQL_PARAM
     ))
-    .map_err(|x| Configuration(x.into()))?;
+    .unwrap();
 
     let mut final_sql = String::from("");
     let mut pg_param_idx = 1;
@@ -1662,7 +1639,7 @@ fn local_sql_syntax(pool: &AnyPool, sql: &String) -> Result<String, sqlx::Error>
         saved_start = m.start() + this_match.len();
     }
     final_sql.push_str(&sql[saved_start..]);
-    Ok(final_sql)
+    final_sql
 }
 
 /// Takes as arguments a list of tables and a configuration map describing all of the constraints
@@ -1670,10 +1647,7 @@ fn local_sql_syntax(pool: &AnyPool, sql: &String) -> Result<String, sqlx::Error>
 /// under dependencies, returns the list of tables sorted according to their foreign key
 /// dependencies, such that if table_a depends on table_b, then table_b comes before table_a in the
 /// list that is returned.
-fn verify_table_deps_and_sort(
-    table_list: &Vec<String>,
-    constraints: &SerdeMap,
-) -> Result<Vec<String>, sqlx::Error> {
+fn verify_table_deps_and_sort(table_list: &Vec<String>, constraints: &SerdeMap) -> Vec<String> {
     fn get_cycles(g: &DiGraphMap<&str, ()>) -> Result<Vec<String>, Vec<Vec<String>>> {
         let mut cycles = vec![];
         match toposort(&g, None) {
@@ -1700,28 +1674,14 @@ fn verify_table_deps_and_sort(
         }
     }
 
-    let trees = constraints
-        .get("tree")
-        .and_then(|t| t.as_object())
-        .ok_or(Configuration(format!("No 'tree' in {:?}", constraints).into()))?;
+    let trees = constraints.get("tree").and_then(|t| t.as_object()).unwrap();
     for table_name in table_list {
         let mut dependency_graph = DiGraphMap::<&str, ()>::new();
-        let table_trees = trees
-            .get(table_name)
-            .and_then(|t| t.as_array())
-            .ok_or(Configuration(format!("No '{}' in trees", table_name).into()))?;
+        let table_trees = trees.get(table_name).and_then(|t| t.as_array()).unwrap();
         for tree in table_trees {
-            let tree = tree
-                .as_object()
-                .ok_or(Configuration(format!("{} is not an object", tree).into()))?;
-            let child = tree
-                .get("child")
-                .and_then(|c| c.as_str())
-                .ok_or(Configuration(format!("No 'child' in {:?}", tree).into()))?;
-            let parent = tree
-                .get("parent")
-                .and_then(|p| p.as_str())
-                .ok_or(Configuration(format!("No 'parent' in {:?}", tree).into()))?;
+            let tree = tree.as_object().unwrap();
+            let child = tree.get("child").and_then(|c| c.as_str()).unwrap();
+            let parent = tree.get("parent").and_then(|p| p.as_str()).unwrap();
             let c_index = dependency_graph.add_node(child);
             let p_index = dependency_graph.add_node(parent);
             dependency_graph.add_edge(c_index, p_index, ());
@@ -1739,16 +1699,10 @@ fn verify_table_deps_and_sort(
                         if i < end_index {
                             let dep = table_trees
                                 .iter()
-                                .find(|d| {
-                                    d.get("child").unwrap_or(&json!("")).as_str() == Some(child)
-                                })
+                                .find(|d| d.get("child").unwrap().as_str() == Some(child))
                                 .and_then(|d| d.as_object())
-                                .ok_or(Configuration(
-                                    "Dependency is not an object".to_string().into(),
-                                ))?;
-                            let parent = dep
-                                .get("parent")
-                                .ok_or(Configuration(format!("No 'parent' in {:?}", dep).into()))?;
+                                .unwrap();
+                            let parent = dep.get("parent").unwrap();
                             message.push_str(
                                 format!("tree({}) references {}", child, parent).as_str(),
                             );
@@ -1759,70 +1713,40 @@ fn verify_table_deps_and_sort(
                     }
                     message.push_str(". ");
                 }
-                return Err(Configuration(format!("{}", message).into()));
+                panic!("{}", message);
             }
         };
     }
 
-    let foreign_keys = constraints
-        .get("foreign")
-        .and_then(|f| f.as_object())
-        .ok_or(Configuration("Could not retrieve foreign constraints".to_string().into()))?;
-    let under_keys = constraints
-        .get("under")
-        .and_then(|u| u.as_object())
-        .ok_or(Configuration("Could not retrieve under constraints".to_string().into()))?;
+    let foreign_keys = constraints.get("foreign").and_then(|f| f.as_object()).unwrap();
+    let under_keys = constraints.get("under").and_then(|u| u.as_object()).unwrap();
     let mut dependency_graph = DiGraphMap::<&str, ()>::new();
     for table_name in table_list {
         let t_index = dependency_graph.add_node(table_name);
-        let fkeys = foreign_keys
-            .get(table_name)
-            .and_then(|f| f.as_array())
-            .ok_or(Configuration(format!("No '{}' in foreign keys", table_name).into()))?;
+        let fkeys = foreign_keys.get(table_name).and_then(|f| f.as_array()).unwrap();
         for fkey in fkeys {
-            let ftable = fkey
-                .get("ftable")
-                .and_then(|f| f.as_str())
-                .ok_or(Configuration(format!("No 'ftable' in {:?}", fkey).into()))?;
+            let ftable = fkey.get("ftable").and_then(|f| f.as_str()).unwrap();
             let f_index = dependency_graph.add_node(ftable);
             dependency_graph.add_edge(t_index, f_index, ());
         }
 
-        let ukeys = under_keys
-            .get(table_name)
-            .and_then(|u| u.as_array())
-            .ok_or(Configuration(format!("No '{}' in under keys", table_name).into()))?;
+        let ukeys = under_keys.get(table_name).and_then(|u| u.as_array()).unwrap();
         for ukey in ukeys {
-            let ttable = ukey
-                .get("ttable")
-                .and_then(|t| t.as_str())
-                .ok_or(Configuration(format!("No 'ttable' in {:?}", ukey).into()))?;
-            let tcolumn = ukey
-                .get("tcolumn")
-                .and_then(|t| t.as_str())
-                .ok_or(Configuration(format!("No 'tcolumn' in {:?}", ukey).into()))?;
-            let value = ukey
-                .get("value")
-                .and_then(|t| t.as_str())
-                .ok_or(Configuration(format!("No 'value' in {:?}", ukey).into()))?;
+            let ttable = ukey.get("ttable").and_then(|t| t.as_str()).unwrap();
+            let tcolumn = ukey.get("tcolumn").and_then(|t| t.as_str()).unwrap();
+            let value = ukey.get("value").and_then(|t| t.as_str()).unwrap();
             if ttable != table_name {
-                let ttable_trees = trees
-                    .get(ttable)
-                    .and_then(|t| t.as_array())
-                    .ok_or(Configuration(format!("No '{}' in trees", ttable).into()))?;
+                let ttable_trees = trees.get(ttable).and_then(|t| t.as_array()).unwrap();
                 if ttable_trees
                     .iter()
-                    .filter(|d| d.get("child").unwrap_or(&json!("")).as_str() == Some(tcolumn))
+                    .filter(|d| d.get("child").unwrap().as_str() == Some(tcolumn))
                     .collect::<Vec<_>>()
                     .is_empty()
                 {
-                    return Err(Configuration(
-                        format!(
-                            "under({}.{}, {}) refers to a non-existent tree",
-                            ttable, tcolumn, value
-                        )
-                        .into(),
-                    ));
+                    panic!(
+                        "under({}.{}, {}) refers to a non-existent tree",
+                        ttable, tcolumn, value
+                    );
                 }
                 let tt_index = dependency_graph.add_node(ttable);
                 dependency_graph.add_edge(t_index, tt_index, ());
@@ -1832,7 +1756,7 @@ fn verify_table_deps_and_sort(
 
     match get_cycles(&dependency_graph) {
         Ok(sorted_table_list) => {
-            return Ok(sorted_table_list);
+            return sorted_table_list;
         }
         Err(cycles) => {
             let mut message = String::new();
@@ -1843,56 +1767,30 @@ fn verify_table_deps_and_sort(
                 let end_index = cycle.len() - 1;
                 for (i, table) in cycle.iter().enumerate() {
                     if i < end_index {
-                        let dep_name = cycle
-                            .get(i + 1)
-                            .ok_or(Configuration(format!("Could not get cycle {}", i + 1).into()))?
-                            .as_str();
-                        let fkeys = foreign_keys.get(table).and_then(|f| f.as_array()).ok_or(
-                            Configuration(format!("No foreign keys for '{}'", table).into()),
-                        )?;
-                        let ukeys = under_keys
-                            .get(table)
-                            .and_then(|u| u.as_array())
-                            .ok_or(Configuration(format!("No under keys for '{}", table).into()))?;
+                        let dep_name = cycle.get(i + 1).unwrap().as_str();
+                        let fkeys = foreign_keys.get(table).and_then(|f| f.as_array()).unwrap();
+                        let ukeys = under_keys.get(table).and_then(|u| u.as_array()).unwrap();
                         let column;
                         let ref_table;
                         let ref_column;
                         if let Some(dep) = fkeys
                             .iter()
-                            .find(|d| {
-                                d.get("ftable").unwrap_or(&json!("")).as_str() == Some(dep_name)
-                            })
+                            .find(|d| d.get("ftable").unwrap().as_str() == Some(dep_name))
                             .and_then(|d| d.as_object())
                         {
-                            column = dep
-                                .get("column")
-                                .ok_or(Configuration(format!("No 'column' in {:?}", dep).into()))?;
-                            ref_table = dep
-                                .get("ftable")
-                                .ok_or(Configuration(format!("No 'ftable' in {:?}", dep).into()))?;
-                            ref_column = dep.get("fcolumn").ok_or(Configuration(
-                                format!("No 'fcolumn' in {:?}", dep).into(),
-                            ))?;
+                            column = dep.get("column").unwrap();
+                            ref_table = dep.get("ftable").unwrap();
+                            ref_column = dep.get("fcolumn").unwrap();
                         } else if let Some(dep) = ukeys
                             .iter()
-                            .find(|d| {
-                                d.get("ttable").unwrap_or(&json!("")).as_str() == Some(dep_name)
-                            })
+                            .find(|d| d.get("ttable").unwrap().as_str() == Some(dep_name))
                             .and_then(|d| d.as_object())
                         {
-                            column = dep
-                                .get("column")
-                                .ok_or(Configuration(format!("No 'column' in {:?}", dep).into()))?;
-                            ref_table = dep
-                                .get("ttable")
-                                .ok_or(Configuration(format!("No 'ttable' in {:?}", dep).into()))?;
-                            ref_column = dep.get("tcolumn").ok_or(Configuration(
-                                format!("No 'tcolumn' in {:?}", dep).into(),
-                            ))?;
+                            column = dep.get("column").unwrap();
+                            ref_table = dep.get("ttable").unwrap();
+                            ref_column = dep.get("tcolumn").unwrap();
                         } else {
-                            return Err(Configuration(
-                                format!("{}. Unable to retrieve the details.", message).into(),
-                            ));
+                            panic!("{}. Unable to retrieve the details.", message);
                         }
 
                         message.push_str(
@@ -1912,7 +1810,7 @@ fn verify_table_deps_and_sort(
                 }
                 message.push_str(". ");
             }
-            return Err(Configuration(format!("{}", message).into()));
+            panic!("{}", message);
         }
     };
 }
@@ -1926,7 +1824,7 @@ fn create_table_statement(
     parser: &StartParser,
     table_name: &String,
     pool: &AnyPool,
-) -> Result<(Vec<String>, SerdeValue), sqlx::Error> {
+) -> (Vec<String>, SerdeValue) {
     let mut drop_table_sql = format!(r#"DROP TABLE IF EXISTS "{}""#, table_name);
     if pool.any_kind() == AnyKind::Postgres {
         drop_table_sql.push_str(" CASCADE");
@@ -1949,11 +1847,9 @@ fn create_table_statement(
         .get(&normal_table_name)
         .and_then(|t| t.get("column_order"))
         .and_then(|c| c.as_array())
-        .ok_or(Configuration(
-            format!("No 'column_order' for {} in tables config", normal_table_name).into(),
-        ))?
+        .unwrap()
         .iter()
-        .map(|v| v.as_str().unwrap_or("").to_string())
+        .map(|v| v.as_str().unwrap().to_string())
         .collect::<Vec<_>>();
 
     let columns = tables_config
@@ -1961,9 +1857,7 @@ fn create_table_statement(
         .and_then(|c| c.as_object())
         .and_then(|o| o.get("column"))
         .and_then(|c| c.as_object())
-        .ok_or(Configuration(
-            format!("Could not get column config for table {}", normal_table_name).into(),
-        ))?;
+        .unwrap();
 
     let mut table_constraints = json!({
         "foreign": [],
@@ -1975,10 +1869,7 @@ fn create_table_statement(
 
     let mut colvals: Vec<SerdeMap> = vec![];
     for column_name in &column_names {
-        let column = columns
-            .get(column_name)
-            .and_then(|c| c.as_object())
-            .ok_or(Configuration(format!("No '{}' in {:?}", column_name, columns).into()))?;
+        let column = columns.get(column_name).and_then(|c| c.as_object()).unwrap();
         colvals.push(column.clone());
     }
 
@@ -1991,23 +1882,14 @@ fn create_table_statement(
             &row.get("datatype")
                 .and_then(|d| d.as_str())
                 .and_then(|s| Some(s.to_string()))
-                .ok_or(Configuration(format!("No 'datatype' in {:?}", row).into()))?,
+                .unwrap(),
             pool,
         );
 
-        let sql_type = match sql_type {
-            Some(t) => t,
-            None => {
-                return Err(Configuration(
-                    format!(
-                        "Missing SQL type for {}",
-                        row.get("datatype")
-                            .ok_or(Configuration(format!("No 'datatype' in {:?}", row).into()))?
-                    )
-                    .into(),
-                ))
-            }
-        };
+        if let None = sql_type {
+            panic!("Missing SQL type for {}", row.get("datatype").unwrap());
+        }
+        let sql_type = sql_type.unwrap();
 
         let short_sql_type = {
             if sql_type.to_lowercase().as_str().starts_with("varchar(") {
@@ -2019,46 +1901,32 @@ fn create_table_statement(
 
         if pool.any_kind() == AnyKind::Postgres {
             if !PG_SQL_TYPES.contains(&short_sql_type.to_lowercase().as_str()) {
-                return Err(Configuration(
-                    format!(
-                        "Unrecognized PostgreSQL SQL type '{}' for datatype: '{}'. \
+                panic!(
+                    "Unrecognized PostgreSQL SQL type '{}' for datatype: '{}'. \
                      Accepted SQL types for PostgreSQL are: {}",
-                        sql_type,
-                        row.get("datatype")
-                            .and_then(|d| d.as_str())
-                            .ok_or(Configuration(format!("No 'datatype' in {:?}", row).into()))?,
-                        PG_SQL_TYPES.join(", ")
-                    )
-                    .into(),
-                ));
+                    sql_type,
+                    row.get("datatype").and_then(|d| d.as_str()).unwrap(),
+                    PG_SQL_TYPES.join(", ")
+                );
             }
         } else {
             if !SL_SQL_TYPES.contains(&short_sql_type.to_lowercase().as_str()) {
-                return Err(Configuration(
-                    format!(
-                        "Unrecognized SQLite SQL type '{}' for datatype '{}'. \
+                panic!(
+                    "Unrecognized SQLite SQL type '{}' for datatype '{}'. \
                      Accepted SQL datatypes for SQLite are: {}",
-                        sql_type,
-                        row.get("datatype")
-                            .and_then(|d| d.as_str())
-                            .ok_or(Configuration(format!("No 'datatype' in {:?}", row).into()))?,
-                        SL_SQL_TYPES.join(", ")
-                    )
-                    .into(),
-                ));
+                    sql_type,
+                    row.get("datatype").and_then(|d| d.as_str()).unwrap(),
+                    SL_SQL_TYPES.join(", ")
+                );
             }
         }
 
-        let column_name = row
-            .get("column")
-            .and_then(|s| s.as_str())
-            .ok_or(Configuration(format!("No 'column' in {:?}", row).into()))?;
+        let column_name = row.get("column").and_then(|s| s.as_str()).unwrap();
         let mut line = format!(r#"  "{}" {}"#, column_name, sql_type);
         let structure = row.get("structure").and_then(|s| s.as_str());
         if let Some(structure) = structure {
             if structure != "" && !table_name.ends_with("_conflict") {
-                let parsed_structure =
-                    parser.parse(structure).map_err(|e| Configuration(e.to_string().into()))?;
+                let parsed_structure = parser.parse(structure).unwrap();
                 for expression in parsed_structure {
                     match *expression {
                         Expression::Label(value) if value == "primary" => {
@@ -2066,9 +1934,7 @@ fn create_table_statement(
                             let primary_keys = table_constraints
                                 .get_mut("primary")
                                 .and_then(|v| v.as_array_mut())
-                                .ok_or(Configuration(
-                                    format!("Can't get primary keys for {}", table_name).into(),
-                                ))?;
+                                .unwrap();
                             primary_keys.push(SerdeValue::String(column_name.to_string()));
                         }
                         Expression::Label(value) if value == "unique" => {
@@ -2076,30 +1942,19 @@ fn create_table_statement(
                             let unique_constraints = table_constraints
                                 .get_mut("unique")
                                 .and_then(|v| v.as_array_mut())
-                                .ok_or(Configuration(
-                                    format!("Can't get unique keys for {}", table_name).into(),
-                                ))?;
+                                .unwrap();
                             unique_constraints.push(SerdeValue::String(column_name.to_string()));
                         }
                         Expression::Function(name, args) if name == "from" => {
                             if args.len() != 1 {
-                                return Err(Configuration(
-                                    format!(
-                                        "Invalid foreign key: {} for: {}",
-                                        structure, table_name
-                                    )
-                                    .into(),
-                                ));
+                                panic!("Invalid foreign key: {} for: {}", structure, table_name);
                             }
                             match &*args[0] {
                                 Expression::Field(ftable, fcolumn) => {
                                     let foreign_keys = table_constraints
                                         .get_mut("foreign")
                                         .and_then(|v| v.as_array_mut())
-                                        .ok_or(Configuration(
-                                            format!("Can't get foreign keys for {}", table_name)
-                                                .into(),
-                                        ))?;
+                                        .unwrap();
                                     let foreign_key = json!({
                                         "column": column_name,
                                         "ftable": ftable,
@@ -2108,87 +1963,62 @@ fn create_table_statement(
                                     foreign_keys.push(foreign_key);
                                 }
                                 _ => {
-                                    return Err(Configuration(
-                                        format!(
-                                            "Invalid foreign key: {} for: {}",
-                                            structure, table_name
-                                        )
-                                        .into(),
-                                    ))
+                                    panic!("Invalid foreign key: {} for: {}", structure, table_name)
                                 }
                             };
                         }
                         Expression::Function(name, args) if name == "tree" => {
                             if args.len() != 1 {
-                                return Err(Configuration(
-                                    format!(
-                                        "Invalid 'tree' constraint: {} for: {}",
-                                        structure, table_name
-                                    )
-                                    .into(),
-                                ));
+                                panic!(
+                                    "Invalid 'tree' constraint: {} for: {}",
+                                    structure, table_name
+                                );
                             }
                             match &*args[0] {
                                 Expression::Label(child) => {
-                                    let child_datatype = match columns
+                                    let child_datatype = columns
                                         .get(child)
                                         .and_then(|c| c.get("datatype"))
-                                        .and_then(|d| d.as_str())
-                                    {
-                                        None => return Err(Configuration(
-                                            format!(
-                                                "Could not determine SQL datatype for {} of tree({})",
-                                                child, child
-                                            ).into())),
-                                        Some(c) => c,
-                                    };
+                                        .and_then(|d| d.as_str());
+                                    if let None = child_datatype {
+                                        panic!(
+                                            "Could not determine SQL datatype for {} of tree({})",
+                                            child, child
+                                        );
+                                    }
+                                    let child_datatype = child_datatype.unwrap();
                                     let parent = column_name;
                                     let child_sql_type = get_sql_type(
                                         datatypes_config,
                                         &child_datatype.to_string(),
                                         pool,
                                     )
-                                    .ok_or(Configuration(
-                                        format!("Could not get SQL type for {:?}", child_datatype)
-                                            .into(),
-                                    ))?;
+                                    .unwrap();
                                     if sql_type != child_sql_type {
-                                        return Err(Configuration(
-                                            format!(
-                                                "SQL type '{}' of '{}' in 'tree({})' for table \
+                                        panic!(
+                                            "SQL type '{}' of '{}' in 'tree({})' for table \
                                              '{}' doe snot match SQL type: '{}' of parent: '{}'.",
-                                                child_sql_type,
-                                                child,
-                                                child,
-                                                table_name,
-                                                sql_type,
-                                                parent
-                                            )
-                                            .into(),
-                                        ));
+                                            child_sql_type,
+                                            child,
+                                            child,
+                                            table_name,
+                                            sql_type,
+                                            parent
+                                        );
                                     }
                                     let tree_constraints = table_constraints
                                         .get_mut("tree")
                                         .and_then(|t| t.as_array_mut())
-                                        .ok_or(Configuration(
-                                            format!(
-                                                "Could not get tree constraints for {}",
-                                                table_name
-                                            )
-                                            .into(),
-                                        ))?;
+                                        .unwrap();
                                     let entry = json!({"parent": column_name,
                                                        "child": child});
                                     tree_constraints.push(entry);
                                 }
                                 _ => {
-                                    return Err(Configuration(
-                                        format!(
-                                            "Invalid 'tree' constraint: {} for: {}",
-                                            structure, table_name
-                                        )
-                                        .into(),
-                                    ));
+                                    panic!(
+                                        "Invalid 'tree' constraint: {} for: {}",
+                                        structure, table_name
+                                    );
                                 }
                             };
                         }
@@ -2198,40 +2028,27 @@ fn create_table_statement(
                                 structure, table_name
                             );
                             if args.len() != 2 {
-                                return Err(Configuration(format!("{}", generic_error).into()));
+                                panic!("{}", generic_error);
                             }
                             match (&*args[0], &*args[1]) {
                                 (Expression::Field(ttable, tcolumn), Expression::Label(value)) => {
                                     let under_constraints = table_constraints
                                         .get_mut("under")
                                         .and_then(|u| u.as_array_mut())
-                                        .ok_or(Configuration(
-                                            format!(
-                                                "Could not get under constraints for {}",
-                                                table_name
-                                            )
-                                            .into(),
-                                        ))?;
+                                        .unwrap();
                                     let entry = json!({"column": column_name,
                                                        "ttable": ttable,
                                                        "tcolumn": tcolumn,
                                                        "value": value});
                                     under_constraints.push(entry);
                                 }
-                                (_, _) => {
-                                    return Err(Configuration(format!("{}", generic_error).into()))
-                                }
+                                (_, _) => panic!("{}", generic_error),
                             };
                         }
-                        _ => {
-                            return Err(Configuration(
-                                format!(
-                                    "Unrecognized structure: {} for {}.{}",
-                                    structure, table_name, column_name
-                                )
-                                .into(),
-                            ))
-                        }
+                        _ => panic!(
+                            "Unrecognized structure: {} for {}.{}",
+                            structure, table_name, column_name
+                        ),
                     };
                 }
             }
@@ -2241,9 +2058,7 @@ fn create_table_statement(
                 .get("foreign")
                 .and_then(|v| v.as_array())
                 .and_then(|v| Some(v.is_empty()))
-                .ok_or(Configuration(
-                    format!("Could not check foreign constraints for {}", table_name).into(),
-                ))?
+                .unwrap()
         {
             line.push_str("");
         } else {
@@ -2252,22 +2067,14 @@ fn create_table_statement(
         create_lines.push(line);
     }
 
-    let foreign_keys = table_constraints.get("foreign").and_then(|v| v.as_array()).ok_or(
-        Configuration(format!("Could not get foreign constraints for {}", table_name).into()),
-    )?;
+    let foreign_keys = table_constraints.get("foreign").and_then(|v| v.as_array()).unwrap();
     let num_fkeys = foreign_keys.len();
     for (i, fkey) in foreign_keys.iter().enumerate() {
         create_lines.push(format!(
             r#"  FOREIGN KEY ("{}") REFERENCES "{}"("{}"){}"#,
-            fkey.get("column")
-                .and_then(|s| s.as_str())
-                .ok_or(Configuration(format!("No 'column' in {:?}", fkey).into()))?,
-            fkey.get("ftable")
-                .and_then(|s| s.as_str())
-                .ok_or(Configuration(format!("No 'ftable' in {:?}", fkey).into()))?,
-            fkey.get("fcolumn")
-                .and_then(|s| s.as_str())
-                .ok_or(Configuration(format!("No 'fcolumn' in {:?}", fkey).into()))?,
+            fkey.get("column").and_then(|s| s.as_str()).unwrap(),
+            fkey.get("ftable").and_then(|s| s.as_str()).unwrap(),
+            fkey.get("fcolumn").and_then(|s| s.as_str()).unwrap(),
             if i < (num_fkeys - 1) { "," } else { "" }
         ));
     }
@@ -2278,21 +2085,11 @@ fn create_table_statement(
 
     // Loop through the tree constraints and if any of their associated child columns do not already
     // have an associated unique or primary index, create one implicitly here:
-    let tree_constraints = table_constraints
-        .get("tree")
-        .and_then(|v| v.as_array())
-        .ok_or(Configuration(format!("Cannot get tree constraints for {}", table_name).into()))?;
+    let tree_constraints = table_constraints.get("tree").and_then(|v| v.as_array()).unwrap();
     for tree in tree_constraints {
-        let unique_keys = table_constraints.get("unique").and_then(|v| v.as_array()).ok_or(
-            Configuration(format!("Cannot get unique constraints for {}", table_name).into()),
-        )?;
-        let primary_keys = table_constraints.get("primary").and_then(|v| v.as_array()).ok_or(
-            Configuration(format!("Cannot get primary constraints for {}", table_name).into()),
-        )?;
-        let tree_child = tree
-            .get("child")
-            .and_then(|c| c.as_str())
-            .ok_or(Configuration(format!("No 'child' in {:?}", tree).into()))?;
+        let unique_keys = table_constraints.get("unique").and_then(|v| v.as_array()).unwrap();
+        let primary_keys = table_constraints.get("primary").and_then(|v| v.as_array()).unwrap();
+        let tree_child = tree.get("child").and_then(|c| c.as_str()).unwrap();
         if !unique_keys.contains(&SerdeValue::String(tree_child.to_string()))
             && !primary_keys.contains(&SerdeValue::String(tree_child.to_string()))
         {
@@ -2309,53 +2106,36 @@ fn create_table_statement(
         table_name, table_name
     ));
 
-    return Ok((statements, table_constraints));
+    return (statements, table_constraints);
 }
 
 /// Given a list of messages and a HashMap, messages_stats, with which to collect counts of
 /// message types, count the various message types encountered in the list and increment the counts
 /// in messages_stats accordingly.
-fn add_message_counts(
-    messages: &Vec<SerdeValue>,
-    messages_stats: &mut HashMap<String, usize>,
-) -> Result<(), sqlx::Error> {
+fn add_message_counts(messages: &Vec<SerdeValue>, messages_stats: &mut HashMap<String, usize>) {
     for message in messages {
-        let message = message
-            .as_object()
-            .ok_or(Configuration(format!("{:?} is not an object", message).into()))?;
-        let level = message
-            .get("level")
-            .ok_or(Configuration(format!("No 'level' in {:?}", message).into()))?;
+        let message = message.as_object().unwrap();
+        let level = message.get("level").unwrap();
         if level == "error" {
-            let current_errors = messages_stats
-                .get("error")
-                .ok_or(Configuration(format!("No 'error' in {:?}", messages_stats).into()))?;
+            let current_errors = messages_stats.get("error").unwrap();
             messages_stats.insert("error".to_string(), current_errors + 1);
         } else if level == "warning" {
-            let current_warnings = messages_stats
-                .get("warning")
-                .ok_or(Configuration(format!("No 'warning' in {:?}", messages_stats).into()))?;
+            let current_warnings = messages_stats.get("warning").unwrap();
             messages_stats.insert("warning".to_string(), current_warnings + 1);
         } else if level == "info" {
-            let current_infos = messages_stats
-                .get("info")
-                .ok_or(Configuration(format!("No 'info' in {:?}", messages_stats).into()))?;
+            let current_infos = messages_stats.get("info").unwrap();
             messages_stats.insert("info".to_string(), current_infos + 1);
         } else {
             eprintln!("Warning: unknown message type: {}", level);
         }
     }
-    Ok(())
 }
 
 /// Given a global config map, return a list of defined datatype names sorted from the most generic
 /// to the most specific. This function will panic if circular dependencies are encountered.
-fn get_sorted_datatypes(global_config: &SerdeMap) -> Result<Vec<&str>, sqlx::Error> {
+fn get_sorted_datatypes(global_config: &SerdeMap) -> Vec<&str> {
     let mut graph = DiGraphMap::<&str, ()>::new();
-    let dt_config = global_config
-        .get("datatype")
-        .and_then(|d| d.as_object())
-        .ok_or(Configuration(format!("Could not get datatype config").into()))?;
+    let dt_config = global_config.get("datatype").and_then(|d| d.as_object()).unwrap();
     for (dt_name, dt_obj) in dt_config.iter() {
         let d_index = graph.add_node(dt_name);
         if let Some(parent) = dt_obj.get("parent").and_then(|p| p.as_str()) {
@@ -2379,13 +2159,11 @@ fn get_sorted_datatypes(global_config: &SerdeMap) -> Result<Vec<&str>, sqlx::Err
                     cycles.push(cycle);
                 }
             }
-            return Err(Configuration(
-                format!("Defined datatypes contain circular dependencies: {:?}", cycles).into(),
-            ));
+            panic!("Defined datatypes contain circular dependencies: {:?}", cycles);
         }
         Ok(mut sorted) => {
             sorted.reverse();
-            Ok(sorted)
+            sorted
         }
     }
 }
@@ -2396,18 +2174,15 @@ fn get_sorted_datatypes(global_config: &SerdeMap) -> Result<Vec<&str>, sqlx::Err
 ///    `sorted_datatypes`, followed by:
 /// 2. Messages pertaining to violations of one of the rules in the rule table, followed by:
 /// 3. Messages pertaining to structure violations.
-fn sort_messages(
-    sorted_datatypes: &Vec<&str>,
-    cell_messages: &Vec<SerdeValue>,
-) -> Result<Vec<SerdeValue>, String> {
+fn sort_messages(sorted_datatypes: &Vec<&str>, cell_messages: &Vec<SerdeValue>) -> Vec<SerdeValue> {
     let mut datatype_messages = vec![];
     let mut structure_messages = vec![];
     let mut rule_messages = vec![];
     for message in cell_messages {
         let rule = message
             .get("rule")
-            .and_then(|r| Some(r.as_str().unwrap_or("").splitn(2, ":").collect::<Vec<_>>()))
-            .ok_or(format!("Could not get rule for {:?}", message))?;
+            .and_then(|r| Some(r.as_str().unwrap().splitn(2, ":").collect::<Vec<_>>()))
+            .unwrap();
         if rule[0] == "rule" {
             rule_messages.push(message.clone());
         } else if rule[0] == "datatype" {
@@ -2424,7 +2199,7 @@ fn sort_messages(
                 let mut messages = datatype_messages
                     .iter()
                     .filter(|m| {
-                        m.get("rule").and_then(|r| r.as_str()).unwrap_or("")
+                        m.get("rule").and_then(|r| r.as_str()).unwrap()
                             == format!("datatype:{}", datatype)
                     })
                     .map(|m| m.clone())
@@ -2438,7 +2213,7 @@ fn sort_messages(
     let mut messages = datatype_messages;
     messages.append(&mut rule_messages);
     messages.append(&mut structure_messages);
-    Ok(messages)
+    messages
 }
 
 /// Given a configuration map, a table name, a number of rows, their corresponding chunk number,
@@ -2470,7 +2245,7 @@ async fn make_inserts(
             .and_then(|t| t.as_object())
             .and_then(|t| t.get(table_name))
             .and_then(|t| t.as_array())
-            .ok_or(Configuration(format!("Cannot get primary keys for {}", table_name).into()))?;
+            .unwrap();
 
         let uniques = config
             .get("constraints")
@@ -2479,7 +2254,7 @@ async fn make_inserts(
             .and_then(|t| t.as_object())
             .and_then(|t| t.get(table_name))
             .and_then(|t| t.as_array())
-            .ok_or(Configuration(format!("Cannot get unique keys for {}", table_name).into()))?;
+            .unwrap();
 
         let trees = config
             .get("constraints")
@@ -2488,10 +2263,10 @@ async fn make_inserts(
             .and_then(|t| t.as_object())
             .and_then(|o| o.get(table_name))
             .and_then(|t| t.as_array())
-            .ok_or(Configuration(format!("Cannot get tree keys for {}", table_name).into()))?
+            .unwrap()
             .iter()
             .map(|v| v.as_object().unwrap())
-            .map(|v| v.get("child").unwrap_or(&json!("")).clone())
+            .map(|v| v.get("child").unwrap().clone())
             .collect::<Vec<_>>();
 
         for key_columns in vec![primaries, uniques, &trees] {
@@ -2513,30 +2288,23 @@ async fn make_inserts(
         messages_stats: &mut HashMap<String, usize>,
         verbose: bool,
         pool: &AnyPool,
-    ) -> Result<(String, Vec<String>, String, Vec<String>), sqlx::Error> {
+    ) -> (String, Vec<String>, String, Vec<String>) {
         let mut lines = vec![];
         let mut params = vec![];
         let mut message_lines = vec![];
         let mut message_params = vec![];
-        let sorted_datatypes = get_sorted_datatypes(config)?;
+        let sorted_datatypes = get_sorted_datatypes(config);
         for row in rows.iter() {
-            let mut values = vec![format!(
-                "{}",
-                row.row_number.ok_or(Configuration("Row number is None".into()))?
-            )];
+            let mut values = vec![format!("{}", row.row_number.unwrap())];
             for column in column_names {
-                let cell = row.contents.get(column).ok_or(Configuration(
-                    format!("No '{}' in {:?}", column, row.contents).into(),
-                ))?;
+                let cell = row.contents.get(column).unwrap();
 
                 // Insert the value of the cell into the column unless it is invalid or has the
                 // nulltype field set, in which case insert NULL:
                 if cell.nulltype == None && cell.valid {
                     let sql_type =
                         get_sql_type_from_global_config(&config, &table_name, &column, pool)
-                            .ok_or(Configuration(
-                                format!("Could not find SQL type for {}", column).into(),
-                            ))?;
+                            .unwrap();
                     values.push(cast_sql_param_from_text(&sql_type));
                     params.push(cell.value.clone());
                 } else {
@@ -2547,22 +2315,15 @@ async fn make_inserts(
                 // the message table:
                 if !cell.valid {
                     if verbose {
-                        add_message_counts(&cell.messages, messages_stats)?;
+                        add_message_counts(&cell.messages, messages_stats);
                     }
-                    for message in sort_messages(&sorted_datatypes, &cell.messages)
-                        .map_err(|e| Configuration(e.into()))?
-                    {
-                        let row = row
-                            .row_number
-                            .ok_or(Configuration("Row number is None".into()))?
-                            .to_string();
+                    for message in sort_messages(&sorted_datatypes, &cell.messages) {
+                        let row = row.row_number.unwrap().to_string();
                         let message_values = vec![
                             SQL_PARAM, &row, SQL_PARAM, SQL_PARAM, SQL_PARAM, SQL_PARAM, SQL_PARAM,
                         ];
 
-                        let message = message.as_object().ok_or(Configuration(
-                            format!("{:?} is not an object", message).into(),
-                        ))?;
+                        let message = message.as_object().unwrap();
                         message_params.push({
                             let normal_table_name;
                             if let Some(s) = table_name.strip_suffix("_conflict") {
@@ -2575,29 +2336,13 @@ async fn make_inserts(
                         message_params.push(column.clone());
                         message_params.push(cell.value.clone());
                         message_params.push(
-                            message
-                                .get("level")
-                                .and_then(|s| s.as_str())
-                                .ok_or(Configuration(
-                                    format!("No 'level' in {:?}", message).into(),
-                                ))?
-                                .to_string(),
+                            message.get("level").and_then(|s| s.as_str()).unwrap().to_string(),
                         );
                         message_params.push(
-                            message
-                                .get("rule")
-                                .and_then(|s| s.as_str())
-                                .ok_or(Configuration(format!("No 'rule' in {:?}", message).into()))?
-                                .to_string(),
+                            message.get("rule").and_then(|s| s.as_str()).unwrap().to_string(),
                         );
                         message_params.push(
-                            message
-                                .get("message")
-                                .and_then(|s| s.as_str())
-                                .ok_or(Configuration(
-                                    format!("No 'message' in {:?}", message).into(),
-                                ))?
-                                .to_string(),
+                            message.get("message").and_then(|s| s.as_str()).unwrap().to_string(),
                         );
                         let line = message_values.join(", ");
                         let line = format!("({})", line);
@@ -2642,7 +2387,7 @@ async fn make_inserts(
             message_output.push_str(";");
         }
 
-        Ok((output, params, message_output, message_params))
+        (output, params, message_output, message_params)
     }
 
     fn has_conflict(row: &ResultRow, conflict_columns: &Vec<SerdeValue>) -> bool {
@@ -2675,11 +2420,9 @@ async fn make_inserts(
         .and_then(|t| t.get(table_name))
         .and_then(|t| t.get("column_order"))
         .and_then(|c| c.as_array())
-        .ok_or(Configuration(
-            format!("Could not determine column order for {}", table_name).into(),
-        ))?
+        .unwrap()
         .iter()
-        .map(|v| v.as_str().unwrap_or("").to_string())
+        .map(|v| v.as_str().unwrap().to_string())
         .collect::<Vec<_>>();
 
     let (main_sql, main_params, main_message_sql, main_message_params) = generate_sql(
@@ -2690,7 +2433,7 @@ async fn make_inserts(
         messages_stats,
         verbose,
         pool,
-    )?;
+    );
     let (conflict_sql, conflict_params, conflict_message_sql, conflict_message_params) =
         generate_sql(
             &config,
@@ -2700,7 +2443,7 @@ async fn make_inserts(
             messages_stats,
             verbose,
             pool,
-        )?;
+        );
 
     Ok((
         (main_sql, main_params, main_message_sql, main_message_params),
@@ -2751,7 +2494,7 @@ async fn validate_rows_inter_and_insert(
     )
     .await?;
 
-    let main_sql = local_sql_syntax(&pool, &main_sql)?;
+    let main_sql = local_sql_syntax(&pool, &main_sql);
     let mut main_query = sqlx_query(&main_sql);
     for param in &main_params {
         main_query = main_query.bind(param);
@@ -2759,21 +2502,21 @@ async fn validate_rows_inter_and_insert(
     let main_result = main_query.execute(pool).await;
     match main_result {
         Ok(_) => {
-            let conflict_sql = local_sql_syntax(&pool, &conflict_sql)?;
+            let conflict_sql = local_sql_syntax(&pool, &conflict_sql);
             let mut conflict_query = sqlx_query(&conflict_sql);
             for param in &conflict_params {
                 conflict_query = conflict_query.bind(param);
             }
             conflict_query.execute(pool).await?;
 
-            let main_message_sql = local_sql_syntax(&pool, &main_message_sql)?;
+            let main_message_sql = local_sql_syntax(&pool, &main_message_sql);
             let mut main_message_query = sqlx_query(&main_message_sql);
             for param in &main_message_params {
                 main_message_query = main_message_query.bind(param);
             }
             main_message_query.execute(pool).await?;
 
-            let conflict_message_sql = local_sql_syntax(&pool, &conflict_message_sql)?;
+            let conflict_message_sql = local_sql_syntax(&pool, &conflict_message_sql);
             let mut conflict_message_query = sqlx_query(&conflict_message_sql);
             for param in &conflict_message_params {
                 conflict_message_query = conflict_message_query.bind(param);
@@ -2781,35 +2524,20 @@ async fn validate_rows_inter_and_insert(
             conflict_message_query.execute(pool).await?;
 
             if verbose {
-                let curr_errors = messages_stats
-                    .get("error")
-                    .ok_or(Configuration(format!("No 'error' in {:?}", messages_stats).into()))?;
+                let curr_errors = messages_stats.get("error").unwrap();
                 messages_stats.insert(
                     "error".to_string(),
-                    curr_errors
-                        + tmp_messages_stats.get("error").ok_or(Configuration(
-                            format!("No 'error' in {:?}", tmp_messages_stats).into(),
-                        ))?,
+                    curr_errors + tmp_messages_stats.get("error").unwrap(),
                 );
-                let curr_warnings = messages_stats
-                    .get("warning")
-                    .ok_or(Configuration(format!("No 'warning' in {:?}", messages_stats).into()))?;
+                let curr_warnings = messages_stats.get("warning").unwrap();
                 messages_stats.insert(
                     "warning".to_string(),
-                    curr_warnings
-                        + tmp_messages_stats.get("warning").ok_or(Configuration(
-                            format!("No 'error' in {:?}", tmp_messages_stats).into(),
-                        ))?,
+                    curr_warnings + tmp_messages_stats.get("warning").unwrap(),
                 );
-                let curr_infos = messages_stats
-                    .get("info")
-                    .ok_or(Configuration(format!("No 'info' in {:?}", messages_stats).into()))?;
+                let curr_infos = messages_stats.get("info").unwrap();
                 messages_stats.insert(
                     "info".to_string(),
-                    curr_infos
-                        + tmp_messages_stats.get("info").ok_or(Configuration(
-                            format!("No 'error' in {:?}", tmp_messages_stats).into(),
-                        ))?,
+                    curr_infos + tmp_messages_stats.get("info").unwrap(),
                 );
             }
         }
@@ -2822,28 +2550,28 @@ async fn validate_rows_inter_and_insert(
             ) = make_inserts(config, table_name, rows, chunk_number, messages_stats, verbose, pool)
                 .await?;
 
-            let main_sql = local_sql_syntax(&pool, &main_sql)?;
+            let main_sql = local_sql_syntax(&pool, &main_sql);
             let mut main_query = sqlx_query(&main_sql);
             for param in &main_params {
                 main_query = main_query.bind(param);
             }
             main_query.execute(pool).await?;
 
-            let conflict_sql = local_sql_syntax(&pool, &conflict_sql)?;
+            let conflict_sql = local_sql_syntax(&pool, &conflict_sql);
             let mut conflict_query = sqlx_query(&conflict_sql);
             for param in &conflict_params {
                 conflict_query = conflict_query.bind(param);
             }
             conflict_query.execute(pool).await?;
 
-            let main_message_sql = local_sql_syntax(&pool, &main_message_sql)?;
+            let main_message_sql = local_sql_syntax(&pool, &main_message_sql);
             let mut main_message_query = sqlx_query(&main_message_sql);
             for param in &main_message_params {
                 main_message_query = main_message_query.bind(param);
             }
             main_message_query.execute(pool).await?;
 
-            let conflict_message_sql = local_sql_syntax(&pool, &conflict_message_sql)?;
+            let conflict_message_sql = local_sql_syntax(&pool, &conflict_message_sql);
             let mut conflict_message_query = sqlx_query(&conflict_message_sql);
             for param in &conflict_message_params {
                 conflict_message_query = conflict_message_query.bind(param);
@@ -2964,17 +2692,8 @@ async fn load_db(
     verbose: bool,
 ) -> Result<(), sqlx::Error> {
     let mut table_list = vec![];
-    for table in config
-        .get("sorted_table_list")
-        .and_then(|l| l.as_array())
-        .ok_or(Configuration("Could not get sorted_table_list from config".into()))?
-    {
-        table_list.push(
-            table
-                .as_str()
-                .and_then(|s| Some(s.to_string()))
-                .ok_or(Configuration(format!("Unable to push {} into table list", table).into()))?,
-        );
+    for table in config.get("sorted_table_list").and_then(|l| l.as_array()).unwrap() {
+        table_list.push(table.as_str().and_then(|s| Some(s.to_string())).unwrap());
     }
     let table_list = table_list; // Change the table_list to read only after populating it.
     let num_tables = table_list.len();
@@ -3000,26 +2719,26 @@ async fn load_db(
                 .and_then(|o| o.get(&table_name))
                 .and_then(|n| n.get("path"))
                 .and_then(|p| p.as_str())
-                .ok_or(Configuration(format!("Could not get path for {}", table_name).into()))?,
+                .unwrap(),
         );
-        let mut rdr = csv::ReaderBuilder::new()
-            .has_headers(false)
-            .delimiter(b'\t')
-            .from_reader(File::open(path.clone()).map_err(|x| Configuration(x.into()))?);
+        let mut rdr = csv::ReaderBuilder::new().has_headers(false).delimiter(b'\t').from_reader(
+            File::open(path.clone()).unwrap_or_else(|err| {
+                panic!("Unable to open '{}': {}", path.clone(), err);
+            }),
+        );
 
         // Extract the headers, which we will need later:
         let mut records = rdr.records();
-        let headers = match records.next() {
-            Some(result) => result.map_err(|e| Configuration(e.to_string().into()))?,
-            None => return Err(Configuration(format!("'{}' is empty", path).into())),
-        };
+        let headers;
+        if let Some(result) = records.next() {
+            headers = result.unwrap();
+        } else {
+            panic!("'{}' is empty", path);
+        }
 
         for header in headers.iter() {
             if header.trim().is_empty() {
-                return Err(Configuration(
-                    format!("One or more of the header fields is empty for table '{}'", table_name)
-                        .into(),
-                ));
+                panic!("One or more of the header fields is empty for table '{}'", table_name);
             }
         }
 
@@ -3056,29 +2775,12 @@ async fn load_db(
         recs_to_update.append(&mut validate_under(config, pool, &table_name, None).await?);
 
         for record in recs_to_update {
-            let row_number = record
-                .get("row_number")
-                .ok_or(Configuration(format!("No 'row_number' in {:?}", record).into()))?;
-            let column_name = record
-                .get("column")
-                .and_then(|s| s.as_str())
-                .ok_or(Configuration(format!("No 'column' in {:?}", record).into()))?;
-            let value = record
-                .get("value")
-                .and_then(|s| s.as_str())
-                .ok_or(Configuration(format!("No 'value' in {:?}", record).into()))?;
-            let level = record
-                .get("level")
-                .and_then(|s| s.as_str())
-                .ok_or(Configuration(format!("No 'level' in {:?}", record).into()))?;
-            let rule = record
-                .get("rule")
-                .and_then(|s| s.as_str())
-                .ok_or(Configuration(format!("No 'rule' in {:?}", record).into()))?;
-            let message = record
-                .get("message")
-                .and_then(|s| s.as_str())
-                .ok_or(Configuration(format!("No 'message' in {:?}", record).into()))?;
+            let row_number = record.get("row_number").unwrap();
+            let column_name = record.get("column").and_then(|s| s.as_str()).unwrap();
+            let value = record.get("value").and_then(|s| s.as_str()).unwrap();
+            let level = record.get("level").and_then(|s| s.as_str()).unwrap();
+            let rule = record.get("rule").and_then(|s| s.as_str()).unwrap();
+            let message = record.get("message").and_then(|s| s.as_str()).unwrap();
 
             let sql = format!(
                 r#"UPDATE "{}" SET "{}" = NULL WHERE "row_number" = {}"#,
@@ -3095,7 +2797,7 @@ async fn load_db(
                        VALUES ({}, {}, {}, {}, {}, {}, {})"#,
                     SQL_PARAM, row_number, SQL_PARAM, SQL_PARAM, SQL_PARAM, SQL_PARAM, SQL_PARAM
                 ),
-            )?;
+            );
             let mut query = sqlx_query(&sql);
             query = query.bind(&table_name);
             query = query.bind(&column_name);
@@ -3111,21 +2813,15 @@ async fn load_db(
                     "message": message,
                     "level": level,
                 })];
-                add_message_counts(&messages, &mut messages_stats)?;
+                add_message_counts(&messages, &mut messages_stats);
             }
         }
 
         if verbose {
             // Output a report on the messages generated to stderr:
-            let errors = messages_stats
-                .get("error")
-                .ok_or(Configuration(format!("No 'error' in {:?}", messages_stats).into()))?;
-            let warnings = messages_stats
-                .get("warning")
-                .ok_or(Configuration(format!("No 'warning' in {:?}", messages_stats).into()))?;
-            let infos = messages_stats
-                .get("info")
-                .ok_or(Configuration(format!("No 'info' in {:?}", messages_stats).into()))?;
+            let errors = messages_stats.get("error").unwrap();
+            let warnings = messages_stats.get("warning").unwrap();
+            let infos = messages_stats.get("info").unwrap();
             let status_message = format!(
                 "{} errors, {} warnings, and {} information messages generated for {}",
                 errors, warnings, infos, table_name
