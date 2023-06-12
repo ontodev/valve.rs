@@ -38,7 +38,7 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         } else {
             connection_string = database.to_string();
         }
-        connection_options = AnyConnectOptions::from_str(connection_string.as_str()).unwrap();
+        connection_options = AnyConnectOptions::from_str(connection_string.as_str())?;
     }
 
     let pool = AnyPoolOptions::new().max_connections(5).connect_with(connection_options).await?;
