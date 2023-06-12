@@ -560,30 +560,19 @@ pub fn get_compiled_rule_conditions(
     config: &SerdeMap,
     compiled_datatype_conditions: HashMap<String, CompiledCondition>,
     parser: &StartParser,
-) -> Result<HashMap<String, HashMap<String, Vec<ColumnRule>>>, String> {
+) -> HashMap<String, HashMap<String, Vec<ColumnRule>>> {
     let mut compiled_rule_conditions = HashMap::new();
-    let tables_config = config
-        .get("table")
-        .and_then(|t| t.as_object())
-        .ok_or("Could not read table config from valve config")?;
-    let rules_config = config
-        .get("rule")
-        .and_then(|t| t.as_object())
-        .ok_or("Could not read rule config from valve config")?;
+    let tables_config = config.get("table").and_then(|t| t.as_object()).unwrap();
+    let rules_config = config.get("rule").and_then(|t| t.as_object()).unwrap();
     for (rules_table, table_rules) in rules_config.iter() {
-        let table_rules =
-            table_rules.as_object().ok_or(format!("{:?} is not an object", table_rules))?;
+        let table_rules = table_rules.as_object().unwrap();
         for (_, column_rules) in table_rules.iter() {
-            let column_rules =
-                column_rules.as_array().ok_or(format!("{:?} is not an array", column_rules))?;
+            let column_rules = column_rules.as_array().unwrap();
             for row in column_rules {
                 // Compile and collect the when and then conditions.
                 let mut column_rule_key = None;
                 for column in vec!["when column", "then column"] {
-                    let row_column = row
-                        .get(column)
-                        .and_then(|c| c.as_str())
-                        .ok_or(format!("No string '{}' in {:?}", column, row))?;
+                    let row_column = row.get(column).and_then(|c| c.as_str()).unwrap();
                     if column == "when column" {
                         column_rule_key = Some(row_column.to_string());
                     }
@@ -592,16 +581,12 @@ pub fn get_compiled_rule_conditions(
                         .and_then(|t| t.get("column"))
                         .and_then(|c| c.as_object())
                         .and_then(|c| Some(c.contains_key(row_column)))
-                        .unwrap_or(false)
+                        .unwrap()
                     {
-                        return Err(format!(
-                            "Could not retrieve column '{}.{}' from rules table",
-                            rules_table, row_column
-                        ));
+                        panic!("Undefined column '{}.{}' in rules table", rules_table, row_column);
                     }
                 }
-                let column_rule_key =
-                    column_rule_key.ok_or("Could not find column rule key".to_string())?;
+                let column_rule_key = column_rule_key.unwrap();
 
                 let mut when_compiled = None;
                 let mut then_compiled = None;
@@ -626,22 +611,18 @@ pub fn get_compiled_rule_conditions(
                         let table_rules = HashMap::new();
                         compiled_rule_conditions.insert(rules_table.to_string(), table_rules);
                     }
-                    let table_rules = compiled_rule_conditions.get_mut(rules_table).ok_or(
-                        format!("'{}' not found in compiled rule conditions", rules_table),
-                    )?;
+                    let table_rules = compiled_rule_conditions.get_mut(rules_table).unwrap();
                     if !table_rules.contains_key(&column_rule_key) {
                         table_rules.insert(column_rule_key.to_string(), vec![]);
                     }
-                    let column_rules = table_rules
-                        .get_mut(&column_rule_key)
-                        .ok_or(format!("'{}' not found in table rules", column_rule_key))?;
+                    let column_rules = table_rules.get_mut(&column_rule_key).unwrap();
                     column_rules.push(ColumnRule { when: when_compiled, then: then_compiled });
                 }
             }
         }
     }
 
-    Ok(compiled_rule_conditions)
+    compiled_rule_conditions
 }
 
 /// Given the global config map and a parser, parse all of the structure conditions, add them to
@@ -1017,8 +998,7 @@ pub async fn valve(
     let compiled_datatype_conditions =
         get_compiled_datatype_conditions(&config, &parser).map_err(|x| Configuration(x.into()))?;
     let compiled_rule_conditions =
-        get_compiled_rule_conditions(&config, compiled_datatype_conditions.clone(), &parser)
-            .map_err(|x| Configuration(x.into()))?;
+        get_compiled_rule_conditions(&config, compiled_datatype_conditions.clone(), &parser);
 
     if *command == ValveCommand::Load {
         if verbose {
