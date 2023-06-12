@@ -43,9 +43,7 @@ use regex::Regex;
 use serde_json::{json, Value as SerdeValue};
 use sqlx::{
     any::{AnyConnectOptions, AnyKind, AnyPool, AnyPoolOptions, AnyRow},
-    query as sqlx_query, Column,
-    Error::Configuration,
-    Row, ValueRef,
+    query as sqlx_query, Column, Row, ValueRef,
 };
 use std::{
     collections::{BTreeMap, HashMap},
@@ -521,18 +519,12 @@ pub fn read_config_files(
 pub fn get_compiled_datatype_conditions(
     config: &SerdeMap,
     parser: &StartParser,
-) -> Result<HashMap<String, CompiledCondition>, String> {
+) -> HashMap<String, CompiledCondition> {
     let mut compiled_datatype_conditions: HashMap<String, CompiledCondition> = HashMap::new();
-    let datatypes_config = config
-        .get("datatype")
-        .and_then(|t| t.as_object())
-        .ok_or("Could not read datatype config".to_string())?;
+    let datatypes_config = config.get("datatype").and_then(|t| t.as_object()).unwrap();
     for (_, row) in datatypes_config.iter() {
-        let row = row.as_object().ok_or(format!("{:?} is not an object", row))?;
-        let dt_name = row
-            .get("datatype")
-            .and_then(|d| d.as_str())
-            .ok_or(format!("No string 'datatype' in {:?}", row))?;
+        let row = row.as_object().unwrap();
+        let dt_name = row.get("datatype").and_then(|d| d.as_str()).unwrap();
         let condition = row.get("condition").and_then(|c| c.as_str());
         let compiled_condition =
             compile_condition(condition, parser, &compiled_datatype_conditions);
@@ -541,7 +533,7 @@ pub fn get_compiled_datatype_conditions(
         }
     }
 
-    Ok(compiled_datatype_conditions)
+    compiled_datatype_conditions
 }
 
 /// Given the global config map, a hash map of compiled datatype conditions (indexed by the text
@@ -947,7 +939,7 @@ pub async fn valve(
 ) -> Result<String, sqlx::Error> {
     let (specials_config, mut tables_config, mut datatypes_config, rules_config) =
         read_config_files(&table_table.to_string(), config_table)
-            .map_err(|x| Configuration(x.into()))?;
+            .map_err(|x| sqlx::Error::Configuration(x.into()))?;
 
     let parser = StartParser::new();
 
@@ -995,8 +987,7 @@ pub async fn valve(
     config
         .insert(String::from("sorted_table_list"), SerdeValue::Array(sorted_table_serdevalue_list));
 
-    let compiled_datatype_conditions =
-        get_compiled_datatype_conditions(&config, &parser).map_err(|x| Configuration(x.into()))?;
+    let compiled_datatype_conditions = get_compiled_datatype_conditions(&config, &parser);
     let compiled_rule_conditions =
         get_compiled_rule_conditions(&config, compiled_datatype_conditions.clone(), &parser);
 

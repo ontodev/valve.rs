@@ -10,7 +10,6 @@ use serde_json::{json, Value as SerdeValue};
 use sqlx::{
     any::{AnyConnectOptions, AnyKind, AnyPoolOptions},
     query as sqlx_query,
-    Error::Configuration,
 };
 use std::str::FromStr;
 
@@ -47,8 +46,7 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
     }
 
     let parser = StartParser::new();
-    let compiled_datatype_conditions =
-        get_compiled_datatype_conditions(&config, &parser).map_err(|x| Configuration(x.into()))?;
+    let compiled_datatype_conditions = get_compiled_datatype_conditions(&config, &parser);
     let parsed_structure_conditions = get_parsed_structure_conditions(&config, &parser);
     let compiled_rule_conditions =
         get_compiled_rule_conditions(&config, compiled_datatype_conditions.clone(), &parser);
