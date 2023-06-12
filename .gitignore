@@ -1,2 +1,6 @@
 /target
 /build
+/test/output
+/test/perf_test_data/ontology
+/test/random_test_data/ontology
+/junk

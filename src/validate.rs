@@ -1,7 +1,7 @@
 use enquote::unquote;
 use indexmap::IndexMap;
 use serde_json::{json, Value as SerdeValue};
-use sqlx::{any::AnyPool, query as sqlx_query, Error::Configuration, Row, ValueRef};
+use sqlx::{any::AnyPool, query as sqlx_query, Row, ValueRef};
 use std::collections::HashMap;
 
 use crate::{
@@ -178,7 +178,7 @@ pub async fn get_matching_values(
     column_name: &str,
     matching_string: Option<&str>,
 ) -> Result<SerdeValue, sqlx::Error> {
-    let dt_name = match config
+    let dt_name = config
         .get("table")
         .and_then(|t| t.as_object())
         .and_then(|t| t.get(table_name))
@@ -189,15 +189,7 @@ pub async fn get_matching_values(
         .and_then(|c| c.as_object())
         .and_then(|c| c.get("datatype"))
         .and_then(|d| d.as_str())
-    {
-        Some(dt_name) => dt_name,
-        None => {
-            return Err(Configuration(
-                format!("No column config for '{}.{}' in VALVE config", table_name, column_name)
-                    .into(),
-            ))
-        }
-    };
+        .unwrap();
 
     let dt_condition =
         compiled_datatype_conditions.get(dt_name).and_then(|d| Some(d.parsed.clone()));
@@ -224,44 +216,23 @@ pub async fn get_matching_values(
             // foreign column. Otherwise if the structure includes an
             // `under(tree_table.tree_column, value)` condition, then get the values from the tree
             // column that are under `value`.
-            let structure_name = match config
-                .get("table")
-                .and_then(|t| t.as_object())
-                .and_then(|t| t.get(table_name))
-                .and_then(|t| t.as_object())
-                .and_then(|t| t.get("column"))
-                .and_then(|c| c.as_object())
-                .and_then(|c| c.get(column_name))
-                .and_then(|c| c.as_object())
-                .and_then(|c| c.get("structure"))
-                .and_then(|d| d.as_str())
-            {
-                Some(s) => s,
-                None => {
-                    return Err(Configuration(
-                        format!(
-                            "No structure constraint for '{}.{}' in VALVE config",
-                            table_name, column_name
-                        )
-                        .into(),
-                    ))
-                }
-            };
-            let structure = parsed_structure_conditions.get(structure_name);
+            let structure = parsed_structure_conditions.get(
+                config
+                    .get("table")
+                    .and_then(|t| t.as_object())
+                    .and_then(|t| t.get(table_name))
+                    .and_then(|t| t.as_object())
+                    .and_then(|t| t.get("column"))
+                    .and_then(|c| c.as_object())
+                    .and_then(|c| c.get(column_name))
+                    .and_then(|c| c.as_object())
+                    .and_then(|c| c.get("structure"))
+                    .and_then(|d| d.as_str())
+                    .unwrap(),
+            );
 
             let sql_type =
-                match get_sql_type_from_global_config(&config, table_name, &column_name, pool) {
-                    Some(t) => t,
-                    None => {
-                        return Err(Configuration(
-                            format!(
-                                "Unable to determine SQL type for '{}.{}' from VALVE config",
-                                table_name, column_name
-                            )
-                            .into(),
-                        ))
-                    }
-                };
+                get_sql_type_from_global_config(&config, table_name, &column_name, pool).unwrap();
 
             match structure {
                 Some(ParsedStructure { original, parsed }) => {
@@ -309,7 +280,7 @@ pub async fn get_matching_values(
                                 }
                             }
 
-                            let tree = match config
+                            let tree = config
                                 .get("constraints")
                                 .and_then(|c| c.as_object())
                                 .and_then(|c| c.get("tree"))
@@ -317,29 +288,15 @@ pub async fn get_matching_values(
                                 .and_then(|t| t.get(table_name))
                                 .and_then(|t| t.as_array())
                                 .and_then(|t| {
-                                    t.iter().find(|o| match o.get("child") {
-                                        Some(c) => c == tree_col,
-                                        None => false,
-                                    })
+                                    t.iter().find(|o| o.get("child").unwrap() == tree_col)
                                 })
-                                .and_then(|t| t.as_object())
-                            {
-                                Some(t) => t,
-                                None => {
-                                    return Err(Configuration(
-                                        format!("No tree: '{}.{}' found", table_name, tree_col)
-                                            .into(),
-                                    ))
-                                }
-                            };
-                            let child_column = match tree.get("child").and_then(|c| c.as_str()) {
-                                Some(c) => c,
-                                None => {
-                                    return Err(Configuration(
-                                        format!("No 'child' in tree {:?}", tree).into(),
-                                    ))
-                                }
-                            };
+                                .expect(
+                                    format!("No tree: '{}.{}' found", table_name, tree_col)
+                                        .as_str(),
+                                )
+                                .as_object()
+                                .unwrap();
+                            let child_column = tree.get("child").and_then(|c| c.as_str()).unwrap();
 
                             let (tree_sql, mut params) = with_tree_sql(
                                 &config,
@@ -371,11 +328,7 @@ pub async fn get_matching_values(
                                 values.push(get_column_value(&row, &child_column, &sql_type));
                             }
                         }
-                        _ => {
-                            return Err(Configuration(
-                                format!("Unrecognised structure: {}", original).into(),
-                            ))
-                        }
+                        _ => panic!("Unrecognised structure: {}", original),
                     };
                 }
                 None => (),

@@ -11,8 +11,10 @@ label	trimmed_line		match(/\S([^\n]*\S)*/)
 line	text		exclude(/\n/)		a line of text				input
 natural_number	integer		match(/\d+/)		a natural number, including zero	INTEGER	INTEGER		
 nonspace	trimmed_line		exclude(/\s/)		text without whitespace				
+numeric	nonspace		match(/-?\d+(\.\d+)?/)		a positive or negative number	NUMERIC	NUMERIC		
 path	line		exclude(/\n/)		a path to a file				
 prefix	word		exclude(/\W/)		a prefix for a CURIE				
+real	nonspace		match(/-?\d+(\.\d+)?/)		a positive or negative real number	REAL	REAL		
 suffix	word		exclude(/\W/)		a suffix for a CURIE				
 table_name	word		exclude(/\W/)		a table name				
 table_type	word	lowercase	in('table', 'column', 'datatype')		a table type				
