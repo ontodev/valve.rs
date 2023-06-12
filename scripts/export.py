@@ -170,8 +170,8 @@ def export_data(cursor, is_sqlite, args):
                     strict=True,
                     lineterminator="\n",
                     quoting=csv.QUOTE_NONE,
-                    escapechar="",
-                    quotechar="",
+                    escapechar=None,
+                    quotechar=None,
                 )
                 writer.writeheader()
                 for row in rows:
@@ -222,7 +222,7 @@ def export_messages(cursor, is_sqlite, args):
             lineterminator="\n",
             quoting=csv.QUOTE_NONE,
             escapechar="\\",
-            quotechar="",
+            quotechar=None,
         )
         writer.writeheader()
 
