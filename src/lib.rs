@@ -650,36 +650,27 @@ pub fn get_compiled_rule_conditions(
 pub fn get_parsed_structure_conditions(
     config: &SerdeMap,
     parser: &StartParser,
-) -> Result<HashMap<String, ParsedStructure>, String> {
+) -> HashMap<String, ParsedStructure> {
     let mut parsed_structure_conditions = HashMap::new();
-    let tables_config = config
-        .get("table")
-        .and_then(|t| t.as_object())
-        .ok_or("Could not retrieve table config".to_string())?;
+    let tables_config = config.get("table").and_then(|t| t.as_object()).unwrap();
     for (table, table_config) in tables_config.iter() {
-        let columns_config = table_config
-            .get("column")
-            .and_then(|c| c.as_object())
-            .ok_or("Could not retrieve columns config".to_string())?;
+        let columns_config = table_config.get("column").and_then(|c| c.as_object()).unwrap();
         for (_, row) in columns_config.iter() {
             let row_table = table;
             let structure = row.get("structure").and_then(|s| s.as_str());
             match structure {
                 Some(structure) if structure != "" => {
-                    let parsed_structure = match parser.parse(structure) {
-                        Ok(p) => p,
-                        Err(e) => {
-                            return Err(format!(
-                                "While parsing structure: '{}' for column: '{}.{}' got error:\n{}",
-                                structure,
-                                row_table,
-                                row.get("table")
-                                    .and_then(|t| t.as_str())
-                                    .ok_or(format!("No string 'table' in {:?}", row))?,
-                                e
-                            ))
-                        }
-                    };
+                    let parsed_structure = parser.parse(structure);
+                    if let Err(e) = parsed_structure {
+                        panic!(
+                            "While parsing structure: '{}' for column: '{}.{}' got error:\n{}",
+                            structure,
+                            row_table,
+                            row.get("table").and_then(|t| t.as_str()).unwrap(),
+                            e
+                        );
+                    }
+                    let parsed_structure = parsed_structure.unwrap();
                     let parsed_structure = &parsed_structure[0];
                     let parsed_structure = ParsedStructure {
                         original: structure.to_string(),
@@ -692,7 +683,7 @@ pub fn get_parsed_structure_conditions(
         }
     }
 
-    Ok(parsed_structure_conditions)
+    parsed_structure_conditions
 }
 
 /// Given config maps for tables and datatypes, a database connection pool, and a StartParser,
