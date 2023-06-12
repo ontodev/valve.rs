@@ -1,7 +1,7 @@
 use enquote::unquote;
 use indexmap::IndexMap;
 use serde_json::{json, Value as SerdeValue};
-use sqlx::{any::AnyPool, query as sqlx_query, Error::Configuration, Row, ValueRef};
+use sqlx::{any::AnyPool, query as sqlx_query, Row, ValueRef};
 use std::collections::HashMap;
 
 use crate::{
@@ -56,22 +56,10 @@ pub async fn validate_row(
             value: match cell.get("value") {
                 Some(SerdeValue::String(s)) => s.to_string(),
                 Some(SerdeValue::Number(n)) => format!("{}", n),
-                _ => {
-                    return Err(Configuration(
-                        format!("Field 'value' of: {:#?} is neither a number nor a string.", cell)
-                            .into(),
-                    ))
-                }
+                _ => panic!("Field 'value' of: {:#?} is neither a number nor a string.", cell),
             },
-            valid: cell
-                .get("valid")
-                .and_then(|v| v.as_bool())
-                .ok_or(Configuration(format!("No 'valid' in {:?}", cell).into()))?,
-            messages: cell
-                .get("messages")
-                .and_then(|m| m.as_array())
-                .ok_or(Configuration(format!("No 'messages' in {:?}", cell).into()))?
-                .to_vec(),
+            valid: cell.get("valid").and_then(|v| v.as_bool()).unwrap(),
+            messages: cell.get("messages").and_then(|m| m.as_array()).unwrap().to_vec(),
         };
         result_row.contents.insert(column.to_string(), result_cell);
     }
@@ -85,7 +73,7 @@ pub async fn validate_row(
             &table_name.to_string(),
             column_name,
             cell,
-        )?;
+        );
     }
 
     let context = result_row.clone();
@@ -97,7 +85,7 @@ pub async fn validate_row(
             column_name,
             &context,
             cell,
-        )?;
+        );
 
         if cell.nulltype == None {
             validate_cell_datatype(
@@ -106,7 +94,7 @@ pub async fn validate_row(
                 &table_name.to_string(),
                 column_name,
                 cell,
-            )?;
+            );
 
             // We don't do any further validation on cells that have datatype violations because
             // they can result in database errors when, for instance, we compare a numeric with a
@@ -153,32 +141,13 @@ pub async fn validate_row(
     );
 
     for violation in violations.iter_mut() {
-        let vrow_number = violation
-            .get("row_number")
-            .and_then(|r| r.as_i64())
-            .ok_or(Configuration(format!("No 'row_number' in {:?}", violation).into()))?
-            as u32;
+        let vrow_number = violation.get("row_number").unwrap().as_i64().unwrap() as u32;
         if Some(vrow_number) == row_number || (row_number == None && Some(vrow_number) == Some(0)) {
-            let column = violation
-                .get("column")
-                .and_then(|s| s.as_str())
-                .ok_or(Configuration(format!("No 'column' in {:?}", violation).into()))?;
-            let level = violation
-                .get("level")
-                .and_then(|s| s.as_str())
-                .ok_or(Configuration(format!("No 'level' in {:?}", violation).into()))?;
-            let rule = violation
-                .get("rule")
-                .and_then(|s| s.as_str())
-                .ok_or(Configuration(format!("No 'rule' in {:?}", violation).into()))?;
-            let message = violation
-                .get("message")
-                .and_then(|s| s.as_str())
-                .ok_or(Configuration(format!("No 'message' in {:?}", violation).into()))?;
-            let result_cell = &mut result_row
-                .contents
-                .get_mut(column)
-                .ok_or(Configuration(format!("No '{}' in result row", column).into()))?;
+            let column = violation.get("column").and_then(|s| s.as_str()).unwrap();
+            let level = violation.get("level").and_then(|s| s.as_str()).unwrap();
+            let rule = violation.get("rule").and_then(|s| s.as_str()).unwrap();
+            let message = violation.get("message").and_then(|s| s.as_str()).unwrap();
+            let result_cell = &mut result_row.contents.get_mut(column).unwrap();
             result_cell.messages.push(json!({
                 "level": level,
                 "rule": rule,
@@ -209,7 +178,7 @@ pub async fn get_matching_values(
     column_name: &str,
     matching_string: Option<&str>,
 ) -> Result<SerdeValue, sqlx::Error> {
-    let dt_name = match config
+    let dt_name = config
         .get("table")
         .and_then(|t| t.as_object())
         .and_then(|t| t.get(table_name))
@@ -220,15 +189,7 @@ pub async fn get_matching_values(
         .and_then(|c| c.as_object())
         .and_then(|c| c.get("datatype"))
         .and_then(|d| d.as_str())
-    {
-        Some(dt_name) => dt_name,
-        None => {
-            return Err(Configuration(
-                format!("No column config for '{}.{}' in VALVE config", table_name, column_name)
-                    .into(),
-            ))
-        }
-    };
+        .unwrap();
 
     let dt_condition =
         compiled_datatype_conditions.get(dt_name).and_then(|d| Some(d.parsed.clone()));
@@ -255,44 +216,23 @@ pub async fn get_matching_values(
             // foreign column. Otherwise if the structure includes an
             // `under(tree_table.tree_column, value)` condition, then get the values from the tree
             // column that are under `value`.
-            let structure_name = match config
-                .get("table")
-                .and_then(|t| t.as_object())
-                .and_then(|t| t.get(table_name))
-                .and_then(|t| t.as_object())
-                .and_then(|t| t.get("column"))
-                .and_then(|c| c.as_object())
-                .and_then(|c| c.get(column_name))
-                .and_then(|c| c.as_object())
-                .and_then(|c| c.get("structure"))
-                .and_then(|d| d.as_str())
-            {
-                Some(s) => s,
-                None => {
-                    return Err(Configuration(
-                        format!(
-                            "No structure constraint for '{}.{}' in VALVE config",
-                            table_name, column_name
-                        )
-                        .into(),
-                    ))
-                }
-            };
-            let structure = parsed_structure_conditions.get(structure_name);
+            let structure = parsed_structure_conditions.get(
+                config
+                    .get("table")
+                    .and_then(|t| t.as_object())
+                    .and_then(|t| t.get(table_name))
+                    .and_then(|t| t.as_object())
+                    .and_then(|t| t.get("column"))
+                    .and_then(|c| c.as_object())
+                    .and_then(|c| c.get(column_name))
+                    .and_then(|c| c.as_object())
+                    .and_then(|c| c.get("structure"))
+                    .and_then(|d| d.as_str())
+                    .unwrap(),
+            );
 
             let sql_type =
-                match get_sql_type_from_global_config(&config, table_name, &column_name, pool) {
-                    Some(t) => t,
-                    None => {
-                        return Err(Configuration(
-                            format!(
-                                "Unable to determine SQL type for '{}.{}' from VALVE config",
-                                table_name, column_name
-                            )
-                            .into(),
-                        ))
-                    }
-                };
+                get_sql_type_from_global_config(&config, table_name, &column_name, pool).unwrap();
 
             match structure {
                 Some(ParsedStructure { original, parsed }) => {
@@ -314,7 +254,7 @@ pub async fn get_matching_values(
                                         r#"SELECT "{}" FROM "{}" WHERE {} LIKE {}"#,
                                         fcolumn, ftable, fcolumn_text, SQL_PARAM
                                     ),
-                                )?;
+                                );
                                 let rows =
                                     sqlx_query(&sql).bind(&matching_string).fetch_all(pool).await?;
                                 for row in rows.iter() {
@@ -340,7 +280,7 @@ pub async fn get_matching_values(
                                 }
                             }
 
-                            let tree = match config
+                            let tree = config
                                 .get("constraints")
                                 .and_then(|c| c.as_object())
                                 .and_then(|c| c.get("tree"))
@@ -348,29 +288,15 @@ pub async fn get_matching_values(
                                 .and_then(|t| t.get(table_name))
                                 .and_then(|t| t.as_array())
                                 .and_then(|t| {
-                                    t.iter().find(|o| match o.get("child") {
-                                        Some(c) => c == tree_col,
-                                        None => false,
-                                    })
+                                    t.iter().find(|o| o.get("child").unwrap() == tree_col)
                                 })
-                                .and_then(|t| t.as_object())
-                            {
-                                Some(t) => t,
-                                None => {
-                                    return Err(Configuration(
-                                        format!("No tree: '{}.{}' found", table_name, tree_col)
-                                            .into(),
-                                    ))
-                                }
-                            };
-                            let child_column = match tree.get("child").and_then(|c| c.as_str()) {
-                                Some(c) => c,
-                                None => {
-                                    return Err(Configuration(
-                                        format!("No 'child' in tree {:?}", tree).into(),
-                                    ))
-                                }
-                            };
+                                .expect(
+                                    format!("No tree: '{}.{}' found", table_name, tree_col)
+                                        .as_str(),
+                                )
+                                .as_object()
+                                .unwrap();
+                            let child_column = tree.get("child").and_then(|c| c.as_str()).unwrap();
 
                             let (tree_sql, mut params) = with_tree_sql(
                                 &config,
@@ -380,7 +306,7 @@ pub async fn get_matching_values(
                                 under_val,
                                 None,
                                 pool,
-                            )?;
+                            );
                             let child_column_text =
                                 cast_column_sql_to_text(&child_column, &sql_type);
                             let sql = local_sql_syntax(
@@ -389,7 +315,7 @@ pub async fn get_matching_values(
                                     r#"{} SELECT "{}" FROM "tree" WHERE {} LIKE {}"#,
                                     tree_sql, child_column, child_column_text, SQL_PARAM
                                 ),
-                            )?;
+                            );
                             params.push(matching_string);
 
                             let mut query = sqlx_query(&sql);
@@ -402,11 +328,7 @@ pub async fn get_matching_values(
                                 values.push(get_column_value(&row, &child_column, &sql_type));
                             }
                         }
-                        _ => {
-                            return Err(Configuration(
-                                format!("Unrecognised structure: {}", original).into(),
-                            ))
-                        }
+                        _ => panic!("Unrecognised structure: {}", original),
                     };
                 }
                 None => (),
@@ -444,26 +366,15 @@ pub async fn validate_under(
         .and_then(|t| t.as_object())
         .and_then(|o| o.get(table_name))
         .and_then(|t| t.as_array())
-        .ok_or(Configuration(format!("No 'under' in table config for '{}'", table_name).into()))?;
+        .unwrap();
 
     for ukey in ukeys {
-        let ukey =
-            ukey.as_object().ok_or(Configuration(format!("{:?} is not an object", ukey).into()))?;
-        let tree_table = ukey
-            .get("ttable")
-            .and_then(|tt| tt.as_str())
-            .ok_or(Configuration(format!("No 'ttable' in {:?}", ukey).into()))?;
-        let tree_child = ukey
-            .get("tcolumn")
-            .and_then(|tc| tc.as_str())
-            .ok_or(Configuration(format!("No 'tcolumn' in {:?}", ukey).into()))?;
-        let column = ukey
-            .get("column")
-            .and_then(|c| c.as_str())
-            .ok_or(Configuration(format!("No 'column' in {:?}", ukey).into()))?;
-        let sql_type = get_sql_type_from_global_config(&config, &table_name, &column, pool).ok_or(
-            Configuration(format!("Could not find SQL type for {}.{}", table_name, column).into()),
-        )?;
+        let ukey = ukey.as_object().unwrap();
+        let tree_table = ukey.get("ttable").and_then(|tt| tt.as_str()).unwrap();
+        let tree_child = ukey.get("tcolumn").and_then(|tc| tc.as_str()).unwrap();
+        let column = ukey.get("column").and_then(|c| c.as_str()).unwrap();
+        let sql_type =
+            get_sql_type_from_global_config(&config, &table_name, &column, pool).unwrap();
         let tree = config
             .get("constraints")
             .and_then(|c| c.as_object())
@@ -471,26 +382,21 @@ pub async fn validate_under(
             .and_then(|t| t.as_object())
             .and_then(|o| o.get(tree_table))
             .and_then(|t| t.as_array())
-            .ok_or(Configuration(
-                format!("Could not determine tree constraints for {}", tree_table).into(),
-            ))?
+            .unwrap()
             .iter()
             .find(|tkey| {
                 tkey.as_object()
                     .and_then(|o| o.get("child"))
                     .and_then(|c| Some(c == tree_child))
-                    .unwrap_or(false)
+                    .unwrap()
             })
             .and_then(|tree| Some(tree.as_object().unwrap()))
-            .ok_or(Configuration(format!("Tree of {} is not an object", table_name).into()))?;
-        let tree_parent = tree
-            .get("parent")
-            .and_then(|p| p.as_str())
-            .ok_or(Configuration(format!("No 'parent' in {:?}", tree).into()))?;
+            .unwrap();
+        let tree_parent = tree.get("parent").and_then(|p| p.as_str()).unwrap();
         let mut extra_clause;
         let mut params;
         if let Some(ref extra_row) = extra_row {
-            (extra_clause, params) = select_with_extra_row(&config, extra_row, table_name, pool)?;
+            (extra_clause, params) = select_with_extra_row(&config, extra_row, table_name, pool);
         } else {
             extra_clause = String::new();
             params = vec![];
@@ -520,7 +426,7 @@ pub async fn validate_under(
             effective_tree = tree_table.to_string();
         }
 
-        let uval = ukey.get("value").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let uval = ukey.get("value").and_then(|v| v.as_str()).unwrap().to_string();
         let (tree_sql, mut tree_params) = with_tree_sql(
             &config,
             tree,
@@ -529,7 +435,7 @@ pub async fn validate_under(
             Some(uval.clone()),
             None,
             pool,
-        )?;
+        );
         // Add the tree params to the beginning of the parameter list:
         tree_params.append(&mut params);
         params = tree_params;
@@ -572,7 +478,7 @@ pub async fn validate_under(
                 tree_parent,
                 effective_table,
             ),
-        )?;
+        );
 
         let mut query = sqlx_query(&sql);
         for param in &params {
@@ -581,8 +487,7 @@ pub async fn validate_under(
         let rows = query.fetch_all(pool).await?;
 
         for row in rows {
-            let raw_row_number =
-                row.try_get_raw("row_number").map_err(|e| Configuration(e.to_string().into()))?;
+            let raw_row_number = row.try_get_raw("row_number").unwrap();
             let row_number: i64;
             if raw_row_number.is_null() {
                 row_number = 0;
@@ -590,9 +495,7 @@ pub async fn validate_under(
                 row_number = row.get("row_number");
             }
 
-            let raw_column_val = row
-                .try_get_raw(format!(r#"{}"#, column).as_str())
-                .map_err(|e| Configuration(e.to_string().into()))?;
+            let raw_column_val = row.try_get_raw(format!(r#"{}"#, column).as_str()).unwrap();
             let mut column_val = String::from("");
             if raw_column_val.is_null() {
                 // If the column value already contains a different error, its value will be null
@@ -609,7 +512,7 @@ pub async fn validate_under(
                              AND "column" = {}"#,
                         SQL_PARAM, SQL_PARAM, SQL_PARAM
                     ),
-                )?;
+                );
                 let mut message_query = sqlx_query(&message_sql);
                 message_query = message_query.bind(&table_name);
                 message_query = message_query.bind(&row_number);
@@ -690,32 +593,19 @@ pub async fn validate_tree_foreign_keys(
         .and_then(|t| t.as_object())
         .and_then(|o| o.get(table_name))
         .and_then(|t| t.as_array())
-        .ok_or(Configuration(
-            format!("Could not determine tree constraints for {}", table_name).into(),
-        ))?;
+        .unwrap();
 
     let mut results = vec![];
     for tkey in tkeys {
-        let tkey =
-            tkey.as_object().ok_or(Configuration(format!("{:?} is not an object", tkey).into()))?;
-        let child_col = tkey
-            .get("child")
-            .and_then(|c| c.as_str())
-            .ok_or(Configuration(format!("No 'child' in {:?}", tkey).into()))?;
-        let parent_col = tkey
-            .get("parent")
-            .and_then(|p| p.as_str())
-            .ok_or(Configuration(format!("No 'parent' in {:?}", tkey).into()))?;
+        let tkey = tkey.as_object().unwrap();
+        let child_col = tkey.get("child").and_then(|c| c.as_str()).unwrap();
+        let parent_col = tkey.get("parent").and_then(|p| p.as_str()).unwrap();
         let parent_sql_type =
-            get_sql_type_from_global_config(&config, &table_name, &parent_col, pool).ok_or(
-                Configuration(
-                    format!("Can't determine SQL type for {}.{}", table_name, parent_col).into(),
-                ),
-            )?;
+            get_sql_type_from_global_config(&config, &table_name, &parent_col, pool).unwrap();
         let with_clause;
         let params;
         if let Some(ref extra_row) = extra_row {
-            (with_clause, params) = select_with_extra_row(&config, extra_row, table_name, pool)?;
+            (with_clause, params) = select_with_extra_row(&config, extra_row, table_name, pool);
         } else {
             with_clause = String::new();
             params = vec![];
@@ -747,7 +637,7 @@ pub async fn validate_tree_foreign_keys(
                 child_col,
                 parent_col
             ),
-        )?;
+        );
 
         let mut query = sqlx_query(&sql);
         for param in &params {
@@ -755,17 +645,14 @@ pub async fn validate_tree_foreign_keys(
         }
         let rows = query.fetch_all(pool).await?;
         for row in rows {
-            let raw_row_number =
-                row.try_get_raw("row_number").map_err(|e| Configuration(e.to_string().into()))?;
+            let raw_row_number = row.try_get_raw("row_number").unwrap();
             let row_number: i64;
             if raw_row_number.is_null() {
                 row_number = 0;
             } else {
                 row_number = row.get("row_number");
             }
-            let raw_parent_val = row
-                .try_get_raw(format!(r#"{}"#, parent_col).as_str())
-                .map_err(|e| Configuration(e.to_string().into()))?;
+            let raw_parent_val = row.try_get_raw(format!(r#"{}"#, parent_col).as_str()).unwrap();
             let mut parent_val = String::from("");
             if !raw_parent_val.is_null() {
                 parent_val = get_column_value(&row, &parent_col, &parent_sql_type);
@@ -784,7 +671,7 @@ pub async fn validate_tree_foreign_keys(
                              AND "column" = {}"#,
                         SQL_PARAM, SQL_PARAM, SQL_PARAM
                     ),
-                )?;
+                );
                 let mut message_query = sqlx_query(&message_sql);
                 message_query = message_query.bind(&table_name);
                 message_query = message_query.bind(&row_number);
@@ -818,10 +705,7 @@ pub async fn validate_tree_foreign_keys(
                 // is there then we are fine, and we can go on to the next row.
                 let sql_type =
                     get_sql_type_from_global_config(&config, &table_name, &parent_col, pool)
-                        .ok_or(Configuration(
-                            format!("Can't determine SQL type for {}.{}", table_name, parent_col)
-                                .into(),
-                        ))?;
+                        .unwrap();
                 let sql_param = cast_sql_param_from_text(&sql_type);
                 let sql = local_sql_syntax(
                     &pool,
@@ -829,7 +713,7 @@ pub async fn validate_tree_foreign_keys(
                         r#"SELECT 1 FROM "{}" WHERE "{}" = {} LIMIT 1"#,
                         table_name, child_col, sql_param
                     ),
-                )?;
+                );
                 let query = sqlx_query(&sql).bind(parent_val.to_string());
                 let rows = query.fetch_all(pool).await?;
                 if rows.len() > 0 {
@@ -865,9 +749,7 @@ pub async fn validate_rows_trees(
         .and_then(|t| t.get(table_name))
         .and_then(|t| t.get("column_order"))
         .and_then(|c| c.as_array())
-        .ok_or(Configuration(
-            format!("Could not determine column order for {}", table_name).into(),
-        ))?
+        .unwrap()
         .iter()
         .map(|v| v.as_str().unwrap().to_string())
         .collect::<Vec<_>>();
@@ -877,10 +759,7 @@ pub async fn validate_rows_trees(
         let mut result_row = ResultRow { row_number: None, contents: IndexMap::new() };
         for column_name in &column_names {
             let context = row.clone();
-            let cell = row
-                .contents
-                .get_mut(column_name)
-                .ok_or(Configuration(format!("No '{}' in row", column_name).into()))?;
+            let cell = row.contents.get_mut(column_name).unwrap();
             // We don't do any further validation on cells that are legitimately empty, or on cells
             // that have datatype violations. We exclude the latter because they can result in
             // database errors when, for instance, we compare a numeric with a non-numeric type.
@@ -922,9 +801,7 @@ pub async fn validate_rows_constraints(
         .and_then(|t| t.get(table_name))
         .and_then(|t| t.get("column_order"))
         .and_then(|c| c.as_array())
-        .ok_or(Configuration(
-            format!("Could not determine column order for {}", table_name).into(),
-        ))?
+        .unwrap()
         .iter()
         .map(|v| v.as_str().unwrap().to_string())
         .collect::<Vec<_>>();
@@ -933,10 +810,7 @@ pub async fn validate_rows_constraints(
     for row in rows.iter_mut() {
         let mut result_row = ResultRow { row_number: None, contents: IndexMap::new() };
         for column_name in &column_names {
-            let cell = row
-                .contents
-                .get_mut(column_name)
-                .ok_or(Configuration(format!("No '{}' in row", column_name).into()))?;
+            let cell = row.contents.get_mut(column_name).unwrap();
             // We don't do any further validation on cells that are legitimately empty, or on cells
             // that have datatype violations. We exclude the latter because they can result in
             // database errors when, for instance, we compare a numeric with a non-numeric type.
@@ -1016,8 +890,7 @@ pub fn validate_rows_intra(
                         table_name,
                         &column_name,
                         cell,
-                    )
-                    .unwrap();
+                    );
                 }
 
                 for column_name in &column_names {
@@ -1030,8 +903,7 @@ pub fn validate_rows_intra(
                         &column_name,
                         &context,
                         cell,
-                    )
-                    .unwrap();
+                    );
 
                     if cell.nulltype == None {
                         validate_cell_datatype(
@@ -1040,8 +912,7 @@ pub fn validate_rows_intra(
                             table_name,
                             &column_name,
                             cell,
-                        )
-                        .unwrap();
+                        );
                     }
                 }
                 result_rows.push(result_row);
@@ -1074,7 +945,7 @@ fn result_row_to_config_map(incoming: &ResultRow) -> SerdeMap {
 fn contains_dt_violation(messages: &Vec<SerdeValue>) -> bool {
     let mut contains_dt_violation = false;
     for m in messages {
-        if m.get("rule").and_then(|r| r.as_str()).unwrap_or("").starts_with("datatype:") {
+        if m.get("rule").and_then(|r| r.as_str()).unwrap().starts_with("datatype:") {
             contains_dt_violation = true;
             break;
         }
@@ -1089,7 +960,7 @@ fn select_with_extra_row(
     extra_row: &ResultRow,
     table_name: &str,
     pool: &AnyPool,
-) -> Result<(String, Vec<String>), sqlx::Error> {
+) -> (String, Vec<String>) {
     let extra_row_len = extra_row.contents.keys().len();
     let mut params = vec![];
     let mut first_select;
@@ -1100,11 +971,7 @@ fn select_with_extra_row(
 
     let mut second_select = String::from(r#"SELECT "row_number", "#);
     for (i, (key, content)) in extra_row.contents.iter().enumerate() {
-        let sql_type = get_sql_type_from_global_config(&config, &table_name, &key, pool).ok_or(
-            Configuration(
-                format!("Could not determine SQL type for {}.{}", table_name, key).into(),
-            ),
-        )?;
+        let sql_type = get_sql_type_from_global_config(&config, &table_name, &key, pool).unwrap();
         let sql_param = cast_sql_param_from_text(&sql_type);
         // enumerate() begins from 0 but we need to begin at 1:
         let i = i + 1;
@@ -1119,10 +986,10 @@ fn select_with_extra_row(
         }
     }
 
-    Ok((
+    (
         format!(r#"WITH "{}_ext" AS ({} UNION ALL {})"#, table_name, first_select, second_select),
         params,
-    ))
+    )
 }
 
 /// Given a map representing a tree constraint, a table name, a root from which to generate a
@@ -1136,24 +1003,16 @@ fn with_tree_sql(
     root: Option<String>,
     extra_clause: Option<String>,
     pool: &AnyPool,
-) -> Result<(String, Vec<String>), sqlx::Error> {
+) -> (String, Vec<String>) {
     let extra_clause = extra_clause.unwrap_or(String::new());
-    let child_col = tree
-        .get("child")
-        .and_then(|c| c.as_str())
-        .ok_or(Configuration(format!("No 'child' in {:?}", tree).into()))?;
-    let parent_col = tree
-        .get("parent")
-        .and_then(|c| c.as_str())
-        .ok_or(Configuration(format!("No 'parent' in {:?}", tree).into()))?;
+    let child_col = tree.get("child").and_then(|c| c.as_str()).unwrap();
+    let parent_col = tree.get("parent").and_then(|c| c.as_str()).unwrap();
 
     let mut params = vec![];
     let under_sql;
     if let Some(root) = root {
-        let sql_type = get_sql_type_from_global_config(&config, table_name, &child_col, pool)
-            .ok_or(Configuration(
-                format!("Could not get SQL type for {}.{}", table_name, child_col).into(),
-            ))?;
+        let sql_type =
+            get_sql_type_from_global_config(&config, table_name, &child_col, pool).unwrap();
         under_sql = format!(r#"WHERE "{}" = {}"#, child_col, cast_sql_param_from_text(&sql_type));
         params.push(root.clone());
     } else {
@@ -1183,7 +1042,7 @@ fn with_tree_sql(
         child_col
     );
 
-    Ok((sql, params))
+    (sql, params)
 }
 
 /// Given a config map, compiled datatype conditions, a table name, a column name, and a cell to
@@ -1196,7 +1055,7 @@ fn validate_cell_nulltype(
     table_name: &String,
     column_name: &String,
     cell: &mut ResultCell,
-) -> Result<(), sqlx::Error> {
+) {
     let column = config
         .get("table")
         .and_then(|t| t.as_object())
@@ -1205,22 +1064,14 @@ fn validate_cell_nulltype(
         .and_then(|o| o.get("column"))
         .and_then(|c| c.as_object())
         .and_then(|o| o.get(column_name))
-        .ok_or(Configuration(
-            format!("Could not get column config for {}.{}", table_name, column_name).into(),
-        ))?;
+        .unwrap();
     if let Some(SerdeValue::String(nt_name)) = column.get("nulltype") {
-        let nt_condition = &compiled_datatype_conditions
-            .get(nt_name)
-            .ok_or(Configuration(
-                format!("No '{}' in compiled datatype conditions", nt_name).into(),
-            ))?
-            .compiled;
+        let nt_condition = &compiled_datatype_conditions.get(nt_name).unwrap().compiled;
         let value = &cell.value;
         if nt_condition(&value) {
             cell.nulltype = Some(nt_name.to_string());
         }
     }
-    Ok(())
 }
 
 /// Given a config map, compiled datatype conditions, a table name, a column name, and a cell to
@@ -1231,13 +1082,13 @@ fn validate_cell_datatype(
     table_name: &String,
     column_name: &String,
     cell: &mut ResultCell,
-) -> Result<(), sqlx::Error> {
+) {
     fn get_datatypes_to_check(
         config: &SerdeMap,
         compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
         primary_dt_name: &str,
         dt_name: Option<String>,
-    ) -> Result<Vec<SerdeMap>, sqlx::Error> {
+    ) -> Vec<SerdeMap> {
         let mut datatypes = vec![];
         if let Some(dt_name) = dt_name {
             let datatype = config
@@ -1245,11 +1096,8 @@ fn validate_cell_datatype(
                 .and_then(|d| d.as_object())
                 .and_then(|o| o.get(&dt_name))
                 .and_then(|d| d.as_object())
-                .ok_or(Configuration(format!("Could not find datatype for {}", dt_name).into()))?;
-            let dt_name = datatype
-                .get("datatype")
-                .and_then(|d| d.as_str())
-                .ok_or(Configuration(format!("No 'datatype' in {:?}", datatype).into()))?;
+                .unwrap();
+            let dt_name = datatype.get("datatype").and_then(|d| d.as_str()).unwrap();
             let dt_condition = compiled_datatype_conditions.get(dt_name);
             let dt_parent = match datatype.get("parent") {
                 Some(SerdeValue::String(s)) => Some(s.clone()),
@@ -1265,10 +1113,10 @@ fn validate_cell_datatype(
                 compiled_datatype_conditions,
                 primary_dt_name,
                 dt_parent,
-            )?;
+            );
             datatypes.append(&mut more_datatypes);
         }
-        Ok(datatypes)
+        datatypes
     }
 
     let column = config
@@ -1279,21 +1127,14 @@ fn validate_cell_datatype(
         .and_then(|o| o.get("column"))
         .and_then(|c| c.as_object())
         .and_then(|o| o.get(column_name))
-        .ok_or(Configuration(
-            format!("Could not get column for {}.{}", table_name, column_name).into(),
-        ))?;
-    let primary_dt_name = column
-        .get("datatype")
-        .and_then(|d| d.as_str())
-        .ok_or(Configuration(format!("No 'datatype' in {:?}", column).into()))?;
+        .unwrap();
+    let primary_dt_name = column.get("datatype").and_then(|d| d.as_str()).unwrap();
     let primary_datatype = config
         .get("datatype")
         .and_then(|d| d.as_object())
         .and_then(|o| o.get(primary_dt_name))
-        .ok_or(Configuration("Could not get datatype config".into()))?;
-    let primary_dt_description = primary_datatype
-        .get("description")
-        .ok_or(Configuration(format!("No 'description' in {:?}", primary_datatype).into()))?;
+        .unwrap();
+    let primary_dt_description = primary_datatype.get("description").unwrap();
     if let Some(primary_dt_condition_func) = compiled_datatype_conditions.get(primary_dt_name) {
         let primary_dt_condition_func = &primary_dt_condition_func.compiled;
         if !primary_dt_condition_func(&cell.value) {
@@ -1303,28 +1144,15 @@ fn validate_cell_datatype(
                 compiled_datatype_conditions,
                 primary_dt_name,
                 Some(primary_dt_name.to_string()),
-            )?;
+            );
             // If this datatype has any parents, check them beginning from the most general to the
             // most specific. We use while and pop instead of a for loop so as to check the
             // conditions in LIFO order.
             while !parent_datatypes.is_empty() {
-                let datatype = parent_datatypes
-                    .pop()
-                    .ok_or(Configuration("Could not pop parent datatype".into()))?;
-                let dt_name = datatype
-                    .get("datatype")
-                    .and_then(|d| d.as_str())
-                    .ok_or(Configuration(format!("No 'datatype' in {:?}", datatype).into()))?;
-                let dt_description = datatype
-                    .get("description")
-                    .and_then(|d| d.as_str())
-                    .ok_or(Configuration(format!("No 'description' in {:?}", datatype).into()))?;
-                let dt_condition = &compiled_datatype_conditions
-                    .get(dt_name)
-                    .ok_or(Configuration(
-                        format!("No '{}' in compiled datatype conditions", dt_name).into(),
-                    ))?
-                    .compiled;
+                let datatype = parent_datatypes.pop().unwrap();
+                let dt_name = datatype.get("datatype").and_then(|d| d.as_str()).unwrap();
+                let dt_description = datatype.get("description").and_then(|d| d.as_str()).unwrap();
+                let dt_condition = &compiled_datatype_conditions.get(dt_name).unwrap().compiled;
                 if !dt_condition(&cell.value) {
                     let message = json!({
                         "rule": format!("datatype:{}", dt_name),
@@ -1335,9 +1163,7 @@ fn validate_cell_datatype(
                 }
             }
             if primary_dt_description != "" {
-                let primary_dt_description = primary_dt_description.as_str().ok_or(
-                    Configuration(format!("{} is not a string", primary_dt_description).into()),
-                )?;
+                let primary_dt_description = primary_dt_description.as_str().unwrap();
                 let message = json!({
                     "rule": format!("datatype:{}", primary_dt_name),
                     "level": "error",
@@ -1347,7 +1173,6 @@ fn validate_cell_datatype(
             }
         }
     }
-    Ok(())
 }
 
 /// Given a config map, compiled rule conditions, a table name, a column name, the row context,
@@ -1360,7 +1185,7 @@ fn validate_cell_rules(
     column_name: &String,
     context: &ResultRow,
     cell: &mut ResultCell,
-) -> Result<(), sqlx::Error> {
+) {
     fn check_condition(
         condition_type: &str,
         cell: &ResultCell,
@@ -1368,14 +1193,14 @@ fn validate_cell_rules(
         table_name: &String,
         column_name: &String,
         compiled_rules: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
-    ) -> Result<bool, sqlx::Error> {
+    ) -> bool {
         let condition = rule
             .get(format!("{} condition", condition_type).as_str())
             .and_then(|c| c.as_str())
-            .ok_or(Configuration(format!("No '{}' in {:?}", condition_type, rule).into()))?;
+            .unwrap();
         if vec!["null", "not null"].contains(&condition) {
-            return Ok((condition == "null" && cell.nulltype != None)
-                || (condition == "not null" && cell.nulltype == None));
+            return (condition == "null" && cell.nulltype != None)
+                || (condition == "not null" && cell.nulltype == None);
         } else {
             let compiled_condition = compiled_rules
                 .get(table_name)
@@ -1396,21 +1221,12 @@ fn validate_cell_rules(
                         Some(c.then.compiled.clone())
                     }
                 })
-                .ok_or(Configuration(
-                    format!(
-                        "Could not determine compiled condition for {}.{}",
-                        table_name, column_name
-                    )
-                    .into(),
-                ))?;
-            return Ok(compiled_condition(&cell.value));
+                .unwrap();
+            return compiled_condition(&cell.value);
         }
     }
 
-    let rules_config = config
-        .get("rule")
-        .and_then(|r| r.as_object())
-        .ok_or(Configuration("Could not get rule config".to_string().into()))?;
+    let rules_config = config.get("rule").and_then(|r| r.as_object()).unwrap();
     let applicable_rules;
     match rules_config.get(table_name) {
         Some(SerdeValue::Object(table_rules)) => {
@@ -1418,40 +1234,30 @@ fn validate_cell_rules(
                 Some(SerdeValue::Array(column_rules)) => {
                     applicable_rules = column_rules;
                 }
-                _ => return Ok(()),
+                _ => return,
             };
         }
-        _ => return Ok(()),
+        _ => return,
     };
 
     for (rule_number, rule) in applicable_rules.iter().enumerate() {
         // enumerate() begins at 0 by default but we need to begin with 1:
         let rule_number = rule_number + 1;
-        let rule =
-            rule.as_object().ok_or(Configuration(format!("{:?} is not an object", rule).into()))?;
+        let rule = rule.as_object().unwrap();
         // Check the then condition only if the when condition is satisfied:
-        if check_condition("when", cell, rule, table_name, column_name, compiled_rules)? {
-            let then_column = rule
-                .get("then column")
-                .and_then(|c| c.as_str())
-                .ok_or(Configuration(format!("No 'then column' in {:?}", rule).into()))?;
-            let then_cell = context
-                .contents
-                .get(then_column)
-                .ok_or(Configuration(format!("No '{}' in context", then_column).into()))?;
-            if !check_condition("then", then_cell, rule, table_name, column_name, compiled_rules)? {
+        if check_condition("when", cell, rule, table_name, column_name, compiled_rules) {
+            let then_column = rule.get("then column").and_then(|c| c.as_str()).unwrap();
+            let then_cell = context.contents.get(then_column).unwrap();
+            if !check_condition("then", then_cell, rule, table_name, column_name, compiled_rules) {
                 cell.valid = false;
                 cell.messages.push(json!({
                     "rule": format!("rule:{}-{}", column_name, rule_number),
-                    "level": rule.get("level")
-                        .ok_or(Configuration(format!("No 'level' in {:?}", rule).into()))?,
-                    "message": rule.get("description")
-                        .ok_or(Configuration(format!("No 'description' in {:?}", rule).into()))?,
+                    "level": rule.get("level").unwrap(),
+                    "message": rule.get("description").unwrap(),
                 }));
             }
         }
     }
-    Ok(())
 }
 
 /// Given a config map, a db connection pool, a table name, a column name, and a cell to validate,
@@ -1471,7 +1277,7 @@ async fn validate_cell_foreign_constraints(
         .and_then(|t| t.as_object())
         .and_then(|o| o.get(table_name))
         .and_then(|t| t.as_array())
-        .ok_or(Configuration(format!("Can't get foreign keys for {}", table_name).into()))?
+        .unwrap()
         .iter()
         .filter(|t| {
             t.as_object()
@@ -1483,22 +1289,14 @@ async fn validate_cell_foreign_constraints(
         .collect::<Vec<_>>();
 
     for fkey in fkeys {
-        let ftable = fkey
-            .get("ftable")
-            .and_then(|t| t.as_str())
-            .ok_or(Configuration(format!("No 'ftable' in {:?}", fkey).into()))?;
-        let fcolumn = fkey
-            .get("fcolumn")
-            .and_then(|c| c.as_str())
-            .ok_or(Configuration(format!("No 'fcolumn' in {:?}", fkey).into()))?;
-        let sql_type = get_sql_type_from_global_config(&config, &ftable, &fcolumn, pool).ok_or(
-            Configuration(format!("Can't get SQL type for {}.{}", ftable, fcolumn).into()),
-        )?;
+        let ftable = fkey.get("ftable").and_then(|t| t.as_str()).unwrap();
+        let fcolumn = fkey.get("fcolumn").and_then(|c| c.as_str()).unwrap();
+        let sql_type = get_sql_type_from_global_config(&config, &ftable, &fcolumn, pool).unwrap();
         let sql_param = cast_sql_param_from_text(&sql_type);
         let fsql = local_sql_syntax(
             &pool,
             &format!(r#"SELECT 1 FROM "{}" WHERE "{}" = {} LIMIT 1"#, ftable, fcolumn, sql_param),
-        )?;
+        );
         let frows = sqlx_query(&fsql).bind(&cell.value).fetch_all(pool).await?;
 
         if frows.is_empty() {
@@ -1514,7 +1312,7 @@ async fn validate_cell_foreign_constraints(
                     r#"SELECT 1 FROM "{}_conflict" WHERE "{}" = {} LIMIT 1"#,
                     ftable, fcolumn, sql_param
                 ),
-            )?;
+            );
             let frows = sqlx_query(&fsql).bind(cell.value.clone()).fetch_all(pool).await?;
 
             if frows.is_empty() {
@@ -1567,7 +1365,7 @@ async fn validate_cell_trees(
         .and_then(|t| t.as_object())
         .and_then(|o| o.get(table_name))
         .and_then(|t| t.as_array())
-        .ok_or(Configuration(format!("Can't get tree constraints for {}", table_name).into()))?
+        .unwrap()
         .iter()
         .filter(|t| {
             t.as_object()
@@ -1585,29 +1383,17 @@ async fn validate_cell_trees(
     }
 
     let parent_col = column_name;
-    let parent_sql_type = get_sql_type_from_global_config(&config, &table_name, &parent_col, pool)
-        .ok_or(Configuration(
-            format!("Can't get SQL type for {}.{}", table_name, parent_col).into(),
-        ))?;
+    let parent_sql_type =
+        get_sql_type_from_global_config(&config, &table_name, &parent_col, pool).unwrap();
     let parent_sql_param = cast_sql_param_from_text(&parent_sql_type);
     let parent_val = cell.value.clone();
     for tkey in tkeys {
-        let child_col = tkey
-            .get("child")
-            .and_then(|c| c.as_str())
-            .ok_or(Configuration(format!("No 'child' in {:?}", tkey).into()))?;
+        let child_col = tkey.get("child").and_then(|c| c.as_str()).unwrap();
         let child_sql_type =
-            get_sql_type_from_global_config(&config, &table_name, &child_col, pool).ok_or(
-                Configuration(
-                    format!("Can't get SQL type for {}.{}", table_name, child_col).into(),
-                ),
-            )?;
+            get_sql_type_from_global_config(&config, &table_name, &child_col, pool).unwrap();
         let child_sql_param = cast_sql_param_from_text(&child_sql_type);
-        let child_val = context
-            .contents
-            .get(child_col)
-            .and_then(|c| Some(c.value.clone()))
-            .ok_or(Configuration(format!("Can't get '{}' from context", child_col).into()))?;
+        let child_val =
+            context.contents.get(child_col).and_then(|c| Some(c.value.clone())).unwrap();
 
         // In order to check if the current row will cause a dependency cycle, we need to query
         // against all previously validated rows. Since previously validated rows belonging to the
@@ -1656,12 +1442,12 @@ async fn validate_cell_trees(
             Some(parent_val.clone()),
             Some(extra_clause),
             pool,
-        )?;
+        );
         params.append(&mut tree_sql_params);
         let sql = local_sql_syntax(
             &pool,
             &format!(r#"{} SELECT "{}", "{}" FROM "tree""#, tree_sql, child_col, parent_col),
-        )?;
+        );
 
         let mut query = sqlx_query(&sql);
         for param in &params {
@@ -1747,7 +1533,7 @@ async fn validate_cell_unique_constraints(
         .and_then(|t| t.as_object())
         .and_then(|o| o.get(table_name))
         .and_then(|t| t.as_array())
-        .ok_or(Configuration(format!("Could not get primary keys for {}", table_name).into()))?;
+        .unwrap();
     let uniques = config
         .get("constraints")
         .and_then(|c| c.as_object())
@@ -1755,7 +1541,7 @@ async fn validate_cell_unique_constraints(
         .and_then(|t| t.as_object())
         .and_then(|o| o.get(table_name))
         .and_then(|t| t.as_array())
-        .ok_or(Configuration(format!("Could not get unique keys for {}", table_name).into()))?;
+        .unwrap();
     let trees = config
         .get("constraints")
         .and_then(|c| c.as_object())
@@ -1764,7 +1550,7 @@ async fn validate_cell_unique_constraints(
         .and_then(|o| o.get(table_name))
         .and_then(|t| t.as_array())
         .and_then(|a| Some(a.iter().map(|o| o.as_object().and_then(|o| o.get("child")).unwrap())))
-        .ok_or(Configuration(format!("Could not get tree keys for {}", table_name).into()))?
+        .unwrap()
         .collect::<Vec<_>>();
 
     let is_primary = primaries.contains(&SerdeValue::String(column_name.to_string()));
@@ -1790,7 +1576,7 @@ async fn validate_cell_unique_constraints(
                    ) "#,
                 except_table,
                 table_name,
-                row_number.ok_or(Configuration("Row number is None".into()))?
+                row_number.unwrap()
             );
         }
 
@@ -1801,10 +1587,8 @@ async fn validate_cell_unique_constraints(
             query_table = table_name.to_string();
         }
 
-        let sql_type = get_sql_type_from_global_config(&config, &table_name, &column_name, pool)
-            .ok_or(Configuration(
-                format!("Could not get SQL type for {}.{}", table_name, column_name).into(),
-            ))?;
+        let sql_type =
+            get_sql_type_from_global_config(&config, &table_name, &column_name, pool).unwrap();
         let sql_param = cast_sql_param_from_text(&sql_type);
         let sql = local_sql_syntax(
             &pool,
@@ -1812,7 +1596,7 @@ async fn validate_cell_unique_constraints(
                 r#"{} SELECT 1 FROM "{}" WHERE "{}" = {} LIMIT 1"#,
                 with_sql, query_table, column_name, sql_param
             ),
-        )?;
+        );
         let query = sqlx_query(&sql).bind(&cell.value);
 
         let contained_in_prev_results = !prev_results
