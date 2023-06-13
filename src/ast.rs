@@ -37,7 +37,11 @@ impl std::fmt::Debug for Expression {
                 pattern, replace, flags
             ),
             Expression::Function(name, args) => {
-                write!(f, "{{\"function\": {{\"name\": \"{}\", \"args\": {:?}}}}}", name, args)
+                write!(
+                    f,
+                    "{{\"function\": {{\"name\": \"{}\", \"args\": {:?}}}}}",
+                    name, args
+                )
             }
         }
     }

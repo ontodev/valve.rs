@@ -46,7 +46,10 @@ pub async fn validate_row(
     }
 
     // Initialize the result row with the values from the given row:
-    let mut result_row = ResultRow { row_number: row_number, contents: IndexMap::new() };
+    let mut result_row = ResultRow {
+        row_number: row_number,
+        contents: IndexMap::new(),
+    };
     for (column, cell) in row.iter() {
         let result_cell = ResultCell {
             nulltype: cell
@@ -56,10 +59,17 @@ pub async fn validate_row(
             value: match cell.get("value") {
                 Some(SerdeValue::String(s)) => s.to_string(),
                 Some(SerdeValue::Number(n)) => format!("{}", n),
-                _ => panic!("Field 'value' of: {:#?} is neither a number nor a string.", cell),
+                _ => panic!(
+                    "Field 'value' of: {:#?} is neither a number nor a string.",
+                    cell
+                ),
             },
             valid: cell.get("valid").and_then(|v| v.as_bool()).unwrap(),
-            messages: cell.get("messages").and_then(|m| m.as_array()).unwrap().to_vec(),
+            messages: cell
+                .get("messages")
+                .and_then(|m| m.as_array())
+                .unwrap()
+                .to_vec(),
         };
         result_row.contents.insert(column.to_string(), result_cell);
     }
@@ -191,8 +201,9 @@ pub async fn get_matching_values(
         .and_then(|d| d.as_str())
         .unwrap();
 
-    let dt_condition =
-        compiled_datatype_conditions.get(dt_name).and_then(|d| Some(d.parsed.clone()));
+    let dt_condition = compiled_datatype_conditions
+        .get(dt_name)
+        .and_then(|d| Some(d.parsed.clone()));
 
     let mut values = vec![];
     match dt_condition {
@@ -255,8 +266,10 @@ pub async fn get_matching_values(
                                         fcolumn, ftable, fcolumn_text, SQL_PARAM
                                     ),
                                 );
-                                let rows =
-                                    sqlx_query(&sql).bind(&matching_string).fetch_all(pool).await?;
+                                let rows = sqlx_query(&sql)
+                                    .bind(&matching_string)
+                                    .fetch_all(pool)
+                                    .await?;
                                 for row in rows.iter() {
                                     values.push(get_column_value(&row, &fcolumn, &sql_type));
                                 }
@@ -426,7 +439,11 @@ pub async fn validate_under(
             effective_tree = tree_table.to_string();
         }
 
-        let uval = ukey.get("value").and_then(|v| v.as_str()).unwrap().to_string();
+        let uval = ukey
+            .get("value")
+            .and_then(|v| v.as_str())
+            .unwrap()
+            .to_string();
         let (tree_sql, mut tree_params) = with_tree_sql(
             &config,
             tree,
@@ -652,7 +669,9 @@ pub async fn validate_tree_foreign_keys(
             } else {
                 row_number = row.get("row_number");
             }
-            let raw_parent_val = row.try_get_raw(format!(r#"{}"#, parent_col).as_str()).unwrap();
+            let raw_parent_val = row
+                .try_get_raw(format!(r#"{}"#, parent_col).as_str())
+                .unwrap();
             let mut parent_val = String::from("");
             if !raw_parent_val.is_null() {
                 parent_val = get_column_value(&row, &parent_col, &parent_sql_type);
@@ -756,7 +775,10 @@ pub async fn validate_rows_trees(
 
     let mut result_rows = vec![];
     for row in rows {
-        let mut result_row = ResultRow { row_number: None, contents: IndexMap::new() };
+        let mut result_row = ResultRow {
+            row_number: None,
+            contents: IndexMap::new(),
+        };
         for column_name in &column_names {
             let context = row.clone();
             let cell = row.contents.get_mut(column_name).unwrap();
@@ -775,7 +797,9 @@ pub async fn validate_rows_trees(
                 )
                 .await?;
             }
-            result_row.contents.insert(column_name.to_string(), cell.clone());
+            result_row
+                .contents
+                .insert(column_name.to_string(), cell.clone());
         }
         // Note that in this implementation, the result rows are never actually returned, but we
         // still need them because the validate_cell_trees() function needs a list of previous
@@ -808,7 +832,10 @@ pub async fn validate_rows_constraints(
 
     let mut result_rows = vec![];
     for row in rows.iter_mut() {
-        let mut result_row = ResultRow { row_number: None, contents: IndexMap::new() };
+        let mut result_row = ResultRow {
+            row_number: None,
+            contents: IndexMap::new(),
+        };
         for column_name in &column_names {
             let cell = row.contents.get_mut(column_name).unwrap();
             // We don't do any further validation on cells that are legitimately empty, or on cells
@@ -830,7 +857,9 @@ pub async fn validate_rows_constraints(
                 )
                 .await?;
             }
-            result_row.contents.insert(column_name.to_string(), cell.clone());
+            result_row
+                .contents
+                .insert(column_name.to_string(), cell.clone());
         }
         // Note that in this implementation, the result rows are never actually returned, but we
         // still need them because the validate_cell_unique_constraints() function needs a list of
@@ -858,7 +887,10 @@ pub fn validate_rows_intra(
         match row {
             Err(err) => eprintln!("Error while processing row for '{}': {}", table_name, err),
             Ok(row) => {
-                let mut result_row = ResultRow { row_number: None, contents: IndexMap::new() };
+                let mut result_row = ResultRow {
+                    row_number: None,
+                    contents: IndexMap::new(),
+                };
                 for (i, value) in row.iter().enumerate() {
                     let result_cell = ResultCell {
                         nulltype: None,
@@ -931,11 +963,20 @@ fn result_row_to_config_map(incoming: &ResultRow) -> SerdeMap {
     for (column, cell) in incoming.contents.iter() {
         let mut cell_map = SerdeMap::new();
         if let Some(nulltype) = &cell.nulltype {
-            cell_map.insert("nulltype".to_string(), SerdeValue::String(nulltype.to_string()));
+            cell_map.insert(
+                "nulltype".to_string(),
+                SerdeValue::String(nulltype.to_string()),
+            );
         }
-        cell_map.insert("value".to_string(), SerdeValue::String(cell.value.to_string()));
+        cell_map.insert(
+            "value".to_string(),
+            SerdeValue::String(cell.value.to_string()),
+        );
         cell_map.insert("valid".to_string(), SerdeValue::Bool(cell.valid));
-        cell_map.insert("messages".to_string(), SerdeValue::Array(cell.messages.clone()));
+        cell_map.insert(
+            "messages".to_string(),
+            SerdeValue::Array(cell.messages.clone()),
+        );
         outgoing.insert(column.to_string(), SerdeValue::Object(cell_map));
     }
     outgoing
@@ -945,7 +986,11 @@ fn result_row_to_config_map(incoming: &ResultRow) -> SerdeMap {
 fn contains_dt_violation(messages: &Vec<SerdeValue>) -> bool {
     let mut contains_dt_violation = false;
     for m in messages {
-        if m.get("rule").and_then(|r| r.as_str()).unwrap().starts_with("datatype:") {
+        if m.get("rule")
+            .and_then(|r| r.as_str())
+            .unwrap()
+            .starts_with("datatype:")
+        {
             contains_dt_violation = true;
             break;
         }
@@ -987,7 +1032,10 @@ fn select_with_extra_row(
     }
 
     (
-        format!(r#"WITH "{}_ext" AS ({} UNION ALL {})"#, table_name, first_select, second_select),
+        format!(
+            r#"WITH "{}_ext" AS ({} UNION ALL {})"#,
+            table_name, first_select, second_select
+        ),
         params,
     )
 }
@@ -1013,7 +1061,11 @@ fn with_tree_sql(
     if let Some(root) = root {
         let sql_type =
             get_sql_type_from_global_config(&config, table_name, &child_col, pool).unwrap();
-        under_sql = format!(r#"WHERE "{}" = {}"#, child_col, cast_sql_param_from_text(&sql_type));
+        under_sql = format!(
+            r#"WHERE "{}" = {}"#,
+            child_col,
+            cast_sql_param_from_text(&sql_type)
+        );
         params.push(root.clone());
     } else {
         under_sql = String::new();
@@ -1151,7 +1203,10 @@ fn validate_cell_datatype(
             while !parent_datatypes.is_empty() {
                 let datatype = parent_datatypes.pop().unwrap();
                 let dt_name = datatype.get("datatype").and_then(|d| d.as_str()).unwrap();
-                let dt_description = datatype.get("description").and_then(|d| d.as_str()).unwrap();
+                let dt_description = datatype
+                    .get("description")
+                    .and_then(|d| d.as_str())
+                    .unwrap();
                 let dt_condition = &compiled_datatype_conditions.get(dt_name).unwrap().compiled;
                 if !dt_condition(&cell.value) {
                     let message = json!({
@@ -1248,7 +1303,14 @@ fn validate_cell_rules(
         if check_condition("when", cell, rule, table_name, column_name, compiled_rules) {
             let then_column = rule.get("then column").and_then(|c| c.as_str()).unwrap();
             let then_cell = context.contents.get(then_column).unwrap();
-            if !check_condition("then", then_cell, rule, table_name, column_name, compiled_rules) {
+            if !check_condition(
+                "then",
+                then_cell,
+                rule,
+                table_name,
+                column_name,
+                compiled_rules,
+            ) {
                 cell.valid = false;
                 cell.messages.push(json!({
                     "rule": format!("rule:{}-{}", column_name, rule_number),
@@ -1295,7 +1357,10 @@ async fn validate_cell_foreign_constraints(
         let sql_param = cast_sql_param_from_text(&sql_type);
         let fsql = local_sql_syntax(
             &pool,
-            &format!(r#"SELECT 1 FROM "{}" WHERE "{}" = {} LIMIT 1"#, ftable, fcolumn, sql_param),
+            &format!(
+                r#"SELECT 1 FROM "{}" WHERE "{}" = {} LIMIT 1"#,
+                ftable, fcolumn, sql_param
+            ),
         );
         let frows = sqlx_query(&fsql).bind(&cell.value).fetch_all(pool).await?;
 
@@ -1313,7 +1378,10 @@ async fn validate_cell_foreign_constraints(
                     ftable, fcolumn, sql_param
                 ),
             );
-            let frows = sqlx_query(&fsql).bind(cell.value.clone()).fetch_all(pool).await?;
+            let frows = sqlx_query(&fsql)
+                .bind(cell.value.clone())
+                .fetch_all(pool)
+                .await?;
 
             if frows.is_empty() {
                 message.as_object_mut().and_then(|m| {
@@ -1392,8 +1460,11 @@ async fn validate_cell_trees(
         let child_sql_type =
             get_sql_type_from_global_config(&config, &table_name, &child_col, pool).unwrap();
         let child_sql_param = cast_sql_param_from_text(&child_sql_type);
-        let child_val =
-            context.contents.get(child_col).and_then(|c| Some(c.value.clone())).unwrap();
+        let child_val = context
+            .contents
+            .get(child_col)
+            .and_then(|c| Some(c.value.clone()))
+            .unwrap();
 
         // In order to check if the current row will cause a dependency cycle, we need to query
         // against all previously validated rows. Since previously validated rows belonging to the
@@ -1446,7 +1517,10 @@ async fn validate_cell_trees(
         params.append(&mut tree_sql_params);
         let sql = local_sql_syntax(
             &pool,
-            &format!(r#"{} SELECT "{}", "{}" FROM "tree""#, tree_sql, child_col, parent_col),
+            &format!(
+                r#"{} SELECT "{}", "{}" FROM "tree""#,
+                tree_sql, child_col, parent_col
+            ),
         );
 
         let mut query = sqlx_query(&sql);
@@ -1459,7 +1533,9 @@ async fn validate_cell_trees(
         // the new row would result in a cycle.
         let cycle_detected = {
             let cycle_row = rows.iter().find(|row| {
-                let raw_foo = row.try_get_raw(format!(r#"{}"#, parent_col).as_str()).unwrap();
+                let raw_foo = row
+                    .try_get_raw(format!(r#"{}"#, parent_col).as_str())
+                    .unwrap();
                 if raw_foo.is_null() {
                     false
                 } else {
@@ -1484,8 +1560,10 @@ async fn validate_cell_trees(
 
             let mut cycle_msg = vec![];
             for cycle in &cycle_legs {
-                cycle_msg
-                    .push(format!("({}: {}, {}: {})", child_col, cycle.0, parent_col, cycle.1));
+                cycle_msg.push(format!(
+                    "({}: {}, {}: {})",
+                    child_col, cycle.0, parent_col, cycle.1
+                ));
             }
             let cycle_msg = cycle_msg.join(", ");
             cell.valid = false;
@@ -1549,7 +1627,12 @@ async fn validate_cell_unique_constraints(
         .and_then(|t| t.as_object())
         .and_then(|o| o.get(table_name))
         .and_then(|t| t.as_array())
-        .and_then(|a| Some(a.iter().map(|o| o.as_object().and_then(|o| o.get("child")).unwrap())))
+        .and_then(|a| {
+            Some(
+                a.iter()
+                    .map(|o| o.as_object().and_then(|o| o.get("child")).unwrap()),
+            )
+        })
         .unwrap()
         .collect::<Vec<_>>();
 
