@@ -133,7 +133,11 @@ pub struct ColumnRule {
 // See the comment about this in ast.rs.
 impl std::fmt::Debug for ColumnRule {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{{\"column_rule\": {{\"when\": {:?}, \"then\": {:?}}}}}", &self.when, &self.then)
+        write!(
+            f,
+            "{{\"column_rule\": {{\"when\": {:?}, \"then\": {:?}}}}}",
+            &self.when, &self.then
+        )
     }
 }
 
@@ -203,11 +207,16 @@ pub fn read_config_files(
             if special_table_types.contains_key(row_type) {
                 match specials_config.get(row_type) {
                     Some(SerdeValue::Null) => (),
-                    _ => panic!("Multiple tables with type '{}' declared in '{}'", row_type, path),
+                    _ => panic!(
+                        "Multiple tables with type '{}' declared in '{}'",
+                        row_type, path
+                    ),
                 }
                 let row_table = row.get("table").and_then(|t| t.as_str()).unwrap();
-                specials_config
-                    .insert(row_type.to_string(), SerdeValue::String(row_table.to_string()));
+                specials_config.insert(
+                    row_type.to_string(),
+                    SerdeValue::String(row_table.to_string()),
+                );
             } else {
                 panic!("Unrecognized table type '{}' in '{}'", row_type, path);
             }
@@ -240,7 +249,10 @@ pub fn read_config_files(
         path: &str,
     ) -> Vec<SerdeMap> {
         if path.to_lowercase().ends_with(".tsv") {
-            let table_name = specials_config.get(table_type).and_then(|d| d.as_str()).unwrap();
+            let table_name = specials_config
+                .get(table_type)
+                .and_then(|d| d.as_str())
+                .unwrap();
             let path = String::from(
                 tables_config
                     .get(table_name)
@@ -262,7 +274,10 @@ pub fn read_config_files(
                 }
             }
             if db_table == None {
-                panic!("Could not determine special table name for type '{}'.", table_type);
+                panic!(
+                    "Could not determine special table name for type '{}'.",
+                    table_type
+                );
             }
             let db_table = db_table.unwrap();
             read_db_table_into_vector(path, db_table)
@@ -273,7 +288,13 @@ pub fn read_config_files(
     let mut datatypes_config = SerdeMap::new();
     let rows = get_special_config("datatype", &specials_config, &tables_config, path);
     for mut row in rows {
-        for column in vec!["datatype", "parent", "condition", "SQLite type", "PostgreSQL type"] {
+        for column in vec![
+            "datatype",
+            "parent",
+            "condition",
+            "SQLite type",
+            "PostgreSQL type",
+        ] {
             if !row.contains_key(column) || row.get(column) == None {
                 panic!("Missing required column '{}' reading '{}'", column, path);
             }
@@ -383,8 +404,10 @@ pub fn read_config_files(
                 rules_config.insert(String::from(row_table), SerdeValue::Object(SerdeMap::new()));
             }
 
-            let table_rule_config =
-                rules_config.get_mut(row_table).and_then(|t| t.as_object_mut()).unwrap();
+            let table_rule_config = rules_config
+                .get_mut(row_table)
+                .and_then(|t| t.as_object_mut())
+                .unwrap();
             if !table_rule_config.contains_key(row_when_column) {
                 table_rule_config.insert(String::from(row_when_column), SerdeValue::Array(vec![]));
             }
@@ -467,7 +490,12 @@ pub fn read_config_files(
     );
 
     // Finally, return all the configs:
-    (specials_config, tables_config, datatypes_config, rules_config)
+    (
+        specials_config,
+        tables_config,
+        datatypes_config,
+        rules_config,
+    )
 }
 
 /// Given the global configuration map and a parser, compile all of the datatype conditions,
@@ -532,7 +560,10 @@ pub fn get_compiled_rule_conditions(
                         .and_then(|c| Some(c.contains_key(row_column)))
                         .unwrap()
                     {
-                        panic!("Undefined column '{}.{}' in rules table", rules_table, row_column);
+                        panic!(
+                            "Undefined column '{}.{}' in rules table",
+                            rules_table, row_column
+                        );
                     }
                 }
                 let column_rule_key = column_rule_key.unwrap();
@@ -565,7 +596,10 @@ pub fn get_compiled_rule_conditions(
                         table_rules.insert(column_rule_key.to_string(), vec![]);
                     }
                     let column_rules = table_rules.get_mut(&column_rule_key).unwrap();
-                    column_rules.push(ColumnRule { when: when_compiled, then: then_compiled });
+                    column_rules.push(ColumnRule {
+                        when: when_compiled,
+                        then: then_compiled,
+                    });
                 }
             }
         }
@@ -584,7 +618,10 @@ pub fn get_parsed_structure_conditions(
     let mut parsed_structure_conditions = HashMap::new();
     let tables_config = config.get("table").and_then(|t| t.as_object()).unwrap();
     for (table, table_config) in tables_config.iter() {
-        let columns_config = table_config.get("column").and_then(|c| c.as_object()).unwrap();
+        let columns_config = table_config
+            .get("column")
+            .and_then(|c| c.as_object())
+            .unwrap();
         for (_, row) in columns_config.iter() {
             let row_table = table;
             let structure = row.get("structure").and_then(|s| s.as_str());
@@ -646,8 +683,10 @@ pub async fn configure_db(
     let mut setup_statements = HashMap::new();
     let table_names: Vec<String> = tables_config.keys().cloned().collect();
     for table_name in table_names {
-        let optional_path =
-            tables_config.get(&table_name).and_then(|r| r.get("path")).and_then(|p| p.as_str());
+        let optional_path = tables_config
+            .get(&table_name)
+            .and_then(|r| r.get("path"))
+            .and_then(|p| p.as_str());
 
         let path;
         match optional_path {
@@ -673,11 +712,12 @@ pub async fn configure_db(
 
         // Get the actual columns from the data itself. Note that we set has_headers to false
         // (even though the files have header rows) in order to explicitly read the header row.
-        let mut rdr = csv::ReaderBuilder::new().has_headers(false).delimiter(b'\t').from_reader(
-            File::open(path.clone()).unwrap_or_else(|err| {
+        let mut rdr = csv::ReaderBuilder::new()
+            .has_headers(false)
+            .delimiter(b'\t')
+            .from_reader(File::open(path.clone()).unwrap_or_else(|err| {
                 panic!("Unable to open '{}': {}", path.clone(), err);
-            }),
-        );
+            }));
         let mut iter = rdr.records();
         let actual_columns;
         if let Some(result) = iter.next() {
@@ -694,10 +734,22 @@ pub async fn configure_db(
             let column;
             if !defined_columns.contains(&column_name.to_string()) {
                 let mut cmap = SerdeMap::new();
-                cmap.insert(String::from("table"), SerdeValue::String(table_name.to_string()));
-                cmap.insert(String::from("column"), SerdeValue::String(column_name.to_string()));
-                cmap.insert(String::from("nulltype"), SerdeValue::String(String::from("empty")));
-                cmap.insert(String::from("datatype"), SerdeValue::String(String::from("text")));
+                cmap.insert(
+                    String::from("table"),
+                    SerdeValue::String(table_name.to_string()),
+                );
+                cmap.insert(
+                    String::from("column"),
+                    SerdeValue::String(column_name.to_string()),
+                );
+                cmap.insert(
+                    String::from("nulltype"),
+                    SerdeValue::String(String::from("empty")),
+                );
+                cmap.insert(
+                    String::from("datatype"),
+                    SerdeValue::String(String::from("text")),
+                );
                 column = SerdeValue::Object(cmap);
             } else {
                 column = tables_config
@@ -712,10 +764,16 @@ pub async fn configure_db(
             all_columns.insert(column_name.to_string(), column);
         }
 
-        tables_config.get_mut(&table_name).and_then(|t| t.as_object_mut()).and_then(|o| {
-            o.insert(String::from("column"), SerdeValue::Object(all_columns));
-            o.insert(String::from("column_order"), SerdeValue::Array(column_order))
-        });
+        tables_config
+            .get_mut(&table_name)
+            .and_then(|t| t.as_object_mut())
+            .and_then(|o| {
+                o.insert(String::from("column"), SerdeValue::Object(all_columns));
+                o.insert(
+                    String::from("column_order"),
+                    SerdeValue::Array(column_order),
+                )
+            });
 
         // Create the table and its corresponding conflict table:
         let mut table_statements = vec![];
@@ -921,27 +979,55 @@ pub async fn valve(
         connection_options = AnyConnectOptions::from_str(connection_string.as_str()).unwrap();
     }
 
-    let pool = AnyPoolOptions::new().max_connections(5).connect_with(connection_options).await?;
+    let pool = AnyPoolOptions::new()
+        .max_connections(5)
+        .connect_with(connection_options)
+        .await?;
     if *command == ValveCommand::Load && pool.any_kind() == AnyKind::Sqlite {
-        sqlx_query("PRAGMA foreign_keys = ON").execute(&pool).await?;
+        sqlx_query("PRAGMA foreign_keys = ON")
+            .execute(&pool)
+            .await?;
     }
 
-    let (sorted_table_list, constraints_config) =
-        configure_db(&mut tables_config, &mut datatypes_config, &pool, &parser, verbose, command)
-            .await?;
+    let (sorted_table_list, constraints_config) = configure_db(
+        &mut tables_config,
+        &mut datatypes_config,
+        &pool,
+        &parser,
+        verbose,
+        command,
+    )
+    .await?;
 
     let mut config = SerdeMap::new();
-    config.insert(String::from("special"), SerdeValue::Object(specials_config.clone()));
-    config.insert(String::from("table"), SerdeValue::Object(tables_config.clone()));
-    config.insert(String::from("datatype"), SerdeValue::Object(datatypes_config.clone()));
-    config.insert(String::from("rule"), SerdeValue::Object(rules_config.clone()));
-    config.insert(String::from("constraints"), SerdeValue::Object(constraints_config.clone()));
+    config.insert(
+        String::from("special"),
+        SerdeValue::Object(specials_config.clone()),
+    );
+    config.insert(
+        String::from("table"),
+        SerdeValue::Object(tables_config.clone()),
+    );
+    config.insert(
+        String::from("datatype"),
+        SerdeValue::Object(datatypes_config.clone()),
+    );
+    config.insert(
+        String::from("rule"),
+        SerdeValue::Object(rules_config.clone()),
+    );
+    config.insert(
+        String::from("constraints"),
+        SerdeValue::Object(constraints_config.clone()),
+    );
     let mut sorted_table_serdevalue_list: Vec<SerdeValue> = vec![];
     for table in &sorted_table_list {
         sorted_table_serdevalue_list.push(SerdeValue::String(table.to_string()));
     }
-    config
-        .insert(String::from("sorted_table_list"), SerdeValue::Array(sorted_table_serdevalue_list));
+    config.insert(
+        String::from("sorted_table_list"),
+        SerdeValue::Array(sorted_table_serdevalue_list),
+    );
 
     let compiled_datatype_conditions = get_compiled_datatype_conditions(&config, &parser);
     let compiled_rule_conditions =
@@ -949,10 +1035,20 @@ pub async fn valve(
 
     if *command == ValveCommand::Load {
         if verbose {
-            eprintln!("{} - Processing {} tables.", Utc::now(), sorted_table_list.len());
+            eprintln!(
+                "{} - Processing {} tables.",
+                Utc::now(),
+                sorted_table_list.len()
+            );
         }
-        load_db(&config, &pool, &compiled_datatype_conditions, &compiled_rule_conditions, verbose)
-            .await?;
+        load_db(
+            &config,
+            &pool,
+            &compiled_datatype_conditions,
+            &compiled_rule_conditions,
+            verbose,
+        )
+        .await?;
     }
 
     let config = SerdeValue::Object(config);
@@ -968,7 +1064,10 @@ pub async fn insert_new_row(
     row: &SerdeMap,
 ) -> Result<u32, sqlx::Error> {
     // The new row number to insert is the current highest row number + 1.
-    let sql = format!(r#"SELECT MAX("row_number") AS "row_number" FROM "{}_view""#, table_name);
+    let sql = format!(
+        r#"SELECT MAX("row_number") AS "row_number" FROM "{}_view""#,
+        table_name
+    );
     let query = sqlx_query(&sql);
     let result_row = query.fetch_one(pool).await?;
     let result = result_row.try_get_raw("row_number").unwrap();
@@ -1085,7 +1184,11 @@ pub async fn update_row(
                 pool,
             )
             .unwrap();
-            assignments.push(format!(r#""{}" = {}"#, column, cast_sql_param_from_text(&sql_type)));
+            assignments.push(format!(
+                r#""{}" = {}"#,
+                column,
+                cast_sql_param_from_text(&sql_type)
+            ));
             params.push(String::from(cell_value));
         } else {
             assignments.push(format!(r#""{}" = NULL"#, column));
@@ -1150,11 +1253,12 @@ pub async fn update_row(
 /// Note: Use this function to read "small" TSVs only. In particular, use this for the special
 /// configuration tables.
 fn read_tsv_into_vector(path: &str) -> Vec<SerdeMap> {
-    let mut rdr = csv::ReaderBuilder::new().delimiter(b'\t').from_reader(
-        File::open(path).unwrap_or_else(|err| {
-            panic!("Unable to open '{}': {}", path, err);
-        }),
-    );
+    let mut rdr =
+        csv::ReaderBuilder::new()
+            .delimiter(b'\t')
+            .from_reader(File::open(path).unwrap_or_else(|err| {
+                panic!("Unable to open '{}': {}", path, err);
+            }));
 
     let rows: Vec<_> = rdr
         .deserialize()
@@ -1203,8 +1307,12 @@ fn read_db_table_into_vector(database: &str, config_table: &str) -> Vec<SerdeMap
         connection_options = AnyConnectOptions::from_str(connection_string.as_str()).unwrap();
     }
 
-    let pool = block_on(AnyPoolOptions::new().max_connections(5).connect_with(connection_options))
-        .unwrap();
+    let pool = block_on(
+        AnyPoolOptions::new()
+            .max_connections(5)
+            .connect_with(connection_options),
+    )
+    .unwrap();
 
     let sql = format!("SELECT * FROM \"{}\"", config_table);
     let rows = block_on(sqlx_query(&sql).fetch_all(&pool)).unwrap();
@@ -1356,8 +1464,9 @@ fn compile_condition(
                 Expression::Label(value)
                     if compiled_datatype_conditions.contains_key(&value.to_string()) =>
                 {
-                    let compiled_datatype_condition =
-                        compiled_datatype_conditions.get(&value.to_string()).unwrap();
+                    let compiled_datatype_condition = compiled_datatype_conditions
+                        .get(&value.to_string())
+                        .unwrap();
                     return CompiledCondition {
                         original: value.to_string(),
                         parsed: compiled_datatype_condition.parsed.clone(),
@@ -1391,8 +1500,11 @@ fn get_sql_type(dt_config: &SerdeMap, datatype: &String, pool: &AnyPool) -> Opti
         return Some(sql_type.as_str().and_then(|s| Some(s.to_string())).unwrap());
     }
 
-    let parent_datatype =
-        dt_config.get(datatype).and_then(|d| d.get("parent")).and_then(|p| p.as_str()).unwrap();
+    let parent_datatype = dt_config
+        .get(datatype)
+        .and_then(|d| d.get("parent"))
+        .and_then(|p| p.as_str())
+        .unwrap();
 
     return get_sql_type(dt_config, &parent_datatype.to_string(), pool);
 }
@@ -1405,7 +1517,10 @@ fn get_sql_type_from_global_config(
     column: &str,
     pool: &AnyPool,
 ) -> Option<String> {
-    let dt_config = global_config.get("datatype").and_then(|d| d.as_object()).unwrap();
+    let dt_config = global_config
+        .get("datatype")
+        .and_then(|d| d.as_object())
+        .unwrap();
     let normal_table_name;
     if let Some(s) = table.strip_suffix("_conflict") {
         normal_table_name = String::from(s);
@@ -1520,14 +1635,20 @@ fn verify_table_deps_and_sort(table_list: &Vec<String>, constraints: &SerdeMap) 
                     for mut way in ways_to_problem_node {
                         let mut cycle = vec![problem_node];
                         cycle.append(&mut way);
-                        let cycle = cycle.iter().map(|&item| item.to_string()).collect::<Vec<_>>();
+                        let cycle = cycle
+                            .iter()
+                            .map(|&item| item.to_string())
+                            .collect::<Vec<_>>();
                         cycles.push(cycle);
                     }
                 }
                 Err(cycles)
             }
             Ok(sorted) => {
-                let mut sorted = sorted.iter().map(|&item| item.to_string()).collect::<Vec<_>>();
+                let mut sorted = sorted
+                    .iter()
+                    .map(|&item| item.to_string())
+                    .collect::<Vec<_>>();
                 sorted.reverse();
                 Ok(sorted)
             }
@@ -1578,19 +1699,31 @@ fn verify_table_deps_and_sort(table_list: &Vec<String>, constraints: &SerdeMap) 
         };
     }
 
-    let foreign_keys = constraints.get("foreign").and_then(|f| f.as_object()).unwrap();
-    let under_keys = constraints.get("under").and_then(|u| u.as_object()).unwrap();
+    let foreign_keys = constraints
+        .get("foreign")
+        .and_then(|f| f.as_object())
+        .unwrap();
+    let under_keys = constraints
+        .get("under")
+        .and_then(|u| u.as_object())
+        .unwrap();
     let mut dependency_graph = DiGraphMap::<&str, ()>::new();
     for table_name in table_list {
         let t_index = dependency_graph.add_node(table_name);
-        let fkeys = foreign_keys.get(table_name).and_then(|f| f.as_array()).unwrap();
+        let fkeys = foreign_keys
+            .get(table_name)
+            .and_then(|f| f.as_array())
+            .unwrap();
         for fkey in fkeys {
             let ftable = fkey.get("ftable").and_then(|f| f.as_str()).unwrap();
             let f_index = dependency_graph.add_node(ftable);
             dependency_graph.add_edge(t_index, f_index, ());
         }
 
-        let ukeys = under_keys.get(table_name).and_then(|u| u.as_array()).unwrap();
+        let ukeys = under_keys
+            .get(table_name)
+            .and_then(|u| u.as_array())
+            .unwrap();
         for ukey in ukeys {
             let ttable = ukey.get("ttable").and_then(|t| t.as_str()).unwrap();
             let tcolumn = ukey.get("tcolumn").and_then(|t| t.as_str()).unwrap();
@@ -1656,10 +1789,7 @@ fn verify_table_deps_and_sort(table_list: &Vec<String>, constraints: &SerdeMap) 
                         message.push_str(
                             format!(
                                 "{}.{} depends on {}.{}",
-                                table,
-                                column,
-                                ref_table,
-                                ref_column,
+                                table, column, ref_table, ref_column,
                             )
                             .as_str(),
                         );
@@ -1729,7 +1859,10 @@ fn create_table_statement(
 
     let mut colvals: Vec<SerdeMap> = vec![];
     for column_name in &column_names {
-        let column = columns.get(column_name).and_then(|c| c.as_object()).unwrap();
+        let column = columns
+            .get(column_name)
+            .and_then(|c| c.as_object())
+            .unwrap();
         colvals.push(column.clone());
     }
 
@@ -1927,7 +2060,10 @@ fn create_table_statement(
         create_lines.push(line);
     }
 
-    let foreign_keys = table_constraints.get("foreign").and_then(|v| v.as_array()).unwrap();
+    let foreign_keys = table_constraints
+        .get("foreign")
+        .and_then(|v| v.as_array())
+        .unwrap();
     let num_fkeys = foreign_keys.len();
     for (i, fkey) in foreign_keys.iter().enumerate() {
         create_lines.push(format!(
@@ -1945,10 +2081,19 @@ fn create_table_statement(
 
     // Loop through the tree constraints and if any of their associated child columns do not already
     // have an associated unique or primary index, create one implicitly here:
-    let tree_constraints = table_constraints.get("tree").and_then(|v| v.as_array()).unwrap();
+    let tree_constraints = table_constraints
+        .get("tree")
+        .and_then(|v| v.as_array())
+        .unwrap();
     for tree in tree_constraints {
-        let unique_keys = table_constraints.get("unique").and_then(|v| v.as_array()).unwrap();
-        let primary_keys = table_constraints.get("primary").and_then(|v| v.as_array()).unwrap();
+        let unique_keys = table_constraints
+            .get("unique")
+            .and_then(|v| v.as_array())
+            .unwrap();
+        let primary_keys = table_constraints
+            .get("primary")
+            .and_then(|v| v.as_array())
+            .unwrap();
         let tree_child = tree.get("child").and_then(|c| c.as_str()).unwrap();
         if !unique_keys.contains(&SerdeValue::String(tree_child.to_string()))
             && !primary_keys.contains(&SerdeValue::String(tree_child.to_string()))
@@ -1995,7 +2140,10 @@ fn add_message_counts(messages: &Vec<SerdeValue>, messages_stats: &mut HashMap<S
 /// to the most specific. This function will panic if circular dependencies are encountered.
 fn get_sorted_datatypes(global_config: &SerdeMap) -> Vec<&str> {
     let mut graph = DiGraphMap::<&str, ()>::new();
-    let dt_config = global_config.get("datatype").and_then(|d| d.as_object()).unwrap();
+    let dt_config = global_config
+        .get("datatype")
+        .and_then(|d| d.as_object())
+        .unwrap();
     for (dt_name, dt_obj) in dt_config.iter() {
         let d_index = graph.add_node(dt_name);
         if let Some(parent) = dt_obj.get("parent").and_then(|p| p.as_str()) {
@@ -2015,11 +2163,17 @@ fn get_sorted_datatypes(global_config: &SerdeMap) -> Vec<&str> {
                 for mut way in ways_to_problem_node {
                     let mut cycle = vec![problem_node];
                     cycle.append(&mut way);
-                    let cycle = cycle.iter().map(|&item| item.to_string()).collect::<Vec<_>>();
+                    let cycle = cycle
+                        .iter()
+                        .map(|&item| item.to_string())
+                        .collect::<Vec<_>>();
                     cycles.push(cycle);
                 }
             }
-            panic!("Defined datatypes contain circular dependencies: {:?}", cycles);
+            panic!(
+                "Defined datatypes contain circular dependencies: {:?}",
+                cycles
+            );
         }
         Ok(mut sorted) => {
             sorted.reverse();
@@ -2093,7 +2247,10 @@ async fn make_inserts(
     verbose: bool,
     pool: &AnyPool,
 ) -> Result<
-    ((String, Vec<String>, String, Vec<String>), (String, Vec<String>, String, Vec<String>)),
+    (
+        (String, Vec<String>, String, Vec<String>),
+        (String, Vec<String>, String, Vec<String>),
+    ),
     sqlx::Error,
 > {
     let conflict_columns = {
@@ -2196,13 +2353,25 @@ async fn make_inserts(
                         message_params.push(column.clone());
                         message_params.push(cell.value.clone());
                         message_params.push(
-                            message.get("level").and_then(|s| s.as_str()).unwrap().to_string(),
+                            message
+                                .get("level")
+                                .and_then(|s| s.as_str())
+                                .unwrap()
+                                .to_string(),
                         );
                         message_params.push(
-                            message.get("rule").and_then(|s| s.as_str()).unwrap().to_string(),
+                            message
+                                .get("rule")
+                                .and_then(|s| s.as_str())
+                                .unwrap()
+                                .to_string(),
                         );
                         message_params.push(
-                            message.get("message").and_then(|s| s.as_str()).unwrap().to_string(),
+                            message
+                                .get("message")
+                                .and_then(|s| s.as_str())
+                                .unwrap()
+                                .to_string(),
                         );
                         let line = message_values.join(", ");
                         let line = format!("({})", line);
@@ -2307,7 +2476,12 @@ async fn make_inserts(
 
     Ok((
         (main_sql, main_params, main_message_sql, main_message_params),
-        (conflict_sql, conflict_params, conflict_message_sql, conflict_message_params),
+        (
+            conflict_sql,
+            conflict_params,
+            conflict_message_sql,
+            conflict_message_params,
+        ),
     ))
 }
 
@@ -2407,8 +2581,16 @@ async fn validate_rows_inter_and_insert(
             let (
                 (main_sql, main_params, main_message_sql, main_message_params),
                 (conflict_sql, conflict_params, conflict_message_sql, conflict_message_params),
-            ) = make_inserts(config, table_name, rows, chunk_number, messages_stats, verbose, pool)
-                .await?;
+            ) = make_inserts(
+                config,
+                table_name,
+                rows,
+                chunk_number,
+                messages_stats,
+                verbose,
+                pool,
+            )
+            .await?;
 
             let main_sql = local_sql_syntax(&pool, &main_sql);
             let mut main_query = sqlx_query(&main_sql);
@@ -2552,7 +2734,11 @@ async fn load_db(
     verbose: bool,
 ) -> Result<(), sqlx::Error> {
     let mut table_list = vec![];
-    for table in config.get("sorted_table_list").and_then(|l| l.as_array()).unwrap() {
+    for table in config
+        .get("sorted_table_list")
+        .and_then(|l| l.as_array())
+        .unwrap()
+    {
         table_list.push(table.as_str().and_then(|s| Some(s.to_string())).unwrap());
     }
     let table_list = table_list; // Change the table_list to read only after populating it.
@@ -2581,11 +2767,12 @@ async fn load_db(
                 .and_then(|p| p.as_str())
                 .unwrap(),
         );
-        let mut rdr = csv::ReaderBuilder::new().has_headers(false).delimiter(b'\t').from_reader(
-            File::open(path.clone()).unwrap_or_else(|err| {
+        let mut rdr = csv::ReaderBuilder::new()
+            .has_headers(false)
+            .delimiter(b'\t')
+            .from_reader(File::open(path.clone()).unwrap_or_else(|err| {
                 panic!("Unable to open '{}': {}", path.clone(), err);
-            }),
-        );
+            }));
 
         // Extract the headers, which we will need later:
         let mut records = rdr.records();
@@ -2598,7 +2785,10 @@ async fn load_db(
 
         for header in headers.iter() {
             if header.trim().is_empty() {
-                panic!("One or more of the header fields is empty for table '{}'", table_name);
+                panic!(
+                    "One or more of the header fields is empty for table '{}'",
+                    table_name
+                );
             }
         }
 

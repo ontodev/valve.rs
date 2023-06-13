@@ -40,9 +40,14 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         connection_options = AnyConnectOptions::from_str(connection_string.as_str()).unwrap();
     }
 
-    let pool = AnyPoolOptions::new().max_connections(5).connect_with(connection_options).await?;
+    let pool = AnyPoolOptions::new()
+        .max_connections(5)
+        .connect_with(connection_options)
+        .await?;
     if pool.any_kind() == AnyKind::Sqlite {
-        sqlx_query("PRAGMA foreign_keys = ON").execute(&pool).await?;
+        sqlx_query("PRAGMA foreign_keys = ON")
+            .execute(&pool)
+            .await?;
     }
 
     let parser = StartParser::new();
