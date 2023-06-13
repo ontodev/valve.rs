@@ -104,9 +104,14 @@ async fn main() -> Result<(), sqlx::Error> {
     if api_test {
         run_api_tests(&source, &destination).await?;
     } else if dump_config {
-        let config =
-            valve(&source, &String::from(":memory:"), &ValveCommand::Config, false, &config_table)
-                .await?;
+        let config = valve(
+            &source,
+            &String::from(":memory:"),
+            &ValveCommand::Config,
+            false,
+            &config_table,
+        )
+        .await?;
         let mut config: SerdeValue = serde_json::from_str(config.as_str()).unwrap();
         let config = config.as_object_mut().unwrap();
         let parser = StartParser::new();
@@ -131,9 +136,23 @@ async fn main() -> Result<(), sqlx::Error> {
         let config = serde_json::to_string(config).unwrap();
         println!("{}", config);
     } else if create_only {
-        valve(&source, &destination, &ValveCommand::Create, verbose, &config_table).await?;
+        valve(
+            &source,
+            &destination,
+            &ValveCommand::Create,
+            verbose,
+            &config_table,
+        )
+        .await?;
     } else {
-        valve(&source, &destination, &ValveCommand::Load, verbose, &config_table).await?;
+        valve(
+            &source,
+            &destination,
+            &ValveCommand::Load,
+            verbose,
+            &config_table,
+        )
+        .await?;
     }
 
     Ok(())
