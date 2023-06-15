@@ -325,7 +325,7 @@ pub fn read_config_files(
     // Load column table
     let rows = get_special_config("column", &specials_config, &tables_config, path);
     for mut row in rows {
-        for column in vec!["table", "column", "nulltype", "datatype"] {
+        for column in vec!["table", "column", "label", "nulltype", "datatype"] {
             if !row.contains_key(column) || row.get(column) == None {
                 panic!("Missing required column '{}' reading '{}'", column, path);
             }
