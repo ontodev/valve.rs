@@ -5,8 +5,9 @@ table	type		empty	table_type		type of this table, used for tables with special m
 table	description		empty	description		a description of this table
 column	table			table_name	from(table.table)	the table that this column belongs to
 column	column			column_name		the name of this column
-column	datatype			datatype_name	from(datatype.datatype)	the datatype for this column
+column	label		empty	label		the human-readable label for this column
 column	nulltype		empty	datatype_name	from(datatype.datatype)	the datatype for NULL values in this column
+column	datatype			datatype_name	from(datatype.datatype)	the datatype for this column
 column	structure		empty	trimmed_line		schema information for this column
 column	description		empty	description		a description of this column
 datatype	datatype			datatype_name	primary	the name of this datatype
