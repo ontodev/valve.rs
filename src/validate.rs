@@ -1186,7 +1186,10 @@ fn validate_cell_datatype(
         .and_then(|d| d.as_object())
         .and_then(|o| o.get(primary_dt_name))
         .unwrap();
-    let primary_dt_description = primary_datatype.get("description").unwrap();
+    let primary_dt_description = primary_datatype
+        .get("description")
+        .and_then(|d| d.as_str())
+        .unwrap();
     if let Some(primary_dt_condition_func) = compiled_datatype_conditions.get(primary_dt_name) {
         let primary_dt_condition_func = &primary_dt_condition_func.compiled;
         if !primary_dt_condition_func(&cell.value) {
@@ -1209,23 +1212,34 @@ fn validate_cell_datatype(
                     .unwrap();
                 let dt_condition = &compiled_datatype_conditions.get(dt_name).unwrap().compiled;
                 if !dt_condition(&cell.value) {
-                    let message = json!({
+                    let message = if dt_description == "" {
+                        format!("{} should be of datatype `{}'", column_name, dt_name)
+                    } else {
+                        format!("{} should be {}", column_name, dt_description)
+                    };
+                    let message_info = json!({
                         "rule": format!("datatype:{}", dt_name),
                         "level": "error",
-                        "message": format!("{} should be {}", column_name, dt_description)
+                        "message": message,
                     });
-                    cell.messages.push(message);
+                    cell.messages.push(message_info);
                 }
             }
-            if primary_dt_description != "" {
-                let primary_dt_description = primary_dt_description.as_str().unwrap();
-                let message = json!({
-                    "rule": format!("datatype:{}", primary_dt_name),
-                    "level": "error",
-                    "message": format!("{} should be {}", column_name, primary_dt_description)
-                });
-                cell.messages.push(message);
-            }
+
+            let message = if primary_dt_description == "" {
+                format!(
+                    "{} should be of datatype `{}'",
+                    column_name, primary_dt_name
+                )
+            } else {
+                format!("{} should be {}", column_name, primary_dt_description)
+            };
+            let message_info = json!({
+                "rule": format!("datatype:{}", primary_dt_name),
+                "level": "error",
+                "message": message,
+            });
+            cell.messages.push(message_info);
         }
     }
 }

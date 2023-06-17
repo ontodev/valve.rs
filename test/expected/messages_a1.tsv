@@ -14,6 +14,7 @@ table2	C4	error	under:not-under	Value 'g' of column xyzzy is not under 'd'	g
 table2	C5	error	under:not-under	Value 'h' of column xyzzy is not under 'd'	h
 table2	C7	error	under:not-in-tree	Value z of column xyzzy is not in table2.child	z
 table2	A9	error	key:foreign	Value i of column child exists only in table4_conflict.other_foreign_column	i
+table3	C1	error	datatype:label	label should be of datatype `label'	   mobecular entity
 table3	C1	error	datatype:trimmed_line	label should be a line of text that does not begin or end with whitespace	   mobecular entity
 table3	A1	error	key:foreign	Value MOB of column source is not in table1.prefix	MOB
 table3	A2	error	key:foreign	Value ZOB of column source is not in table1.prefix	ZOB
