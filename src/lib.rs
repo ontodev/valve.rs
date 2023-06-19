@@ -886,8 +886,7 @@ pub async fn configure_db(
                   "value" TEXT,
                   "level" TEXT,
                   "rule" TEXT,
-                  "message" TEXT,
-                  UNIQUE ("table", "row", "column", "rule")
+                  "message" TEXT
                 );
               "#},
             {
@@ -1174,6 +1173,25 @@ pub async fn update_row(
         let cell = cell.as_object().unwrap();
         let cell_valid = cell.get("valid").and_then(|v| v.as_bool()).unwrap();
         let cell_value = cell.get("value").and_then(|v| v.as_str()).unwrap();
+
+        // Add an extra 'update' row to the message table indicating that the value of this column
+        // has been updated:
+        let insert_sql = format!(
+            r#"INSERT INTO "message"
+               ("table", "row", "column", "value", "level", "rule", "message")
+               SELECT "table", "row", "column", '{value}', 'update', 'rule:update',
+                      'Value changed from ''' || "value" || ''' to ''{value}'''
+               FROM "message"
+               WHERE "table" = '{table}' AND "row" = {row} AND "column" = '{column}'
+               ORDER BY "message_id" DESC LIMIT 1"#,
+            value = cell_value,
+            row = row_number,
+            column = column,
+            table = table_name,
+        );
+        let query = sqlx_query(&insert_sql);
+        query.execute(pool).await?;
+
         let mut cell_for_insert = cell.clone();
         if cell_valid {
             cell_for_insert.remove("value");
@@ -1208,7 +1226,7 @@ pub async fn update_row(
         }
     }
 
-    // First update the given row in the table:
+    // Update the given row in the table:
     let mut update_stmt = format!(r#"UPDATE "{}" SET "#, table_name);
     update_stmt.push_str(&assignments.join(", "));
     update_stmt.push_str(&format!(r#" WHERE "row_number" = {}"#, row_number));
@@ -1220,10 +1238,10 @@ pub async fn update_row(
     }
     query.execute(pool).await?;
 
-    // Next delete any messages that had been previously inserted to the message table for the old
-    // version of this row:
+    // Then delete any messages that had been previously inserted to the message table for the old
+    // version of this row (other than any 'update'-level messages):
     let delete_sql = format!(
-        r#"DELETE FROM "message" WHERE "table" = '{}' AND "row" = {}"#,
+        r#"DELETE FROM "message" WHERE "table" = '{}' AND "row" = {} AND "level" <> 'update'"#,
         table_name, row_number
     );
     let query = sqlx_query(&delete_sql);
