@@ -1174,24 +1174,74 @@ pub async fn update_row(
         let cell_valid = cell.get("valid").and_then(|v| v.as_bool()).unwrap();
         let cell_value = cell.get("value").and_then(|v| v.as_str()).unwrap();
 
-        // Add an extra 'update' row to the message table indicating that the value of this column
-        // has been updated:
+        // Begin by adding an extra 'update' row to the message table indicating that the value of
+        // this column has been updated (if that is the case).
+
+        // In some cases the current value of the column will have to retrieved from the last
+        // generated message, so we retrieve that from the database:
+        let last_msg_val = {
+            let sql = format!(
+                r#"SELECT value
+                     FROM "message"
+                     WHERE "row" = {row}
+                       AND "column" = '{column}'
+                       AND "table" = '{table}'
+                     LIMIT 1"#,
+                column = column,
+                table = table_name,
+                row = row_number,
+            );
+            let query = sqlx_query(&sql);
+
+            let results = query.fetch_all(pool).await?;
+            if results.is_empty() {
+                "".to_string()
+            } else {
+                let row = &results[0];
+                let raw_value = row.try_get_raw("value").unwrap();
+                if !raw_value.is_null() {
+                    get_column_value(&row, "value", "text")
+                } else {
+                    "".to_string()
+                }
+            }
+        };
+
+        // Construct the SQL for the insert of the 'update' message using last_msg_val:
+        let casted_column = cast_column_sql_to_text(column, "non-text");
+        let is_clause = if pool.any_kind() == AnyKind::Sqlite {
+            "IS"
+        } else {
+            "IS NOT DISTINCT FROM"
+        };
+
         let insert_sql = format!(
             r#"INSERT INTO "message"
                ("table", "row", "column", "value", "level", "rule", "message")
-               SELECT "table", "row", "column", '{value}', 'update', 'rule:update',
-                      'Value changed from ''' || "value" || ''' to ''{value}'''
-               FROM "message"
-               WHERE "table" = '{table}' AND "row" = {row} AND "column" = '{column}'
-               ORDER BY "message_id" DESC LIMIT 1"#,
-            value = cell_value,
-            row = row_number,
+               SELECT
+                 '{table}', "row_number", '{column}', '{value}', 'update', 'rule:update',
+                 'Value changed from ''' ||
+                   CASE
+                     WHEN "{column}" {is_clause} NULL THEN '{last_msg_val}'
+                     ELSE {casted_column}
+                   END ||
+                 ''' to ''{value}'''
+               FROM "{table}_view"
+               WHERE "row_number" = {row} AND (
+                 ("{column}" {is_clause} NULL AND '{last_msg_val}' != '{value}')
+                   OR {casted_column} != '{value}'
+               )"#,
             column = column,
+            last_msg_val = last_msg_val,
+            is_clause = is_clause,
+            row = row_number,
             table = table_name,
+            value = cell_value,
         );
         let query = sqlx_query(&insert_sql);
         query.execute(pool).await?;
 
+        // Generate the assignment statements and messages for each column:
         let mut cell_for_insert = cell.clone();
         if cell_valid {
             cell_for_insert.remove("value");

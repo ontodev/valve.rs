@@ -138,11 +138,12 @@ def export_data(cursor, is_sqlite, args):
                     select.append(f'"{column}"')
                 else:
                     cast = "" if is_sqlite else "::TEXT"
+                    is_clause = "IS" if is_sqlite else "IS NOT DISTINCT FROM"
                     select.append(
                         f"""
                         CASE
-                          WHEN "{column}" IS NULL THEN (
-                            SELECT VALUE
+                          WHEN "{column}" {is_clause} NULL THEN (
+                            SELECT value
                             FROM "message"
                             WHERE "row" = "row_number"
                               AND "column" = '{column}'
