@@ -1186,6 +1186,7 @@ pub async fn update_row(
                      WHERE "row" = {row}
                        AND "column" = '{column}'
                        AND "table" = '{table}'
+                     ORDER BY "message_id" DESC
                      LIMIT 1"#,
                 column = column,
                 table = table_name,
