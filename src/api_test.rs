@@ -116,7 +116,8 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         },
     });
 
-    let result_row = validate_row(
+    // We test that validate_row() is idempotent by running it multiple times on the same row:
+    let result_row_1 = validate_row(
         &config,
         &compiled_datatype_conditions,
         &compiled_rule_conditions,
@@ -127,8 +128,46 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         Some(1),
     )
     .await?;
-    update_row(&config, &pool, "table2", &result_row, 1).await?;
 
+    let result_row_2 = validate_row(
+        &config,
+        &compiled_datatype_conditions,
+        &compiled_rule_conditions,
+        &pool,
+        "table2",
+        &result_row_1,
+        true,
+        Some(1),
+    )
+    .await?;
+    assert_eq!(result_row_1, result_row_2);
+
+    let result_row = validate_row(
+        &config,
+        &compiled_datatype_conditions,
+        &compiled_rule_conditions,
+        &pool,
+        "table2",
+        &result_row_2,
+        true,
+        Some(1),
+    )
+    .await?;
+    assert_eq!(result_row, result_row_2);
+
+    // Now update the database with the validated row:
+    update_row(
+        &config,
+        &compiled_datatype_conditions,
+        &compiled_rule_conditions,
+        &pool,
+        "table2",
+        &result_row,
+        1,
+    )
+    .await?;
+
+    // Validate and insert a new row:
     let row = json!({
         "id": {"messages": [], "valid": true, "value": "BFO:0000027"},
         "label": {"messages": [], "valid": true, "value": "bazaar"},
@@ -154,8 +193,17 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         None,
     )
     .await?;
-    let _new_row_num = insert_new_row(&config, &pool, "table3", &result_row).await?;
+    let _new_row_num = insert_new_row(
+        &config,
+        &compiled_datatype_conditions,
+        &compiled_rule_conditions,
+        &pool,
+        "table3",
+        &result_row,
+    )
+    .await?;
 
+    // Validate and update:
     let row = json!({
         "child": {"messages": [], "valid": true, "value": 2},
         "parent": {"messages": [], "valid": true, "value": 6},
@@ -181,8 +229,18 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         Some(1),
     )
     .await?;
-    update_row(&config, &pool, "table6", &result_row, 1).await?;
+    update_row(
+        &config,
+        &compiled_datatype_conditions,
+        &compiled_rule_conditions,
+        &pool,
+        "table6",
+        &result_row,
+        1,
+    )
+    .await?;
 
+    // Validate and insert
     let row = json!({
         "child": {"messages": [], "valid": true, "value": 2},
         "parent": {"messages": [], "valid": true, "value": 6},
@@ -207,7 +265,15 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         None,
     )
     .await?;
-    let _new_row_num = insert_new_row(&config, &pool, "table6", &result_row).await?;
+    let _new_row_num = insert_new_row(
+        &config,
+        &compiled_datatype_conditions,
+        &compiled_rule_conditions,
+        &pool,
+        "table6",
+        &result_row,
+    )
+    .await?;
 
     Ok(())
 }

@@ -24,7 +24,7 @@ pub mod validate;
 lalrpop_mod!(pub valve_grammar);
 
 use crate::validate::{
-    validate_rows_constraints, validate_rows_intra, validate_rows_trees,
+    validate_row, validate_rows_constraints, validate_rows_intra, validate_rows_trees,
     validate_tree_foreign_keys, validate_under, ResultRow,
 };
 use crate::{ast::Expression, valve_grammar::StartParser};
@@ -1058,10 +1058,28 @@ pub async fn valve(
 /// row number to the row and insert it to the database, then return the new row number.
 pub async fn insert_new_row(
     global_config: &SerdeMap,
+    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
+    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     pool: &AnyPool,
     table_name: &str,
     row: &SerdeMap,
 ) -> Result<u32, sqlx::Error> {
+    // First, send the row through the row validator to determine if any fields are problematic and
+    // to mark them with appropriate messages:
+    let row = validate_row(
+        global_config,
+        compiled_datatype_conditions,
+        compiled_rule_conditions,
+        pool,
+        table_name,
+        row,
+        false,
+        None,
+    )
+    .await?;
+
+    // Now prepare the row and messages for insertion to the database.
+
     // The new row number to insert is the current highest row number + 1.
     let sql = format!(
         r#"SELECT MAX("row_number") AS "row_number" FROM "{}_view""#,
@@ -1143,6 +1161,7 @@ pub async fn insert_new_row(
         let level = m.get("level").and_then(|c| c.as_str()).unwrap();
         let rule = m.get("rule").and_then(|c| c.as_str()).unwrap();
         let message = m.get("message").and_then(|c| c.as_str()).unwrap();
+        let message = message.replace("'", "''");
         let message_sql = format!(
             r#"INSERT INTO "message"
                ("table", "row", "column", "value", "level", "rule", "message")
@@ -1160,11 +1179,28 @@ pub async fn insert_new_row(
 /// update, update the corresponding row in the database with new values as specified by `row`.
 pub async fn update_row(
     global_config: &SerdeMap,
+    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
+    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     pool: &AnyPool,
     table_name: &str,
     row: &SerdeMap,
     row_number: u32,
 ) -> Result<(), sqlx::Error> {
+    // First, send the row through the row validator to determine if any fields are problematic and
+    // to mark them with appropriate messages:
+    let row = validate_row(
+        global_config,
+        compiled_datatype_conditions,
+        compiled_rule_conditions,
+        pool,
+        table_name,
+        row,
+        true,
+        Some(row_number),
+    )
+    .await?;
+
+    // Now prepare the row and messages for the database update:
     let mut assignments = vec![];
     let mut params = vec![];
     let mut messages = vec![];
@@ -1305,6 +1341,7 @@ pub async fn update_row(
         let level = m.get("level").and_then(|c| c.as_str()).unwrap();
         let rule = m.get("rule").and_then(|c| c.as_str()).unwrap();
         let message = m.get("message").and_then(|c| c.as_str()).unwrap();
+        let message = message.replace("'", "''");
         let insert_sql = format!(
             r#"INSERT INTO "message"
                ("table", "row", "column", "value", "level", "rule", "message")

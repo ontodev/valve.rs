@@ -28,7 +28,8 @@ pub struct ResultRow {
 
 /// Given a config map, maps of compiled datatype and rule conditions, a database connection
 /// pool, a table name, a row to validate, and a row number in case the row already exists,
-/// perform both intra- and inter-row validation and return the validated row.
+/// perform both intra- and inter-row validation and return the validated row. Note that this
+/// function is idempotent.
 pub async fn validate_row(
     config: &SerdeMap,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
@@ -169,8 +170,7 @@ pub async fn validate_row(
         }
     }
 
-    let result_row = result_row_to_config_map(&result_row);
-
+    let result_row = remove_duplicate_messages(&result_row_to_config_map(&result_row))?;
     Ok(result_row)
 }
 
@@ -573,7 +573,7 @@ pub async fn validate_under(
                     "value": column_val,
                     "level": "error",
                     "rule": "under:not-in-tree",
-                    "message": format!("Value {} of column {} is not in {}.{}",
+                    "message": format!("Value '{}' of column {} is not in {}.{}",
                                        column_val, column, tree_table, tree_child).as_str(),
                 }));
             } else if is_under == 0 {
@@ -746,7 +746,7 @@ pub async fn validate_tree_foreign_keys(
                 "value": parent_val,
                 "level": "error",
                 "rule": "tree:foreign",
-                "message": format!("Value {} of column {} is not in column {}",
+                "message": format!("Value '{}' of column {} is not in column {}",
                                    parent_val, parent_col, child_col).as_str(),
             }));
         }
@@ -954,6 +954,28 @@ pub fn validate_rows_intra(
 
     // Finally return the result rows:
     result_rows
+}
+
+/// Given a row represented as a SerdeMap, remove any duplicate messages from the row's cells, so
+/// that no cell has messages with the same level, rule, and message text.
+fn remove_duplicate_messages(row: &SerdeMap) -> Result<SerdeMap, sqlx::Error> {
+    let mut deduped_row = SerdeMap::new();
+    for (column_name, cell) in row.iter() {
+        let mut messages = cell
+            .get("messages")
+            .and_then(|m| m.as_array())
+            .unwrap_or(&vec![])
+            .clone();
+        messages.dedup_by(|a, b| {
+            a.get("level").unwrap() == b.get("level").unwrap()
+                && a.get("rule").unwrap() == b.get("rule").unwrap()
+                && a.get("message").unwrap() == b.get("message").unwrap()
+        });
+        let mut cell = cell.as_object().unwrap().clone();
+        cell.insert("messages".to_string(), json!(messages));
+        deduped_row.insert(column_name.to_string(), json!(cell));
+    }
+    Ok(deduped_row)
 }
 
 /// Given a result row, convert it to a SerdeMap and return it.
@@ -1213,7 +1235,7 @@ fn validate_cell_datatype(
                 let dt_condition = &compiled_datatype_conditions.get(dt_name).unwrap().compiled;
                 if !dt_condition(&cell.value) {
                     let message = if dt_description == "" {
-                        format!("{} should be of datatype `{}'", column_name, dt_name)
+                        format!("{} should be of datatype {}", column_name, dt_name)
                     } else {
                         format!("{} should be {}", column_name, dt_description)
                     };
@@ -1227,10 +1249,7 @@ fn validate_cell_datatype(
             }
 
             let message = if primary_dt_description == "" {
-                format!(
-                    "{} should be of datatype `{}'",
-                    column_name, primary_dt_name
-                )
+                format!("{} should be of datatype {}", column_name, primary_dt_name)
             } else {
                 format!("{} should be {}", column_name, primary_dt_description)
             };
@@ -1402,7 +1421,7 @@ async fn validate_cell_foreign_constraints(
                     m.insert(
                         "message".to_string(),
                         SerdeValue::String(format!(
-                            "Value {} of column {} is not in {}.{}",
+                            "Value '{}' of column {} is not in {}.{}",
                             cell.value, column_name, ftable, fcolumn
                         )),
                     )
@@ -1412,7 +1431,7 @@ async fn validate_cell_foreign_constraints(
                     m.insert(
                         "message".to_string(),
                         SerdeValue::String(format!(
-                            "Value {} of column {} exists only in {}_conflict.{}",
+                            "Value '{}' of column {} exists only in {}_conflict.{}",
                             cell.value, column_name, ftable, fcolumn
                         )),
                     )

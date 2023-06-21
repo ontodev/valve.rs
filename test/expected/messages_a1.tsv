@@ -12,18 +12,18 @@ table2	C3	error	under:not-under	Value 'f' of column xyzzy is not under 'd'	f
 table2	D4	error	rule:foo-4	bar must be 'y' or 'z' if foo = 5	5
 table2	C4	error	under:not-under	Value 'g' of column xyzzy is not under 'd'	g
 table2	C5	error	under:not-under	Value 'h' of column xyzzy is not under 'd'	h
-table2	C7	error	under:not-in-tree	Value z of column xyzzy is not in table2.child	z
-table2	A9	error	key:foreign	Value i of column child exists only in table4_conflict.other_foreign_column	i
-table3	C1	error	datatype:label	label should be of datatype `label'	   mobecular entity
+table2	C7	error	under:not-in-tree	Value 'z' of column xyzzy is not in table2.child	z
+table2	A9	error	key:foreign	Value 'i' of column child exists only in table4_conflict.other_foreign_column	i
+table3	C1	error	datatype:label	label should be of datatype label	   mobecular entity
 table3	C1	error	datatype:trimmed_line	label should be a line of text that does not begin or end with whitespace	   mobecular entity
-table3	A1	error	key:foreign	Value MOB of column source is not in table1.prefix	MOB
-table3	A2	error	key:foreign	Value ZOB of column source is not in table1.prefix	ZOB
-table3	A3	error	key:foreign	Value JOB of column source is not in table1.prefix	JOB
+table3	A1	error	key:foreign	Value 'MOB' of column source is not in table1.prefix	MOB
+table3	A2	error	key:foreign	Value 'ZOB' of column source is not in table1.prefix	ZOB
+table3	A3	error	key:foreign	Value 'JOB' of column source is not in table1.prefix	JOB
 table3	E4	error	tree:cycle	Cyclic dependency: (label: bar, parent: car), (label: car, parent: foo), (label: foo, parent: bar) for tree(parent) of label	bar
-table3	A4	error	key:foreign	Value SOB of column source is not in table1.prefix	SOB
-table3	E5	error	tree:foreign	Value jafar of column parent is not in column label	jafar
-table3	A5	error	key:foreign	Value YOB of column source is not in table1.prefix	YOB
-table3	E6	error	tree:foreign	Value owl:Thing of column parent is not in column label	owl:Thing
+table3	A4	error	key:foreign	Value 'SOB' of column source is not in table1.prefix	SOB
+table3	E5	error	tree:foreign	Value 'jafar' of column parent is not in column label	jafar
+table3	A5	error	key:foreign	Value 'YOB' of column source is not in table1.prefix	YOB
+table3	E6	error	tree:foreign	Value 'owl:Thing' of column parent is not in column label	owl:Thing
 table3	A7	error	datatype:nonspace	source should be text without whitespace	CO B
 table3	A7	error	datatype:prefix	source should be a prefix for a CURIE	CO B
 table3	A7	error	datatype:word	source should be a single word: letters, numbers, underscore	CO B
@@ -31,7 +31,7 @@ table3	B8	error	key:unique	Values of id must be unique	COB:0000013
 table3	B10	error	key:unique	Values of id must be unique	VO:0000001
 table3	C10	error	key:primary	Values of label must be unique	vaccine
 table3	C10	error	tree:child-unique	Values of label must be unique	vaccine
-table3	A10	error	key:foreign	Value BOB of column source is not in table1.prefix	BOB
+table3	A10	error	key:foreign	Value 'BOB' of column source is not in table1.prefix	BOB
 table4	A9	error	key:unique	Values of foreign_column must be unique	a
 table4	A10	error	key:unique	Values of foreign_column must be unique	b
 table4	C10	error	key:primary	Values of numeric_foreign_column must be unique	9
@@ -43,6 +43,6 @@ table6	C3	error	under:not-under	Value '6' of column xyzzy is not under '4'	6
 table6	D4	error	rule:foo-4	bar must be 25 or 26 if foo = 'e'	e
 table6	C4	error	under:not-under	Value '7' of column xyzzy is not under '4'	7
 table6	C5	error	under:not-under	Value '8' of column xyzzy is not under '4'	8
-table6	C7	error	under:not-in-tree	Value 26 of column xyzzy is not in table6.child	26
-table6	A9	error	key:foreign	Value 9 of column child exists only in table4_conflict.numeric_foreign_column	9
+table6	C7	error	under:not-in-tree	Value '26' of column xyzzy is not in table6.child	26
+table6	A9	error	key:foreign	Value '9' of column child exists only in table4_conflict.numeric_foreign_column	9
 table7	B3	error	datatype:integer	planetfall should be a positive or negative integer	e
