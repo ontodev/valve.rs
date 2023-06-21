@@ -1184,7 +1184,7 @@ pub async fn update_row(
     pool: &AnyPool,
     table_name: &str,
     row: &SerdeMap,
-    row_number: u32,
+    row_number: &u32,
 ) -> Result<(), sqlx::Error> {
     // First, send the row through the row validator to determine if any fields are problematic and
     // to mark them with appropriate messages:
@@ -1196,7 +1196,7 @@ pub async fn update_row(
         table_name,
         row,
         true,
-        Some(row_number),
+        Some(*row_number),
     )
     .await?;
 

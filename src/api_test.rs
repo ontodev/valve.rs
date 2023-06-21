@@ -163,7 +163,7 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         &pool,
         "table2",
         &result_row,
-        1,
+        &1,
     )
     .await?;
 
@@ -236,7 +236,7 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         &pool,
         "table6",
         &result_row,
-        1,
+        &1,
     )
     .await?;
 
