@@ -926,6 +926,36 @@ pub async fn configure_db(
     return Ok((sorted_tables, constraints_config));
 }
 
+/// Given the global config map, a table name, a column name, and a database connection pool
+/// used to determine the database type return the column's SQL type.
+pub fn get_sql_type_from_global_config(
+    global_config: &SerdeMap,
+    table: &str,
+    column: &str,
+    pool: &AnyPool,
+) -> Option<String> {
+    let dt_config = global_config
+        .get("datatype")
+        .and_then(|d| d.as_object())
+        .unwrap();
+    let normal_table_name;
+    if let Some(s) = table.strip_suffix("_conflict") {
+        normal_table_name = String::from(s);
+    } else {
+        normal_table_name = table.to_string();
+    }
+    let dt = global_config
+        .get("table")
+        .and_then(|t| t.get(normal_table_name))
+        .and_then(|t| t.get("column"))
+        .and_then(|c| c.get(column))
+        .and_then(|c| c.get("datatype"))
+        .and_then(|d| d.as_str())
+        .and_then(|d| Some(d.to_string()))
+        .unwrap();
+    get_sql_type(&dt_config, &dt, pool)
+}
+
 /// Various VALVE commands, used with [valve()](valve).
 #[derive(Debug, PartialEq, Eq)]
 pub enum ValveCommand {
@@ -1576,36 +1606,6 @@ fn get_sql_type(dt_config: &SerdeMap, datatype: &String, pool: &AnyPool) -> Opti
         .unwrap();
 
     return get_sql_type(dt_config, &parent_datatype.to_string(), pool);
-}
-
-/// Given the global config map, a table name, a column name, and a database connection pool
-/// used to determine the database type return the column's SQL type.
-fn get_sql_type_from_global_config(
-    global_config: &SerdeMap,
-    table: &str,
-    column: &str,
-    pool: &AnyPool,
-) -> Option<String> {
-    let dt_config = global_config
-        .get("datatype")
-        .and_then(|d| d.as_object())
-        .unwrap();
-    let normal_table_name;
-    if let Some(s) = table.strip_suffix("_conflict") {
-        normal_table_name = String::from(s);
-    } else {
-        normal_table_name = table.to_string();
-    }
-    let dt = global_config
-        .get("table")
-        .and_then(|t| t.get(normal_table_name))
-        .and_then(|t| t.get("column"))
-        .and_then(|c| c.get(column))
-        .and_then(|c| c.get("datatype"))
-        .and_then(|d| d.as_str())
-        .and_then(|d| Some(d.to_string()))
-        .unwrap();
-    get_sql_type(&dt_config, &dt, pool)
 }
 
 /// Given a SQL type, return the appropriate CAST(...) statement for casting the SQL_PARAM
