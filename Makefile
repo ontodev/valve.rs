@@ -111,6 +111,12 @@ test/perf_test_data/ontology: test/generate_random_test_data.py
 	./$< 1 10000 5 $@
 
 build/valve_perf.db: valve | test/perf_test_data/ontology build
+	@if [ -f $@ ]; \
+	then \
+		echo "'$@' exists but is out of date. To rebuild '$@', run \`make cleanperfdb\`" \
+		"before running \`make $@\`" ; \
+		false; \
+	fi
 	time -p ./$< --verbose test/perf_test_data/table.tsv $@
 
 .PHONY: sqlite_perf_test
