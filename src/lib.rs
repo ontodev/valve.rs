@@ -693,10 +693,15 @@ pub async fn configure_db(
             // If an entry of the tables_config has no path then it is an internal table which need
             // not be configured explicitly. Currently the only example is the message table.
             None => continue,
-            Some(p) if !Path::new(p).canonicalize()?.is_file() => {
+            Some(p) if !Path::new(p).is_file() => {
                 eprintln!("WARN: File does not exist {}", p);
                 continue;
             }
+            Some(p) if Path::new(p).canonicalize().is_err() => {
+                eprintln!("WARN: File path could not be made canonical {}", p);
+                continue;
+            }
+
             Some(p) => path = p.to_string(),
         };
 
