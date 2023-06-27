@@ -27,7 +27,7 @@ pub struct ResultRow {
 }
 
 /// TODO: Add a docstring here
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum QueryAsIfKind {
     Update,
     Ignore,
@@ -38,7 +38,8 @@ pub enum QueryAsIfKind {
 pub struct QueryAsIf {
     pub kind: QueryAsIfKind,
     pub table: String,
-    // SQLite does not allow a CTE named 'foo' to reference a table named 'foo' so we need an alias:
+    // Although PostgreSQL allows it, SQLite does not allow a CTE named 'foo' to refer to a table
+    // named 'foo' so we need to use an alias:
     pub alias: String,
     pub row_number: u32,
     pub row: Option<SerdeMap>,
@@ -124,6 +125,7 @@ pub async fn validate_row(
             // they can result in database errors when, for instance, we compare a numeric with a
             // non-numeric type.
             if cell.valid || !contains_dt_violation(&cell.messages) {
+                // TODO: Pass query_as_if here:
                 validate_cell_trees(
                     config,
                     pool,
@@ -134,14 +136,17 @@ pub async fn validate_row(
                     &vec![],
                 )
                 .await?;
+                // DONE. (TODO: Remove this comment later.)
                 validate_cell_foreign_constraints(
                     config,
                     pool,
                     &table_name.to_string(),
                     column_name,
                     cell,
+                    query_as_if,
                 )
                 .await?;
+                // TODO: Pass query_as_if here:
                 validate_cell_unique_constraints(
                     config,
                     pool,
@@ -156,6 +161,7 @@ pub async fn validate_row(
         }
     }
 
+    // TODO: Pass query_as_if here:
     let mut violations = validate_tree_foreign_keys(
         config,
         pool,
@@ -164,6 +170,7 @@ pub async fn validate_row(
     )
     .await?;
     violations.append(
+        // TODO: Pass query_as_if here:
         &mut validate_under(
             config,
             pool,
@@ -261,7 +268,7 @@ pub async fn get_matching_values(
                     .and_then(|c| c.as_object())
                     .and_then(|c| c.get("structure"))
                     .and_then(|d| d.as_str())
-                    .unwrap(),
+                    .unwrap_or(""),
             );
 
             let sql_type =
@@ -864,8 +871,15 @@ pub async fn validate_rows_constraints(
             // that have datatype violations. We exclude the latter because they can result in
             // database errors when, for instance, we compare a numeric with a non-numeric type.
             if cell.nulltype == None && (cell.valid || !contains_dt_violation(&cell.messages)) {
-                validate_cell_foreign_constraints(config, pool, table_name, &column_name, cell)
-                    .await?;
+                validate_cell_foreign_constraints(
+                    config,
+                    pool,
+                    table_name,
+                    &column_name,
+                    cell,
+                    None,
+                )
+                .await?;
 
                 validate_cell_unique_constraints(
                     config,
@@ -1377,6 +1391,84 @@ fn validate_cell_rules(
     }
 }
 
+/// TODO: Add docstring here
+fn as_if_to_sql(
+    global_config: &SerdeMap,
+    pool: &AnyPool,
+    as_if: &QueryAsIf,
+    conflict_table: bool,
+) -> String {
+    let sql = {
+        let suffix = {
+            if conflict_table {
+                "_conflict"
+            } else {
+                ""
+            }
+        };
+
+        if as_if.kind == QueryAsIfKind::Ignore {
+            format!(
+                r#""{table_alias}{suffix}" AS (
+                     SELECT * FROM "{table_name}{suffix}" WHERE "row_number" <> {row_number}
+                )"#,
+                table_alias = as_if.alias,
+                suffix = suffix,
+                table_name = as_if.table,
+                row_number = as_if.row_number,
+            )
+        } else {
+            let row = as_if.row.as_ref().unwrap();
+            let columns = row.keys().cloned().collect::<Vec<_>>();
+            let values = {
+                let mut values = vec![];
+                for column in &columns {
+                    let value = row
+                        .get(column)
+                        .and_then(|c| c.get("value"))
+                        .and_then(|v| v.as_str())
+                        .unwrap();
+
+                    let sql_type = get_sql_type_from_global_config(
+                        &global_config,
+                        &as_if.table,
+                        &column,
+                        pool,
+                    )
+                    .unwrap();
+
+                    if sql_type.to_lowercase() == "text" {
+                        values.push(format!("'{}'", value));
+                    } else {
+                        values.push(value.to_string());
+                    }
+                }
+                values.join(", ")
+            };
+            format!(
+                r#""{table_alias}{suffix}" AS (
+                   SELECT "row_number", {columns}
+                   FROM "{table_name}{suffix}"
+                   WHERE "row_number" <> {row_number}
+                   UNION ALL
+                   SELECT {row_number}, {values}
+                )"#,
+                columns = columns
+                    .iter()
+                    .map(|c| format!("\"{}\"", c))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                table_alias = as_if.alias,
+                table_name = as_if.table,
+                row_number = as_if.row_number,
+                values = values,
+            )
+        }
+    };
+
+    sql
+}
+
 /// Given a config map, a db connection pool, a table name, a column name, and a cell to validate,
 /// check the cell value against any foreign keys that have been defined for the column. If there is
 /// a violation, indicate it with an error message attached to the cell.
@@ -1386,6 +1478,7 @@ async fn validate_cell_foreign_constraints(
     table_name: &String,
     column_name: &String,
     cell: &mut ResultCell,
+    query_as_if: Option<&QueryAsIf>,
 ) -> Result<(), sqlx::Error> {
     let fkeys = config
         .get("constraints")
@@ -1405,20 +1498,40 @@ async fn validate_cell_foreign_constraints(
         .map(|v| v.as_object().unwrap())
         .collect::<Vec<_>>();
 
+    let as_if_clause = match query_as_if {
+        Some(query_as_if) => {
+            format!("WITH {} ", as_if_to_sql(config, pool, &query_as_if, false))
+        }
+        None => "".to_string(),
+    };
+    let as_if_clause_for_conflict = match query_as_if {
+        Some(query_as_if) => {
+            format!("WITH {} ", as_if_to_sql(config, pool, &query_as_if, true))
+        }
+        None => "".to_string(),
+    };
+
     for fkey in fkeys {
         let ftable = fkey.get("ftable").and_then(|t| t.as_str()).unwrap();
+        let (as_if_clause, ftable_alias) = match query_as_if {
+            Some(query_as_if) if ftable == query_as_if.table => {
+                (as_if_clause.to_string(), query_as_if.alias.to_string())
+            }
+            _ => ("".to_string(), ftable.to_string()),
+        };
         let fcolumn = fkey.get("fcolumn").and_then(|c| c.as_str()).unwrap();
         let sql_type = get_sql_type_from_global_config(&config, &ftable, &fcolumn, pool).unwrap();
         let sql_param = cast_sql_param_from_text(&sql_type);
         let fsql = local_sql_syntax(
             &pool,
             &format!(
-                r#"SELECT 1 FROM "{}" WHERE "{}" = {} LIMIT 1"#,
-                ftable, fcolumn, sql_param
+                r#"{}SELECT 1 FROM "{}" WHERE "{}" = {} LIMIT 1"#,
+                as_if_clause, ftable_alias, fcolumn, sql_param
             ),
         );
-        let frows = sqlx_query(&fsql).bind(&cell.value).fetch_all(pool).await?;
+        //eprintln!("FSQL FOR {:?}: {}", fkey, fsql);
 
+        let frows = sqlx_query(&fsql).bind(&cell.value).fetch_all(pool).await?;
         if frows.is_empty() {
             cell.valid = false;
             let mut message = json!({
@@ -1426,13 +1539,22 @@ async fn validate_cell_foreign_constraints(
                 "level": "error",
             });
 
+            let (as_if_clause_for_conflict, ftable_alias) = match query_as_if {
+                Some(query_as_if) if ftable == query_as_if.table => (
+                    as_if_clause_for_conflict.to_string(),
+                    query_as_if.alias.to_string(),
+                ),
+                _ => ("".to_string(), ftable.to_string()),
+            };
+
             let fsql = local_sql_syntax(
                 &pool,
                 &format!(
-                    r#"SELECT 1 FROM "{}_conflict" WHERE "{}" = {} LIMIT 1"#,
-                    ftable, fcolumn, sql_param
+                    r#"{}SELECT 1 FROM "{}_conflict" WHERE "{}" = {} LIMIT 1"#,
+                    as_if_clause_for_conflict, ftable_alias, fcolumn, sql_param
                 ),
             );
+            //eprintln!("CONFLICT FSQL FOR {:?}: {}", fkey, fsql);
             let frows = sqlx_query(&fsql)
                 .bind(cell.value.clone())
                 .fetch_all(pool)

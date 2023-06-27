@@ -1417,9 +1417,11 @@ pub async fn get_rows_to_update(
         rows_to_update.insert(dependent_table.to_string(), affected_rows);
     }
 
-    // TODO (later): tree. Add more rows to the IndexMap for tree constraints.
+    // TODO (later): tree.
 
-    // TODO (later): under. Add more rows to the IndexMap for under constraints.
+    // TODO (later): under.
+
+    // TODO (later): unique and primary.
 
     // TODO: I think this reverse is unneeded but let's keep it commented for now.
     // We reverse here because the deepest dependencies need to be updated first.
@@ -1437,6 +1439,7 @@ pub async fn update_row(
     table_name: &str,
     row: &SerdeMap,
     row_number: &u32,
+    skip_validation: bool,
 ) -> Result<(), sqlx::Error> {
     // eprintln!("***** In update_row(). Got row: {:#?}", row);
 
@@ -1444,17 +1447,21 @@ pub async fn update_row(
 
     // First, send the row through the row validator to determine if any fields are problematic and
     // to mark them with appropriate messages:
-    let row = validate_row(
-        global_config,
-        compiled_datatype_conditions,
-        compiled_rule_conditions,
-        pool,
-        table_name,
-        row,
-        Some(*row_number),
-        None,
-    )
-    .await?;
+    let row = if !skip_validation {
+        validate_row(
+            global_config,
+            compiled_datatype_conditions,
+            compiled_rule_conditions,
+            pool,
+            table_name,
+            row,
+            Some(*row_number),
+            None,
+        )
+        .await?
+    } else {
+        row.clone()
+    };
     //eprintln!("***** In update_row(). Row after validation: {:#?}", row);
 
     // Now prepare the row and messages for the database update:
@@ -1571,7 +1578,7 @@ pub async fn update_row(
     }
 
     // Update the given row in the table:
-    let mut update_stmt = format!(r#"GARBAGE-REMOVE-THIS-LATER UPDATE "{}" SET "#, table_name);
+    let mut update_stmt = format!(r#"UPDATE "{}" SET "#, table_name);
     update_stmt.push_str(&assignments.join(", "));
     update_stmt.push_str(&format!(r#" WHERE "row_number" = {}"#, row_number));
     let update_stmt = local_sql_syntax(&pool, &update_stmt);
@@ -1610,21 +1617,23 @@ pub async fn update_row(
             let updates = get_rows_to_update(global_config, pool, table_name, &row, row_number)
                 .await
                 .map_err(|e| Configuration(e.into()))?;
-            eprintln!("UPDATES: {:#?}", updates);
+            //eprintln!("UPDATES: {:#?}", updates);
 
             let query_as_if = QueryAsIf {
                 kind: QueryAsIfKind::Update,
                 table: table_name.to_string(),
                 alias: format!("{}_as_if", table_name),
                 row_number: *row_number,
-                row: Some(row),
+                row: Some(row.clone()),
             };
 
-            // Validate each row 'counterfactually' (see above):
-            let mut validated_rows = vec![];
             for (update_table, rows_to_update) in &updates {
                 for (row_number, row) in rows_to_update {
-                    eprintln!("ROW NUMBER: {}, ROW: {:#?}", row_number, row);
+                    eprintln!(
+                        "VALIDATING ROW NUMBER {} OF {}, ROW: {:#?}",
+                        row_number, update_table, row
+                    );
+                    // Validate each row 'counterfactually' (see above):
                     let vrow = validate_row(
                         global_config,
                         compiled_datatype_conditions,
@@ -1637,21 +1646,33 @@ pub async fn update_row(
                     )
                     .await?;
                     eprintln!("VALIDATED ROW: {:#?}", vrow);
-                    validated_rows.push(vrow);
+                    // Update the row in the database:
+                    block_on(update_row(
+                        global_config,
+                        compiled_datatype_conditions,
+                        compiled_rule_conditions,
+                        pool,
+                        update_table,
+                        &vrow,
+                        row_number,
+                        true,
+                    ))?;
                 }
             }
-
-            // TODO: Call update_row() on the each of the validated rows. Note that for this to work
-            // as intended we are going to have to add some way to bypass the implicit re-validation
-            // that happens at the beginning of that function.
-
-            // TODO: Finally, retry the update_row() call that resulted in our being in the Err
+            // Finally, retry the update_row() call that resulted in our being in the Err
             // branch to begin with.
-
-            // TODO: remove this error return. Do something smarter above instead.
-            return Err(Configuration(
-                format!("Arghh!! Got database error: {}", e).into(),
-            ));
+            let mut query = sqlx_query(&update_stmt);
+            for param in &params {
+                query = query.bind(param);
+            }
+            match query.execute(pool).await {
+                Ok(_) => eprintln!("It worked!!"),
+                Err(e) => {
+                    return Err(Configuration(
+                        format!("Arghh!! Got schmatabase error: {}", e).into(),
+                    ))
+                }
+            };
         }
     };
 
