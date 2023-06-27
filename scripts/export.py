@@ -148,6 +148,7 @@ def export_data(cursor, is_sqlite, args):
                             WHERE "row" = "row_number"
                               AND "column" = '{column}'
                               AND "table" = '{table}'
+                            ORDER BY "message_id" DESC
                             LIMIT 1
                           )
                           ELSE "{column}"{cast}

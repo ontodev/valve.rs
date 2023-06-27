@@ -37,15 +37,9 @@ pub async fn validate_row(
     pool: &AnyPool,
     table_name: &str,
     row: &SerdeMap,
-    existing_row: bool,
     row_number: Option<u32>,
+    rows_to_ignore: Option<HashMap<String, Vec<u32>>>,
 ) -> Result<SerdeMap, sqlx::Error> {
-    // If existing_row is false, then override any row number provided with None:
-    let mut row_number = row_number.clone();
-    if !existing_row {
-        row_number = None;
-    }
-
     // Initialize the result row with the values from the given row:
     let mut result_row = ResultRow {
         row_number: row_number,
@@ -136,7 +130,6 @@ pub async fn validate_row(
                     column_name,
                     cell,
                     &vec![],
-                    existing_row,
                     row_number,
                 )
                 .await?;
@@ -852,7 +845,6 @@ pub async fn validate_rows_constraints(
                     &column_name,
                     cell,
                     &result_rows,
-                    false,
                     None,
                 )
                 .await?;
@@ -1616,8 +1608,8 @@ async fn validate_cell_trees(
 /// the row, `context`, to which the cell belongs, and a list of previously validated rows,
 /// check the cell value against any unique-type keys that have been defined for the column.
 /// If there is a violation, indicate it with an error message attached to the cell. If
-/// the `existing_row` flag is set to True, then checks will be made as if the given `row_number`
-/// does not exist in the table.
+/// `row_number` is set to None, then no row corresponding to the given cell is assumed to exist
+/// in the table.
 async fn validate_cell_unique_constraints(
     config: &SerdeMap,
     pool: &AnyPool,
@@ -1625,14 +1617,8 @@ async fn validate_cell_unique_constraints(
     column_name: &String,
     cell: &mut ResultCell,
     prev_results: &Vec<ResultRow>,
-    existing_row: bool,
     row_number: Option<u32>,
 ) -> Result<(), sqlx::Error> {
-    // If existing_row is false, then override any row number provided with None:
-    let mut row_number = row_number.clone();
-    if !existing_row {
-        row_number = None;
-    }
     // If the column has a primary or unique key constraint, or if it is the child associated with
     // a tree, then if the value of the cell is a duplicate either of one of the previously
     // validated rows in the batch, or a duplicate of a validated row that has already been inserted
@@ -1684,15 +1670,13 @@ async fn validate_cell_unique_constraints(
     if is_primary || is_unique || is_tree_child {
         let mut with_sql = String::new();
         let except_table = format!("{}_exc", table_name);
-        if existing_row {
+        if let Some(row_number) = row_number {
             with_sql = format!(
                 r#"WITH "{}" AS (
                        SELECT * FROM "{}"
                        WHERE "row_number" != {}
                    ) "#,
-                except_table,
-                table_name,
-                row_number.unwrap()
+                except_table, table_name, row_number
             );
         }
 

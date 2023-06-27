@@ -31,6 +31,7 @@ use crate::{ast::Expression, valve_grammar::StartParser};
 use chrono::Utc;
 use crossbeam;
 use futures::executor::block_on;
+use indexmap::IndexMap;
 use indoc::indoc;
 use itertools::{IntoChunks, Itertools};
 use lazy_static::lazy_static;
@@ -43,7 +44,9 @@ use regex::Regex;
 use serde_json::{json, Value as SerdeValue};
 use sqlx::{
     any::{AnyConnectOptions, AnyKind, AnyPool, AnyPoolOptions, AnyRow},
-    query as sqlx_query, Column, Row, ValueRef,
+    query as sqlx_query, Column,
+    Error::Configuration,
+    Row, ValueRef,
 };
 use std::{
     collections::{BTreeMap, HashMap},
@@ -1073,7 +1076,7 @@ pub async fn insert_new_row(
         pool,
         table_name,
         row,
-        false,
+        None,
         None,
     )
     .await?;
@@ -1175,6 +1178,255 @@ pub async fn insert_new_row(
     Ok(new_row_number)
 }
 
+pub async fn get_updates(
+    global_config: &SerdeMap,
+    pool: &AnyPool,
+    table: &str,
+    row: &SerdeMap,
+    row_number: &u32,
+) -> Result<IndexMap<String, IndexMap<u32, SerdeMap>>, String> {
+    // eprintln!("GETTING UPDATES FOR ROW {} OF {}", row_number, table);
+
+    fn get_cell_value(row: &SerdeMap, column: &str) -> Result<String, String> {
+        match row.get(column).and_then(|cell| cell.get("value")) {
+            Some(SerdeValue::String(s)) => Ok(format!("{}", s)),
+            Some(SerdeValue::Number(n)) => Ok(format!("{}", n)),
+            Some(SerdeValue::Bool(b)) => Ok(format!("{}", b)),
+            _ => Err(format!(
+                "Value missing or of unknown type in column {} of row to update: {:?}",
+                column, row
+            )),
+        }
+    }
+
+    async fn get_current_value(
+        table: &str,
+        column: &str,
+        row_number: &u32,
+        pool: &AnyPool,
+    ) -> Result<String, String> {
+        let (is_clause, cast) = if pool.any_kind() == AnyKind::Sqlite {
+            ("IS", "")
+        } else {
+            ("IS NOT DISTINCT FROM", "::TEXT")
+        };
+        let sql = format!(
+            r#"SELECT
+                 CASE
+                   WHEN "{column}" {is_clause} NULL THEN (
+                     SELECT value
+                     FROM "message"
+                     WHERE "row" = "row_number"
+                       AND "column" = '{column}'
+                       AND "table" = '{table}'
+                     ORDER BY "message_id" DESC
+                     LIMIT 1
+                   )
+                   ELSE "{column}"{cast}
+                 END AS "{column}"
+               FROM "{table}_view" WHERE "row_number" = {row_number}
+            "#,
+            column = column,
+            is_clause = is_clause,
+            table = table,
+            cast = cast,
+            row_number = row_number,
+        );
+        // eprintln!("SQL FOR CURRENT VALUE:\n{}", sql);
+
+        let query = sqlx_query(&sql);
+        let result_row = query.fetch_one(pool).await.map_err(|e| e.to_string())?;
+        let value: &str = result_row.try_get(column).unwrap();
+        Ok(value.to_string())
+    }
+
+    // TODO: Make this an outer function and make it public.
+    async fn get_affected_rows(
+        table: &str,
+        column: &str,
+        current_value: &str,
+        new_value: &str,
+        global_config: &SerdeMap,
+        pool: &AnyPool,
+    ) -> Result<IndexMap<u32, SerdeMap>, String> {
+        // eprintln!("GETTING AFFECTED ROWS FOR {}.{}", table, column);
+
+        let sql_type =
+            get_sql_type_from_global_config(&global_config, &table, &column, pool).unwrap();
+
+        let sql = {
+            let is_clause = if pool.any_kind() == AnyKind::Sqlite {
+                "IS"
+            } else {
+                "IS NOT DISTINCT FROM"
+            };
+
+            let select_columns = global_config
+                .get("table")
+                .and_then(|t| t.get(table))
+                .and_then(|t| t.as_object())
+                .and_then(|t| t.get("column"))
+                .and_then(|t| t.as_object())
+                .and_then(|t| Some(t.keys()))
+                .and_then(|k| Some(k.map(|k| k.to_string())))
+                .and_then(|t| Some(t.collect::<Vec<_>>()))
+                .unwrap();
+
+            let mut select_columns = select_columns
+                .iter()
+                .map(|c| {
+                    format!(
+                        r#"CASE
+                             WHEN "{column}" {is_clause} NULL THEN (
+                               SELECT value
+                               FROM "message"
+                               WHERE "row" = "row_number"
+                                 AND "column" = '{column}'
+                                 AND "table" = '{table}'
+                               ORDER BY "message_id" DESC
+                               LIMIT 1
+                             )
+                             ELSE {casted_column}
+                           END AS "{column}""#,
+                        casted_column = if pool.any_kind() == AnyKind::Sqlite {
+                            cast_column_sql_to_text(c, "non-text")
+                        } else {
+                            format!("\"{}\"::TEXT", c)
+                        },
+                        column = c,
+                        table = table,
+                    )
+                })
+                .collect::<Vec<_>>();
+
+            let select_columns = {
+                let mut v = vec!["row_number".to_string()];
+                v.append(&mut select_columns);
+                v
+            };
+
+            // Since the consequence of an update could involve currently invalid rows
+            // (in the conflict table) becoming valid or vice versa, we need to check rows for
+            // which the value of the column is either new_value or the current value.
+            format!(
+                "SELECT {} FROM \"{}_view\" \
+                     WHERE {} IN ('{}', '{}')",
+                select_columns.join(", "),
+                table,
+                cast_column_sql_to_text(column, &sql_type),
+                current_value,
+                new_value
+            )
+        };
+        // eprintln!("SQL: {}", sql);
+
+        let query = sqlx_query(&sql);
+        let mut table_rows = IndexMap::new();
+        for row in query.fetch_all(pool).await.map_err(|e| e.to_string())? {
+            let mut table_row = SerdeMap::new();
+            let mut row_number: Option<u32> = None;
+            for column in row.columns() {
+                let cname = column.name();
+                if cname == "row_number" {
+                    row_number = Some(row.get::<i64, _>("row_number") as u32);
+                } else {
+                    let raw_value = row.try_get_raw(format!(r#"{}"#, cname).as_str()).unwrap();
+                    let value;
+                    if !raw_value.is_null() {
+                        value = get_column_value(&row, &cname, "text");
+                    } else {
+                        value = String::from("");
+                    }
+                    let cell = json!({
+                        "value": value,
+                        "valid": true,
+                        "messages": json!([]),
+                    });
+                    table_row.insert(cname.to_string(), json!(cell));
+                }
+            }
+            let row_number = row_number.ok_or("Row: has no row number".to_string())?;
+            table_rows.insert(row_number, table_row);
+        }
+
+        Ok(table_rows)
+    }
+
+    let foreign_dependencies = {
+        let mut foreign_dependencies = vec![];
+        let global_fconstraints = global_config
+            .get("constraints")
+            .and_then(|c| c.get("foreign"))
+            .and_then(|c| c.as_object())
+            .unwrap();
+        for (dependent_table, fconstraints) in global_fconstraints {
+            for entry in fconstraints.as_array().unwrap() {
+                let ftable = entry.get("ftable").and_then(|c| c.as_str()).unwrap();
+                if ftable == table {
+                    let mut fdep = entry.as_object().unwrap().clone();
+                    fdep.insert("table".to_string(), json!(dependent_table));
+                    foreign_dependencies.push(fdep);
+                }
+            }
+        }
+        foreign_dependencies
+    };
+
+    //eprintln!(
+    //    "FOREIGN KEYS THAT DEPEND ON {}: {:#?}",
+    //    table, foreign_dependencies
+    //);
+
+    let mut updates = IndexMap::new();
+    for fdep in &foreign_dependencies {
+        let dependent_table = fdep.get("table").and_then(|c| c.as_str()).unwrap();
+        let dependent_column = fdep.get("column").and_then(|c| c.as_str()).unwrap();
+        let target_column = fdep.get("fcolumn").and_then(|c| c.as_str()).unwrap();
+        let target_table = fdep.get("ftable").and_then(|c| c.as_str()).unwrap();
+
+        // Fetch the cell corresponding to `column` from `row`, and the value of that cell,
+        // which is the new value for the row.
+        let new_value = get_cell_value(row, target_column)?;
+        //eprintln!(
+        //    "NEW VALUE OF {}.{}: {}",
+        //    target_table, target_column, new_value
+        //);
+
+        // Query the database using `row_number` to get the current value of the column for
+        // the row.
+        let current_value =
+            get_current_value(target_table, target_column, row_number, pool).await?;
+        //eprintln!(
+        //    "CURRENT VALUE OF {}.{}: {}",
+        //    target_table, target_column, current_value
+        //);
+
+        // Query dependent_table.dependent_column for the rows that will be affected by the change
+        // from the current to the new value:
+        let affected_rows = get_affected_rows(
+            dependent_table,
+            dependent_column,
+            &current_value,
+            &new_value,
+            global_config,
+            pool,
+        )
+        .await?;
+        //eprintln!("AFFECTED ROWS: {:#?}", affected_rows);
+
+        updates.insert(dependent_table.to_string(), affected_rows);
+    }
+
+    // TODO (later): tree. Add more rows to the IndexMap for tree constraints.
+
+    // TODO (later): under. Add more rows to the IndexMap for under constraints.
+
+    // TODO: I think this reverse is unneeded but let's keep it commented for now.
+    // We reverse here because the deepest dependencies need to be updated first.
+    // updates.reverse();
+    Ok(updates)
+}
+
 /// Given global config map, a database connection pool, a table name, a row, and the row number to
 /// update, update the corresponding row in the database with new values as specified by `row`.
 pub async fn update_row(
@@ -1186,6 +1438,10 @@ pub async fn update_row(
     row: &SerdeMap,
     row_number: &u32,
 ) -> Result<(), sqlx::Error> {
+    // eprintln!("***** In update_row(). Got row: {:#?}", row);
+
+    // TODO: If possible use BEGIN and END TRANSACTION here and ROLLBACK in case of an error.
+
     // First, send the row through the row validator to determine if any fields are problematic and
     // to mark them with appropriate messages:
     let row = validate_row(
@@ -1195,10 +1451,11 @@ pub async fn update_row(
         pool,
         table_name,
         row,
-        true,
         Some(*row_number),
+        None,
     )
     .await?;
+    //eprintln!("***** In update_row(). Row after validation: {:#?}", row);
 
     // Now prepare the row and messages for the database update:
     let mut assignments = vec![];
@@ -1314,16 +1571,69 @@ pub async fn update_row(
     }
 
     // Update the given row in the table:
-    let mut update_stmt = format!(r#"UPDATE "{}" SET "#, table_name);
+    let mut update_stmt = format!(r#"GARBAGE-REMOVE-THIS-LATER UPDATE "{}" SET "#, table_name);
     update_stmt.push_str(&assignments.join(", "));
     update_stmt.push_str(&format!(r#" WHERE "row_number" = {}"#, row_number));
     let update_stmt = local_sql_syntax(&pool, &update_stmt);
+    //eprintln!(
+    //    "***** In update_row(). Running update statement: {} with params: {:?}",
+    //    update_stmt, params,
+    //);
 
     let mut query = sqlx_query(&update_stmt);
     for param in &params {
         query = query.bind(param);
     }
-    query.execute(pool).await?;
+    match query.execute(pool).await {
+        Ok(_) => (),
+        Err(e) => {
+            // Overview:
+            // ---------
+            // We need to call something similar to validate_row() on every affected row in the
+            // dependent table, with the hitch that we need to validate them with the target row
+            // of the target table in the database replaced, somehow, with the modified version
+            // of it represented by `row`. (In the case of delete_row() we would simply have to
+            // ignore the target row in the database somehow (maybe by excluding its row number
+            // using a CTE). Those re-validated rows should then be sent to update_row() which will
+            // try to insert them into the database one by one. In the case of a database error
+            // this code (i.e., in this block) will be triggered again, and so on, recursively
+            // until everything succeeds.
+            //
+            // Note also that we might want to run ANALYZE (or the sqlite equivalent) after
+            // the update has completed.
+
+            // Step 1:
+            // ------
+            // Look through the valve config to see which tables are dependent on this table
+            // and find the rows that need to be updated.
+
+            let updates = get_updates(global_config, pool, table_name, &row, row_number)
+                .await
+                .map_err(|e| Configuration(e.into()))?;
+            eprintln!("UPDATES: {:#?}", updates);
+
+            // YOU ARE HERE. What we now need to do, for each of the rows returned in `updates`
+            // (one at a time), is to (i) validate it 'counterfactually' (see above), (ii) Call
+            // update_row() on the result. Note that for (ii) to work as intended we are going to
+            // have to add some way to bypass the implicit re-validation that happens at the
+            // beginning of that function./ I think that might be all.
+
+            // Try this: For counterfactual validation, we could define a new struct like:
+            // struct AsIf {
+            //     type: AsIfType, // AsIfType::Update, AsIfType::Delete
+            //     row_number,
+            //     row: Option<SerdeMap>,
+            // }
+            // and pass it to validate_row() as an optional parameter. For now we will allow only
+            // one row to be counterfactually modified in this way, but maybe we might want to
+            // eventually support more than one row by changing the paramater to a vector.
+
+            // TODO: remove this error return. Do something smarter above instead.
+            return Err(Configuration(
+                format!("Arghh!! Got database error: {}", e).into(),
+            ));
+        }
+    };
 
     // Then delete any messages that had been previously inserted to the message table for the old
     // version of this row (other than any 'update'-level messages):

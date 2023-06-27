@@ -124,8 +124,8 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         &pool,
         "table2",
         row.as_object().unwrap(),
-        true,
         Some(1),
+        None,
     )
     .await?;
 
@@ -136,8 +136,8 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         &pool,
         "table2",
         &result_row_1,
-        true,
         Some(1),
+        None,
     )
     .await?;
     assert_eq!(result_row_1, result_row_2);
@@ -149,8 +149,8 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         &pool,
         "table2",
         &result_row_2,
-        true,
         Some(1),
+        None,
     )
     .await?;
     assert_eq!(result_row, result_row_2);
@@ -162,7 +162,7 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         &compiled_rule_conditions,
         &pool,
         "table2",
-        &result_row,
+        &row.as_object().unwrap(),
         &1,
     )
     .await?;
@@ -189,7 +189,7 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         &pool,
         "table3",
         row.as_object().unwrap(),
-        false,
+        None,
         None,
     )
     .await?;
@@ -225,8 +225,8 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         &pool,
         "table6",
         row.as_object().unwrap(),
-        true,
         Some(1),
+        None,
     )
     .await?;
     update_row(
@@ -261,7 +261,7 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         &pool,
         "table6",
         row.as_object().unwrap(),
-        false,
+        None,
         None,
     )
     .await?;
