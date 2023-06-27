@@ -26,6 +26,24 @@ pub struct ResultRow {
     pub contents: IndexMap<String, ResultCell>,
 }
 
+/// TODO: Add a docstring here
+#[derive(Clone, Debug)]
+pub enum QueryAsIfKind {
+    Update,
+    Ignore,
+}
+
+/// Used for counterfactual validation.
+#[derive(Clone, Debug)]
+pub struct QueryAsIf {
+    pub kind: QueryAsIfKind,
+    pub table: String,
+    // SQLite does not allow a CTE named 'foo' to reference a table named 'foo' so we need an alias:
+    pub alias: String,
+    pub row_number: u32,
+    pub row: Option<SerdeMap>,
+}
+
 /// Given a config map, maps of compiled datatype and rule conditions, a database connection
 /// pool, a table name, a row to validate, and a row number in case the row already exists,
 /// perform both intra- and inter-row validation and return the validated row. Note that this
@@ -38,13 +56,14 @@ pub async fn validate_row(
     table_name: &str,
     row: &SerdeMap,
     row_number: Option<u32>,
-    rows_to_ignore: Option<HashMap<String, Vec<u32>>>,
+    query_as_if: Option<&QueryAsIf>,
 ) -> Result<SerdeMap, sqlx::Error> {
     // Initialize the result row with the values from the given row:
     let mut result_row = ResultRow {
         row_number: row_number,
         contents: IndexMap::new(),
     };
+
     for (column, cell) in row.iter() {
         let result_cell = ResultCell {
             nulltype: cell
@@ -137,11 +156,21 @@ pub async fn validate_row(
         }
     }
 
-    let mut violations =
-        validate_tree_foreign_keys(config, pool, &table_name.to_string(), Some(context.clone()))
-            .await?;
+    let mut violations = validate_tree_foreign_keys(
+        config,
+        pool,
+        &table_name.to_string(),
+        Some(&context.clone()),
+    )
+    .await?;
     violations.append(
-        &mut validate_under(config, pool, &table_name.to_string(), Some(context.clone())).await?,
+        &mut validate_under(
+            config,
+            pool,
+            &table_name.to_string(),
+            Some(&context.clone()),
+        )
+        .await?,
     );
 
     for violation in violations.iter_mut() {
@@ -309,7 +338,7 @@ pub async fn get_matching_values(
                                 tree,
                                 &table_name.to_string(),
                                 &table_name.to_string(),
-                                under_val,
+                                under_val.as_ref(),
                                 None,
                                 pool,
                             );
@@ -362,7 +391,7 @@ pub async fn validate_under(
     config: &SerdeMap,
     pool: &AnyPool,
     table_name: &String,
-    extra_row: Option<ResultRow>,
+    extra_row: Option<&ResultRow>,
 ) -> Result<Vec<SerdeValue>, sqlx::Error> {
     let mut results = vec![];
     let ukeys = config
@@ -442,7 +471,7 @@ pub async fn validate_under(
             tree,
             &table_name,
             &effective_tree,
-            Some(uval.clone()),
+            Some(&uval.clone()),
             None,
             pool,
         );
@@ -594,7 +623,7 @@ pub async fn validate_tree_foreign_keys(
     config: &SerdeMap,
     pool: &AnyPool,
     table_name: &String,
-    extra_row: Option<ResultRow>,
+    extra_row: Option<&ResultRow>,
 ) -> Result<Vec<SerdeValue>, sqlx::Error> {
     let tkeys = config
         .get("constraints")
@@ -1062,11 +1091,12 @@ fn with_tree_sql(
     tree: &SerdeMap,
     table_name: &str,
     effective_table_name: &str,
-    root: Option<String>,
-    extra_clause: Option<String>,
+    root: Option<&String>,
+    extra_clause: Option<&String>,
     pool: &AnyPool,
 ) -> (String, Vec<String>) {
-    let extra_clause = extra_clause.unwrap_or(String::new());
+    let empty_string = String::new();
+    let extra_clause = extra_clause.unwrap_or(&empty_string);
     let child_col = tree.get("child").and_then(|c| c.as_str()).unwrap();
     let parent_col = tree.get("parent").and_then(|c| c.as_str()).unwrap();
 
@@ -1153,14 +1183,14 @@ fn validate_cell_datatype(
         config: &SerdeMap,
         compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
         primary_dt_name: &str,
-        dt_name: Option<String>,
+        dt_name: Option<&String>,
     ) -> Vec<SerdeMap> {
         let mut datatypes = vec![];
         if let Some(dt_name) = dt_name {
             let datatype = config
                 .get("datatype")
                 .and_then(|d| d.as_object())
-                .and_then(|o| o.get(&dt_name))
+                .and_then(|o| o.get(dt_name))
                 .and_then(|d| d.as_object())
                 .unwrap();
             let dt_name = datatype.get("datatype").and_then(|d| d.as_str()).unwrap();
@@ -1178,7 +1208,7 @@ fn validate_cell_datatype(
                 config,
                 compiled_datatype_conditions,
                 primary_dt_name,
-                dt_parent,
+                dt_parent.as_ref(),
             );
             datatypes.append(&mut more_datatypes);
         }
@@ -1212,7 +1242,7 @@ fn validate_cell_datatype(
                 config,
                 compiled_datatype_conditions,
                 primary_dt_name,
-                Some(primary_dt_name.to_string()),
+                Some(&primary_dt_name.to_string()),
             );
             // If this datatype has any parents, check them beginning from the most general to the
             // most specific. We use while and pop instead of a for loop so as to check the
@@ -1535,8 +1565,8 @@ async fn validate_cell_trees(
             &tkey,
             &table_name,
             &table_name_ext,
-            Some(parent_val.clone()),
-            Some(extra_clause),
+            Some(&parent_val.clone()),
+            Some(&extra_clause),
             pool,
         );
         params.append(&mut tree_sql_params);

@@ -25,7 +25,7 @@ lalrpop_mod!(pub valve_grammar);
 
 use crate::validate::{
     validate_row, validate_rows_constraints, validate_rows_intra, validate_rows_trees,
-    validate_tree_foreign_keys, validate_under, ResultRow,
+    validate_tree_foreign_keys, validate_under, QueryAsIf, QueryAsIfKind, ResultRow,
 };
 use crate::{ast::Expression, valve_grammar::StartParser};
 use chrono::Utc;
@@ -1178,7 +1178,7 @@ pub async fn insert_new_row(
     Ok(new_row_number)
 }
 
-pub async fn get_updates(
+pub async fn get_rows_to_update(
     global_config: &SerdeMap,
     pool: &AnyPool,
     table: &str,
@@ -1377,7 +1377,7 @@ pub async fn get_updates(
     //    table, foreign_dependencies
     //);
 
-    let mut updates = IndexMap::new();
+    let mut rows_to_update = IndexMap::new();
     for fdep in &foreign_dependencies {
         let dependent_table = fdep.get("table").and_then(|c| c.as_str()).unwrap();
         let dependent_column = fdep.get("column").and_then(|c| c.as_str()).unwrap();
@@ -1414,7 +1414,7 @@ pub async fn get_updates(
         .await?;
         //eprintln!("AFFECTED ROWS: {:#?}", affected_rows);
 
-        updates.insert(dependent_table.to_string(), affected_rows);
+        rows_to_update.insert(dependent_table.to_string(), affected_rows);
     }
 
     // TODO (later): tree. Add more rows to the IndexMap for tree constraints.
@@ -1423,8 +1423,8 @@ pub async fn get_updates(
 
     // TODO: I think this reverse is unneeded but let's keep it commented for now.
     // We reverse here because the deepest dependencies need to be updated first.
-    // updates.reverse();
-    Ok(updates)
+    // rows_to_update.reverse();
+    Ok(rows_to_update)
 }
 
 /// Given global config map, a database connection pool, a table name, a row, and the row number to
@@ -1593,7 +1593,7 @@ pub async fn update_row(
             // dependent table, with the hitch that we need to validate them with the target row
             // of the target table in the database replaced, somehow, with the modified version
             // of it represented by `row`. (In the case of delete_row() we would simply have to
-            // ignore the target row in the database somehow (maybe by excluding its row number
+            // ignore the target row in the database somehow, maybe by excluding its row number
             // using a CTE). Those re-validated rows should then be sent to update_row() which will
             // try to insert them into the database one by one. In the case of a database error
             // this code (i.e., in this block) will be triggered again, and so on, recursively
@@ -1607,26 +1607,46 @@ pub async fn update_row(
             // Look through the valve config to see which tables are dependent on this table
             // and find the rows that need to be updated.
 
-            let updates = get_updates(global_config, pool, table_name, &row, row_number)
+            let updates = get_rows_to_update(global_config, pool, table_name, &row, row_number)
                 .await
                 .map_err(|e| Configuration(e.into()))?;
             eprintln!("UPDATES: {:#?}", updates);
 
-            // YOU ARE HERE. What we now need to do, for each of the rows returned in `updates`
-            // (one at a time), is to (i) validate it 'counterfactually' (see above), (ii) Call
-            // update_row() on the result. Note that for (ii) to work as intended we are going to
-            // have to add some way to bypass the implicit re-validation that happens at the
-            // beginning of that function./ I think that might be all.
+            let query_as_if = QueryAsIf {
+                kind: QueryAsIfKind::Update,
+                table: table_name.to_string(),
+                alias: format!("{}_as_if", table_name),
+                row_number: *row_number,
+                row: Some(row),
+            };
 
-            // Try this: For counterfactual validation, we could define a new struct like:
-            // struct AsIf {
-            //     type: AsIfType, // AsIfType::Update, AsIfType::Delete
-            //     row_number,
-            //     row: Option<SerdeMap>,
-            // }
-            // and pass it to validate_row() as an optional parameter. For now we will allow only
-            // one row to be counterfactually modified in this way, but maybe we might want to
-            // eventually support more than one row by changing the paramater to a vector.
+            // Validate each row 'counterfactually' (see above):
+            let mut validated_rows = vec![];
+            for (update_table, rows_to_update) in &updates {
+                for (row_number, row) in rows_to_update {
+                    eprintln!("ROW NUMBER: {}, ROW: {:#?}", row_number, row);
+                    let vrow = validate_row(
+                        global_config,
+                        compiled_datatype_conditions,
+                        compiled_rule_conditions,
+                        pool,
+                        update_table,
+                        row,
+                        Some(*row_number),
+                        Some(&query_as_if),
+                    )
+                    .await?;
+                    eprintln!("VALIDATED ROW: {:#?}", vrow);
+                    validated_rows.push(vrow);
+                }
+            }
+
+            // TODO: Call update_row() on the each of the validated rows. Note that for this to work
+            // as intended we are going to have to add some way to bypass the implicit re-validation
+            // that happens at the beginning of that function.
+
+            // TODO: Finally, retry the update_row() call that resulted in our being in the Err
+            // branch to begin with.
 
             // TODO: remove this error return. Do something smarter above instead.
             return Err(Configuration(
