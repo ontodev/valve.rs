@@ -28,6 +28,7 @@ use crate::validate::{
     validate_tree_foreign_keys, validate_under, QueryAsIf, QueryAsIfKind, ResultRow,
 };
 use crate::{ast::Expression, valve_grammar::StartParser};
+use async_recursion::async_recursion;
 use chrono::Utc;
 use crossbeam;
 use futures::executor::block_on;
@@ -1058,7 +1059,8 @@ pub async fn valve(
 }
 
 /// Given a global config map, a database connection pool, a table name, and a row, assign a new
-/// row number to the row and insert it to the database, then return the new row number.
+/// row number to the row and insert it to the database, then return the new row number. Optionally,
+/// if row_number is provided, use that to identify the new row.
 pub async fn insert_new_row(
     global_config: &SerdeMap,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
@@ -1066,38 +1068,51 @@ pub async fn insert_new_row(
     pool: &AnyPool,
     table_name: &str,
     row: &SerdeMap,
+    new_row_number: Option<&u32>,
+    skip_validation: bool,
 ) -> Result<u32, sqlx::Error> {
     // First, send the row through the row validator to determine if any fields are problematic and
     // to mark them with appropriate messages:
-    let row = validate_row(
-        global_config,
-        compiled_datatype_conditions,
-        compiled_rule_conditions,
-        pool,
-        table_name,
-        row,
-        None,
-        None,
-    )
-    .await?;
+
+    let row = if !skip_validation {
+        validate_row(
+            global_config,
+            compiled_datatype_conditions,
+            compiled_rule_conditions,
+            pool,
+            table_name,
+            row,
+            None,
+            None,
+        )
+        .await?
+    } else {
+        row.clone()
+    };
 
     // Now prepare the row and messages for insertion to the database.
 
-    // The new row number to insert is the current highest row number + 1.
-    let sql = format!(
-        r#"SELECT MAX("row_number") AS "row_number" FROM "{}_view""#,
-        table_name
-    );
-    let query = sqlx_query(&sql);
-    let result_row = query.fetch_one(pool).await?;
-    let result = result_row.try_get_raw("row_number").unwrap();
-    let new_row_number: i64;
-    if result.is_null() {
-        new_row_number = 1;
-    } else {
-        new_row_number = result_row.get("row_number");
-    }
-    let new_row_number = new_row_number as u32 + 1;
+    let new_row_number = match new_row_number {
+        Some(n) => *n,
+        None => {
+            // The new row number to insert is the current highest row number + 1.
+            let sql = format!(
+                r#"SELECT MAX("row_number") AS "row_number" FROM "{}_view""#,
+                table_name
+            );
+            let query = sqlx_query(&sql);
+            let result_row = query.fetch_one(pool).await?;
+            let result = result_row.try_get_raw("row_number").unwrap();
+            let new_row_number: i64;
+            if result.is_null() {
+                new_row_number = 1;
+            } else {
+                new_row_number = result_row.get("row_number");
+            }
+            let new_row_number = new_row_number as u32 + 1;
+            new_row_number
+        }
+    };
 
     let mut insert_columns = vec![];
     let mut insert_values = vec![];
@@ -1464,6 +1479,7 @@ pub async fn get_rows_to_update(
 
 /// Given global config map, a database connection pool, a table name, a row, and the row number to
 /// update, update the corresponding row in the database with new values as specified by `row`.
+#[async_recursion]
 pub async fn update_row(
     global_config: &SerdeMap,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
@@ -1614,143 +1630,197 @@ pub async fn update_row(
         }
     }
 
-    // Update the given row in the table:
-    let mut update_stmt = format!(r#"UPDATE "{}" SET "#, table_name);
-    update_stmt.push_str(&assignments.join(", "));
-    update_stmt.push_str(&format!(r#" WHERE "row_number" = {}"#, row_number));
-    let update_stmt = local_sql_syntax(&pool, &update_stmt);
-    //eprintln!(
-    //    "***** In update_row(). Running update statement: {} with params: {:?}",
-    //    update_stmt, params,
-    //);
+    // Overview:
+    // ---------
+    // We need to call something similar to validate_row() on every affected row in the
+    // dependent table, with the hitch that we need to validate them with the target row
+    // of the target table in the database replaced, somehow, with the modified version
+    // of it represented by `row`. (In the case of delete_row() we would simply have to
+    // ignore the target row in the database somehow, maybe by excluding its row number
+    // using a CTE). Those re-validated rows should then be sent to update_row() which will
+    // try to insert them into the database one by one. In the case of a database error
+    // this code (i.e., in this block) will be triggered again, and so on, recursively
+    // until everything succeeds.
+    //
+    // Note also that we might want to run ANALYZE (or the sqlite equivalent) after
+    // the update has completed.
 
-    let mut query = sqlx_query(&update_stmt);
-    for param in &params {
-        query = query.bind(param);
+    // Step 1:
+    // ------
+    // Look through the valve config to see which tables are dependent on this table
+    // and find the rows that need to be updated.
+
+    let (updates_before, updates_after) =
+        get_rows_to_update(global_config, pool, table_name, &row, row_number)
+            .await
+            .map_err(|e| Configuration(e.into()))?;
+    eprintln!("UPDATES_BEFORE: {:#?}", updates_before);
+    eprintln!("UPDATES_AFTER: {:#?}", updates_after);
+
+    let query_as_if = QueryAsIf {
+        kind: QueryAsIfKind::Replace,
+        table: table_name.to_string(),
+        alias: format!("{}_as_if", table_name),
+        row_number: *row_number,
+        row: Some(row.clone()),
+    };
+
+    // TODO: Factor this code out into a function instead of repeating it twice for
+    // updates_after and updates_before (see below)
+    for (update_table, rows_to_update) in &updates_before {
+        for (row_number, row) in rows_to_update {
+            eprintln!(
+                "VALIDATING ROW NUMBER {} OF {}, ROW: {:#?}",
+                row_number, update_table, row
+            );
+            // Validate each row 'counterfactually' (see above):
+            let vrow = validate_row(
+                global_config,
+                compiled_datatype_conditions,
+                compiled_rule_conditions,
+                pool,
+                update_table,
+                row,
+                Some(*row_number),
+                Some(&query_as_if),
+            )
+            .await?;
+            eprintln!("VALIDATED ROW: {:#?}", vrow);
+            // Update the row in the database:
+            update_row(
+                global_config,
+                compiled_datatype_conditions,
+                compiled_rule_conditions,
+                pool,
+                update_table,
+                &vrow,
+                row_number,
+                true,
+            )
+            .await?;
+        }
     }
-    match query.execute(pool).await {
-        Ok(_) => (),
-        Err(_) => {
-            // Overview:
-            // ---------
-            // We need to call something similar to validate_row() on every affected row in the
-            // dependent table, with the hitch that we need to validate them with the target row
-            // of the target table in the database replaced, somehow, with the modified version
-            // of it represented by `row`. (In the case of delete_row() we would simply have to
-            // ignore the target row in the database somehow, maybe by excluding its row number
-            // using a CTE). Those re-validated rows should then be sent to update_row() which will
-            // try to insert them into the database one by one. In the case of a database error
-            // this code (i.e., in this block) will be triggered again, and so on, recursively
-            // until everything succeeds.
-            //
-            // Note also that we might want to run ANALYZE (or the sqlite equivalent) after
-            // the update has completed.
 
-            // Step 1:
-            // ------
-            // Look through the valve config to see which tables are dependent on this table
-            // and find the rows that need to be updated.
+    // Update the target row
 
-            let (updates_before, updates_after) =
-                get_rows_to_update(global_config, pool, table_name, &row, row_number)
-                    .await
-                    .map_err(|e| Configuration(e.into()))?;
-            eprintln!("UPDATES_BEFORE: {:#?}", updates_before);
-            eprintln!("UPDATES_AFTER: {:#?}", updates_after);
+    // Figure out where the row currently is:
+    let sql = format!(
+        "SELECT 1 FROM \"{}\" WHERE row_number = {}",
+        table_name, row_number
+    );
+    let query = sqlx_query(&sql);
+    let rows = query.fetch_all(pool).await?;
+    let mut current_table = String::from(table_name);
+    if rows.len() == 0 {
+        current_table.push_str("_conflict");
+    }
 
-            let query_as_if = QueryAsIf {
-                kind: QueryAsIfKind::Replace,
-                table: table_name.to_string(),
-                alias: format!("{}_as_if", table_name),
-                row_number: *row_number,
-                row: Some(row.clone()),
-            };
-
-            // TODO: Factor this code out into a function instead of repeating it twice for
-            // updates_after and updates_before
-            for (update_table, rows_to_update) in &updates_before {
-                for (row_number, row) in rows_to_update {
-                    eprintln!(
-                        "VALIDATING ROW NUMBER {} OF {}, ROW: {:#?}",
-                        row_number, update_table, row
-                    );
-                    // Validate each row 'counterfactually' (see above):
-                    let vrow = validate_row(
-                        global_config,
-                        compiled_datatype_conditions,
-                        compiled_rule_conditions,
-                        pool,
-                        update_table,
-                        row,
-                        Some(*row_number),
-                        Some(&query_as_if),
-                    )
-                    .await?;
-                    eprintln!("VALIDATED ROW: {:#?}", vrow);
-                    // Update the row in the database:
-                    block_on(update_row(
-                        global_config,
-                        compiled_datatype_conditions,
-                        compiled_rule_conditions,
-                        pool,
-                        update_table,
-                        &vrow,
-                        row_number,
-                        true,
-                    ))?;
-                }
-            }
-            // Finally, retry the update_row() call that resulted in our being in the Err
-            // branch to begin with.
-            let mut query = sqlx_query(&update_stmt);
-            for param in &params {
-                query = query.bind(param);
-            }
-            match query.execute(pool).await {
-                Ok(_) => eprintln!("Before updates done! Now trying after updates."),
-                Err(e) => {
-                    // TODO NEXT: Instead of returning an error here, we should try to insert to the
-                    // conflict table like we do during bulk loading.
-                    return Err(Configuration(
-                        format!("Arghh!! Got schmatabase error: {}", e).into(),
-                    ));
-                }
-            };
-
-            for (update_table, rows_to_update) in &updates_after {
-                for (row_number, row) in rows_to_update {
-                    eprintln!(
-                        "VALIDATING ROW NUMBER {} OF {}, ROW: {:#?}",
-                        row_number, update_table, row
-                    );
-                    // Validate each row 'counterfactually' (see above):
-                    let vrow = validate_row(
-                        global_config,
-                        compiled_datatype_conditions,
-                        compiled_rule_conditions,
-                        pool,
-                        update_table,
-                        row,
-                        Some(*row_number),
-                        Some(&query_as_if),
-                    )
-                    .await?;
-                    eprintln!("VALIDATED ROW: {:#?}", vrow);
-                    // Update the row in the database:
-                    block_on(update_row(
-                        global_config,
-                        compiled_datatype_conditions,
-                        compiled_rule_conditions,
-                        pool,
-                        update_table,
-                        &vrow,
-                        row_number,
-                        true,
-                    ))?;
+    // Figure out where the row needs to go:
+    let mut table_to_write = String::from(table_name);
+    for (column, cell) in row.iter() {
+        let valid = cell.get("valid").unwrap();
+        if valid == false {
+            let structure = global_config
+                .get("table")
+                .and_then(|t| t.as_object())
+                .and_then(|t| t.get(table_name))
+                .and_then(|t| t.as_object())
+                .and_then(|t| t.get("column"))
+                .and_then(|c| c.as_object())
+                .and_then(|c| c.get(column))
+                .and_then(|c| c.as_object())
+                .and_then(|c| c.get("structure"))
+                .and_then(|s| s.as_str())
+                .unwrap_or("");
+            if vec!["primary", "unique"].contains(&structure) || structure.starts_with("tree(") {
+                let messages = cell.get("messages").and_then(|m| m.as_array()).unwrap();
+                for msg in messages {
+                    let level = msg.get("level").and_then(|l| l.as_str()).unwrap();
+                    eprintln!("LEVEL: {}", level);
+                    if level == "error" {
+                        table_to_write.push_str("_conflict");
+                        break;
+                    }
                 }
             }
         }
-    };
+    }
+
+    if table_to_write == current_table {
+        let mut update_stmt = format!(r#"UPDATE "{}" SET "#, table_to_write);
+        update_stmt.push_str(&assignments.join(", "));
+        update_stmt.push_str(&format!(r#" WHERE "row_number" = {}"#, row_number));
+        let update_stmt = local_sql_syntax(&pool, &update_stmt);
+        eprintln!(
+            "Table_to_write is current_table. Running update statement: {} with params: {:?}",
+            update_stmt, params,
+        );
+
+        let mut query = sqlx_query(&update_stmt);
+        for param in &params {
+            query = query.bind(param);
+        }
+        query.execute(pool).await?;
+    } else {
+        let sql = format!(
+            "DELETE FROM \"{}\" WHERE row_number = {}",
+            current_table, row_number
+        );
+        eprintln!(
+            "Table to write is not the same as current table. Running {}",
+            sql
+        );
+        let query = sqlx_query(&sql);
+        query.execute(pool).await?;
+        eprintln!("INSERTING NEW ROW");
+        insert_new_row(
+            global_config,
+            compiled_datatype_conditions,
+            compiled_rule_conditions,
+            pool,
+            &table_to_write,
+            &row,
+            Some(row_number),
+            true,
+        )
+        .await?;
+    }
+
+    // TODO: Factor this code out into a function instead of repeating it twice for
+    // updates_after and updates_before (see below)
+    for (update_table, rows_to_update) in &updates_after {
+        for (row_number, row) in rows_to_update {
+            eprintln!(
+                "VALIDATING ROW NUMBER {} OF {}, ROW: {:#?}",
+                row_number, update_table, row
+            );
+            // Validate each row 'counterfactually' (see above):
+            let vrow = validate_row(
+                global_config,
+                compiled_datatype_conditions,
+                compiled_rule_conditions,
+                pool,
+                update_table,
+                row,
+                Some(*row_number),
+                Some(&query_as_if),
+            )
+            .await?;
+            eprintln!("VALIDATED ROW: {:#?}", vrow);
+            // Update the row in the database:
+            update_row(
+                global_config,
+                compiled_datatype_conditions,
+                compiled_rule_conditions,
+                pool,
+                update_table,
+                &vrow,
+                row_number,
+                true,
+            )
+            .await?;
+        }
+    }
 
     // Then delete any messages that had been previously inserted to the message table for the old
     // version of this row (other than any 'update'-level messages):
@@ -2044,7 +2114,7 @@ fn get_sql_type(dt_config: &SerdeMap, datatype: &String, pool: &AnyPool) -> Opti
 
 /// Given the global config map, a table name, a column name, and a database connection pool
 /// used to determine the database type return the column's SQL type.
-fn get_sql_type_from_global_config(
+pub fn get_sql_type_from_global_config(
     global_config: &SerdeMap,
     table: &str,
     column: &str,
