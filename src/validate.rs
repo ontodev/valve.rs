@@ -1436,7 +1436,9 @@ fn as_if_to_sql(
                     )
                     .unwrap();
 
-                    if sql_type.to_lowercase() == "text" {
+                    if sql_type.to_lowercase() == "text"
+                        || sql_type.to_lowercase().starts_with("varchar(")
+                    {
                         values.push(format!("'{}'", value));
                     } else {
                         values.push(value.to_string());
@@ -1529,8 +1531,10 @@ async fn validate_cell_foreign_constraints(
             ),
         );
         //eprintln!("FSQL FOR {:?}: {}", fkey, fsql);
+        //eprintln!("FSQL: {}", fsql);
 
         let frows = sqlx_query(&fsql).bind(&cell.value).fetch_all(pool).await?;
+        //eprintln!("SUCCEEDED!!!");
         if frows.is_empty() {
             cell.valid = false;
             let mut message = json!({

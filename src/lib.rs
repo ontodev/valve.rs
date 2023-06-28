@@ -1191,7 +1191,7 @@ pub async fn get_rows_to_update(
     ),
     String,
 > {
-    // eprintln!("GETTING UPDATES FOR ROW {} OF {}", row_number, table);
+    eprintln!("GETTING UPDATES FOR ROW {} OF {}", row_number, table);
 
     fn get_cell_value(row: &SerdeMap, column: &str) -> Result<String, String> {
         match row.get(column).and_then(|cell| cell.get("value")) {
@@ -1254,11 +1254,6 @@ pub async fn get_rows_to_update(
         global_config: &SerdeMap,
         pool: &AnyPool,
     ) -> Result<IndexMap<u32, SerdeMap>, String> {
-        // eprintln!("GETTING AFFECTED ROWS FOR {}.{}", table, column);
-
-        let sql_type =
-            get_sql_type_from_global_config(&global_config, &table, &column, pool).unwrap();
-
         let sql = {
             let is_clause = if pool.any_kind() == AnyKind::Sqlite {
                 "IS"
@@ -1266,7 +1261,7 @@ pub async fn get_rows_to_update(
                 "IS NOT DISTINCT FROM"
             };
 
-            let select_columns = global_config
+            let real_columns = global_config
                 .get("table")
                 .and_then(|t| t.get(table))
                 .and_then(|t| t.as_object())
@@ -1277,7 +1272,7 @@ pub async fn get_rows_to_update(
                 .and_then(|t| Some(t.collect::<Vec<_>>()))
                 .unwrap();
 
-            let mut select_columns = select_columns
+            let mut inner_columns = real_columns
                 .iter()
                 .map(|c| {
                     format!(
@@ -1304,9 +1299,20 @@ pub async fn get_rows_to_update(
                 })
                 .collect::<Vec<_>>();
 
-            let select_columns = {
+            let mut outer_columns = real_columns
+                .iter()
+                .map(|c| format!("t.\"{}_extended\"", c))
+                .collect::<Vec<_>>();
+
+            let inner_columns = {
                 let mut v = vec!["row_number".to_string()];
-                v.append(&mut select_columns);
+                v.append(&mut inner_columns);
+                v
+            };
+
+            let outer_columns = {
+                let mut v = vec!["t.row_number".to_string()];
+                v.append(&mut outer_columns);
                 v
             };
 
@@ -1314,18 +1320,19 @@ pub async fn get_rows_to_update(
             // (in the conflict table) becoming valid or vice versa, we need to check rows for
             // which the value of the column is the same as `value`
 
-            //let mike_sql =
             format!(
-                "SELECT {columns} FROM \"{table}_view\" \
-                 WHERE \"{column}_extended\" = '{value}'",
-                columns = select_columns.join(", "),
+                r#"SELECT {outer_columns}
+                 FROM (
+                   SELECT {inner_columns}
+                   FROM "{table}_view"
+                 ) t
+                 WHERE "{column}_extended" = '{value}'"#,
+                outer_columns = outer_columns.join(", "),
+                inner_columns = inner_columns.join(", "),
                 table = table,
                 column = column,
                 value = value
             )
-            //;
-            //eprintln!("MIKE SQL: {}", mike_sql);
-            //mike_sql
         };
         // eprintln!("SQL: {}", sql);
 
@@ -1414,8 +1421,10 @@ pub async fn get_rows_to_update(
 
         // Query dependent_table.dependent_column for the rows that will be affected by the change
         // from the current to the new value:
-        //eprintln!("LOOKING FOR UPDATES BEFORE IN {} USING VALUE: '{}'",
-        //          dependent_table, current_value);
+        //eprintln!(
+        //    "LOOKING FOR UPDATES BEFORE IN {} USING VALUE: '{}'",
+        //    dependent_table, current_value
+        //);
         let updates_before = get_affected_rows(
             dependent_table,
             dependent_column,
@@ -1426,8 +1435,10 @@ pub async fn get_rows_to_update(
         .await?;
         //eprintln!("UPDATES BEFORE ARE: {:#?}", updates_before);
 
-        //eprintln!("LOOKING FOR UPDATES AFTER IN {} USING VALUE: '{}'",
-        //          dependent_table, new_value);
+        //eprintln!(
+        //    "LOOKING FOR UPDATES AFTER IN {} USING VALUE: '{}'",
+        //    dependent_table, new_value
+        //);
         let updates_after = get_affected_rows(
             dependent_table,
             dependent_column,
@@ -1619,7 +1630,7 @@ pub async fn update_row(
     }
     match query.execute(pool).await {
         Ok(_) => (),
-        Err(e) => {
+        Err(_) => {
             // Overview:
             // ---------
             // We need to call something similar to validate_row() on every affected row in the
