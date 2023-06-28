@@ -26,7 +26,7 @@ pub struct ResultRow {
     pub contents: IndexMap<String, ResultCell>,
 }
 
-/// TODO: Add a docstring here
+/// The sense in which a [QueryAsIf] struct should be interpreted.
 #[derive(Clone, Debug, PartialEq)]
 pub enum QueryAsIfKind {
     Replace,
@@ -158,7 +158,7 @@ pub async fn validate_row(
         }
     }
 
-    // TODO.
+    // TODO: Possibly propagate `query_as_if` down into this function:
     let mut violations = validate_tree_foreign_keys(
         config,
         pool,
@@ -167,7 +167,7 @@ pub async fn validate_row(
     )
     .await?;
     violations.append(
-        // TODO.
+        // TODO: Possibly propagate `query_as_if` down into this function:
         &mut validate_under(
             config,
             pool,
@@ -1390,7 +1390,8 @@ fn validate_cell_rules(
     }
 }
 
-/// TODO: Add docstring here
+/// Generates an SQL fragment representing the "as if" portion of a query that will be used for
+/// counterfactual validation.
 fn as_if_to_sql(
     global_config: &SerdeMap,
     pool: &AnyPool,
