@@ -29,7 +29,7 @@ pub struct ResultRow {
 /// TODO: Add a docstring here
 #[derive(Clone, Debug, PartialEq)]
 pub enum QueryAsIfKind {
-    Update,
+    Replace,
     Ignore,
 }
 
@@ -125,7 +125,6 @@ pub async fn validate_row(
             // they can result in database errors when, for instance, we compare a numeric with a
             // non-numeric type.
             if cell.valid || !contains_dt_violation(&cell.messages) {
-                // TODO: Pass query_as_if here:
                 validate_cell_trees(
                     config,
                     pool,
@@ -136,7 +135,6 @@ pub async fn validate_row(
                     &vec![],
                 )
                 .await?;
-                // DONE. (TODO: Remove this comment later.)
                 validate_cell_foreign_constraints(
                     config,
                     pool,
@@ -146,7 +144,6 @@ pub async fn validate_row(
                     query_as_if,
                 )
                 .await?;
-                // TODO: Pass query_as_if here:
                 validate_cell_unique_constraints(
                     config,
                     pool,
@@ -161,7 +158,7 @@ pub async fn validate_row(
         }
     }
 
-    // TODO: Pass query_as_if here:
+    // TODO.
     let mut violations = validate_tree_foreign_keys(
         config,
         pool,
@@ -170,7 +167,7 @@ pub async fn validate_row(
     )
     .await?;
     violations.append(
-        // TODO: Pass query_as_if here:
+        // TODO.
         &mut validate_under(
             config,
             pool,
@@ -1166,6 +1163,8 @@ fn validate_cell_nulltype(
     column_name: &String,
     cell: &mut ResultCell,
 ) {
+    //eprintln!("GETTING COLUMN CONFIG FOR {}.{}", table_name, column_name);
+
     let column = config
         .get("table")
         .and_then(|t| t.as_object())

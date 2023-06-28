@@ -1184,7 +1184,13 @@ pub async fn get_rows_to_update(
     table: &str,
     row: &SerdeMap,
     row_number: &u32,
-) -> Result<IndexMap<String, IndexMap<u32, SerdeMap>>, String> {
+) -> Result<
+    (
+        IndexMap<String, IndexMap<u32, SerdeMap>>,
+        IndexMap<String, IndexMap<u32, SerdeMap>>,
+    ),
+    String,
+> {
     // eprintln!("GETTING UPDATES FOR ROW {} OF {}", row_number, table);
 
     fn get_cell_value(row: &SerdeMap, column: &str) -> Result<String, String> {
@@ -1244,8 +1250,7 @@ pub async fn get_rows_to_update(
     async fn get_affected_rows(
         table: &str,
         column: &str,
-        current_value: &str,
-        new_value: &str,
+        value: &str,
         global_config: &SerdeMap,
         pool: &AnyPool,
     ) -> Result<IndexMap<u32, SerdeMap>, String> {
@@ -1287,7 +1292,7 @@ pub async fn get_rows_to_update(
                                LIMIT 1
                              )
                              ELSE {casted_column}
-                           END AS "{column}""#,
+                           END AS "{column}_extended""#,
                         casted_column = if pool.any_kind() == AnyKind::Sqlite {
                             cast_column_sql_to_text(c, "non-text")
                         } else {
@@ -1307,16 +1312,20 @@ pub async fn get_rows_to_update(
 
             // Since the consequence of an update could involve currently invalid rows
             // (in the conflict table) becoming valid or vice versa, we need to check rows for
-            // which the value of the column is either new_value or the current value.
+            // which the value of the column is the same as `value`
+
+            //let mike_sql =
             format!(
-                "SELECT {} FROM \"{}_view\" \
-                     WHERE {} IN ('{}', '{}')",
-                select_columns.join(", "),
-                table,
-                cast_column_sql_to_text(column, &sql_type),
-                current_value,
-                new_value
+                "SELECT {columns} FROM \"{table}_view\" \
+                 WHERE \"{column}_extended\" = '{value}'",
+                columns = select_columns.join(", "),
+                table = table,
+                column = column,
+                value = value
             )
+            //;
+            //eprintln!("MIKE SQL: {}", mike_sql);
+            //mike_sql
         };
         // eprintln!("SQL: {}", sql);
 
@@ -1342,6 +1351,7 @@ pub async fn get_rows_to_update(
                         "valid": true,
                         "messages": json!([]),
                     });
+                    let cname = cname.strip_suffix("_extended").unwrap();
                     table_row.insert(cname.to_string(), json!(cell));
                 }
             }
@@ -1377,7 +1387,8 @@ pub async fn get_rows_to_update(
     //    table, foreign_dependencies
     //);
 
-    let mut rows_to_update = IndexMap::new();
+    let mut rows_to_update_before = IndexMap::new();
+    let mut rows_to_update_after = IndexMap::new();
     for fdep in &foreign_dependencies {
         let dependent_table = fdep.get("table").and_then(|c| c.as_str()).unwrap();
         let dependent_column = fdep.get("column").and_then(|c| c.as_str()).unwrap();
@@ -1403,18 +1414,32 @@ pub async fn get_rows_to_update(
 
         // Query dependent_table.dependent_column for the rows that will be affected by the change
         // from the current to the new value:
-        let affected_rows = get_affected_rows(
+        //eprintln!("LOOKING FOR UPDATES BEFORE IN {} USING VALUE: '{}'",
+        //          dependent_table, current_value);
+        let updates_before = get_affected_rows(
             dependent_table,
             dependent_column,
             &current_value,
+            global_config,
+            pool,
+        )
+        .await?;
+        //eprintln!("UPDATES BEFORE ARE: {:#?}", updates_before);
+
+        //eprintln!("LOOKING FOR UPDATES AFTER IN {} USING VALUE: '{}'",
+        //          dependent_table, new_value);
+        let updates_after = get_affected_rows(
+            dependent_table,
+            dependent_column,
             &new_value,
             global_config,
             pool,
         )
         .await?;
-        //eprintln!("AFFECTED ROWS: {:#?}", affected_rows);
+        //eprintln!("UPDATES AFTER ARE: {:#?}", updates_after);
 
-        rows_to_update.insert(dependent_table.to_string(), affected_rows);
+        rows_to_update_before.insert(dependent_table.to_string(), updates_before);
+        rows_to_update_after.insert(dependent_table.to_string(), updates_after);
     }
 
     // TODO (later): tree.
@@ -1423,10 +1448,7 @@ pub async fn get_rows_to_update(
 
     // TODO (later): unique and primary.
 
-    // TODO: I think this reverse is unneeded but let's keep it commented for now.
-    // We reverse here because the deepest dependencies need to be updated first.
-    // rows_to_update.reverse();
-    Ok(rows_to_update)
+    Ok((rows_to_update_before, rows_to_update_after))
 }
 
 /// Given global config map, a database connection pool, a table name, a row, and the row number to
@@ -1476,6 +1498,10 @@ pub async fn update_row(
 
         // Begin by adding an extra 'update' row to the message table indicating that the value of
         // this column has been updated (if that is the case).
+
+        // TODO: We should be able to do this in one query instead of two. See the SQL code in
+        // get_affected_rows() where we solve the problem this two-query approach is meant to solve
+        // simply by re-aliasing the subquery as <column>_extended.
 
         // In some cases the current value of the column will have to retrieved from the last
         // generated message, so we retrieve that from the database:
@@ -1614,20 +1640,24 @@ pub async fn update_row(
             // Look through the valve config to see which tables are dependent on this table
             // and find the rows that need to be updated.
 
-            let updates = get_rows_to_update(global_config, pool, table_name, &row, row_number)
-                .await
-                .map_err(|e| Configuration(e.into()))?;
-            //eprintln!("UPDATES: {:#?}", updates);
+            let (updates_before, updates_after) =
+                get_rows_to_update(global_config, pool, table_name, &row, row_number)
+                    .await
+                    .map_err(|e| Configuration(e.into()))?;
+            eprintln!("UPDATES_BEFORE: {:#?}", updates_before);
+            eprintln!("UPDATES_AFTER: {:#?}", updates_after);
 
             let query_as_if = QueryAsIf {
-                kind: QueryAsIfKind::Update,
+                kind: QueryAsIfKind::Replace,
                 table: table_name.to_string(),
                 alias: format!("{}_as_if", table_name),
                 row_number: *row_number,
                 row: Some(row.clone()),
             };
 
-            for (update_table, rows_to_update) in &updates {
+            // TODO: Factor this code out into a function instead of repeating it twice for
+            // updates_after and updates_before
+            for (update_table, rows_to_update) in &updates_before {
                 for (row_number, row) in rows_to_update {
                     eprintln!(
                         "VALIDATING ROW NUMBER {} OF {}, ROW: {:#?}",
@@ -1666,13 +1696,48 @@ pub async fn update_row(
                 query = query.bind(param);
             }
             match query.execute(pool).await {
-                Ok(_) => eprintln!("It worked!!"),
+                Ok(_) => eprintln!("Before updates done! Now trying after updates."),
                 Err(e) => {
+                    // TODO NEXT: Instead of returning an error here, we should try to insert to the
+                    // conflict table like we do during bulk loading.
                     return Err(Configuration(
                         format!("Arghh!! Got schmatabase error: {}", e).into(),
-                    ))
+                    ));
                 }
             };
+
+            for (update_table, rows_to_update) in &updates_after {
+                for (row_number, row) in rows_to_update {
+                    eprintln!(
+                        "VALIDATING ROW NUMBER {} OF {}, ROW: {:#?}",
+                        row_number, update_table, row
+                    );
+                    // Validate each row 'counterfactually' (see above):
+                    let vrow = validate_row(
+                        global_config,
+                        compiled_datatype_conditions,
+                        compiled_rule_conditions,
+                        pool,
+                        update_table,
+                        row,
+                        Some(*row_number),
+                        Some(&query_as_if),
+                    )
+                    .await?;
+                    eprintln!("VALIDATED ROW: {:#?}", vrow);
+                    // Update the row in the database:
+                    block_on(update_row(
+                        global_config,
+                        compiled_datatype_conditions,
+                        compiled_rule_conditions,
+                        pool,
+                        update_table,
+                        &vrow,
+                        row_number,
+                        true,
+                    ))?;
+                }
+            }
         }
     };
 
