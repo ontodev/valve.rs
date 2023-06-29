@@ -1399,6 +1399,46 @@ pub async fn insert_update_message(
     Ok(())
 }
 
+pub async fn get_db_value(
+    table: &str,
+    column: &str,
+    row_number: &u32,
+    pool: &AnyPool,
+) -> Result<String, String> {
+    let (is_clause, cast) = if pool.any_kind() == AnyKind::Sqlite {
+        ("IS", "")
+    } else {
+        ("IS NOT DISTINCT FROM", "::TEXT")
+    };
+    let sql = format!(
+        r#"SELECT
+                 CASE
+                   WHEN "{column}" {is_clause} NULL THEN (
+                     SELECT value
+                     FROM "message"
+                     WHERE "row" = "row_number"
+                       AND "column" = '{column}'
+                       AND "table" = '{table}'
+                     ORDER BY "message_id" DESC
+                     LIMIT 1
+                   )
+                   ELSE "{column}"{cast}
+                 END AS "{column}"
+               FROM "{table}_view" WHERE "row_number" = {row_number}
+            "#,
+        column = column,
+        is_clause = is_clause,
+        table = table,
+        cast = cast,
+        row_number = row_number,
+    );
+
+    let query = sqlx_query(&sql);
+    let result_row = query.fetch_one(pool).await.map_err(|e| e.to_string())?;
+    let value: &str = result_row.try_get(column).unwrap();
+    Ok(value.to_string())
+}
+
 pub async fn get_rows_to_update(
     global_config: &SerdeMap,
     pool: &AnyPool,
@@ -1424,46 +1464,7 @@ pub async fn get_rows_to_update(
         }
     }
 
-    async fn get_current_value(
-        table: &str,
-        column: &str,
-        row_number: &u32,
-        pool: &AnyPool,
-    ) -> Result<String, String> {
-        let (is_clause, cast) = if pool.any_kind() == AnyKind::Sqlite {
-            ("IS", "")
-        } else {
-            ("IS NOT DISTINCT FROM", "::TEXT")
-        };
-        let sql = format!(
-            r#"SELECT
-                 CASE
-                   WHEN "{column}" {is_clause} NULL THEN (
-                     SELECT value
-                     FROM "message"
-                     WHERE "row" = "row_number"
-                       AND "column" = '{column}'
-                       AND "table" = '{table}'
-                     ORDER BY "message_id" DESC
-                     LIMIT 1
-                   )
-                   ELSE "{column}"{cast}
-                 END AS "{column}"
-               FROM "{table}_view" WHERE "row_number" = {row_number}
-            "#,
-            column = column,
-            is_clause = is_clause,
-            table = table,
-            cast = cast,
-            row_number = row_number,
-        );
-
-        let query = sqlx_query(&sql);
-        let result_row = query.fetch_one(pool).await.map_err(|e| e.to_string())?;
-        let value: &str = result_row.try_get(column).unwrap();
-        Ok(value.to_string())
-    }
-
+    // Collect foreign key dependencies:
     let foreign_dependencies = {
         let mut foreign_dependencies = vec![];
         let global_fconstraints = global_config
@@ -1495,7 +1496,7 @@ pub async fn get_rows_to_update(
         // Query the database using `row_number` to get the current value of the column for
         // the row.
         let current_value =
-            get_current_value(target_table, target_column, &query_as_if.row_number, pool).await?;
+            get_db_value(target_table, target_column, &query_as_if.row_number, pool).await?;
 
         // Query dependent_table.dependent_column for the rows that will be affected by the change
         // from the current to the new value:
@@ -1538,8 +1539,8 @@ pub async fn get_rows_to_update(
         rows_to_update_after.insert(dependent_table.to_string(), updates_after);
     }
 
-    // Collect the unique/primary intra-table dependencies:
-    eprintln!("ROWS TO UPDATE BEFORE: {:#?}", rows_to_update_before);
+    // Collect the intra-table dependencies:
+    // TODO: Consider also the tree intra-table dependencies.
     let primaries = global_config
         .get("constraints")
         .and_then(|c| c.as_object())
@@ -1573,7 +1574,7 @@ pub async fn get_rows_to_update(
         .and_then(|t| Some(t.collect::<Vec<_>>()))
         .unwrap();
 
-    let mut rows_to_update_unique = IndexMap::new();
+    let mut rows_to_update_intra = IndexMap::new();
     for column in &columns {
         if !uniques.contains(column) && !primaries.contains(column) {
             continue;
@@ -1581,7 +1582,7 @@ pub async fn get_rows_to_update(
 
         // Query the database using `row_number` to get the current value of the column for
         // the row.
-        let current_value = get_current_value(table, column, &query_as_if.row_number, pool).await?;
+        let current_value = get_db_value(table, column, &query_as_if.row_number, pool).await?;
 
         // Query table.column for the rows that will be affected by the change from the current to
         // the new value:
@@ -1622,12 +1623,8 @@ pub async fn get_rows_to_update(
                 }
             }
         };
-        rows_to_update_unique.insert(table.to_string(), updates);
+        rows_to_update_intra.insert(table.to_string(), updates);
     }
-
-    // TODO: Collect the rule intra-table dependencies.
-
-    // TODO: Collect the tree intra-table dependencies.
 
     // TODO: Collect the dependencies for under constraints similarly to the way we
     // collect foreign constraints (see just above).
@@ -1635,7 +1632,7 @@ pub async fn get_rows_to_update(
     Ok((
         rows_to_update_before,
         rows_to_update_after,
-        rows_to_update_unique,
+        rows_to_update_intra,
     ))
 }
 
@@ -1747,7 +1744,7 @@ pub async fn delete_row(
     // Look through the valve config to see which tables are dependent on this table and find the
     // rows that need to be updated. Since this is a delete there will only be rows to update
     // before and none after the delete:
-    let (updates_before, _, updates_unique) =
+    let (updates_before, _, updates_intra) =
         get_rows_to_update(global_config, pool, table_name, &query_as_if)
             .await
             .map_err(|e| Configuration(e.into()))?;
@@ -1771,7 +1768,7 @@ pub async fn delete_row(
         compiled_datatype_conditions,
         compiled_rule_conditions,
         pool,
-        &updates_unique,
+        &updates_intra,
         &query_as_if,
         true,
     )
@@ -1900,7 +1897,7 @@ pub async fn update_row(
 
     // First, look through the valve config to see which tables are dependent on this table
     // and find the rows that need to be updated:
-    let (updates_before, updates_after, updates_unique) = {
+    let (updates_before, updates_after, updates_intra) = {
         if do_not_recurse {
             (IndexMap::new(), IndexMap::new(), IndexMap::new())
         } else {
@@ -1929,7 +1926,7 @@ pub async fn update_row(
         compiled_datatype_conditions,
         compiled_rule_conditions,
         pool,
-        &updates_unique,
+        &updates_intra,
         &query_as_if,
         true,
     )
