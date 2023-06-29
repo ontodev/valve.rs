@@ -1197,6 +1197,7 @@ pub async fn get_affected_rows(
     table: &str,
     column: &str,
     value: &str,
+    except: Option<&u32>,
     global_config: &SerdeMap,
     pool: &AnyPool,
 ) -> Result<IndexMap<u32, SerdeMap>, String> {
@@ -1272,12 +1273,18 @@ pub async fn get_affected_rows(
                    SELECT {inner_columns}
                    FROM "{table}_view"
                  ) t
-                 WHERE "{column}_extended" = '{value}'"#,
+                 WHERE "{column}_extended" = '{value}'{except}"#,
             outer_columns = outer_columns.join(", "),
             inner_columns = inner_columns.join(", "),
             table = table,
             column = column,
-            value = value
+            value = value,
+            except = match except {
+                None => "".to_string(),
+                Some(row_number) => {
+                    format!(" AND row_number != {}", row_number)
+                }
+            },
         )
     };
 
@@ -1401,6 +1408,7 @@ pub async fn get_rows_to_update(
     (
         IndexMap<String, IndexMap<u32, SerdeMap>>,
         IndexMap<String, IndexMap<u32, SerdeMap>>,
+        IndexMap<String, IndexMap<u32, SerdeMap>>,
     ),
     String,
 > {
@@ -1495,6 +1503,7 @@ pub async fn get_rows_to_update(
             dependent_table,
             dependent_column,
             &current_value,
+            None,
             global_config,
             pool,
         )
@@ -1518,6 +1527,7 @@ pub async fn get_rows_to_update(
                     dependent_table,
                     dependent_column,
                     &new_value,
+                    None,
                     global_config,
                     pool,
                 )
@@ -1528,13 +1538,105 @@ pub async fn get_rows_to_update(
         rows_to_update_after.insert(dependent_table.to_string(), updates_after);
     }
 
-    // TODO: Collect the dependencies for tree constraints similarly to the way we
-    // collect foreign constraints (see just above).
+    // Collect the unique/primary intra-table dependencies:
+    eprintln!("ROWS TO UPDATE BEFORE: {:#?}", rows_to_update_before);
+    let primaries = global_config
+        .get("constraints")
+        .and_then(|c| c.as_object())
+        .and_then(|c| c.get("primary"))
+        .and_then(|t| t.as_object())
+        .and_then(|t| t.get(table))
+        .and_then(|t| t.as_array())
+        .and_then(|t| Some(t.iter()))
+        .and_then(|t| Some(t.map(|t| t.as_str().unwrap().to_string())))
+        .and_then(|t| Some(t.collect::<Vec<_>>()))
+        .unwrap();
+    let uniques = global_config
+        .get("constraints")
+        .and_then(|c| c.as_object())
+        .and_then(|c| c.get("unique"))
+        .and_then(|t| t.as_object())
+        .and_then(|t| t.get(table))
+        .and_then(|t| t.as_array())
+        .and_then(|t| Some(t.iter()))
+        .and_then(|t| Some(t.map(|t| t.as_str().unwrap().to_string())))
+        .and_then(|t| Some(t.collect::<Vec<_>>()))
+        .unwrap();
+    let columns = global_config
+        .get("table")
+        .and_then(|t| t.get(table))
+        .and_then(|t| t.as_object())
+        .and_then(|t| t.get("column"))
+        .and_then(|t| t.as_object())
+        .and_then(|t| Some(t.keys()))
+        .and_then(|k| Some(k.map(|k| k.to_string())))
+        .and_then(|t| Some(t.collect::<Vec<_>>()))
+        .unwrap();
+
+    let mut rows_to_update_unique = IndexMap::new();
+    for column in &columns {
+        if !uniques.contains(column) && !primaries.contains(column) {
+            continue;
+        }
+
+        // Query the database using `row_number` to get the current value of the column for
+        // the row.
+        let current_value = get_current_value(table, column, &query_as_if.row_number, pool).await?;
+
+        // Query table.column for the rows that will be affected by the change from the current to
+        // the new value:
+        let mut updates = get_affected_rows(
+            table,
+            column,
+            &current_value,
+            Some(&query_as_if.row_number),
+            global_config,
+            pool,
+        )
+        .await?;
+
+        match &query_as_if.row {
+            None => {
+                if query_as_if.kind == QueryAsIfKind::Replace {
+                    eprintln!(
+                        "WARN: No row in query_as_if: {:?} for {:?}",
+                        query_as_if, query_as_if.kind
+                    );
+                }
+            }
+            Some(row) => {
+                // Fetch the cell corresponding to `column` from `row`, and the value of that cell,
+                // which is the new value for the row.
+                let new_value = get_cell_value(&row, column)?;
+                let further_updates = get_affected_rows(
+                    table,
+                    column,
+                    &new_value,
+                    Some(&query_as_if.row_number),
+                    global_config,
+                    pool,
+                )
+                .await?;
+                for (key, data) in further_updates {
+                    updates.insert(key, data);
+                }
+            }
+        };
+        rows_to_update_unique.insert(table.to_string(), updates);
+    }
+
+    // TODO: Collect the rule intra-table dependencies.
+
+    // TODO: Collect the tree intra-table dependencies.
 
     // TODO: Collect the dependencies for under constraints similarly to the way we
     // collect foreign constraints (see just above).
 
-    Ok((rows_to_update_before, rows_to_update_after))
+    Ok((
+        rows_to_update_before,
+        rows_to_update_after,
+        rows_to_update_unique,
+    ))
 }
 
 pub async fn process_updates(
@@ -1544,6 +1646,7 @@ pub async fn process_updates(
     pool: &AnyPool,
     updates: &IndexMap<String, IndexMap<u32, SerdeMap>>,
     query_as_if: &QueryAsIf,
+    do_not_recurse: bool,
 ) -> Result<(), sqlx::Error> {
     for (update_table, rows_to_update) in updates {
         for (row_number, row) in rows_to_update {
@@ -1570,6 +1673,7 @@ pub async fn process_updates(
                 &vrow,
                 row_number,
                 true,
+                do_not_recurse,
             )
             .await?;
         }
@@ -1593,11 +1697,20 @@ pub async fn delete_row(
 
     // First, use the row number to fetch the row from the database:
     let sql = format!(
-        "SELECT * FROM \"{}\" WHERE row_number = {}",
+        "SELECT * FROM \"{}_view\" WHERE row_number = {}",
         table_name, row_number
     );
     let query = sqlx_query(&sql);
-    let sql_row = query.fetch_one(pool).await?;
+    let sql_row = query.fetch_one(pool).await.map_err(|e| {
+        Configuration(
+            format!(
+                "Got: '{}' while fetching row number {} from table {}",
+                e, row_number, table_name
+            )
+            .into(),
+        )
+    })?;
+
     // TODO: This isn't the only place we do this. Factor this out into its own function.
     let mut row = SerdeMap::new();
     for column in sql_row.columns() {
@@ -1634,9 +1747,10 @@ pub async fn delete_row(
     // Look through the valve config to see which tables are dependent on this table and find the
     // rows that need to be updated. Since this is a delete there will only be rows to update
     // before and none after the delete:
-    let (updates_before, _) = get_rows_to_update(global_config, pool, table_name, &query_as_if)
-        .await
-        .map_err(|e| Configuration(e.into()))?;
+    let (updates_before, _, updates_unique) =
+        get_rows_to_update(global_config, pool, table_name, &query_as_if)
+            .await
+            .map_err(|e| Configuration(e.into()))?;
 
     // Process the updates that need to be performed before the update of the target row:
     process_updates(
@@ -1646,6 +1760,20 @@ pub async fn delete_row(
         pool,
         &updates_before,
         &query_as_if,
+        false,
+    )
+    .await?;
+
+    // Now process the rows from the same table as the target table that need to be re-validated
+    // because of unique or primary constraints:
+    process_updates(
+        global_config,
+        compiled_datatype_conditions,
+        compiled_rule_conditions,
+        pool,
+        &updates_unique,
+        &query_as_if,
+        true,
     )
     .await?;
 
@@ -1686,6 +1814,7 @@ pub async fn update_row(
     row: &SerdeMap,
     row_number: &u32,
     skip_validation: bool,
+    do_not_recurse: bool,
 ) -> Result<(), sqlx::Error> {
     // First, send the row through the row validator to determine if any fields are problematic and
     // to mark them with appropriate messages:
@@ -1771,10 +1900,15 @@ pub async fn update_row(
 
     // First, look through the valve config to see which tables are dependent on this table
     // and find the rows that need to be updated:
-    let (updates_before, updates_after) =
-        get_rows_to_update(global_config, pool, table_name, &query_as_if)
-            .await
-            .map_err(|e| Configuration(e.into()))?;
+    let (updates_before, updates_after, updates_unique) = {
+        if do_not_recurse {
+            (IndexMap::new(), IndexMap::new(), IndexMap::new())
+        } else {
+            get_rows_to_update(global_config, pool, table_name, &query_as_if)
+                .await
+                .map_err(|e| Configuration(e.into()))?
+        }
+    };
 
     // Process the updates that need to be performed before the update of the target row:
     process_updates(
@@ -1784,6 +1918,20 @@ pub async fn update_row(
         pool,
         &updates_before,
         &query_as_if,
+        false,
+    )
+    .await?;
+
+    // Now process the rows from the same table as the target table that need to be re-validated
+    // because of unique or primary constraints:
+    process_updates(
+        global_config,
+        compiled_datatype_conditions,
+        compiled_rule_conditions,
+        pool,
+        &updates_unique,
+        &query_as_if,
+        true,
     )
     .await?;
 
@@ -1870,6 +2018,7 @@ pub async fn update_row(
         pool,
         &updates_after,
         &query_as_if,
+        false,
     )
     .await?;
 

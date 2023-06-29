@@ -103,6 +103,7 @@ pub async fn validate_row(
 
     let context = result_row.clone();
     for (column_name, cell) in result_row.contents.iter_mut() {
+        // TODO: Pass the query_as_if parameter to validate_cell_rules.
         validate_cell_rules(
             config,
             compiled_rule_conditions,
@@ -125,6 +126,7 @@ pub async fn validate_row(
             // they can result in database errors when, for instance, we compare a numeric with a
             // non-numeric type.
             if cell.valid || !contains_dt_violation(&cell.messages) {
+                // TODO: Pass the query_as_if parameter to validate_cell_trees.
                 validate_cell_trees(
                     config,
                     pool,
