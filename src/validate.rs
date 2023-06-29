@@ -1163,8 +1163,6 @@ fn validate_cell_nulltype(
     column_name: &String,
     cell: &mut ResultCell,
 ) {
-    //eprintln!("GETTING COLUMN CONFIG FOR {}.{}", table_name, column_name);
-
     let column = config
         .get("table")
         .and_then(|t| t.as_object())
@@ -1531,11 +1529,8 @@ async fn validate_cell_foreign_constraints(
                 as_if_clause, ftable_alias, fcolumn, sql_param
             ),
         );
-        //eprintln!("FSQL FOR {:?}: {}", fkey, fsql);
-        //eprintln!("FSQL: {}", fsql);
 
         let frows = sqlx_query(&fsql).bind(&cell.value).fetch_all(pool).await?;
-        //eprintln!("SUCCEEDED!!!");
         if frows.is_empty() {
             cell.valid = false;
             let mut message = json!({
@@ -1558,7 +1553,6 @@ async fn validate_cell_foreign_constraints(
                     as_if_clause_for_conflict, ftable_alias, fcolumn, sql_param
                 ),
             );
-            //eprintln!("CONFLICT FSQL FOR {:?}: {}", fkey, fsql);
             let frows = sqlx_query(&fsql)
                 .bind(cell.value.clone())
                 .fetch_all(pool)

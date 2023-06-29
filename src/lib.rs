@@ -1280,7 +1280,6 @@ pub async fn get_affected_rows(
             value = value
         )
     };
-    // eprintln!("SQL: {}", sql);
 
     let query = sqlx_query(&sql);
     let mut table_rows = IndexMap::new();
@@ -1313,6 +1312,84 @@ pub async fn get_affected_rows(
     }
 
     Ok(table_rows)
+}
+
+pub async fn insert_update_message(
+    pool: &AnyPool,
+    table: &str,
+    column: &str,
+    row_number: &u32,
+    cell_value: &str,
+) -> Result<(), sqlx::Error> {
+    // TODO: We should be able to do this in one query instead of two. See the SQL code in
+    // get_affected_rows() where we solve the problem this two-query approach is meant to solve
+    // simply by re-aliasing the subquery as <column>_extended.
+
+    // In some cases the current value of the column will have to retrieved from the last
+    // generated message, so we retrieve that from the database:
+    let last_msg_val = {
+        let sql = format!(
+            r#"SELECT value
+                     FROM "message"
+                     WHERE "row" = {row}
+                       AND "column" = '{column}'
+                       AND "table" = '{table}'
+                     ORDER BY "message_id" DESC
+                     LIMIT 1"#,
+            column = column,
+            table = table,
+            row = row_number,
+        );
+        let query = sqlx_query(&sql);
+
+        let results = query.fetch_all(pool).await?;
+        if results.is_empty() {
+            "".to_string()
+        } else {
+            let row = &results[0];
+            let raw_value = row.try_get_raw("value").unwrap();
+            if !raw_value.is_null() {
+                get_column_value(&row, "value", "text")
+            } else {
+                "".to_string()
+            }
+        }
+    };
+
+    // Construct the SQL for the insert of the 'update' message using last_msg_val:
+    let casted_column = cast_column_sql_to_text(column, "non-text");
+    let is_clause = if pool.any_kind() == AnyKind::Sqlite {
+        "IS"
+    } else {
+        "IS NOT DISTINCT FROM"
+    };
+
+    let insert_sql = format!(
+        r#"INSERT INTO "message"
+               ("table", "row", "column", "value", "level", "rule", "message")
+               SELECT
+                 '{table}', "row_number", '{column}', '{value}', 'update', 'rule:update',
+                 'Value changed from ''' ||
+                   CASE
+                     WHEN "{column}" {is_clause} NULL THEN '{last_msg_val}'
+                     ELSE {casted_column}
+                   END ||
+                 ''' to ''{value}'''
+               FROM "{table}_view"
+               WHERE "row_number" = {row} AND (
+                 ("{column}" {is_clause} NULL AND '{last_msg_val}' != '{value}')
+                   OR {casted_column} != '{value}'
+               )"#,
+        column = column,
+        last_msg_val = last_msg_val,
+        is_clause = is_clause,
+        row = row_number,
+        table = table,
+        value = cell_value,
+    );
+    let query = sqlx_query(&insert_sql);
+    query.execute(pool).await?;
+    Ok(())
 }
 
 pub async fn get_rows_to_update(
@@ -1450,6 +1527,46 @@ pub async fn get_rows_to_update(
     Ok((rows_to_update_before, rows_to_update_after))
 }
 
+pub async fn process_updates(
+    global_config: &SerdeMap,
+    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
+    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    pool: &AnyPool,
+    updates: &IndexMap<String, IndexMap<u32, SerdeMap>>,
+    query_as_if: &QueryAsIf,
+) -> Result<(), sqlx::Error> {
+    for (update_table, rows_to_update) in updates {
+        for (row_number, row) in rows_to_update {
+            // Validate each row 'counterfactually':
+            let vrow = validate_row(
+                global_config,
+                compiled_datatype_conditions,
+                compiled_rule_conditions,
+                pool,
+                update_table,
+                row,
+                Some(*row_number),
+                Some(&query_as_if),
+            )
+            .await?;
+
+            // Update the row in the database:
+            update_row(
+                global_config,
+                compiled_datatype_conditions,
+                compiled_rule_conditions,
+                pool,
+                update_table,
+                &vrow,
+                row_number,
+                true,
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
 /// Given global config map, a database connection pool, a table name, a row, and the row number to
 /// update, update the corresponding row in the database with new values as specified by `row`.
 #[async_recursion]
@@ -1463,11 +1580,6 @@ pub async fn update_row(
     row_number: &u32,
     skip_validation: bool,
 ) -> Result<(), sqlx::Error> {
-    // eprintln!("***** In update_row(). Got row: {:#?}", row);
-
-    // TODO: If possible use BEGIN and END TRANSACTION here and ROLLBACK in case of an error.
-    // Maybe we need a wrapper function for this.
-
     // First, send the row through the row validator to determine if any fields are problematic and
     // to mark them with appropriate messages:
     let row = if !skip_validation {
@@ -1486,6 +1598,11 @@ pub async fn update_row(
         row.clone()
     };
 
+    // TODO: If possible use BEGIN and END TRANSACTION here and ROLLBACK in case of an error.
+    // Maybe we need a wrapper function for this?
+    // Note also that we might want to run ANALYZE (or the sqlite equivalent) after
+    // the updates have completed.
+
     // Now prepare the row and messages for the database update:
     let mut assignments = vec![];
     let mut params = vec![];
@@ -1498,75 +1615,7 @@ pub async fn update_row(
 
         // Begin by adding an extra 'update' row to the message table indicating that the value of
         // this column has been updated (if that is the case).
-
-        // TODO: We should be able to do this in one query instead of two. See the SQL code in
-        // get_affected_rows() where we solve the problem this two-query approach is meant to solve
-        // simply by re-aliasing the subquery as <column>_extended.
-
-        // In some cases the current value of the column will have to retrieved from the last
-        // generated message, so we retrieve that from the database:
-        let last_msg_val = {
-            let sql = format!(
-                r#"SELECT value
-                     FROM "message"
-                     WHERE "row" = {row}
-                       AND "column" = '{column}'
-                       AND "table" = '{table}'
-                     ORDER BY "message_id" DESC
-                     LIMIT 1"#,
-                column = column,
-                table = table_name,
-                row = row_number,
-            );
-            let query = sqlx_query(&sql);
-
-            let results = query.fetch_all(pool).await?;
-            if results.is_empty() {
-                "".to_string()
-            } else {
-                let row = &results[0];
-                let raw_value = row.try_get_raw("value").unwrap();
-                if !raw_value.is_null() {
-                    get_column_value(&row, "value", "text")
-                } else {
-                    "".to_string()
-                }
-            }
-        };
-
-        // Construct the SQL for the insert of the 'update' message using last_msg_val:
-        let casted_column = cast_column_sql_to_text(column, "non-text");
-        let is_clause = if pool.any_kind() == AnyKind::Sqlite {
-            "IS"
-        } else {
-            "IS NOT DISTINCT FROM"
-        };
-
-        let insert_sql = format!(
-            r#"INSERT INTO "message"
-               ("table", "row", "column", "value", "level", "rule", "message")
-               SELECT
-                 '{table}', "row_number", '{column}', '{value}', 'update', 'rule:update',
-                 'Value changed from ''' ||
-                   CASE
-                     WHEN "{column}" {is_clause} NULL THEN '{last_msg_val}'
-                     ELSE {casted_column}
-                   END ||
-                 ''' to ''{value}'''
-               FROM "{table}_view"
-               WHERE "row_number" = {row} AND (
-                 ("{column}" {is_clause} NULL AND '{last_msg_val}' != '{value}')
-                   OR {casted_column} != '{value}'
-               )"#,
-            column = column,
-            last_msg_val = last_msg_val,
-            is_clause = is_clause,
-            row = row_number,
-            table = table_name,
-            value = cell_value,
-        );
-        let query = sqlx_query(&insert_sql);
-        query.execute(pool).await?;
+        insert_update_message(pool, table_name, column, row_number, cell_value).await?;
 
         // Generate the assignment statements and messages for each column:
         let mut cell_for_insert = cell.clone();
@@ -1603,77 +1652,15 @@ pub async fn update_row(
         }
     }
 
-    // Overview:
-    // ---------
-    // We need to call something similar to validate_row() on every affected row in the
-    // dependent table, with the hitch that we need to validate them with the target row
-    // of the target table in the database replaced, somehow, with the modified version
-    // of it represented by `row`. (In the case of delete_row() we would simply have to
-    // ignore the target row in the database somehow, maybe by excluding its row number
-    // using a CTE). Those re-validated rows should then be sent to update_row() which will
-    // try to insert them into the database one by one. In the case of a database error
-    // this code (i.e., in this block) will be triggered again, and so on, recursively
-    // until everything succeeds.
-    //
-    // Note also that we might want to run ANALYZE (or the sqlite equivalent) after
-    // the update has completed.
-
-    async fn process_updates(
-        global_config: &SerdeMap,
-        compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
-        compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
-        pool: &AnyPool,
-        updates: &IndexMap<String, IndexMap<u32, SerdeMap>>,
-        query_as_if: &QueryAsIf,
-    ) -> Result<(), sqlx::Error> {
-        // TODO: Factor this code out into a function instead of repeating it twice for
-        // updates_after and updates_before (see below)
-        for (update_table, rows_to_update) in updates {
-            for (row_number, row) in rows_to_update {
-                eprintln!(
-                    "VALIDATING ROW NUMBER {} OF {}, ROW: {:#?}",
-                    row_number, update_table, row
-                );
-                // Validate each row 'counterfactually' (see above):
-                let vrow = validate_row(
-                    global_config,
-                    compiled_datatype_conditions,
-                    compiled_rule_conditions,
-                    pool,
-                    update_table,
-                    row,
-                    Some(*row_number),
-                    Some(&query_as_if),
-                )
-                .await?;
-                eprintln!("VALIDATED ROW: {:#?}", vrow);
-                // Update the row in the database:
-                update_row(
-                    global_config,
-                    compiled_datatype_conditions,
-                    compiled_rule_conditions,
-                    pool,
-                    update_table,
-                    &vrow,
-                    row_number,
-                    true,
-                )
-                .await?;
-            }
-        }
-        Ok(())
-    }
-
-    // Look through the valve config to see which tables are dependent on this table
-    // and find the rows that need to be updated.
-
+    // First, look through the valve config to see which tables are dependent on this table
+    // and find the rows that need to be updated:
     let (updates_before, updates_after) =
         get_rows_to_update(global_config, pool, table_name, &row, row_number)
             .await
             .map_err(|e| Configuration(e.into()))?;
-    eprintln!("UPDATES_BEFORE: {:#?}", updates_before);
-    eprintln!("UPDATES_AFTER: {:#?}", updates_after);
 
+    // Used by process_updates() to validate the given row, counterfactually, "as if" the version
+    // of the row in the database currently were replaced with `row`:
     let query_as_if = QueryAsIf {
         kind: QueryAsIfKind::Replace,
         table: table_name.to_string(),
@@ -1693,9 +1680,8 @@ pub async fn update_row(
     )
     .await?;
 
-    // Update the target row.
-
-    // First, figure out where the row currently is:
+    // Now update the target row. First, figure out whether the row is currently in the base table
+    // or the conflict table:
     let sql = format!(
         "SELECT 1 FROM \"{}\" WHERE row_number = {}",
         table_name, row_number
@@ -1707,7 +1693,7 @@ pub async fn update_row(
         current_table.push_str("_conflict");
     }
 
-    // Next, figure out where the row needs to go:
+    // Next, figure out where to put the new version of the row:
     let mut table_to_write = String::from(table_name);
     for (column, cell) in row.iter() {
         let valid = cell.get("valid").unwrap();
@@ -1728,7 +1714,6 @@ pub async fn update_row(
                 let messages = cell.get("messages").and_then(|m| m.as_array()).unwrap();
                 for msg in messages {
                     let level = msg.get("level").and_then(|l| l.as_str()).unwrap();
-                    eprintln!("LEVEL: {}", level);
                     if level == "error" {
                         table_to_write.push_str("_conflict");
                         break;
@@ -1738,18 +1723,13 @@ pub async fn update_row(
         }
     }
 
-    // Update or insert, dependeing on whether the table to write to is the same as the table that
-    // the row is currently in:
+    // If table_to_write and current_table are the same, update it. Otherwise delete the current
+    // version of the row from the database and insert the new version to table_to_write:
     if table_to_write == current_table {
         let mut update_stmt = format!(r#"UPDATE "{}" SET "#, table_to_write);
         update_stmt.push_str(&assignments.join(", "));
         update_stmt.push_str(&format!(r#" WHERE "row_number" = {}"#, row_number));
         let update_stmt = local_sql_syntax(&pool, &update_stmt);
-        eprintln!(
-            "Table_to_write is current_table. Running update statement: {} with params: {:?}",
-            update_stmt, params,
-        );
-
         let mut query = sqlx_query(&update_stmt);
         for param in &params {
             query = query.bind(param);
@@ -1760,13 +1740,8 @@ pub async fn update_row(
             "DELETE FROM \"{}\" WHERE row_number = {}",
             current_table, row_number
         );
-        eprintln!(
-            "Table to write is not the same as current table. Running {}",
-            sql
-        );
         let query = sqlx_query(&sql);
         query.execute(pool).await?;
-        eprintln!("INSERTING NEW ROW");
         insert_new_row(
             global_config,
             compiled_datatype_conditions,
@@ -1780,7 +1755,7 @@ pub async fn update_row(
         .await?;
     }
 
-    // Process the updates that need to be performed after the update of the target row:
+    // Now process the updates that need to be performed after the update of the target row:
     process_updates(
         global_config,
         compiled_datatype_conditions,
