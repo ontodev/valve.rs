@@ -165,6 +165,7 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         &row.as_object().unwrap(),
         &1,
         false,
+        false,
     )
     .await?;
 
@@ -240,6 +241,7 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         "table6",
         &result_row,
         &1,
+        false,
         false,
     )
     .await?;

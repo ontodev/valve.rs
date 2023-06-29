@@ -29,8 +29,9 @@ pub struct ResultRow {
 /// The sense in which a [QueryAsIf] struct should be interpreted.
 #[derive(Clone, Debug, PartialEq)]
 pub enum QueryAsIfKind {
-    Replace,
+    Add,
     Ignore,
+    Replace,
 }
 
 /// Used for counterfactual validation.
@@ -1407,64 +1408,77 @@ fn as_if_to_sql(
             }
         };
 
-        if as_if.kind == QueryAsIfKind::Ignore {
-            format!(
-                r#""{table_alias}{suffix}" AS (
-                     SELECT * FROM "{table_name}{suffix}" WHERE "row_number" <> {row_number}
-                )"#,
-                table_alias = as_if.alias,
-                suffix = suffix,
-                table_name = as_if.table,
-                row_number = as_if.row_number,
-            )
-        } else {
-            let row = as_if.row.as_ref().unwrap();
-            let columns = row.keys().cloned().collect::<Vec<_>>();
-            let values = {
-                let mut values = vec![];
-                for column in &columns {
-                    let value = row
-                        .get(column)
-                        .and_then(|c| c.get("value"))
-                        .and_then(|v| v.as_str())
+        match as_if.kind {
+            QueryAsIfKind::Ignore => {
+                format!(
+                    r#""{table_alias}{suffix}" AS (
+                       SELECT * FROM "{table_name}{suffix}" WHERE "row_number" <> {row_number}
+                    )"#,
+                    table_alias = as_if.alias,
+                    suffix = suffix,
+                    table_name = as_if.table,
+                    row_number = as_if.row_number,
+                )
+            }
+            QueryAsIfKind::Add | QueryAsIfKind::Replace => {
+                let row = as_if.row.as_ref().unwrap();
+                let columns = row.keys().cloned().collect::<Vec<_>>();
+                let values = {
+                    let mut values = vec![];
+                    for column in &columns {
+                        let value = row
+                            .get(column)
+                            .and_then(|c| c.get("value"))
+                            .and_then(|v| v.as_str())
+                            .unwrap();
+
+                        let sql_type = get_sql_type_from_global_config(
+                            &global_config,
+                            &as_if.table,
+                            &column,
+                            pool,
+                        )
                         .unwrap();
 
-                    let sql_type = get_sql_type_from_global_config(
-                        &global_config,
-                        &as_if.table,
-                        &column,
-                        pool,
-                    )
-                    .unwrap();
-
-                    if sql_type.to_lowercase() == "text"
-                        || sql_type.to_lowercase().starts_with("varchar(")
-                    {
-                        values.push(format!("'{}'", value));
-                    } else {
-                        values.push(value.to_string());
+                        if sql_type.to_lowercase() == "text"
+                            || sql_type.to_lowercase().starts_with("varchar(")
+                        {
+                            values.push(format!("'{}'", value));
+                        } else {
+                            values.push(value.to_string());
+                        }
                     }
-                }
-                values.join(", ")
-            };
-            format!(
-                r#""{table_alias}{suffix}" AS (
-                   SELECT "row_number", {columns}
-                   FROM "{table_name}{suffix}"
-                   WHERE "row_number" <> {row_number}
-                   UNION ALL
-                   SELECT {row_number}, {values}
-                )"#,
-                columns = columns
+                    values.join(", ")
+                };
+                let columns = columns
                     .iter()
                     .map(|c| format!("\"{}\"", c))
                     .collect::<Vec<_>>()
-                    .join(", "),
-                table_alias = as_if.alias,
-                table_name = as_if.table,
-                row_number = as_if.row_number,
-                values = values,
-            )
+                    .join(", ");
+                let where_clause = {
+                    if as_if.kind == QueryAsIfKind::Replace {
+                        r#"WHERE "row_number" <> {row_number}"#
+                    } else {
+                        ""
+                    }
+                };
+                format!(
+                    r#""{table_alias}{suffix}" AS (
+                   SELECT "row_number", {columns}
+                   FROM "{table_name}{suffix}"
+                   {where_clause}
+                   UNION ALL
+                   SELECT {row_number}, {values}
+                )"#,
+                    columns = columns,
+                    table_alias = as_if.alias,
+                    suffix = suffix,
+                    table_name = as_if.table,
+                    row_number = as_if.row_number,
+                    values = values,
+                    where_clause = where_clause,
+                )
+            }
         }
     };
 

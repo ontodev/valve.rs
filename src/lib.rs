@@ -1091,7 +1091,6 @@ pub async fn insert_new_row(
     };
 
     // Now prepare the row and messages for insertion to the database.
-
     let new_row_number = match new_row_number {
         Some(n) => *n,
         None => {
@@ -1154,23 +1153,94 @@ pub async fn insert_new_row(
         }
     }
 
-    // First add the new row to the table:
+    // Used to validate the given row, counterfactually, "as if" the version of the row in the
+    // database currently were replaced with `row`:
+    let query_as_if = QueryAsIf {
+        kind: QueryAsIfKind::Add,
+        table: table_name.to_string(),
+        alias: format!("{}_as_if", table_name),
+        row_number: new_row_number,
+        row: Some(row.clone()),
+    };
+
+    // Look through the valve config to see which tables are dependent on this table
+    // and find the rows that need to be updated:
+    let (_, updates_after, updates_intra) =
+        get_rows_to_update(global_config, pool, table_name, &query_as_if)
+            .await
+            .map_err(|e| Configuration(e.into()))?;
+
+    // Process the rows from the same table as the target table that need to be re-validated
+    // because of unique or primary constraints:
+    process_updates(
+        global_config,
+        compiled_datatype_conditions,
+        compiled_rule_conditions,
+        pool,
+        &updates_intra,
+        &query_as_if,
+        true,
+    )
+    .await?;
+
+    // Next, figure out where to put the new version of the row:
+    let mut table_to_write = String::from(table_name);
+    for (column, cell) in row.iter() {
+        let valid = cell.get("valid").unwrap();
+        if valid == false {
+            let structure = global_config
+                .get("table")
+                .and_then(|t| t.as_object())
+                .and_then(|t| t.get(table_name))
+                .and_then(|t| t.as_object())
+                .and_then(|t| t.get("column"))
+                .and_then(|c| c.as_object())
+                .and_then(|c| c.get(column))
+                .and_then(|c| c.as_object())
+                .and_then(|c| c.get("structure"))
+                .and_then(|s| s.as_str())
+                .unwrap_or("");
+            if vec!["primary", "unique"].contains(&structure) || structure.starts_with("tree(") {
+                let messages = cell.get("messages").and_then(|m| m.as_array()).unwrap();
+                for msg in messages {
+                    let level = msg.get("level").and_then(|l| l.as_str()).unwrap();
+                    if level == "error" {
+                        table_to_write.push_str("_conflict");
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // Add the new row to the table:
     let insert_stmt = local_sql_syntax(
         &pool,
         &format!(
             r#"INSERT INTO "{}" ("row_number", {}) VALUES ({}, {})"#,
-            table_name,
+            table_to_write,
             insert_columns.join(", "),
             new_row_number,
             insert_values.join(", "),
         ),
     );
-
     let mut query = sqlx_query(&insert_stmt);
     for param in &insert_params {
         query = query.bind(param);
     }
     query.execute(pool).await?;
+
+    // Now process the updates that need to be performed after the update of the target row:
+    process_updates(
+        global_config,
+        compiled_datatype_conditions,
+        compiled_rule_conditions,
+        pool,
+        &updates_after,
+        &query_as_if,
+        false,
+    )
+    .await?;
 
     // Next add any validation messages to the message table:
     for m in messages {
@@ -1495,24 +1565,38 @@ pub async fn get_rows_to_update(
 
         // Query the database using `row_number` to get the current value of the column for
         // the row.
-        let current_value =
-            get_db_value(target_table, target_column, &query_as_if.row_number, pool).await?;
+        let updates_before = match query_as_if.kind {
+            QueryAsIfKind::Add => {
+                if let None = query_as_if.row {
+                    eprintln!(
+                        "WARN: No row in query_as_if: {:?} for {:?}",
+                        query_as_if, query_as_if.kind
+                    );
+                }
+                IndexMap::new()
+            }
+            _ => {
+                let current_value =
+                    get_db_value(target_table, target_column, &query_as_if.row_number, pool)
+                        .await?;
 
-        // Query dependent_table.dependent_column for the rows that will be affected by the change
-        // from the current to the new value:
-        let updates_before = get_affected_rows(
-            dependent_table,
-            dependent_column,
-            &current_value,
-            None,
-            global_config,
-            pool,
-        )
-        .await?;
+                // Query dependent_table.dependent_column for the rows that will be affected by the
+                // change from the current value:
+                get_affected_rows(
+                    dependent_table,
+                    dependent_column,
+                    &current_value,
+                    None,
+                    global_config,
+                    pool,
+                )
+                .await?
+            }
+        };
 
         let updates_after = match &query_as_if.row {
             None => {
-                if query_as_if.kind == QueryAsIfKind::Replace {
+                if query_as_if.kind != QueryAsIfKind::Ignore {
                     eprintln!(
                         "WARN: No row in query_as_if: {:?} for {:?}",
                         query_as_if, query_as_if.kind
@@ -1582,23 +1666,37 @@ pub async fn get_rows_to_update(
 
         // Query the database using `row_number` to get the current value of the column for
         // the row.
-        let current_value = get_db_value(table, column, &query_as_if.row_number, pool).await?;
+        let mut updates = match query_as_if.kind {
+            QueryAsIfKind::Add => {
+                if let None = query_as_if.row {
+                    eprintln!(
+                        "WARN: No row in query_as_if: {:?} for {:?}",
+                        query_as_if, query_as_if.kind
+                    );
+                }
+                IndexMap::new()
+            }
+            _ => {
+                let current_value =
+                    get_db_value(table, column, &query_as_if.row_number, pool).await?;
 
-        // Query table.column for the rows that will be affected by the change from the current to
-        // the new value:
-        let mut updates = get_affected_rows(
-            table,
-            column,
-            &current_value,
-            Some(&query_as_if.row_number),
-            global_config,
-            pool,
-        )
-        .await?;
+                // Query table.column for the rows that will be affected by the change from the
+                // current to the new value:
+                get_affected_rows(
+                    table,
+                    column,
+                    &current_value,
+                    Some(&query_as_if.row_number),
+                    global_config,
+                    pool,
+                )
+                .await?
+            }
+        };
 
         match &query_as_if.row {
             None => {
-                if query_as_if.kind == QueryAsIfKind::Replace {
+                if query_as_if.kind != QueryAsIfKind::Ignore {
                     eprintln!(
                         "WARN: No row in query_as_if: {:?} for {:?}",
                         query_as_if, query_as_if.kind
