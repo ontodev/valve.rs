@@ -164,6 +164,7 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         "table2",
         &row.as_object().unwrap(),
         &1,
+        false,
     )
     .await?;
 
@@ -200,6 +201,8 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         &pool,
         "table3",
         &result_row,
+        None,
+        false,
     )
     .await?;
 
@@ -237,6 +240,7 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         "table6",
         &result_row,
         &1,
+        false,
     )
     .await?;
 
@@ -272,6 +276,8 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         &pool,
         "table6",
         &result_row,
+        None,
+        false,
     )
     .await?;
 

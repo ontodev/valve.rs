@@ -1396,8 +1396,7 @@ pub async fn get_rows_to_update(
     global_config: &SerdeMap,
     pool: &AnyPool,
     table: &str,
-    row: &SerdeMap,
-    row_number: &u32,
+    query_as_if: &QueryAsIf,
 ) -> Result<
     (
         IndexMap<String, IndexMap<u32, SerdeMap>>,
@@ -1485,14 +1484,10 @@ pub async fn get_rows_to_update(
         let target_column = fdep.get("fcolumn").and_then(|c| c.as_str()).unwrap();
         let target_table = fdep.get("ftable").and_then(|c| c.as_str()).unwrap();
 
-        // Fetch the cell corresponding to `column` from `row`, and the value of that cell,
-        // which is the new value for the row.
-        let new_value = get_cell_value(row, target_column)?;
-
         // Query the database using `row_number` to get the current value of the column for
         // the row.
         let current_value =
-            get_current_value(target_table, target_column, row_number, pool).await?;
+            get_current_value(target_table, target_column, &query_as_if.row_number, pool).await?;
 
         // Query dependent_table.dependent_column for the rows that will be affected by the change
         // from the current to the new value:
@@ -1505,15 +1500,30 @@ pub async fn get_rows_to_update(
         )
         .await?;
 
-        let updates_after = get_affected_rows(
-            dependent_table,
-            dependent_column,
-            &new_value,
-            global_config,
-            pool,
-        )
-        .await?;
-
+        let updates_after = match &query_as_if.row {
+            None => {
+                if query_as_if.kind == QueryAsIfKind::Replace {
+                    eprintln!(
+                        "WARN: No row in query_as_if: {:?} for {:?}",
+                        query_as_if, query_as_if.kind
+                    );
+                }
+                IndexMap::new()
+            }
+            Some(row) => {
+                // Fetch the cell corresponding to `column` from `row`, and the value of that cell,
+                // which is the new value for the row.
+                let new_value = get_cell_value(&row, target_column)?;
+                get_affected_rows(
+                    dependent_table,
+                    dependent_column,
+                    &new_value,
+                    global_config,
+                    pool,
+                )
+                .await?
+            }
+        };
         rows_to_update_before.insert(dependent_table.to_string(), updates_before);
         rows_to_update_after.insert(dependent_table.to_string(), updates_after);
     }
@@ -1564,6 +1574,103 @@ pub async fn process_updates(
             .await?;
         }
     }
+    Ok(())
+}
+
+#[async_recursion]
+pub async fn delete_row(
+    global_config: &SerdeMap,
+    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
+    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    pool: &AnyPool,
+    table_name: &str,
+    row_number: &u32,
+) -> Result<(), sqlx::Error> {
+    // TODO: If possible use BEGIN and END TRANSACTION here and ROLLBACK in case of an error.
+    // Maybe we need a wrapper function for this?
+    // Note also that we might want to run ANALYZE (or the sqlite equivalent) after
+    // the deletes have completed.
+
+    // First, use the row number to fetch the row from the database:
+    let sql = format!(
+        "SELECT * FROM \"{}\" WHERE row_number = {}",
+        table_name, row_number
+    );
+    let query = sqlx_query(&sql);
+    let sql_row = query.fetch_one(pool).await?;
+    // TODO: This isn't the only place we do this. Factor this out into its own function.
+    let mut row = SerdeMap::new();
+    for column in sql_row.columns() {
+        let cname = column.name();
+        if cname != "row_number" {
+            let raw_value = sql_row
+                .try_get_raw(format!(r#"{}"#, cname).as_str())
+                .unwrap();
+            let value;
+            if !raw_value.is_null() {
+                value = get_column_value(&sql_row, &cname, "text");
+            } else {
+                value = String::from("");
+            }
+            let cell = json!({
+                "value": value,
+                "valid": true,
+                "messages": json!([]),
+            });
+            row.insert(cname.to_string(), json!(cell));
+        }
+    }
+
+    // Used to validate the given row, counterfactually, "as if" the row did not exist in the
+    // database:
+    let query_as_if = QueryAsIf {
+        kind: QueryAsIfKind::Ignore,
+        table: table_name.to_string(),
+        alias: format!("{}_as_if", table_name),
+        row_number: *row_number,
+        row: None,
+    };
+
+    // Look through the valve config to see which tables are dependent on this table and find the
+    // rows that need to be updated. Since this is a delete there will only be rows to update
+    // before and none after the delete:
+    let (updates_before, _) = get_rows_to_update(global_config, pool, table_name, &query_as_if)
+        .await
+        .map_err(|e| Configuration(e.into()))?;
+
+    // Process the updates that need to be performed before the update of the target row:
+    process_updates(
+        global_config,
+        compiled_datatype_conditions,
+        compiled_rule_conditions,
+        pool,
+        &updates_before,
+        &query_as_if,
+    )
+    .await?;
+
+    // Now delete the row:
+    let sql1 = format!(
+        "DELETE FROM \"{}\" WHERE row_number = {}",
+        table_name, row_number
+    );
+    let sql2 = format!(
+        "DELETE FROM \"{}_conflict\" WHERE row_number = {}",
+        table_name, row_number
+    );
+    for sql in vec![sql1, sql2] {
+        let query = sqlx_query(&sql);
+        query.execute(pool).await?;
+    }
+
+    // Now delete all messages associated with the row:
+    let sql = format!(
+        r#"DELETE FROM "message" WHERE "table" = '{}' AND "row" = {}"#,
+        table_name, row_number
+    );
+    let query = sqlx_query(&sql);
+    query.execute(pool).await?;
+
     Ok(())
 }
 
@@ -1652,15 +1759,8 @@ pub async fn update_row(
         }
     }
 
-    // First, look through the valve config to see which tables are dependent on this table
-    // and find the rows that need to be updated:
-    let (updates_before, updates_after) =
-        get_rows_to_update(global_config, pool, table_name, &row, row_number)
-            .await
-            .map_err(|e| Configuration(e.into()))?;
-
-    // Used by process_updates() to validate the given row, counterfactually, "as if" the version
-    // of the row in the database currently were replaced with `row`:
+    // Used to validate the given row, counterfactually, "as if" the version of the row in the
+    // database currently were replaced with `row`:
     let query_as_if = QueryAsIf {
         kind: QueryAsIfKind::Replace,
         table: table_name.to_string(),
@@ -1668,6 +1768,13 @@ pub async fn update_row(
         row_number: *row_number,
         row: Some(row.clone()),
     };
+
+    // First, look through the valve config to see which tables are dependent on this table
+    // and find the rows that need to be updated:
+    let (updates_before, updates_after) =
+        get_rows_to_update(global_config, pool, table_name, &query_as_if)
+            .await
+            .map_err(|e| Configuration(e.into()))?;
 
     // Process the updates that need to be performed before the update of the target row:
     process_updates(
