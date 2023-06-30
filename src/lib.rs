@@ -1679,23 +1679,9 @@ pub async fn insert_new_row(
 
     // Look through the valve config to see which tables are dependent on this table
     // and find the rows that need to be updated:
-    let (_, updates_after, updates_intra) =
-        get_rows_to_update(global_config, pool, base_table, &query_as_if)
-            .await
-            .map_err(|e| Configuration(e.into()))?;
-
-    // Process the rows from the same table as the target table that need to be re-validated
-    // because of unique or primary constraints:
-    process_updates(
-        global_config,
-        compiled_datatype_conditions,
-        compiled_rule_conditions,
-        pool,
-        &updates_intra,
-        &query_as_if,
-        true,
-    )
-    .await?;
+    let (_, updates_after, _) = get_rows_to_update(global_config, pool, base_table, &query_as_if)
+        .await
+        .map_err(|e| Configuration(e.into()))?;
 
     // If the row is not already being directed to the conflict table, check it to see if it should
     // be redirected there:
@@ -1754,18 +1740,6 @@ pub async fn insert_new_row(
     }
     query.execute(pool).await?;
 
-    // Now process the updates that need to be performed after the update of the target row:
-    process_updates(
-        global_config,
-        compiled_datatype_conditions,
-        compiled_rule_conditions,
-        pool,
-        &updates_after,
-        &query_as_if,
-        false,
-    )
-    .await?;
-
     // Next add any validation messages to the message table:
     for m in messages {
         let column = m.get("column").and_then(|c| c.as_str()).unwrap();
@@ -1783,6 +1757,18 @@ pub async fn insert_new_row(
         let query = sqlx_query(&message_sql);
         query.execute(pool).await?;
     }
+
+    // Now process the updates that need to be performed after the update of the target row:
+    process_updates(
+        global_config,
+        compiled_datatype_conditions,
+        compiled_rule_conditions,
+        pool,
+        &updates_after,
+        &query_as_if,
+        false,
+    )
+    .await?;
 
     Ok(new_row_number)
 }
