@@ -30,7 +30,7 @@ pub struct ResultRow {
 #[derive(Clone, Debug, PartialEq)]
 pub enum QueryAsIfKind {
     Add,
-    Ignore,
+    Remove,
     Replace,
 }
 
@@ -104,7 +104,6 @@ pub async fn validate_row(
 
     let context = result_row.clone();
     for (column_name, cell) in result_row.contents.iter_mut() {
-        // TODO: Pass the query_as_if parameter to validate_cell_rules.
         validate_cell_rules(
             config,
             compiled_rule_conditions,
@@ -1409,7 +1408,7 @@ fn as_if_to_sql(
         };
 
         match as_if.kind {
-            QueryAsIfKind::Ignore => {
+            QueryAsIfKind::Remove => {
                 format!(
                     r#""{table_alias}{suffix}" AS (
                        SELECT * FROM "{table_name}{suffix}" WHERE "row_number" <> {row_number}
