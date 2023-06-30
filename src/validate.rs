@@ -1425,11 +1425,34 @@ fn as_if_to_sql(
                 let values = {
                     let mut values = vec![];
                     for column in &columns {
-                        let value = row
+                        let valid = row
                             .get(column)
-                            .and_then(|c| c.get("value"))
-                            .and_then(|v| v.as_str())
+                            .and_then(|c| c.get("valid"))
+                            .and_then(|v| v.as_bool())
                             .unwrap();
+
+                        let value = {
+                            if valid == true {
+                                let value = match row.get(column).and_then(|c| c.get("value")) {
+                                    Some(SerdeValue::String(s)) => Ok(format!("{}", s)),
+                                    Some(SerdeValue::Number(n)) => Ok(format!("{}", n)),
+                                    Some(SerdeValue::Bool(b)) => Ok(format!("{}", b)),
+                                    _ => Err(format!(
+                                        "Value missing or of unknown type in column {} of row to \
+                                         update: {:?}",
+                                        column, row
+                                    )),
+                                }
+                                .unwrap();
+                                if value == "" {
+                                    "NULL".to_string()
+                                } else {
+                                    value
+                                }
+                            } else {
+                                "NULL".to_string()
+                            }
+                        };
 
                         let sql_type = get_sql_type_from_global_config(
                             &global_config,

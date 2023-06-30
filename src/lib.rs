@@ -1270,10 +1270,10 @@ pub async fn get_db_value(
     row_number: &u32,
     pool: &AnyPool,
 ) -> Result<String, String> {
-    let (is_clause, cast) = if pool.any_kind() == AnyKind::Sqlite {
-        ("IS", "")
+    let is_clause = if pool.any_kind() == AnyKind::Sqlite {
+        "IS"
     } else {
-        ("IS NOT DISTINCT FROM", "::TEXT")
+        "IS NOT DISTINCT FROM"
     };
     let sql = format!(
         r#"SELECT
@@ -1287,15 +1287,19 @@ pub async fn get_db_value(
                      ORDER BY "message_id" DESC
                      LIMIT 1
                    )
-                   ELSE "{column}"{cast}
+                   ELSE {casted_column}
                  END AS "{column}"
                FROM "{table}_view" WHERE "row_number" = {row_number}
             "#,
         column = column,
         is_clause = is_clause,
         table = table,
-        cast = cast,
         row_number = row_number,
+        casted_column = if pool.any_kind() == AnyKind::Sqlite {
+            cast_column_sql_to_text(column, "non-text")
+        } else {
+            format!("\"{}\"::TEXT", column)
+        },
     );
 
     let query = sqlx_query(&sql);
@@ -1536,7 +1540,7 @@ pub async fn process_updates(
                 update_table,
                 &vrow,
                 row_number,
-                true,
+                false,
                 do_not_recurse,
             )
             .await?;
@@ -1753,9 +1757,15 @@ pub async fn delete_row(
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     pool: &AnyPool,
-    table_name: &str,
+    table_to_write: &str,
     row_number: &u32,
+    simulated_update: bool,
 ) -> Result<(), sqlx::Error> {
+    let base_table = match table_to_write.strip_suffix("_conflict") {
+        None => table_to_write.clone(),
+        Some(base) => base,
+    };
+
     // TODO: If possible use BEGIN and END TRANSACTION here and ROLLBACK in case of an error.
     // Maybe we need a wrapper function for this?
     // Note also that we might want to run ANALYZE (or the sqlite equivalent) after
@@ -1764,14 +1774,14 @@ pub async fn delete_row(
     // First, use the row number to fetch the row from the database:
     let sql = format!(
         "SELECT * FROM \"{}_view\" WHERE row_number = {}",
-        table_name, row_number
+        base_table, row_number
     );
     let query = sqlx_query(&sql);
     let sql_row = query.fetch_one(pool).await.map_err(|e| {
         Configuration(
             format!(
                 "Got: '{}' while fetching row number {} from table {}",
-                e, row_number, table_name
+                e, row_number, base_table
             )
             .into(),
         )
@@ -1781,13 +1791,16 @@ pub async fn delete_row(
     let mut row = SerdeMap::new();
     for column in sql_row.columns() {
         let cname = column.name();
-        if cname != "row_number" {
+        if !vec!["row_number", "message"].contains(&cname) {
             let raw_value = sql_row
                 .try_get_raw(format!(r#"{}"#, cname).as_str())
                 .unwrap();
             let value;
             if !raw_value.is_null() {
-                value = get_column_value(&sql_row, &cname, "text");
+                let sql_type =
+                    get_sql_type_from_global_config(global_config, &base_table, &cname, pool)
+                        .unwrap();
+                value = get_column_value(&sql_row, &cname, &sql_type);
             } else {
                 value = String::from("");
             }
@@ -1804,8 +1817,8 @@ pub async fn delete_row(
     // database:
     let query_as_if = QueryAsIf {
         kind: QueryAsIfKind::Remove,
-        table: table_name.to_string(),
-        alias: format!("{}_as_if", table_name),
+        table: base_table.to_string(),
+        alias: format!("{}_as_if", base_table),
         row_number: *row_number,
         row: None,
     };
@@ -1814,7 +1827,7 @@ pub async fn delete_row(
     // rows that need to be updated. Since this is a delete there will only be rows to update
     // before and none after the delete:
     let (updates_before, _, updates_intra) =
-        get_rows_to_update(global_config, pool, table_name, &query_as_if)
+        get_rows_to_update(global_config, pool, base_table, &query_as_if)
             .await
             .map_err(|e| Configuration(e.into()))?;
 
@@ -1833,11 +1846,11 @@ pub async fn delete_row(
     // Now delete the row:
     let sql1 = format!(
         "DELETE FROM \"{}\" WHERE row_number = {}",
-        table_name, row_number
+        base_table, row_number,
     );
     let sql2 = format!(
         "DELETE FROM \"{}_conflict\" WHERE row_number = {}",
-        table_name, row_number
+        base_table, row_number
     );
     for sql in vec![sql1, sql2] {
         let query = sqlx_query(&sql);
@@ -1845,9 +1858,16 @@ pub async fn delete_row(
     }
 
     // Now delete all messages associated with the row:
+    let simulated_update_clause = {
+        if simulated_update {
+            r#"AND "level" <> 'update'"#
+        } else {
+            ""
+        }
+    };
     let sql = format!(
-        r#"DELETE FROM "message" WHERE "table" = '{}' AND "row" = {}"#,
-        table_name, row_number
+        r#"DELETE FROM "message" WHERE "table" = '{}' AND "row" = {} {}"#,
+        base_table, row_number, simulated_update_clause
     );
     let query = sqlx_query(&sql);
     query.execute(pool).await?;
@@ -1882,7 +1902,41 @@ pub async fn update_row(
     skip_validation: bool,
     do_not_recurse: bool,
 ) -> Result<(), sqlx::Error> {
-    // First, send the row through the row validator to determine if any fields are problematic and
+    // Used to validate the given row, counterfactually, "as if" the version of the row in the
+    // database currently were replaced with `row`:
+    let query_as_if = QueryAsIf {
+        kind: QueryAsIfKind::Replace,
+        table: table_name.to_string(),
+        alias: format!("{}_as_if", table_name),
+        row_number: *row_number,
+        row: Some(row.clone()),
+    };
+
+    // First, look through the valve config to see which tables are dependent on this table
+    // and find the rows that need to be updated:
+    let (updates_before, updates_after, updates_intra) = {
+        if do_not_recurse {
+            (IndexMap::new(), IndexMap::new(), IndexMap::new())
+        } else {
+            get_rows_to_update(global_config, pool, table_name, &query_as_if)
+                .await
+                .map_err(|e| Configuration(e.into()))?
+        }
+    };
+
+    // Process the updates that need to be performed before the update of the target row:
+    process_updates(
+        global_config,
+        compiled_datatype_conditions,
+        compiled_rule_conditions,
+        pool,
+        &updates_before,
+        &query_as_if,
+        false,
+    )
+    .await?;
+
+    // Send the row through the row validator to determine if any fields are problematic and
     // to mark them with appropriate messages:
     let row = if !skip_validation {
         validate_row(
@@ -1954,40 +2008,6 @@ pub async fn update_row(
         }
     }
 
-    // Used to validate the given row, counterfactually, "as if" the version of the row in the
-    // database currently were replaced with `row`:
-    let query_as_if = QueryAsIf {
-        kind: QueryAsIfKind::Replace,
-        table: table_name.to_string(),
-        alias: format!("{}_as_if", table_name),
-        row_number: *row_number,
-        row: Some(row.clone()),
-    };
-
-    // First, look through the valve config to see which tables are dependent on this table
-    // and find the rows that need to be updated:
-    let (updates_before, updates_after, updates_intra) = {
-        if do_not_recurse {
-            (IndexMap::new(), IndexMap::new(), IndexMap::new())
-        } else {
-            get_rows_to_update(global_config, pool, table_name, &query_as_if)
-                .await
-                .map_err(|e| Configuration(e.into()))?
-        }
-    };
-
-    // Process the updates that need to be performed before the update of the target row:
-    process_updates(
-        global_config,
-        compiled_datatype_conditions,
-        compiled_rule_conditions,
-        pool,
-        &updates_before,
-        &query_as_if,
-        false,
-    )
-    .await?;
-
     // Now update the target row. First, figure out whether the row is currently in the base table
     // or the conflict table:
     let sql = format!(
@@ -2044,12 +2064,16 @@ pub async fn update_row(
         }
         query.execute(pool).await?;
     } else {
-        let sql = format!(
-            "DELETE FROM \"{}\" WHERE row_number = {}",
-            current_table, row_number
-        );
-        let query = sqlx_query(&sql);
-        query.execute(pool).await?;
+        delete_row(
+            global_config,
+            compiled_datatype_conditions,
+            compiled_rule_conditions,
+            pool,
+            &current_table,
+            row_number,
+            true,
+        )
+        .await?;
         insert_new_row(
             global_config,
             compiled_datatype_conditions,
@@ -2058,7 +2082,7 @@ pub async fn update_row(
             &table_to_write,
             &row,
             Some(*row_number),
-            true,
+            false,
         )
         .await?;
     }
