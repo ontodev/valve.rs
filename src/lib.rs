@@ -1066,21 +1066,25 @@ pub async fn insert_new_row(
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     pool: &AnyPool,
-    table_name: &str,
+    table_to_write: &str,
     row: &SerdeMap,
     new_row_number: Option<&u32>,
     skip_validation: bool,
 ) -> Result<u32, sqlx::Error> {
+    let base_table = match table_to_write.strip_suffix("_conflict") {
+        None => table_to_write.clone(),
+        Some(base) => base,
+    };
+
     // First, send the row through the row validator to determine if any fields are problematic and
     // to mark them with appropriate messages:
-
     let row = if !skip_validation {
         validate_row(
             global_config,
             compiled_datatype_conditions,
             compiled_rule_conditions,
             pool,
-            table_name,
+            base_table,
             row,
             None,
             None,
@@ -1097,7 +1101,7 @@ pub async fn insert_new_row(
             // The new row number to insert is the current highest row number + 1.
             let sql = format!(
                 r#"SELECT MAX("row_number") AS "row_number" FROM "{}_view""#,
-                table_name
+                base_table
             );
             let query = sqlx_query(&sql);
             let result_row = query.fetch_one(pool).await?;
@@ -1128,7 +1132,7 @@ pub async fn insert_new_row(
             cell_for_insert.remove("value");
             let sql_type = get_sql_type_from_global_config(
                 &global_config,
-                &table_name.to_string(),
+                &base_table,
                 &column,
                 pool,
             )
@@ -1157,8 +1161,8 @@ pub async fn insert_new_row(
     // database currently were replaced with `row`:
     let query_as_if = QueryAsIf {
         kind: QueryAsIfKind::Add,
-        table: table_name.to_string(),
-        alias: format!("{}_as_if", table_name),
+        table: base_table.to_string(),
+        alias: format!("{}_as_if", base_table),
         row_number: new_row_number,
         row: Some(row.clone()),
     };
@@ -1166,7 +1170,7 @@ pub async fn insert_new_row(
     // Look through the valve config to see which tables are dependent on this table
     // and find the rows that need to be updated:
     let (_, updates_after, updates_intra) =
-        get_rows_to_update(global_config, pool, table_name, &query_as_if)
+        get_rows_to_update(global_config, pool, base_table, &query_as_if)
             .await
             .map_err(|e| Configuration(e.into()))?;
 
@@ -1183,35 +1187,43 @@ pub async fn insert_new_row(
     )
     .await?;
 
-    // Next, figure out where to put the new version of the row:
-    let mut table_to_write = String::from(table_name);
-    for (column, cell) in row.iter() {
-        let valid = cell.get("valid").unwrap();
-        if valid == false {
-            let structure = global_config
-                .get("table")
-                .and_then(|t| t.as_object())
-                .and_then(|t| t.get(table_name))
-                .and_then(|t| t.as_object())
-                .and_then(|t| t.get("column"))
-                .and_then(|c| c.as_object())
-                .and_then(|c| c.get(column))
-                .and_then(|c| c.as_object())
-                .and_then(|c| c.get("structure"))
-                .and_then(|s| s.as_str())
-                .unwrap_or("");
-            if vec!["primary", "unique"].contains(&structure) || structure.starts_with("tree(") {
-                let messages = cell.get("messages").and_then(|m| m.as_array()).unwrap();
-                for msg in messages {
-                    let level = msg.get("level").and_then(|l| l.as_str()).unwrap();
-                    if level == "error" {
-                        table_to_write.push_str("_conflict");
-                        break;
+    // If the row is not already being directed to the conflict table, check it to see if it should
+    // be redirected there:
+    let table_to_write = {
+        if table_to_write.ends_with("_conflict") {
+            table_to_write.to_string()
+        } else {
+            let mut table_to_write = String::from(base_table);
+            for (column, cell) in row.iter() {
+                let valid = cell.get("valid").unwrap();
+                if valid == false {
+                    let structure = global_config
+                        .get("table")
+                        .and_then(|t| t.as_object())
+                        .and_then(|t| t.get(base_table))
+                        .and_then(|t| t.as_object())
+                        .and_then(|t| t.get("column"))
+                        .and_then(|c| c.as_object())
+                        .and_then(|c| c.get(column))
+                        .and_then(|c| c.as_object())
+                        .and_then(|c| c.get("structure"))
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("");
+                    if vec!["primary", "unique"].contains(&structure) || structure.starts_with("tree(") {
+                        let messages = cell.get("messages").and_then(|m| m.as_array()).unwrap();
+                        for msg in messages {
+                            let level = msg.get("level").and_then(|l| l.as_str()).unwrap();
+                            if level == "error" {
+                                table_to_write.push_str("_conflict");
+                                break;
+                            }
+                        }
                     }
                 }
             }
+            table_to_write
         }
-    }
+    };
 
     // Add the new row to the table:
     let insert_stmt = local_sql_syntax(
@@ -1254,7 +1266,7 @@ pub async fn insert_new_row(
             r#"INSERT INTO "message"
                ("table", "row", "column", "value", "level", "rule", "message")
                VALUES ('{}', {}, '{}', '{}', '{}', '{}', '{}')"#,
-            table_name, new_row_number, column, value, level, rule, message
+            base_table, new_row_number, column, value, level, rule, message
         );
         let query = sqlx_query(&message_sql);
         query.execute(pool).await?;

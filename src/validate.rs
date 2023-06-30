@@ -1457,9 +1457,9 @@ fn as_if_to_sql(
                     .join(", ");
                 let where_clause = {
                     if as_if.kind == QueryAsIfKind::Replace {
-                        r#"WHERE "row_number" <> {row_number}"#
+                        format!(r#"WHERE "row_number" != {}"#, as_if.row_number)
                     } else {
-                        ""
+                        "".to_string()
                     }
                 };
                 format!(
