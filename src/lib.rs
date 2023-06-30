@@ -1460,8 +1460,10 @@ pub async fn get_rows_to_update(
         }
 
         // Query the database using `row_number` to get the current value of the column for
-        // the row.
-        let mut updates = match query_as_if.kind {
+        // the row. We only look for rows to update that match the current value of the column.
+        // Rows matching the column's new value don't also need to be updated. Those will result
+        // in a validation error for the new/modified row but that is fine.
+        let updates = match query_as_if.kind {
             QueryAsIfKind::Add => {
                 if let None = query_as_if.row {
                     eprintln!(
@@ -1486,34 +1488,6 @@ pub async fn get_rows_to_update(
                     pool,
                 )
                 .await?
-            }
-        };
-
-        match &query_as_if.row {
-            None => {
-                if query_as_if.kind != QueryAsIfKind::Remove {
-                    eprintln!(
-                        "WARN: No row in query_as_if: {:?} for {:?}",
-                        query_as_if, query_as_if.kind
-                    );
-                }
-            }
-            Some(row) => {
-                // Fetch the cell corresponding to `column` from `row`, and the value of that cell,
-                // which is the new value for the row.
-                let new_value = get_cell_value(&row, column)?;
-                let further_updates = get_affected_rows(
-                    table,
-                    column,
-                    &new_value,
-                    Some(&query_as_if.row_number),
-                    global_config,
-                    pool,
-                )
-                .await?;
-                for (key, data) in further_updates {
-                    updates.insert(key, data);
-                }
             }
         };
         rows_to_update_intra.insert(table.to_string(), updates);
@@ -2014,19 +1988,6 @@ pub async fn update_row(
     )
     .await?;
 
-    // Now process the rows from the same table as the target table that need to be re-validated
-    // because of unique or primary constraints:
-    process_updates(
-        global_config,
-        compiled_datatype_conditions,
-        compiled_rule_conditions,
-        pool,
-        &updates_intra,
-        &query_as_if,
-        true,
-    )
-    .await?;
-
     // Now update the target row. First, figure out whether the row is currently in the base table
     // or the conflict table:
     let sql = format!(
@@ -2128,6 +2089,19 @@ pub async fn update_row(
         let query = sqlx_query(&insert_sql);
         query.execute(pool).await?;
     }
+
+    // Now process the rows from the same table as the target table that need to be re-validated
+    // because of unique or primary constraints:
+    process_updates(
+        global_config,
+        compiled_datatype_conditions,
+        compiled_rule_conditions,
+        pool,
+        &updates_intra,
+        &query_as_if,
+        true,
+    )
+    .await?;
 
     // Finally process the updates from other tables that need to be performed after the update of
     // the target row:
