@@ -1130,13 +1130,9 @@ pub async fn insert_new_row(
         let mut cell_for_insert = cell.clone();
         if cell_valid {
             cell_for_insert.remove("value");
-            let sql_type = get_sql_type_from_global_config(
-                &global_config,
-                &base_table,
-                &column,
-                pool,
-            )
-            .unwrap();
+            let sql_type =
+                get_sql_type_from_global_config(&global_config, &base_table, &column, pool)
+                    .unwrap();
             insert_values.push(cast_sql_param_from_text(&sql_type));
             insert_params.push(String::from(cell_value));
         } else {
@@ -1209,7 +1205,9 @@ pub async fn insert_new_row(
                         .and_then(|c| c.get("structure"))
                         .and_then(|s| s.as_str())
                         .unwrap_or("");
-                    if vec!["primary", "unique"].contains(&structure) || structure.starts_with("tree(") {
+                    if vec!["primary", "unique"].contains(&structure)
+                        || structure.starts_with("tree(")
+                    {
                         let messages = cell.get("messages").and_then(|m| m.as_array()).unwrap();
                         for msg in messages {
                             let level = msg.get("level").and_then(|l| l.as_str()).unwrap();
@@ -1871,19 +1869,6 @@ pub async fn delete_row(
     )
     .await?;
 
-    // Now process the rows from the same table as the target table that need to be re-validated
-    // because of unique or primary constraints:
-    process_updates(
-        global_config,
-        compiled_datatype_conditions,
-        compiled_rule_conditions,
-        pool,
-        &updates_intra,
-        &query_as_if,
-        true,
-    )
-    .await?;
-
     // Now delete the row:
     let sql1 = format!(
         "DELETE FROM \"{}\" WHERE row_number = {}",
@@ -1905,6 +1890,19 @@ pub async fn delete_row(
     );
     let query = sqlx_query(&sql);
     query.execute(pool).await?;
+
+    // Finally process the rows from the same table as the target table that need to be re-validated
+    // because of unique or primary constraints:
+    process_updates(
+        global_config,
+        compiled_datatype_conditions,
+        compiled_rule_conditions,
+        pool,
+        &updates_intra,
+        &query_as_if,
+        true,
+    )
+    .await?;
 
     Ok(())
 }
@@ -2117,18 +2115,6 @@ pub async fn update_row(
         .await?;
     }
 
-    // Now process the updates that need to be performed after the update of the target row:
-    process_updates(
-        global_config,
-        compiled_datatype_conditions,
-        compiled_rule_conditions,
-        pool,
-        &updates_after,
-        &query_as_if,
-        false,
-    )
-    .await?;
-
     // Now delete any messages that had been previously inserted to the message table for the old
     // version of this row (other than any 'update'-level messages):
     let delete_sql = format!(
@@ -2138,7 +2124,7 @@ pub async fn update_row(
     let query = sqlx_query(&delete_sql);
     query.execute(pool).await?;
 
-    // Finally add the messages to the message table for the new version of this row:
+    // Now add the messages to the message table for the new version of this row:
     for m in messages {
         let column = m.get("column").and_then(|c| c.as_str()).unwrap();
         let value = m.get("value").and_then(|c| c.as_str()).unwrap();
@@ -2155,6 +2141,19 @@ pub async fn update_row(
         let query = sqlx_query(&insert_sql);
         query.execute(pool).await?;
     }
+
+    // Finally process the updates from other tables that need to be performed after the update of
+    // the target row:
+    process_updates(
+        global_config,
+        compiled_datatype_conditions,
+        compiled_rule_conditions,
+        pool,
+        &updates_after,
+        &query_as_if,
+        false,
+    )
+    .await?;
 
     Ok(())
 }
