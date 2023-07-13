@@ -4,6 +4,9 @@ table1	B5	error	key:unique	Values of base must be unique	http://purl.obolibrary.
 table1	A5	error	key:primary	Values of prefix must be unique	VO
 table1	B10	error	key:unique	Values of base must be unique	http://www.w3.org/1999/02/22-rdf-syntax-ns#
 table1	A10	error	key:primary	Values of prefix must be unique	rdf
+table11	D3	error	key:primary	Values of foo must be unique	d
+table11	D4	error	key:primary	Values of foo must be unique	e
+table11	D5	error	key:primary	Values of foo must be unique	e
 table2	D1	error	rule:foo-2	bar cannot be null if foo is not null	5
 table2	D1	error	rule:foo-4	bar must be 'y' or 'z' if foo = 5	5
 table2	D2	error	rule:foo-1	bar must be null whenever foo is null	
@@ -46,3 +49,5 @@ table6	C5	error	under:not-under	Value '8' of column xyzzy is not under '4'	8
 table6	C7	error	under:not-in-tree	Value '26' of column xyzzy is not in table6.child	26
 table6	A9	error	key:foreign	Value '9' of column child exists only in table4_conflict.numeric_foreign_column	9
 table7	B3	error	datatype:integer	planetfall should be a positive or negative integer	e
+table8	A2	error	key:foreign	Value 'w' of column prefix is not in table10.foreign_column	w
+table9	A9	error	key:foreign	Value 'i' of column child is not in table10.other_foreign_column	i

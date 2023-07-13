@@ -48,3 +48,20 @@ table6	foo		empty	text
 table6	bar		empty	integer		
 table7	zork			text	primary	
 table7	planetfall			integer		
+table8	prefix			text	from(table10.foreign_column)	
+table8	base			text		
+table8	ontology_IRI			text		
+table8	version_IRI			text		
+table9	child			trimmed_line	from(table10.other_foreign_column)	
+table9	parent		empty	trimmed_line		
+table9	xyzzy		empty	trimmed_line		
+table9	foo		empty	integer		
+table9	bar		empty	text		
+table10	foreign_column			text	unique	
+table10	other_foreign_column			text	unique	
+table10	numeric_foreign_column			integer	primary	
+table11	child			text		
+table11	parent			text		
+table11	xyzzy			text		
+table11	foo			text	primary	
+table11	bar			text		

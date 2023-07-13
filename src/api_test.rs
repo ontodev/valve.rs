@@ -1,5 +1,5 @@
 use ontodev_valve::{
-    get_compiled_datatype_conditions, get_compiled_rule_conditions,
+    delete_row, get_compiled_datatype_conditions, get_compiled_rule_conditions,
     get_parsed_structure_conditions, insert_new_row, update_row,
     validate::{get_matching_values, validate_row},
     valve,
@@ -56,6 +56,7 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
     let compiled_rule_conditions =
         get_compiled_rule_conditions(&config, compiled_datatype_conditions.clone(), &parser);
 
+    // Test the get_matching_values() function:
     let matching_values = get_matching_values(
         &config,
         &compiled_datatype_conditions,
@@ -99,9 +100,7 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         ])
     );
 
-    // NOTE: No validation of the validate/insert/update functions is done below. You must use an
-    // external script to fetch the data from the database and run a diff against a known good
-    // sample.
+    // We test that validate_row() is idempotent by running it multiple times on the same row:
     let row = json!({
         "child": {"messages": [], "valid": true, "value": "b"},
         "parent": {"messages": [], "valid": true, "value": "f"},
@@ -116,7 +115,6 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         },
     });
 
-    // We test that validate_row() is idempotent by running it multiple times on the same row:
     let result_row_1 = validate_row(
         &config,
         &compiled_datatype_conditions,
@@ -155,7 +153,11 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
     .await?;
     assert_eq!(result_row, result_row_2);
 
-    // Now update the database with the validated row:
+    // Test update, delete, and insert. NOTE that there are no calls to assert() below. You must use
+    // an external script to fetch the data from the database and run a diff against a known good
+    // sample.
+
+    // Update the row we constructed and validated above in the database:
     update_row(
         &config,
         &compiled_datatype_conditions,
@@ -195,6 +197,7 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         None,
     )
     .await?;
+
     let _new_row_num = insert_new_row(
         &config,
         &compiled_datatype_conditions,
@@ -207,7 +210,7 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
     )
     .await?;
 
-    // Validate and update:
+    // Validate and update an existing row:
     let row = json!({
         "child": {"messages": [], "valid": true, "value": 2},
         "parent": {"messages": [], "valid": true, "value": 6},
@@ -233,6 +236,7 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         None,
     )
     .await?;
+
     update_row(
         &config,
         &compiled_datatype_conditions,
@@ -246,7 +250,7 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
     )
     .await?;
 
-    // Validate and insert
+    // Validate and insert a new row:
     let row = json!({
         "child": {"messages": [], "valid": true, "value": 2},
         "parent": {"messages": [], "valid": true, "value": 6},
@@ -260,6 +264,7 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
             "value": 2,
         },
     });
+
     let result_row = validate_row(
         &config,
         &compiled_datatype_conditions,
@@ -271,6 +276,7 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         None,
     )
     .await?;
+
     let _new_row_num = insert_new_row(
         &config,
         &compiled_datatype_conditions,
@@ -279,6 +285,56 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         "table6",
         &result_row,
         None,
+        false,
+    )
+    .await?;
+
+    // Test cases for updates/inserts/deletes with dependencies.
+    let row = json!({
+        "foreign_column": {"messages": [], "valid": true, "value": "w"},
+        "other_foreign_column": {"messages": [], "valid": true, "value": "z"},
+        "numeric_foreign_column": {"messages": [], "valid": true, "value": ""},
+    });
+    update_row(
+        &config,
+        &compiled_datatype_conditions,
+        &compiled_rule_conditions,
+        &pool,
+        "table10",
+        &row.as_object().unwrap(),
+        &1,
+        false,
+        false,
+    )
+    .await?;
+
+    let row = json!({
+        "child": {"messages": [], "valid": true, "value": "b"},
+        "parent": {"messages": [], "valid": true, "value": "c"},
+        "xyzzy": {"messages": [], "valid": true, "value": "d"},
+        "foo": {"messages": [], "valid": true, "value": "d"},
+        "bar": {"messages": [], "valid": true, "value": "f"},
+    });
+    update_row(
+        &config,
+        &compiled_datatype_conditions,
+        &compiled_rule_conditions,
+        &pool,
+        "table11",
+        &row.as_object().unwrap(),
+        &2,
+        false,
+        false,
+    )
+    .await?;
+
+    delete_row(
+        &config,
+        &compiled_datatype_conditions,
+        &compiled_rule_conditions,
+        &pool,
+        "table11",
+        &4,
         false,
     )
     .await?;

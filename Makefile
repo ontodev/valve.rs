@@ -37,7 +37,7 @@ test/output:
 
 test: sqlite_test pg_test api_test random_test
 
-tables_to_test = column datatype rule table table1 table2 table3 table4 table5 table6 table7
+tables_to_test = column datatype rule table table1 table2 table3 table4 table5 table6 table7 table8 table9 table10 table11
 
 sqlite_test: build/valve.db test/src/table.tsv | test/output
 	@echo "Testing valve on sqlite ..."

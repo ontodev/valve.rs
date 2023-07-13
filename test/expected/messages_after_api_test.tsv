@@ -4,6 +4,14 @@ table1	5	base	error	key:unique	Values of base must be unique	http://purl.obolibr
 table1	5	prefix	error	key:primary	Values of prefix must be unique	VO
 table1	10	base	error	key:unique	Values of base must be unique	http://www.w3.org/1999/02/22-rdf-syntax-ns#
 table1	10	prefix	error	key:primary	Values of prefix must be unique	rdf
+table10	1	foreign_column	update	rule:update	Value changed from 'a' to 'w'	w
+table10	1	numeric_foreign_column	error	datatype:integer	numeric_foreign_column should be a positive or negative integer	
+table10	1	numeric_foreign_column	error	datatype:trimmed_line	numeric_foreign_column should be a line of text that does not begin or end with whitespace	
+table10	1	numeric_foreign_column	update	rule:update	Value changed from '1' to ''	
+table10	1	other_foreign_column	update	rule:update	Value changed from 'a' to 'z'	z
+table11	2	foo	error	key:primary	Values of foo must be unique	d
+table11	2	foo	update	rule:update	Value changed from 'e' to 'd'	d
+table11	3	foo	error	key:primary	Values of foo must be unique	d
 table2	1	bar	error	custom:unrelated	An unrelated error	B
 table2	1	bar	update	rule:update	Value changed from '' to 'B'	B
 table2	1	child	update	rule:update	Value changed from 'a' to 'b'	b
@@ -64,3 +72,7 @@ table6	10	bar	error	custom:unrelated	An unrelated error	2
 table6	10	child	error	tree:child-unique	Values of child must be unique	2
 table6	10	xyzzy	error	under:not-in-tree	Value '23' of column xyzzy is not in table6.child	23
 table7	3	planetfall	error	datatype:integer	planetfall should be a positive or negative integer	e
+table8	1	prefix	error	key:foreign	Value 'a' of column prefix is not in table10.foreign_column	a
+table8	2	prefix	error	key:foreign	Value 'w' of column prefix exists only in table10_conflict.foreign_column	w
+table9	1	child	error	key:foreign	Value 'a' of column child is not in table10.other_foreign_column	a
+table9	9	child	error	key:foreign	Value 'i' of column child is not in table10.other_foreign_column	i
