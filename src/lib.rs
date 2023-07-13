@@ -1532,7 +1532,7 @@ pub async fn process_updates(
             .await?;
 
             // Update the row in the database:
-            update_row_without_transaction(
+            update_row(
                 global_config,
                 compiled_datatype_conditions,
                 compiled_rule_conditions,
@@ -1701,9 +1701,6 @@ pub async fn insert_new_row(
         }
     };
 
-    // Begin a transaction in the database:
-    let transaction = pool.begin().await?;
-
     // Add the new row to the table:
     let insert_stmt = local_sql_syntax(
         &pool,
@@ -1751,9 +1748,6 @@ pub async fn insert_new_row(
     )
     .await?;
 
-    // Commit the database transaction:
-    transaction.commit().await?;
-
     Ok(new_row_number)
 }
 
@@ -1771,6 +1765,11 @@ pub async fn delete_row(
         None => table_to_write.clone(),
         Some(base) => base,
     };
+
+    // TODO: If possible use BEGIN and END TRANSACTION here and ROLLBACK in case of an error.
+    // Maybe we need a wrapper function for this?
+    // Note also that we might want to run ANALYZE (or the sqlite equivalent) after
+    // the deletes have completed.
 
     // First, use the row number to fetch the row from the database:
     let sql = format!(
@@ -1832,9 +1831,6 @@ pub async fn delete_row(
             .await
             .map_err(|e| Configuration(e.into()))?;
 
-    // Begin a database transaction:
-    let transaction = pool.begin().await?;
-
     // Process the updates that need to be performed before the update of the target row:
     process_updates(
         global_config,
@@ -1889,49 +1885,13 @@ pub async fn delete_row(
     )
     .await?;
 
-    // Commit the database transaction:
-    transaction.commit().await?;
-
-    Ok(())
-}
-
-/// A wrapper around [update_row_without_transaction()], which wraps that function call inside a
-/// database transaction.
-#[async_recursion]
-pub async fn update_row(
-    global_config: &SerdeMap,
-    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
-    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
-    pool: &AnyPool,
-    table_name: &str,
-    row: &SerdeMap,
-    row_number: &u32,
-    skip_validation: bool,
-    do_not_recurse: bool,
-) -> Result<(), sqlx::Error> {
-    let transaction = pool.begin().await?;
-    update_row_without_transaction(
-        global_config,
-        compiled_datatype_conditions,
-        compiled_rule_conditions,
-        pool,
-        table_name,
-        row,
-        row_number,
-        skip_validation,
-        do_not_recurse,
-    )
-    .await?;
-    transaction.commit().await?;
     Ok(())
 }
 
 /// Given global config map, a database connection pool, a table name, a row, and the row number to
 /// update, update the corresponding row in the database with new values as specified by `row`.
-/// **Warning:** This function updates the database without using database transactions and can
-/// result in database corruption if you are not careful. See [update_row()] for a safer version.
 #[async_recursion]
-pub async fn update_row_without_transaction(
+pub async fn update_row(
     global_config: &SerdeMap,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
@@ -1976,8 +1936,8 @@ pub async fn update_row_without_transaction(
     )
     .await?;
 
-    // Send the row through the row validator to determine if any fields are problematic in light of
-    // the previous updates and mark them with appropriate messages if necessary:
+    // Send the row through the row validator to determine if any fields are problematic and
+    // to mark them with appropriate messages:
     let row = if !skip_validation {
         validate_row(
             global_config,
@@ -1993,6 +1953,11 @@ pub async fn update_row_without_transaction(
     } else {
         row.clone()
     };
+
+    // TODO: If possible use BEGIN and END TRANSACTION here and ROLLBACK in case of an error.
+    // Maybe we need a wrapper function for this?
+    // Note also that we might want to run ANALYZE (or the sqlite equivalent) after
+    // the updates have completed.
 
     // Now prepare the row and messages for the database update:
     let mut assignments = vec![];
