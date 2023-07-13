@@ -339,5 +339,23 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
     )
     .await?;
 
+    let row = json!({
+        "foreign_column": {"messages": [], "valid": true, "value": "i"},
+        "other_foreign_column": {"messages": [], "valid": true, "value": "i"},
+        "numeric_foreign_column": {"messages": [], "valid": true, "value": "9"},
+    });
+
+    let _new_row_num = insert_new_row(
+        &config,
+        &compiled_datatype_conditions,
+        &compiled_rule_conditions,
+        &pool,
+        "table10",
+        &row.as_object().unwrap(),
+        None,
+        false,
+    )
+    .await?;
+
     Ok(())
 }

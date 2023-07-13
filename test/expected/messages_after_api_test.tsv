@@ -75,4 +75,3 @@ table7	3	planetfall	error	datatype:integer	planetfall should be a positive or ne
 table8	1	prefix	error	key:foreign	Value 'a' of column prefix is not in table10.foreign_column	a
 table8	2	prefix	error	key:foreign	Value 'w' of column prefix exists only in table10_conflict.foreign_column	w
 table9	1	child	error	key:foreign	Value 'a' of column child is not in table10.other_foreign_column	a
-table9	9	child	error	key:foreign	Value 'i' of column child is not in table10.other_foreign_column	i
