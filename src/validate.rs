@@ -1,7 +1,7 @@
 use enquote::unquote;
 use indexmap::IndexMap;
 use serde_json::{json, Value as SerdeValue};
-use sqlx::{any::AnyPool, query as sqlx_query, Row, ValueRef};
+use sqlx::{any::AnyPool, query as sqlx_query, Acquire, Row, Transaction, ValueRef};
 use std::collections::HashMap;
 
 use crate::{
@@ -49,17 +49,28 @@ pub struct QueryAsIf {
 /// Given a config map, maps of compiled datatype and rule conditions, a database connection
 /// pool, a table name, a row to validate, and a row number in case the row already exists,
 /// perform both intra- and inter-row validation and return the validated row. Note that this
-/// function is idempotent.
+/// function is idempotent.  Optionally, if a transaction is given, use that instead of the pool
+/// for database access.
 pub async fn validate_row(
     config: &SerdeMap,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     pool: &AnyPool,
+    tx: Option<&mut Transaction<'_, sqlx::Any>>,
     table_name: &str,
     row: &SerdeMap,
     row_number: Option<u32>,
     query_as_if: Option<&QueryAsIf>,
 ) -> Result<SerdeMap, sqlx::Error> {
+    // Fallback to a default transaction if it is not given. Since we do not commit before it falls
+    // out of scope the transaction will be rolled back at the end of this function. And since this
+    // function is read-only the rollback is inconsequential.
+    let default_tx = &mut pool.begin().await?;
+    let tx = match tx {
+        Some(tx) => tx,
+        None => default_tx,
+    };
+
     // Initialize the result row with the values from the given row:
     let mut result_row = ResultRow {
         row_number: row_number,
@@ -130,6 +141,7 @@ pub async fn validate_row(
                 validate_cell_trees(
                     config,
                     pool,
+                    Some(tx),
                     &table_name.to_string(),
                     column_name,
                     cell,
@@ -140,6 +152,7 @@ pub async fn validate_row(
                 validate_cell_foreign_constraints(
                     config,
                     pool,
+                    Some(tx),
                     &table_name.to_string(),
                     column_name,
                     cell,
@@ -149,6 +162,7 @@ pub async fn validate_row(
                 validate_cell_unique_constraints(
                     config,
                     pool,
+                    Some(tx),
                     &table_name.to_string(),
                     column_name,
                     cell,
@@ -164,6 +178,7 @@ pub async fn validate_row(
     let mut violations = validate_tree_foreign_keys(
         config,
         pool,
+        Some(tx),
         &table_name.to_string(),
         Some(&context.clone()),
     )
@@ -173,6 +188,7 @@ pub async fn validate_row(
         &mut validate_under(
             config,
             pool,
+            Some(tx),
             &table_name.to_string(),
             Some(&context.clone()),
         )
@@ -392,10 +408,12 @@ pub async fn get_matching_values(
 }
 
 /// Given a config map, a db connection pool, a table name, and an optional extra row, validate
-/// any associated under constraints for the current column.
+/// any associated under constraints for the current column. Optionally, if a transaction is
+/// given, use that instead of the pool for database access.
 pub async fn validate_under(
     config: &SerdeMap,
     pool: &AnyPool,
+    mut tx: Option<&mut Transaction<'_, sqlx::Any>>,
     table_name: &String,
     extra_row: Option<&ResultRow>,
 ) -> Result<Vec<SerdeValue>, sqlx::Error> {
@@ -529,7 +547,15 @@ pub async fn validate_under(
         for param in &params {
             query = query.bind(param);
         }
-        let rows = query.fetch_all(pool).await?;
+        let rows = {
+            if let None = tx {
+                query.fetch_all(pool).await?
+            } else {
+                query
+                    .fetch_all(tx.as_mut().unwrap().acquire().await?)
+                    .await?
+            }
+        };
 
         for row in rows {
             let raw_row_number = row.try_get_raw("row_number").unwrap();
@@ -562,7 +588,15 @@ pub async fn validate_under(
                 message_query = message_query.bind(&table_name);
                 message_query = message_query.bind(&row_number);
                 message_query = message_query.bind(column);
-                let message_rows = message_query.fetch_all(pool).await?;
+                let message_rows = {
+                    if let None = tx {
+                        message_query.fetch_all(pool).await?
+                    } else {
+                        message_query
+                            .fetch_all(tx.as_mut().unwrap().acquire().await?)
+                            .await?
+                    }
+                };
                 // If there are no rows in the message table then the cell is legitimately empty and
                 // we can skip this row:
                 if message_rows.is_empty() {
@@ -624,10 +658,11 @@ pub async fn validate_under(
 /// Given a config map, a db connection pool, and a table name, validate whether there is a
 /// 'foreign key' violation for any of the table's trees; i.e., for a given tree: tree(child) which
 /// has a given parent column, validate that all of the values in the parent column are in the child
-/// column.
+/// column. Optionally, if a transaction is given, use that instead of the pool for database access.
 pub async fn validate_tree_foreign_keys(
     config: &SerdeMap,
     pool: &AnyPool,
+    mut tx: Option<&mut Transaction<'_, sqlx::Any>>,
     table_name: &String,
     extra_row: Option<&ResultRow>,
 ) -> Result<Vec<SerdeValue>, sqlx::Error> {
@@ -688,7 +723,15 @@ pub async fn validate_tree_foreign_keys(
         for param in &params {
             query = query.bind(param);
         }
-        let rows = query.fetch_all(pool).await?;
+        let rows = {
+            if let None = tx {
+                query.fetch_all(pool).await?
+            } else {
+                query
+                    .fetch_all(tx.as_mut().unwrap().acquire().await?)
+                    .await?
+            }
+        };
         for row in rows {
             let raw_row_number = row.try_get_raw("row_number").unwrap();
             let row_number: i64;
@@ -723,7 +766,15 @@ pub async fn validate_tree_foreign_keys(
                 message_query = message_query.bind(&table_name);
                 message_query = message_query.bind(&row_number);
                 message_query = message_query.bind(parent_col);
-                let message_rows = message_query.fetch_all(pool).await?;
+                let message_rows = {
+                    if let None = tx {
+                        message_query.fetch_all(pool).await?
+                    } else {
+                        message_query
+                            .fetch_all(tx.as_mut().unwrap().acquire().await?)
+                            .await?
+                    }
+                };
                 // If there are no rows in the message table then the cell is legitimately empty and
                 // we can skip this row:
                 if message_rows.is_empty() {
@@ -762,7 +813,15 @@ pub async fn validate_tree_foreign_keys(
                     ),
                 );
                 let query = sqlx_query(&sql).bind(parent_val.to_string());
-                let rows = query.fetch_all(pool).await?;
+                let rows = {
+                    if let None = tx {
+                        query.fetch_all(pool).await?
+                    } else {
+                        query
+                            .fetch_all(tx.as_mut().unwrap().acquire().await?)
+                            .await?
+                    }
+                };
                 if rows.len() > 0 {
                     continue;
                 }
@@ -817,6 +876,7 @@ pub async fn validate_rows_trees(
                 validate_cell_trees(
                     config,
                     pool,
+                    None,
                     table_name,
                     &column_name,
                     cell,
@@ -873,6 +933,7 @@ pub async fn validate_rows_constraints(
                 validate_cell_foreign_constraints(
                     config,
                     pool,
+                    None,
                     table_name,
                     &column_name,
                     cell,
@@ -883,6 +944,7 @@ pub async fn validate_rows_constraints(
                 validate_cell_unique_constraints(
                     config,
                     pool,
+                    None,
                     table_name,
                     &column_name,
                     cell,
@@ -1509,10 +1571,12 @@ fn as_if_to_sql(
 
 /// Given a config map, a db connection pool, a table name, a column name, and a cell to validate,
 /// check the cell value against any foreign keys that have been defined for the column. If there is
-/// a violation, indicate it with an error message attached to the cell.
+/// a violation, indicate it with an error message attached to the cell. Optionally, if a
+/// transaction is given, use that instead of the pool for database access.
 async fn validate_cell_foreign_constraints(
     config: &SerdeMap,
     pool: &AnyPool,
+    mut tx: Option<&mut Transaction<'_, sqlx::Any>>,
     table_name: &String,
     column_name: &String,
     cell: &mut ResultCell,
@@ -1568,7 +1632,16 @@ async fn validate_cell_foreign_constraints(
             ),
         );
 
-        let frows = sqlx_query(&fsql).bind(&cell.value).fetch_all(pool).await?;
+        let frows = {
+            if let None = tx {
+                sqlx_query(&fsql).bind(&cell.value).fetch_all(pool).await?
+            } else {
+                sqlx_query(&fsql)
+                    .bind(&cell.value)
+                    .fetch_all(tx.as_mut().unwrap().acquire().await?)
+                    .await?
+            }
+        };
         if frows.is_empty() {
             cell.valid = false;
             let mut message = json!({
@@ -1591,10 +1664,19 @@ async fn validate_cell_foreign_constraints(
                     as_if_clause_for_conflict, ftable_alias, fcolumn, sql_param
                 ),
             );
-            let frows = sqlx_query(&fsql)
-                .bind(cell.value.clone())
-                .fetch_all(pool)
-                .await?;
+            let frows = {
+                if let None = tx {
+                    sqlx_query(&fsql)
+                        .bind(cell.value.clone())
+                        .fetch_all(pool)
+                        .await?
+                } else {
+                    sqlx_query(&fsql)
+                        .bind(cell.value.clone())
+                        .fetch_all(tx.as_mut().unwrap().acquire().await?)
+                        .await?
+                }
+            };
 
             if frows.is_empty() {
                 message.as_object_mut().and_then(|m| {
@@ -1627,10 +1709,12 @@ async fn validate_cell_foreign_constraints(
 /// Given a config map, a db connection pool, a table name, a column name, a cell to validate,
 /// the row, `context`, to which the cell belongs, and a list of previously validated rows,
 /// validate that none of the "tree" constraints on the column are violated, and indicate any
-/// violations by attaching error messages to the cell.
+/// violations by attaching error messages to the cell. Optionally, if a transaction is
+/// given, use that instead of the pool for database access.
 async fn validate_cell_trees(
     config: &SerdeMap,
     pool: &AnyPool,
+    mut tx: Option<&mut Transaction<'_, sqlx::Any>>,
     table_name: &String,
     column_name: &String,
     cell: &mut ResultCell,
@@ -1740,7 +1824,16 @@ async fn validate_cell_trees(
         for param in &params {
             query = query.bind(param);
         }
-        let rows = query.fetch_all(pool).await?;
+
+        let rows = {
+            if let None = tx {
+                query.fetch_all(pool).await?
+            } else {
+                query
+                    .fetch_all(tx.as_mut().unwrap().acquire().await?)
+                    .await?
+            }
+        };
 
         // If there is a row in the tree whose parent is the to-be-inserted child, then inserting
         // the new row would result in a cycle.
@@ -1797,10 +1890,12 @@ async fn validate_cell_trees(
 /// check the cell value against any unique-type keys that have been defined for the column.
 /// If there is a violation, indicate it with an error message attached to the cell. If
 /// `row_number` is set to None, then no row corresponding to the given cell is assumed to exist
-/// in the table.
+/// in the table. Optionally, if a transaction is given, use that instead of the pool for database
+/// access.
 async fn validate_cell_unique_constraints(
     config: &SerdeMap,
     pool: &AnyPool,
+    mut tx: Option<&mut Transaction<'_, sqlx::Any>>,
     table_name: &String,
     column_name: &String,
     cell: &mut ResultCell,
@@ -1896,7 +1991,18 @@ async fn validate_cell_unique_constraints(
             .collect::<Vec<_>>()
             .is_empty();
 
-        if contained_in_prev_results || !query.fetch_all(pool).await?.is_empty() {
+        if contained_in_prev_results
+            || !{
+                if let None = tx {
+                    query.fetch_all(pool).await?.is_empty()
+                } else {
+                    query
+                        .fetch_all(tx.as_mut().unwrap().acquire().await?)
+                        .await?
+                        .is_empty()
+                }
+            }
+        {
             cell.valid = false;
             if is_primary || is_unique {
                 let error_message;

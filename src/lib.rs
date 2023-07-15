@@ -45,9 +45,9 @@ use regex::Regex;
 use serde_json::{json, Value as SerdeValue};
 use sqlx::{
     any::{AnyConnectOptions, AnyKind, AnyPool, AnyPoolOptions, AnyRow},
-    query as sqlx_query, Column,
+    query as sqlx_query, Acquire, Column,
     Error::Configuration,
-    Row, ValueRef,
+    Row, Transaction, ValueRef,
 };
 use std::{
     collections::{BTreeMap, HashMap},
@@ -1065,6 +1065,7 @@ pub async fn get_affected_rows(
     except: Option<&u32>,
     global_config: &SerdeMap,
     pool: &AnyPool,
+    tx: &mut Transaction<'_, sqlx::Any>,
 ) -> Result<IndexMap<u32, SerdeMap>, String> {
     let sql = {
         let is_clause = if pool.any_kind() == AnyKind::Sqlite {
@@ -1155,7 +1156,11 @@ pub async fn get_affected_rows(
 
     let query = sqlx_query(&sql);
     let mut table_rows = IndexMap::new();
-    for row in query.fetch_all(pool).await.map_err(|e| e.to_string())? {
+    for row in query
+        .fetch_all(tx.acquire().await.map_err(|e| e.to_string())?)
+        .await
+        .map_err(|e| e.to_string())?
+    {
         let mut table_row = SerdeMap::new();
         let mut row_number: Option<u32> = None;
         for column in row.columns() {
@@ -1188,6 +1193,7 @@ pub async fn get_affected_rows(
 
 pub async fn insert_update_message(
     pool: &AnyPool,
+    tx: &mut Transaction<'_, sqlx::Any>,
     table: &str,
     column: &str,
     row_number: &u32,
@@ -1214,7 +1220,7 @@ pub async fn insert_update_message(
         );
         let query = sqlx_query(&sql);
 
-        let results = query.fetch_all(pool).await?;
+        let results = query.fetch_all(tx.acquire().await?).await?;
         if results.is_empty() {
             "".to_string()
         } else {
@@ -1260,7 +1266,7 @@ pub async fn insert_update_message(
         value = cell_value,
     );
     let query = sqlx_query(&insert_sql);
-    query.execute(pool).await?;
+    query.execute(tx.acquire().await?).await?;
     Ok(())
 }
 
@@ -1269,6 +1275,7 @@ pub async fn get_db_value(
     column: &str,
     row_number: &u32,
     pool: &AnyPool,
+    tx: &mut Transaction<'_, sqlx::Any>,
 ) -> Result<String, String> {
     let is_clause = if pool.any_kind() == AnyKind::Sqlite {
         "IS"
@@ -1303,7 +1310,10 @@ pub async fn get_db_value(
     );
 
     let query = sqlx_query(&sql);
-    let result_row = query.fetch_one(pool).await.map_err(|e| e.to_string())?;
+    let result_row = query
+        .fetch_one(tx.acquire().await.map_err(|e| e.to_string())?)
+        .await
+        .map_err(|e| e.to_string())?;
     let value: &str = result_row.try_get(column).unwrap();
     Ok(value.to_string())
 }
@@ -1311,6 +1321,7 @@ pub async fn get_db_value(
 pub async fn get_rows_to_update(
     global_config: &SerdeMap,
     pool: &AnyPool,
+    tx: &mut Transaction<'_, sqlx::Any>,
     table: &str,
     query_as_if: &QueryAsIf,
 ) -> Result<
@@ -1375,9 +1386,14 @@ pub async fn get_rows_to_update(
                 IndexMap::new()
             }
             _ => {
-                let current_value =
-                    get_db_value(target_table, target_column, &query_as_if.row_number, pool)
-                        .await?;
+                let current_value = get_db_value(
+                    target_table,
+                    target_column,
+                    &query_as_if.row_number,
+                    pool,
+                    tx,
+                )
+                .await?;
 
                 // Query dependent_table.dependent_column for the rows that will be affected by the
                 // change from the current value:
@@ -1388,6 +1404,7 @@ pub async fn get_rows_to_update(
                     None,
                     global_config,
                     pool,
+                    tx,
                 )
                 .await?
             }
@@ -1414,6 +1431,7 @@ pub async fn get_rows_to_update(
                     None,
                     global_config,
                     pool,
+                    tx,
                 )
                 .await?
             }
@@ -1479,7 +1497,7 @@ pub async fn get_rows_to_update(
             }
             _ => {
                 let current_value =
-                    get_db_value(table, column, &query_as_if.row_number, pool).await?;
+                    get_db_value(table, column, &query_as_if.row_number, pool, tx).await?;
 
                 // Query table.column for the rows that will be affected by the change from the
                 // current to the new value:
@@ -1490,6 +1508,7 @@ pub async fn get_rows_to_update(
                     Some(&query_as_if.row_number),
                     global_config,
                     pool,
+                    tx,
                 )
                 .await?
             }
@@ -1512,6 +1531,7 @@ pub async fn process_updates(
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     pool: &AnyPool,
+    tx: &mut Transaction<'_, sqlx::Any>,
     updates: &IndexMap<String, IndexMap<u32, SerdeMap>>,
     query_as_if: &QueryAsIf,
     do_not_recurse: bool,
@@ -1524,6 +1544,7 @@ pub async fn process_updates(
                 compiled_datatype_conditions,
                 compiled_rule_conditions,
                 pool,
+                Some(tx),
                 update_table,
                 row,
                 Some(*row_number),
@@ -1537,6 +1558,7 @@ pub async fn process_updates(
                 compiled_datatype_conditions,
                 compiled_rule_conditions,
                 pool,
+                tx,
                 update_table,
                 &vrow,
                 row_number,
@@ -1551,13 +1573,15 @@ pub async fn process_updates(
 
 /// Given a global config map, a database connection pool, a table name, and a row, assign a new
 /// row number to the row and insert it to the database, then return the new row number. Optionally,
-/// if row_number is provided, use that to identify the new row.
+/// if row_number is provided, use that to identify the new row. Optionally, if a transaction is
+/// given, use that instead of the pool for database access.
 #[async_recursion]
 pub async fn insert_new_row(
     global_config: &SerdeMap,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     pool: &AnyPool,
+    tx: &mut Transaction<sqlx::Any>,
     table_to_write: &str,
     row: &SerdeMap,
     new_row_number: Option<u32>,
@@ -1576,6 +1600,7 @@ pub async fn insert_new_row(
             compiled_datatype_conditions,
             compiled_rule_conditions,
             pool,
+            Some(tx),
             base_table,
             row,
             None,
@@ -1596,7 +1621,7 @@ pub async fn insert_new_row(
                 base_table
             );
             let query = sqlx_query(&sql);
-            let result_row = query.fetch_one(pool).await?;
+            let result_row = query.fetch_one(tx.acquire().await?).await?;
             let result = result_row.try_get_raw("row_number").unwrap();
             let new_row_number: i64;
             if result.is_null() {
@@ -1657,9 +1682,10 @@ pub async fn insert_new_row(
 
     // Look through the valve config to see which tables are dependent on this table
     // and find the rows that need to be updated:
-    let (_, updates_after, _) = get_rows_to_update(global_config, pool, base_table, &query_as_if)
-        .await
-        .map_err(|e| Configuration(e.into()))?;
+    let (_, updates_after, _) =
+        get_rows_to_update(global_config, pool, tx, base_table, &query_as_if)
+            .await
+            .map_err(|e| Configuration(e.into()))?;
 
     // If the row is not already being directed to the conflict table, check it to see if it should
     // be redirected there:
@@ -1716,7 +1742,7 @@ pub async fn insert_new_row(
     for param in &insert_params {
         query = query.bind(param);
     }
-    query.execute(pool).await?;
+    query.execute(tx.acquire().await?).await?;
 
     // Next add any validation messages to the message table:
     for m in messages {
@@ -1733,7 +1759,7 @@ pub async fn insert_new_row(
             base_table, new_row_number, column, value, level, rule, message
         );
         let query = sqlx_query(&message_sql);
-        query.execute(pool).await?;
+        query.execute(tx.acquire().await?).await?;
     }
 
     // Now process the updates that need to be performed after the update of the target row:
@@ -1742,6 +1768,7 @@ pub async fn insert_new_row(
         compiled_datatype_conditions,
         compiled_rule_conditions,
         pool,
+        tx,
         &updates_after,
         &query_as_if,
         false,
@@ -1757,6 +1784,7 @@ pub async fn delete_row(
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     pool: &AnyPool,
+    tx: &mut Transaction<sqlx::Any>,
     table_to_write: &str,
     row_number: &u32,
     simulated_update: bool,
@@ -1766,18 +1794,13 @@ pub async fn delete_row(
         Some(base) => base,
     };
 
-    // TODO: If possible use BEGIN and END TRANSACTION here and ROLLBACK in case of an error.
-    // Maybe we need a wrapper function for this?
-    // Note also that we might want to run ANALYZE (or the sqlite equivalent) after
-    // the deletes have completed.
-
     // First, use the row number to fetch the row from the database:
     let sql = format!(
         "SELECT * FROM \"{}_view\" WHERE row_number = {}",
         base_table, row_number
     );
     let query = sqlx_query(&sql);
-    let sql_row = query.fetch_one(pool).await.map_err(|e| {
+    let sql_row = query.fetch_one(tx.acquire().await?).await.map_err(|e| {
         Configuration(
             format!(
                 "Got: '{}' while fetching row number {} from table {}",
@@ -1827,7 +1850,7 @@ pub async fn delete_row(
     // rows that need to be updated. Since this is a delete there will only be rows to update
     // before and none after the delete:
     let (updates_before, _, updates_intra) =
-        get_rows_to_update(global_config, pool, base_table, &query_as_if)
+        get_rows_to_update(global_config, pool, tx, base_table, &query_as_if)
             .await
             .map_err(|e| Configuration(e.into()))?;
 
@@ -1837,6 +1860,7 @@ pub async fn delete_row(
         compiled_datatype_conditions,
         compiled_rule_conditions,
         pool,
+        tx,
         &updates_before,
         &query_as_if,
         false,
@@ -1854,7 +1878,7 @@ pub async fn delete_row(
     );
     for sql in vec![sql1, sql2] {
         let query = sqlx_query(&sql);
-        query.execute(pool).await?;
+        query.execute(tx.acquire().await?).await?;
     }
 
     // Now delete all messages associated with the row:
@@ -1870,7 +1894,7 @@ pub async fn delete_row(
         base_table, row_number, simulated_update_clause
     );
     let query = sqlx_query(&sql);
-    query.execute(pool).await?;
+    query.execute(tx.acquire().await?).await?;
 
     // Finally process the rows from the same table as the target table that need to be re-validated
     // because of unique or primary constraints:
@@ -1879,6 +1903,7 @@ pub async fn delete_row(
         compiled_datatype_conditions,
         compiled_rule_conditions,
         pool,
+        tx,
         &updates_intra,
         &query_as_if,
         true,
@@ -1890,12 +1915,14 @@ pub async fn delete_row(
 
 /// Given global config map, a database connection pool, a table name, a row, and the row number to
 /// update, update the corresponding row in the database with new values as specified by `row`.
+/// Optionally, if a transaction is given, use that instead of the pool for database access.
 #[async_recursion]
 pub async fn update_row(
     global_config: &SerdeMap,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     pool: &AnyPool,
+    tx: &mut Transaction<sqlx::Any>,
     table_name: &str,
     row: &SerdeMap,
     row_number: &u32,
@@ -1918,7 +1945,7 @@ pub async fn update_row(
         if do_not_recurse {
             (IndexMap::new(), IndexMap::new(), IndexMap::new())
         } else {
-            get_rows_to_update(global_config, pool, table_name, &query_as_if)
+            get_rows_to_update(global_config, pool, tx, table_name, &query_as_if)
                 .await
                 .map_err(|e| Configuration(e.into()))?
         }
@@ -1930,6 +1957,7 @@ pub async fn update_row(
         compiled_datatype_conditions,
         compiled_rule_conditions,
         pool,
+        tx,
         &updates_before,
         &query_as_if,
         false,
@@ -1944,6 +1972,7 @@ pub async fn update_row(
             compiled_datatype_conditions,
             compiled_rule_conditions,
             pool,
+            Some(tx),
             table_name,
             row,
             Some(*row_number),
@@ -1953,11 +1982,6 @@ pub async fn update_row(
     } else {
         row.clone()
     };
-
-    // TODO: If possible use BEGIN and END TRANSACTION here and ROLLBACK in case of an error.
-    // Maybe we need a wrapper function for this?
-    // Note also that we might want to run ANALYZE (or the sqlite equivalent) after
-    // the updates have completed.
 
     // Now prepare the row and messages for the database update:
     let mut assignments = vec![];
@@ -1971,7 +1995,7 @@ pub async fn update_row(
 
         // Begin by adding an extra 'update' row to the message table indicating that the value of
         // this column has been updated (if that is the case).
-        insert_update_message(pool, table_name, column, row_number, cell_value).await?;
+        insert_update_message(pool, tx, table_name, column, row_number, cell_value).await?;
 
         // Generate the assignment statements and messages for each column:
         let mut cell_for_insert = cell.clone();
@@ -2015,7 +2039,7 @@ pub async fn update_row(
         table_name, row_number
     );
     let query = sqlx_query(&sql);
-    let rows = query.fetch_all(pool).await?;
+    let rows = query.fetch_all(tx.acquire().await?).await?;
     let mut current_table = String::from(table_name);
     if rows.len() == 0 {
         current_table.push_str("_conflict");
@@ -2062,13 +2086,14 @@ pub async fn update_row(
         for param in &params {
             query = query.bind(param);
         }
-        query.execute(pool).await?;
+        query.execute(tx.acquire().await?).await?;
     } else {
         delete_row(
             global_config,
             compiled_datatype_conditions,
             compiled_rule_conditions,
             pool,
+            tx,
             &current_table,
             row_number,
             true,
@@ -2079,6 +2104,7 @@ pub async fn update_row(
             compiled_datatype_conditions,
             compiled_rule_conditions,
             pool,
+            tx,
             &table_to_write,
             &row,
             Some(*row_number),
@@ -2094,7 +2120,7 @@ pub async fn update_row(
         table_name, row_number
     );
     let query = sqlx_query(&delete_sql);
-    query.execute(pool).await?;
+    query.execute(tx.acquire().await?).await?;
 
     // Now add the messages to the message table for the new version of this row:
     for m in messages {
@@ -2111,7 +2137,7 @@ pub async fn update_row(
             table_name, row_number, column, value, level, rule, message
         );
         let query = sqlx_query(&insert_sql);
-        query.execute(pool).await?;
+        query.execute(tx.acquire().await?).await?;
     }
 
     // Now process the rows from the same table as the target table that need to be re-validated
@@ -2121,6 +2147,7 @@ pub async fn update_row(
         compiled_datatype_conditions,
         compiled_rule_conditions,
         pool,
+        tx,
         &updates_intra,
         &query_as_if,
         true,
@@ -2134,6 +2161,7 @@ pub async fn update_row(
         compiled_datatype_conditions,
         compiled_rule_conditions,
         pool,
+        tx,
         &updates_after,
         &query_as_if,
         false,
@@ -3715,8 +3743,8 @@ async fn load_db(
         // We also need to wait before validating a table's "under" constraints. Although the tree
         // associated with such a constraint need not be defined on the same table, it can be.
         let mut recs_to_update =
-            validate_tree_foreign_keys(config, pool, &table_name, None).await?;
-        recs_to_update.append(&mut validate_under(config, pool, &table_name, None).await?);
+            validate_tree_foreign_keys(config, pool, None, &table_name, None).await?;
+        recs_to_update.append(&mut validate_under(config, pool, None, &table_name, None).await?);
 
         for record in recs_to_update {
             let row_number = record.get("row_number").unwrap();
