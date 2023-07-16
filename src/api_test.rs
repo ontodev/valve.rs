@@ -161,13 +161,11 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
     // sample.
 
     // Update the row we constructed and validated above in the database:
-    let mut transaction = pool.begin().await?;
     update_row(
         &config,
         &compiled_datatype_conditions,
         &compiled_rule_conditions,
         &pool,
-        &mut transaction,
         "table2",
         &row.as_object().unwrap(),
         &1,
@@ -175,7 +173,6 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         false,
     )
     .await?;
-    transaction.commit().await?;
 
     // Validate and insert a new row:
     let row = json!({
@@ -205,20 +202,17 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
     )
     .await?;
 
-    let mut transaction = pool.begin().await?;
     let _new_row_num = insert_new_row(
         &config,
         &compiled_datatype_conditions,
         &compiled_rule_conditions,
         &pool,
-        &mut transaction,
         "table3",
         &result_row,
         None,
         false,
     )
     .await?;
-    transaction.commit().await?;
 
     // Validate and update an existing row:
     let row = json!({
@@ -248,13 +242,11 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
     )
     .await?;
 
-    let mut transaction = pool.begin().await?;
     update_row(
         &config,
         &compiled_datatype_conditions,
         &compiled_rule_conditions,
         &pool,
-        &mut transaction,
         "table6",
         &result_row,
         &1,
@@ -262,7 +254,6 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         false,
     )
     .await?;
-    transaction.commit().await?;
 
     // Validate and insert a new row:
     let row = json!({
@@ -292,20 +283,17 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
     )
     .await?;
 
-    let mut transaction = pool.begin().await?;
     let _new_row_num = insert_new_row(
         &config,
         &compiled_datatype_conditions,
         &compiled_rule_conditions,
         &pool,
-        &mut transaction,
         "table6",
         &result_row,
         None,
         false,
     )
     .await?;
-    transaction.commit().await?;
 
     // Test cases for updates/inserts/deletes with dependencies.
     let row = json!({
@@ -314,13 +302,11 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         "numeric_foreign_column": {"messages": [], "valid": true, "value": ""},
     });
 
-    let mut transaction = pool.begin().await?;
     update_row(
         &config,
         &compiled_datatype_conditions,
         &compiled_rule_conditions,
         &pool,
-        &mut transaction,
         "table10",
         &row.as_object().unwrap(),
         &1,
@@ -328,7 +314,6 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         false,
     )
     .await?;
-    transaction.commit().await?;
 
     let row = json!({
         "child": {"messages": [], "valid": true, "value": "b"},
@@ -338,13 +323,11 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         "bar": {"messages": [], "valid": true, "value": "f"},
     });
 
-    let mut transaction = pool.begin().await?;
     update_row(
         &config,
         &compiled_datatype_conditions,
         &compiled_rule_conditions,
         &pool,
-        &mut transaction,
         "table11",
         &row.as_object().unwrap(),
         &2,
@@ -352,21 +335,17 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         false,
     )
     .await?;
-    transaction.commit().await?;
 
-    let mut transaction = pool.begin().await?;
     delete_row(
         &config,
         &compiled_datatype_conditions,
         &compiled_rule_conditions,
         &pool,
-        &mut transaction,
         "table11",
         &4,
         false,
     )
     .await?;
-    transaction.commit().await?;
 
     let row = json!({
         "foreign_column": {"messages": [], "valid": true, "value": "i"},
@@ -374,20 +353,17 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         "numeric_foreign_column": {"messages": [], "valid": true, "value": "9"},
     });
 
-    let mut transaction = pool.begin().await?;
     let _new_row_num = insert_new_row(
         &config,
         &compiled_datatype_conditions,
         &compiled_rule_conditions,
         &pool,
-        &mut transaction,
         "table10",
         &row.as_object().unwrap(),
         None,
         false,
     )
     .await?;
-    transaction.commit().await?;
 
     Ok(())
 }

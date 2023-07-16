@@ -1553,7 +1553,7 @@ pub async fn process_updates(
             .await?;
 
             // Update the row in the database:
-            update_row(
+            update_row_tx(
                 global_config,
                 compiled_datatype_conditions,
                 compiled_rule_conditions,
@@ -1571,12 +1571,42 @@ pub async fn process_updates(
     Ok(())
 }
 
-/// Given a global config map, a database connection pool, a table name, and a row, assign a new
-/// row number to the row and insert it to the database, then return the new row number. Optionally,
-/// if row_number is provided, use that to identify the new row. Optionally, if a transaction is
-/// given, use that instead of the pool for database access.
+/// A wrapper around [insert_new_row_tx()] in which the database transaction is implicitly created
+/// and then committed once the given new row has been inserted.
 #[async_recursion]
 pub async fn insert_new_row(
+    global_config: &SerdeMap,
+    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
+    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    pool: &AnyPool,
+    table_to_write: &str,
+    row: &SerdeMap,
+    new_row_number: Option<u32>,
+    skip_validation: bool,
+) -> Result<u32, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let rn = insert_new_row_tx(
+        global_config,
+        compiled_datatype_conditions,
+        compiled_rule_conditions,
+        pool,
+        &mut tx,
+        table_to_write,
+        row,
+        new_row_number,
+        skip_validation,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(rn)
+}
+
+/// Given a global config map, a database connection pool, a database transaction, a table name,
+/// and a row, assign a new row number to the row and insert it to the database using the given
+/// transaction, then return the new row number. Optionally, if row_number is provided, use that
+/// to identify the new row.
+#[async_recursion]
+pub async fn insert_new_row_tx(
     global_config: &SerdeMap,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
@@ -1778,8 +1808,36 @@ pub async fn insert_new_row(
     Ok(new_row_number)
 }
 
+/// A wrapper around [delete_row_tx()] in which the database transaction is implicitly created
+/// and then committed once the given row has been deleted.
 #[async_recursion]
 pub async fn delete_row(
+    global_config: &SerdeMap,
+    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
+    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    pool: &AnyPool,
+    table_to_write: &str,
+    row_number: &u32,
+    simulated_update: bool,
+) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    delete_row_tx(
+        global_config,
+        compiled_datatype_conditions,
+        compiled_rule_conditions,
+        pool,
+        &mut tx,
+        table_to_write,
+        row_number,
+        simulated_update,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+#[async_recursion]
+pub async fn delete_row_tx(
     global_config: &SerdeMap,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
@@ -1913,11 +1971,43 @@ pub async fn delete_row(
     Ok(())
 }
 
-/// Given global config map, a database connection pool, a table name, a row, and the row number to
-/// update, update the corresponding row in the database with new values as specified by `row`.
-/// Optionally, if a transaction is given, use that instead of the pool for database access.
+/// A wrapper around [update_row_tx()] in which the database transaction is implicitly created
+/// and then committed once the given row has been updated..
 #[async_recursion]
 pub async fn update_row(
+    global_config: &SerdeMap,
+    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
+    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    pool: &AnyPool,
+    table_name: &str,
+    row: &SerdeMap,
+    row_number: &u32,
+    skip_validation: bool,
+    do_not_recurse: bool,
+) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    update_row_tx(
+        global_config,
+        compiled_datatype_conditions,
+        compiled_rule_conditions,
+        pool,
+        &mut tx,
+        table_name,
+        row,
+        row_number,
+        skip_validation,
+        do_not_recurse,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Given global config map, a database connection pool, a database transaction, a table name, a
+/// row, and the row number to update, update the corresponding row in the database, using the given
+/// transaction, with new values as specified by `row`.
+#[async_recursion]
+pub async fn update_row_tx(
     global_config: &SerdeMap,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
@@ -2088,7 +2178,7 @@ pub async fn update_row(
         }
         query.execute(tx.acquire().await?).await?;
     } else {
-        delete_row(
+        delete_row_tx(
             global_config,
             compiled_datatype_conditions,
             compiled_rule_conditions,
@@ -2099,7 +2189,7 @@ pub async fn update_row(
             true,
         )
         .await?;
-        insert_new_row(
+        insert_new_row_tx(
             global_config,
             compiled_datatype_conditions,
             compiled_rule_conditions,
