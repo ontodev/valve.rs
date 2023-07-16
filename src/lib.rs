@@ -1652,7 +1652,7 @@ pub async fn insert_new_row_tx(
             );
             let query = sqlx_query(&sql);
             let result_row = query.fetch_one(tx.acquire().await?).await?;
-            let result = result_row.try_get_raw("row_number").unwrap();
+            let result = result_row.try_get_raw("row_number")?;
             let new_row_number: i64;
             if result.is_null() {
                 new_row_number = 1;
@@ -1671,30 +1671,59 @@ pub async fn insert_new_row_tx(
     let sorted_datatypes = get_sorted_datatypes(global_config);
     for (column, cell) in row.iter() {
         insert_columns.append(&mut vec![format!(r#""{}""#, column)]);
-        let cell = cell.as_object().unwrap();
-        let cell_valid = cell.get("valid").and_then(|v| v.as_bool()).unwrap();
-        let cell_value = cell.get("value").and_then(|v| v.as_str()).unwrap();
+        let cell = cell.as_object().ok_or(Configuration(
+            format!("Cell {:?} is not an object", cell).into(),
+        ))?;
+        let cell_valid = cell
+            .get("valid")
+            .and_then(|v| v.as_bool())
+            .ok_or(Configuration(
+                format!("No flag named 'valid' in {:?}", cell).into(),
+            ))?;
+        let cell_value = cell
+            .get("value")
+            .and_then(|v| v.as_str())
+            .ok_or(Configuration(
+                format!("No str named 'value' in {:?}", cell).into(),
+            ))?;
         let mut cell_for_insert = cell.clone();
         if cell_valid {
             cell_for_insert.remove("value");
             let sql_type =
-                get_sql_type_from_global_config(&global_config, &base_table, &column, pool)
-                    .unwrap();
+                get_sql_type_from_global_config(&global_config, &base_table, &column, pool).ok_or(
+                    Configuration(
+                        format!("Unable to determine SQL type for {}.{}", base_table, column)
+                            .into(),
+                    ),
+                )?;
             insert_values.push(cast_sql_param_from_text(&sql_type));
             insert_params.push(String::from(cell_value));
         } else {
             insert_values.push(String::from("NULL"));
             let cell_messages = sort_messages(
                 &sorted_datatypes,
-                cell.get("messages").and_then(|m| m.as_array()).unwrap(),
+                cell.get("messages")
+                    .and_then(|m| m.as_array())
+                    .ok_or(Configuration(
+                        format!("No array named 'messages' in {:?}", cell).into(),
+                    ))?,
             );
             for cell_message in cell_messages {
                 messages.push(json!({
                     "column": column,
                     "value": cell_value,
-                    "level": cell_message.get("level").and_then(|s| s.as_str()).unwrap(),
-                    "rule": cell_message.get("rule").and_then(|s| s.as_str()).unwrap(),
-                    "message": cell_message.get("message").and_then(|s| s.as_str()).unwrap(),
+                    "level": cell_message.get("level").and_then(|s| s.as_str())
+                        .ok_or(
+                            Configuration(format!("No 'level' in {:?}", cell_message).into())
+                        )?,
+                    "rule": cell_message.get("rule").and_then(|s| s.as_str())
+                        .ok_or(
+                            Configuration(format!("No 'rule' in {:?}", cell_message).into())
+                        )?,
+                    "message": cell_message.get("message").and_then(|s| s.as_str())
+                        .ok_or(
+                            Configuration(format!("No 'message' in {:?}", cell_message).into())
+                        )?,
                 }));
             }
         }
@@ -1719,43 +1748,50 @@ pub async fn insert_new_row_tx(
 
     // If the row is not already being directed to the conflict table, check it to see if it should
     // be redirected there:
-    let table_to_write = {
-        if table_to_write.ends_with("_conflict") {
-            table_to_write.to_string()
-        } else {
-            let mut table_to_write = String::from(base_table);
-            for (column, cell) in row.iter() {
-                let valid = cell.get("valid").unwrap();
-                if valid == false {
-                    let structure = global_config
-                        .get("table")
-                        .and_then(|t| t.as_object())
-                        .and_then(|t| t.get(base_table))
-                        .and_then(|t| t.as_object())
-                        .and_then(|t| t.get("column"))
-                        .and_then(|c| c.as_object())
-                        .and_then(|c| c.get(column))
-                        .and_then(|c| c.as_object())
-                        .and_then(|c| c.get("structure"))
-                        .and_then(|s| s.as_str())
-                        .unwrap_or("");
-                    if vec!["primary", "unique"].contains(&structure)
-                        || structure.starts_with("tree(")
-                    {
-                        let messages = cell.get("messages").and_then(|m| m.as_array()).unwrap();
-                        for msg in messages {
-                            let level = msg.get("level").and_then(|l| l.as_str()).unwrap();
-                            if level == "error" {
-                                table_to_write.push_str("_conflict");
-                                break;
+    let table_to_write =
+        {
+            if table_to_write.ends_with("_conflict") {
+                table_to_write.to_string()
+            } else {
+                let mut table_to_write = String::from(base_table);
+                for (column, cell) in row.iter() {
+                    let valid = cell.get("valid").ok_or(Configuration(
+                        format!("No flag named 'valid' in {:?}", cell).into(),
+                    ))?;
+                    if valid == false {
+                        let structure = global_config
+                            .get("table")
+                            .and_then(|t| t.as_object())
+                            .and_then(|t| t.get(base_table))
+                            .and_then(|t| t.as_object())
+                            .and_then(|t| t.get("column"))
+                            .and_then(|c| c.as_object())
+                            .and_then(|c| c.get(column))
+                            .and_then(|c| c.as_object())
+                            .and_then(|c| c.get("structure"))
+                            .and_then(|s| s.as_str())
+                            .unwrap_or("");
+                        if vec!["primary", "unique"].contains(&structure)
+                            || structure.starts_with("tree(")
+                        {
+                            let messages = cell.get("messages").and_then(|m| m.as_array()).ok_or(
+                                Configuration(format!("No 'messages' in {:?}", cell).into()),
+                            )?;
+                            for msg in messages {
+                                let level = msg.get("level").and_then(|l| l.as_str()).ok_or(
+                                    Configuration(format!("No 'level' in {:?}", cell).into()),
+                                )?;
+                                if level == "error" {
+                                    table_to_write.push_str("_conflict");
+                                    break;
+                                }
                             }
                         }
                     }
                 }
+                table_to_write
             }
-            table_to_write
-        }
-    };
+        };
 
     // Add the new row to the table:
     let insert_stmt = local_sql_syntax(
@@ -1873,14 +1909,15 @@ pub async fn delete_row_tx(
     for column in sql_row.columns() {
         let cname = column.name();
         if !vec!["row_number", "message"].contains(&cname) {
-            let raw_value = sql_row
-                .try_get_raw(format!(r#"{}"#, cname).as_str())
-                .unwrap();
+            let raw_value = sql_row.try_get_raw(format!(r#"{}"#, cname).as_str())?;
             let value;
             if !raw_value.is_null() {
                 let sql_type =
                     get_sql_type_from_global_config(global_config, &base_table, &cname, pool)
-                        .unwrap();
+                        .ok_or(Configuration(
+                            format!("Unable to determine SQL type for {}.{}", base_table, cname)
+                                .into(),
+                        ))?;
                 value = get_column_value(&sql_row, &cname, &sql_type);
             } else {
                 value = String::from("");
@@ -2079,9 +2116,21 @@ pub async fn update_row_tx(
     let mut messages = vec![];
     let sorted_datatypes = get_sorted_datatypes(global_config);
     for (column, cell) in row.iter() {
-        let cell = cell.as_object().unwrap();
-        let cell_valid = cell.get("valid").and_then(|v| v.as_bool()).unwrap();
-        let cell_value = cell.get("value").and_then(|v| v.as_str()).unwrap();
+        let cell = cell.as_object().ok_or(Configuration(
+            format!("Cell {:?} is not an object", cell).into(),
+        ))?;
+        let cell_valid = cell
+            .get("valid")
+            .and_then(|v| v.as_bool())
+            .ok_or(Configuration(
+                format!("No flag named 'valid' in {:?}", cell).into(),
+            ))?;
+        let cell_value = cell
+            .get("value")
+            .and_then(|v| v.as_str())
+            .ok_or(Configuration(
+                format!("No str named 'value' in {:?}", cell).into(),
+            ))?;
 
         // Begin by adding an extra 'update' row to the message table indicating that the value of
         // this column has been updated (if that is the case).
@@ -2097,7 +2146,9 @@ pub async fn update_row_tx(
                 &column,
                 pool,
             )
-            .unwrap();
+            .ok_or(Configuration(
+                format!("Unable to determine SQL type for {}.{}", table_name, column).into(),
+            ))?;
             assignments.push(format!(
                 r#""{}" = {}"#,
                 column,
@@ -2108,15 +2159,25 @@ pub async fn update_row_tx(
             assignments.push(format!(r#""{}" = NULL"#, column));
             let cell_messages = sort_messages(
                 &sorted_datatypes,
-                cell.get("messages").and_then(|m| m.as_array()).unwrap(),
+                cell.get("messages")
+                    .and_then(|m| m.as_array())
+                    .ok_or(Configuration(
+                        format!("No array named 'messages' in {:?}", cell).into(),
+                    ))?,
             );
             for cell_message in cell_messages {
                 messages.push(json!({
                     "column": String::from(column),
                     "value": String::from(cell_value),
-                    "level": cell_message.get("level").and_then(|s| s.as_str()).unwrap(),
-                    "rule": cell_message.get("rule").and_then(|s| s.as_str()).unwrap(),
-                    "message": cell_message.get("message").and_then(|s| s.as_str()).unwrap(),
+                    "level": cell_message.get("level").and_then(|s| s.as_str()).ok_or(
+                            Configuration(format!("No 'level' in {:?}", cell_message).into())
+                        )?,
+                    "rule": cell_message.get("rule").and_then(|s| s.as_str()).ok_or(
+                            Configuration(format!("No 'rule' in {:?}", cell_message).into())
+                        )?,
+                    "message": cell_message.get("message").and_then(|s| s.as_str()).ok_or(
+                            Configuration(format!("No 'message' in {:?}", cell_message).into())
+                        )?,
                 }));
             }
         }
@@ -2138,7 +2199,9 @@ pub async fn update_row_tx(
     // Next, figure out where to put the new version of the row:
     let mut table_to_write = String::from(table_name);
     for (column, cell) in row.iter() {
-        let valid = cell.get("valid").unwrap();
+        let valid = cell.get("valid").ok_or(Configuration(
+            format!("No flag named 'valid' in {:?}", cell).into(),
+        ))?;
         if valid == false {
             let structure = global_config
                 .get("table")
@@ -2153,9 +2216,17 @@ pub async fn update_row_tx(
                 .and_then(|s| s.as_str())
                 .unwrap_or("");
             if vec!["primary", "unique"].contains(&structure) || structure.starts_with("tree(") {
-                let messages = cell.get("messages").and_then(|m| m.as_array()).unwrap();
+                let messages =
+                    cell.get("messages")
+                        .and_then(|m| m.as_array())
+                        .ok_or(Configuration(
+                            format!("No array named 'messages' in {:?}", cell).into(),
+                        ))?;
                 for msg in messages {
-                    let level = msg.get("level").and_then(|l| l.as_str()).unwrap();
+                    let level = msg
+                        .get("level")
+                        .and_then(|l| l.as_str())
+                        .ok_or(Configuration(format!("No 'level' in {:?}", msg).into()))?;
                     if level == "error" {
                         table_to_write.push_str("_conflict");
                         break;

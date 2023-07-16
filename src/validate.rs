@@ -1,7 +1,9 @@
 use enquote::unquote;
 use indexmap::IndexMap;
 use serde_json::{json, Value as SerdeValue};
-use sqlx::{any::AnyPool, query as sqlx_query, Acquire, Row, Transaction, ValueRef};
+use sqlx::{
+    any::AnyPool, query as sqlx_query, Acquire, Error::Configuration, Row, Transaction, ValueRef,
+};
 use std::collections::HashMap;
 
 use crate::{
@@ -78,25 +80,49 @@ pub async fn validate_row(
     };
 
     for (column, cell) in row.iter() {
+        let nulltype = match cell.get("nulltype") {
+            None => None,
+            Some(SerdeValue::String(s)) => Some(s.to_string()),
+            _ => {
+                return Err(Configuration(
+                    format!("Nulltype is not a string in cell: {:?}", cell).into(),
+                ))
+            }
+        };
+        let value = match cell.get("value") {
+            Some(SerdeValue::String(s)) => s.to_string(),
+            Some(SerdeValue::Number(n)) => format!("{}", n),
+            _ => {
+                return Err(Configuration(
+                    format!(
+                        "Field 'value' of: {:#?} is neither a number nor a string.",
+                        cell
+                    )
+                    .into(),
+                ))
+            }
+        };
+        let valid = match cell.get("valid").and_then(|v| v.as_bool()) {
+            Some(b) => b,
+            None => {
+                return Err(Configuration(
+                    format!("No bool named 'valid' in cell: {:?}", cell).into(),
+                ))
+            }
+        };
+        let messages = match cell.get("messages").and_then(|m| m.as_array()) {
+            Some(a) => a.to_vec(),
+            None => {
+                return Err(Configuration(
+                    format!("No array named 'messages' in cell: {:?}", cell).into(),
+                ))
+            }
+        };
         let result_cell = ResultCell {
-            nulltype: cell
-                .get("nulltype")
-                .and_then(|n| Some(n.as_str().unwrap()))
-                .and_then(|n| Some(n.to_string())),
-            value: match cell.get("value") {
-                Some(SerdeValue::String(s)) => s.to_string(),
-                Some(SerdeValue::Number(n)) => format!("{}", n),
-                _ => panic!(
-                    "Field 'value' of: {:#?} is neither a number nor a string.",
-                    cell
-                ),
-            },
-            valid: cell.get("valid").and_then(|v| v.as_bool()).unwrap(),
-            messages: cell
-                .get("messages")
-                .and_then(|m| m.as_array())
-                .unwrap()
-                .to_vec(),
+            nulltype: nulltype,
+            value: value,
+            valid: valid,
+            messages: messages,
         };
         result_row.contents.insert(column.to_string(), result_cell);
     }
