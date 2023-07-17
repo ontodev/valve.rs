@@ -2,7 +2,8 @@ use enquote::unquote;
 use indexmap::IndexMap;
 use serde_json::{json, Value as SerdeValue};
 use sqlx::{
-    any::AnyPool, query as sqlx_query, Acquire, Error::Configuration, Row, Transaction, ValueRef,
+    any::AnyPool, query as sqlx_query, Acquire, Error::Configuration as SqlxCErr, Row, Transaction,
+    ValueRef,
 };
 use std::collections::HashMap;
 
@@ -50,9 +51,9 @@ pub struct QueryAsIf {
 
 /// Given a config map, maps of compiled datatype and rule conditions, a database connection
 /// pool, a table name, a row to validate, and a row number in case the row already exists,
-/// perform both intra- and inter-row validation and return the validated row. Note that this
-/// function is idempotent.  Optionally, if a transaction is given, use that instead of the pool
-/// for database access.
+/// perform both intra- and inter-row validation and return the validated row. Optionally, if a
+/// transaction is given, use that instead of the pool for database access. Note that this
+/// function is idempotent.
 pub async fn validate_row(
     config: &SerdeMap,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
@@ -66,7 +67,7 @@ pub async fn validate_row(
 ) -> Result<SerdeMap, sqlx::Error> {
     // Fallback to a default transaction if it is not given. Since we do not commit before it falls
     // out of scope the transaction will be rolled back at the end of this function. And since this
-    // function is read-only the rollback is inconsequential.
+    // function is read-only the rollback is trivial and therefore inconsequential.
     let default_tx = &mut pool.begin().await?;
     let tx = match tx {
         Some(tx) => tx,
@@ -84,8 +85,8 @@ pub async fn validate_row(
             None => None,
             Some(SerdeValue::String(s)) => Some(s.to_string()),
             _ => {
-                return Err(Configuration(
-                    format!("Nulltype is not a string in cell: {:?}", cell).into(),
+                return Err(SqlxCErr(
+                    format!("No string 'nulltype' in cell: {:?}.", cell).into(),
                 ))
             }
         };
@@ -93,28 +94,24 @@ pub async fn validate_row(
             Some(SerdeValue::String(s)) => s.to_string(),
             Some(SerdeValue::Number(n)) => format!("{}", n),
             _ => {
-                return Err(Configuration(
-                    format!(
-                        "Field 'value' of: {:#?} is neither a number nor a string.",
-                        cell
-                    )
-                    .into(),
+                return Err(SqlxCErr(
+                    format!("No string/number 'value' in cell: {:#?}.", cell).into(),
                 ))
             }
         };
         let valid = match cell.get("valid").and_then(|v| v.as_bool()) {
             Some(b) => b,
             None => {
-                return Err(Configuration(
-                    format!("No bool named 'valid' in cell: {:?}", cell).into(),
+                return Err(SqlxCErr(
+                    format!("No bool 'valid' in cell: {:?}.", cell).into(),
                 ))
             }
         };
         let messages = match cell.get("messages").and_then(|m| m.as_array()) {
             Some(a) => a.to_vec(),
             None => {
-                return Err(Configuration(
-                    format!("No array named 'messages' in cell: {:?}", cell).into(),
+                return Err(SqlxCErr(
+                    format!("No array 'messages' in cell: {:?}.", cell).into(),
                 ))
             }
         };
@@ -281,7 +278,7 @@ pub async fn get_matching_values(
             for arg in args {
                 if let Expression::Label(arg) = *arg {
                     // Remove the enclosing quotes from the values being returned:
-                    let label = unquote(&arg).unwrap_or(arg);
+                    let label = unquote(&arg).unwrap_or_else(|_| arg);
                     if let Some(s) = matching_string {
                         if label.contains(s) {
                             values.push(label);
@@ -309,7 +306,7 @@ pub async fn get_matching_values(
                     .and_then(|c| c.as_object())
                     .and_then(|c| c.get("structure"))
                     .and_then(|d| d.as_str())
-                    .unwrap_or(""),
+                    .unwrap_or_else(|| ""),
             );
 
             let sql_type =
@@ -1132,7 +1129,7 @@ fn contains_dt_violation(messages: &Vec<SerdeValue>) -> bool {
     for m in messages {
         if m.get("rule")
             .and_then(|r| r.as_str())
-            .unwrap()
+            .unwrap_or_else(|| "")
             .starts_with("datatype:")
         {
             contains_dt_violation = true;
@@ -1197,7 +1194,7 @@ fn with_tree_sql(
     pool: &AnyPool,
 ) -> (String, Vec<String>) {
     let empty_string = String::new();
-    let extra_clause = extra_clause.unwrap_or(&empty_string);
+    let extra_clause = extra_clause.unwrap_or_else(|| &empty_string);
     let child_col = tree.get("child").and_then(|c| c.as_str()).unwrap();
     let parent_col = tree.get("parent").and_then(|c| c.as_str()).unwrap();
 
