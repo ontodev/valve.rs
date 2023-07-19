@@ -423,7 +423,7 @@ pub fn read_config_files(
         }
     }
 
-    // Manually add the messsage config:
+    // Manually add the messsage table config:
     tables_config.insert(
         "message".to_string(),
         json!({
@@ -489,6 +489,60 @@ pub fn read_config_files(
                     "datatype": "line",
                     "structure": ""
                 }
+            }
+        }),
+    );
+
+    // Manually add the history table config:
+    tables_config.insert(
+        "history".to_string(),
+        json!({
+            "table": "history",
+            "description": "History of changes to the VALVE database",
+            "type": "history",
+            "column_order": [
+                "table",
+                "row",
+                "from",
+                "to",
+                "user",
+            ],
+            "column": {
+                "table": {
+                    "table": "history",
+                    "column": "table",
+                    "description": "The table referred to by the history entry",
+                    "datatype": "table_name",
+                    "structure": "",
+                },
+                "row": {
+                    "table": "history",
+                    "column": "row",
+                    "description": "The row number of the table referred to by the history entry",
+                    "datatype": "natural_number",
+                    "structure": "",
+                },
+                "from": {
+                    "table": "history",
+                    "column": "from",
+                    "description": "The initial value of the row",
+                    "datatype": "text",
+                    "structure": "",
+                },
+                "to": {
+                    "table": "history",
+                    "column": "to",
+                    "description": "The final value of the row",
+                    "datatype": "text",
+                    "structure": "",
+                },
+                "user": {
+                    "table": "history",
+                    "column": "user",
+                    "description": "The user responsible for the change",
+                    "datatype": "line",
+                    "structure": "",
+                },
             }
         }),
     );
@@ -874,17 +928,49 @@ pub async fn configure_db(
     let sorted_tables = verify_table_deps_and_sort(&unsorted_tables, &constraints_config);
 
     if *command != ValveCommand::Config || verbose {
+        // Generate DDL for the history table:
+        let mut history_statements = vec![];
+        history_statements.push({
+            let mut sql = r#"DROP TABLE IF EXISTS "history""#.to_string();
+            if pool.any_kind() == AnyKind::Postgres {
+                sql.push_str(" CASCADE");
+            }
+            sql.push_str(";");
+            sql
+        });
+        history_statements.push(format!(
+            indoc! {r#"
+                CREATE TABLE "history" (
+                  {}
+                  "table" TEXT,
+                  "row" BIGINT,
+                  "from" TEXT,
+                  "to" TEXT,
+                  "user" TEXT
+                );
+              "#},
+            {
+                if pool.any_kind() == AnyKind::Sqlite {
+                    "\"history_id\" INTEGER PRIMARY KEY,"
+                } else {
+                    "\"history_id\" SERIAL PRIMARY KEY,"
+                }
+            },
+        ));
+        history_statements
+            .push(r#"CREATE INDEX "history_tr_idx" ON "history"("table", "row");"#.to_string());
+        setup_statements.insert("history".to_string(), history_statements);
+
         // Generate DDL for the message table:
         let mut message_statements = vec![];
-        let drop_sql = {
+        message_statements.push({
             let mut sql = r#"DROP TABLE IF EXISTS "message""#.to_string();
             if pool.any_kind() == AnyKind::Postgres {
                 sql.push_str(" CASCADE");
             }
             sql.push_str(";");
             sql
-        };
-        message_statements.push(drop_sql);
+        });
         message_statements.push(format!(
             indoc! {r#"
                 CREATE TABLE "message" (
@@ -911,9 +997,10 @@ pub async fn configure_db(
         );
         setup_statements.insert("message".to_string(), message_statements);
 
-        // Add the message table to the beginning of the list of tables to create (we add it to the
-        // beginning since the table views all reference it).
-        let mut tables_to_create = vec!["message".to_string()];
+        // Add the message and history tables to the beginning of the list of tables to create
+        // (the message table in particular needs to be at the beginning since the table views all
+        // reference it).
+        let mut tables_to_create = vec!["message".to_string(), "history".to_string()];
         tables_to_create.append(&mut sorted_tables.clone());
         for table in &tables_to_create {
             let table_statements = setup_statements.get(table).unwrap();
