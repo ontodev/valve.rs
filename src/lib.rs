@@ -1759,6 +1759,7 @@ pub async fn process_updates(
                 row_number,
                 false,
                 do_not_recurse,
+                true,
                 user,
             )
             .await?;
@@ -1817,6 +1818,7 @@ pub async fn insert_new_row(
     new_row_number: Option<u32>,
     skip_validation: bool,
     logical_update: bool,
+    skip_history: bool,
     user: &str,
 ) -> Result<u32, sqlx::Error> {
     let mut tx = pool.begin().await?;
@@ -1831,6 +1833,7 @@ pub async fn insert_new_row(
         new_row_number,
         skip_validation,
         logical_update,
+        skip_history,
         user,
     )
     .await?;
@@ -1857,6 +1860,7 @@ pub async fn insert_new_row_tx(
     new_row_number: Option<u32>,
     skip_validation: bool,
     logical_update: bool,
+    skip_history: bool,
     user: &str,
 ) -> Result<u32, sqlx::Error> {
     // Extract the base table name in case table_to_write has a _conflict suffix:
@@ -2088,7 +2092,7 @@ pub async fn insert_new_row_tx(
 
     // Add an entry to the history table here corresponding to the new insertion, unless this is the
     // last part of a logical update operation.
-    if !logical_update {
+    if !logical_update && !skip_history {
         record_row_change(tx, base_table, &new_row_number, None, Some(&row), user).await?;
     }
 
@@ -2106,6 +2110,7 @@ pub async fn delete_row(
     table_to_write: &str,
     row_number: &u32,
     logical_update: bool,
+    skip_history: bool,
     user: &str,
 ) -> Result<(), sqlx::Error> {
     let mut tx = pool.begin().await?;
@@ -2118,6 +2123,7 @@ pub async fn delete_row(
         table_to_write,
         row_number,
         logical_update,
+        skip_history,
         user,
     )
     .await?;
@@ -2139,6 +2145,7 @@ pub async fn delete_row_tx(
     table_to_write: &str,
     row_number: &u32,
     logical_update: bool,
+    skip_history: bool,
     user: &str,
 ) -> Result<(), sqlx::Error> {
     let base_table = match table_to_write.strip_suffix("_conflict") {
@@ -2148,7 +2155,7 @@ pub async fn delete_row_tx(
 
     // Record the row deletion in the history table, unless this delete is just part 1 of a
     // logical update:
-    if !logical_update {
+    if !logical_update && !skip_history {
         let row = get_row_from_db(
             global_config,
             compiled_datatype_conditions,
@@ -2254,6 +2261,7 @@ pub async fn update_row(
     row_number: &u32,
     skip_validation: bool,
     do_not_recurse: bool,
+    skip_history: bool,
     user: &str,
 ) -> Result<(), sqlx::Error> {
     let mut tx = pool.begin().await?;
@@ -2268,6 +2276,7 @@ pub async fn update_row(
         row_number,
         skip_validation,
         do_not_recurse,
+        skip_history,
         user,
     )
     .await?;
@@ -2277,7 +2286,7 @@ pub async fn update_row(
 
 /// Given global config map, a database connection pool, a database transaction, a table name, a
 /// row, and the row number to update, update the corresponding row in the database, using the given
-/// transaction, with new values as specified by `row`.
+/// transaction, with new values as specified by `row`. TODO: Update this docstring.
 #[async_recursion]
 pub async fn update_row_tx(
     global_config: &SerdeMap,
@@ -2290,6 +2299,7 @@ pub async fn update_row_tx(
     row_number: &u32,
     skip_validation: bool,
     do_not_recurse: bool,
+    skip_history: bool,
     user: &str,
 ) -> Result<(), sqlx::Error> {
     // First, look through the valve config to see which tables are dependent on this table and find
@@ -2314,16 +2324,21 @@ pub async fn update_row_tx(
     };
 
     // Save the current version of the row for later recording in the history table:
-    let old_row = get_row_from_db(
-        global_config,
-        compiled_datatype_conditions,
-        compiled_rule_conditions,
-        pool,
-        tx,
-        table_name,
-        row_number,
-    )
-    .await?;
+    let old_row = match skip_history {
+        true => None,
+        false => Some(
+            get_row_from_db(
+                global_config,
+                compiled_datatype_conditions,
+                compiled_rule_conditions,
+                pool,
+                tx,
+                table_name,
+                row_number,
+            )
+            .await?,
+        ),
+    };
 
     // Process the updates that need to be performed before the update of the target row:
     process_updates(
@@ -2500,6 +2515,7 @@ pub async fn update_row_tx(
             &current_table,
             row_number,
             true,
+            true,
             user,
         )
         .await?;
@@ -2513,6 +2529,7 @@ pub async fn update_row_tx(
             &row,
             Some(*row_number),
             false,
+            true,
             true,
             user,
         )
@@ -2577,7 +2594,10 @@ pub async fn update_row_tx(
     .await?;
 
     // Record the row update in the history table:
-    record_row_change(tx, table_name, row_number, Some(&old_row), Some(&row), user).await?;
+    if !skip_history {
+        let old_row = old_row.unwrap();
+        record_row_change(tx, table_name, row_number, Some(&old_row), Some(&row), user).await?;
+    }
 
     Ok(())
 }

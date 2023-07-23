@@ -171,6 +171,7 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         &1,
         false,
         false,
+        false,
         "VALVE",
     )
     .await?;
@@ -211,6 +212,7 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         "table3",
         &result_row,
         None,
+        false,
         false,
         false,
         "VALVE",
@@ -255,6 +257,7 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         &1,
         false,
         false,
+        false,
         "VALVE",
     )
     .await?;
@@ -297,6 +300,7 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         None,
         false,
         false,
+        false,
         "VALVE",
     )
     .await?;
@@ -316,6 +320,7 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         "table10",
         &row.as_object().unwrap(),
         &1,
+        false,
         false,
         false,
         "VALVE",
@@ -340,6 +345,7 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         &2,
         false,
         false,
+        false,
         "VALVE",
     )
     .await?;
@@ -351,6 +357,7 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         &pool,
         "table11",
         &4,
+        false,
         false,
         "VALVE",
     )
@@ -370,6 +377,7 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         "table10",
         &row.as_object().unwrap(),
         None,
+        false,
         false,
         false,
         "VALVE",
