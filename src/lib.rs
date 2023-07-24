@@ -1906,49 +1906,6 @@ pub async fn delete_row_tx(
         Some(base) => base,
     };
 
-    // First, use the row number to fetch the row from the database:
-    let sql = format!(
-        "SELECT * FROM \"{}_view\" WHERE row_number = {}",
-        base_table, row_number
-    );
-    let query = sqlx_query(&sql);
-    let sql_row = query.fetch_one(tx.acquire().await?).await.map_err(|e| {
-        SqlxCErr(
-            format!(
-                "Got: '{}' while fetching row number {} from table {}",
-                e, row_number, base_table
-            )
-            .into(),
-        )
-    })?;
-
-    // TODO: This isn't the only place we do this. Factor this out into its own function.
-    let mut row = SerdeMap::new();
-    for column in sql_row.columns() {
-        let cname = column.name();
-        if !vec!["row_number", "message"].contains(&cname) {
-            let raw_value = sql_row.try_get_raw(format!(r#"{}"#, cname).as_str())?;
-            let value;
-            if !raw_value.is_null() {
-                let sql_type =
-                    get_sql_type_from_global_config(global_config, &base_table, &cname, pool)
-                        .ok_or(SqlxCErr(
-                            format!("Unable to determine SQL type for {}.{}", base_table, cname)
-                                .into(),
-                        ))?;
-                value = get_column_value(&sql_row, &cname, &sql_type);
-            } else {
-                value = String::from("");
-            }
-            let cell = json!({
-                "value": value,
-                "valid": true,
-                "messages": json!([]),
-            });
-            row.insert(cname.to_string(), json!(cell));
-        }
-    }
-
     // Used to validate the given row, counterfactually, "as if" the row did not exist in the
     // database:
     let query_as_if = QueryAsIf {
