@@ -4,6 +4,14 @@ table1	5	base	error	key:unique	Values of base must be unique	http://purl.obolibr
 table1	5	prefix	error	key:primary	Values of prefix must be unique	VO
 table1	10	base	error	key:unique	Values of base must be unique	http://www.w3.org/1999/02/22-rdf-syntax-ns#
 table1	10	prefix	error	key:primary	Values of prefix must be unique	rdf
+table10	1	foreign_column	update	rule:update	Value changed from 'a' to 'w'	w
+table10	1	numeric_foreign_column	error	datatype:integer	numeric_foreign_column should be a positive or negative integer	
+table10	1	numeric_foreign_column	error	datatype:trimmed_line	numeric_foreign_column should be a line of text that does not begin or end with whitespace	
+table10	1	numeric_foreign_column	update	rule:update	Value changed from '1' to ''	
+table10	1	other_foreign_column	update	rule:update	Value changed from 'a' to 'z'	z
+table11	2	foo	error	key:primary	Values of foo must be unique	d
+table11	2	foo	update	rule:update	Value changed from 'e' to 'd'	d
+table11	3	foo	error	key:primary	Values of foo must be unique	d
 table2	1	bar	error	custom:unrelated	An unrelated error	B
 table2	1	bar	update	rule:update	Value changed from '' to 'B'	B
 table2	1	child	update	rule:update	Value changed from 'a' to 'b'	b
@@ -11,25 +19,25 @@ table2	1	child	error	tree:child-unique	Values of child must be unique	b
 table2	1	foo	update	rule:update	Value changed from '5' to '1'	1
 table2	1	parent	update	rule:update	Value changed from 'b' to 'f'	f
 table2	1	xyzzy	update	rule:update	Value changed from 'd' to 'w'	w
-table2	1	xyzzy	error	under:not-in-tree	Value w of column xyzzy is not in table2.child	w
+table2	1	xyzzy	error	under:not-in-tree	Value 'w' of column xyzzy is not in table2.child	w
 table2	2	foo	error	rule:foo-1	bar must be null whenever foo is null	
 table2	2	xyzzy	error	under:not-under	Value 'e' of column xyzzy is not under 'd'	e
 table2	3	xyzzy	error	under:not-under	Value 'f' of column xyzzy is not under 'd'	f
 table2	4	foo	error	rule:foo-4	bar must be 'y' or 'z' if foo = 5	5
 table2	4	xyzzy	error	under:not-under	Value 'g' of column xyzzy is not under 'd'	g
 table2	5	xyzzy	error	under:not-under	Value 'h' of column xyzzy is not under 'd'	h
-table2	7	xyzzy	error	under:not-in-tree	Value z of column xyzzy is not in table2.child	z
-table2	9	child	error	key:foreign	Value i of column child exists only in table4_conflict.other_foreign_column	i
-table3	1	label	error	datatype:label	label should be of datatype `label'	   mobecular entity
+table2	7	xyzzy	error	under:not-in-tree	Value 'z' of column xyzzy is not in table2.child	z
+table2	9	child	error	key:foreign	Value 'i' of column child exists only in table4_conflict.other_foreign_column	i
+table3	1	label	error	datatype:label	label should be of datatype label	   mobecular entity
 table3	1	label	error	datatype:trimmed_line	label should be a line of text that does not begin or end with whitespace	   mobecular entity
-table3	1	source	error	key:foreign	Value MOB of column source is not in table1.prefix	MOB
-table3	2	source	error	key:foreign	Value ZOB of column source is not in table1.prefix	ZOB
-table3	3	source	error	key:foreign	Value JOB of column source is not in table1.prefix	JOB
+table3	1	source	error	key:foreign	Value 'MOB' of column source is not in table1.prefix	MOB
+table3	2	source	error	key:foreign	Value 'ZOB' of column source is not in table1.prefix	ZOB
+table3	3	source	error	key:foreign	Value 'JOB' of column source is not in table1.prefix	JOB
 table3	4	parent	error	tree:cycle	Cyclic dependency: (label: bar, parent: car), (label: car, parent: foo), (label: foo, parent: bar) for tree(parent) of label	bar
-table3	4	source	error	key:foreign	Value SOB of column source is not in table1.prefix	SOB
-table3	5	parent	error	tree:foreign	Value jafar of column parent is not in column label	jafar
-table3	5	source	error	key:foreign	Value YOB of column source is not in table1.prefix	YOB
-table3	6	parent	error	tree:foreign	Value owl:Thing of column parent is not in column label	owl:Thing
+table3	4	source	error	key:foreign	Value 'SOB' of column source is not in table1.prefix	SOB
+table3	5	parent	error	tree:foreign	Value 'jafar' of column parent is not in column label	jafar
+table3	5	source	error	key:foreign	Value 'YOB' of column source is not in table1.prefix	YOB
+table3	6	parent	error	tree:foreign	Value 'owl:Thing' of column parent is not in column label	owl:Thing
 table3	7	source	error	datatype:nonspace	source should be text without whitespace	CO B
 table3	7	source	error	datatype:prefix	source should be a prefix for a CURIE	CO B
 table3	7	source	error	datatype:word	source should be a single word: letters, numbers, underscore	CO B
@@ -37,10 +45,10 @@ table3	8	id	error	key:unique	Values of id must be unique	COB:0000013
 table3	10	id	error	key:unique	Values of id must be unique	VO:0000001
 table3	10	label	error	key:primary	Values of label must be unique	vaccine
 table3	10	label	error	tree:child-unique	Values of label must be unique	vaccine
-table3	10	source	error	key:foreign	Value BOB of column source is not in table1.prefix	BOB
+table3	10	source	error	key:foreign	Value 'BOB' of column source is not in table1.prefix	BOB
 table3	11	parent	error	custom:unrelated	An unrelated error	barrie
-table3	11	parent	error	tree:foreign	Value barrie of column parent is not in column label	barrie
-table3	11	source	error	key:foreign	Value BFOBBER of column source is not in table1.prefix	BFOBBER
+table3	11	parent	error	tree:foreign	Value 'barrie' of column parent is not in column label	barrie
+table3	11	source	error	key:foreign	Value 'BFOBBER' of column source is not in table1.prefix	BFOBBER
 table4	9	foreign_column	error	key:unique	Values of foreign_column must be unique	a
 table4	10	foreign_column	error	key:unique	Values of foreign_column must be unique	b
 table4	10	numeric_foreign_column	error	key:primary	Values of numeric_foreign_column must be unique	9
@@ -51,16 +59,19 @@ table6	1	child	error	tree:child-unique	Values of child must be unique	2
 table6	1	foo	update	rule:update	Value changed from 'e' to 'a'	a
 table6	1	parent	update	rule:update	Value changed from '2' to '6'	6
 table6	1	xyzzy	update	rule:update	Value changed from '4' to '23'	23
-table6	1	xyzzy	error	under:not-in-tree	Value 23 of column xyzzy is not in table6.child	23
+table6	1	xyzzy	error	under:not-in-tree	Value '23' of column xyzzy is not in table6.child	23
 table6	2	foo	error	rule:foo-1	bar must be null whenever foo is null	
 table6	2	xyzzy	error	under:not-under	Value '5' of column xyzzy is not under '4'	5
 table6	3	xyzzy	error	under:not-under	Value '6' of column xyzzy is not under '4'	6
 table6	4	foo	error	rule:foo-4	bar must be 25 or 26 if foo = 'e'	e
 table6	4	xyzzy	error	under:not-under	Value '7' of column xyzzy is not under '4'	7
 table6	5	xyzzy	error	under:not-under	Value '8' of column xyzzy is not under '4'	8
-table6	7	xyzzy	error	under:not-in-tree	Value 26 of column xyzzy is not in table6.child	26
-table6	9	child	error	key:foreign	Value 9 of column child exists only in table4_conflict.numeric_foreign_column	9
+table6	7	xyzzy	error	under:not-in-tree	Value '26' of column xyzzy is not in table6.child	26
+table6	9	child	error	key:foreign	Value '9' of column child exists only in table4_conflict.numeric_foreign_column	9
 table6	10	bar	error	custom:unrelated	An unrelated error	2
 table6	10	child	error	tree:child-unique	Values of child must be unique	2
-table6	10	xyzzy	error	under:not-in-tree	Value 23 of column xyzzy is not in table6.child	23
+table6	10	xyzzy	error	under:not-in-tree	Value '23' of column xyzzy is not in table6.child	23
 table7	3	planetfall	error	datatype:integer	planetfall should be a positive or negative integer	e
+table8	1	prefix	error	key:foreign	Value 'a' of column prefix is not in table10.foreign_column	a
+table8	2	prefix	error	key:foreign	Value 'w' of column prefix exists only in table10_conflict.foreign_column	w
+table9	1	child	error	key:foreign	Value 'a' of column child is not in table10.other_foreign_column	a

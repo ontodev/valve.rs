@@ -37,7 +37,7 @@ test/output:
 
 test: sqlite_test pg_test api_test random_test
 
-tables_to_test = column datatype rule table table1 table2 table3 table4 table5 table6 table7
+tables_to_test = column datatype rule table table1 table2 table3 table4 table5 table6 table7 table8 table9 table10 table11
 
 sqlite_test: build/valve.db test/src/table.tsv | test/output
 	@echo "Testing valve on sqlite ..."
@@ -111,6 +111,12 @@ test/perf_test_data/ontology: test/generate_random_test_data.py
 	./$< 1 10000 5 $@
 
 build/valve_perf.db: valve | test/perf_test_data/ontology build
+	@if [ -f $@ ]; \
+	then \
+		echo "'$@' exists but is out of date. To rebuild '$@', run \`make cleanperfdb\`" \
+		"before running \`make $@\`" ; \
+		false; \
+	fi
 	time -p ./$< --verbose test/perf_test_data/table.tsv $@
 
 .PHONY: sqlite_perf_test

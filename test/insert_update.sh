@@ -19,7 +19,7 @@ output_dir=$pwd/output
 expected_dir=$pwd/expected
 
 ret_value=0
-for table_path in table3.tsv table2.tsv table6.tsv
+for table_path in table2.tsv table3.tsv table6.tsv table10.tsv table11.tsv
 do
     table_path=${table_path#test/}
     table_path=$pwd/output/$table_path
