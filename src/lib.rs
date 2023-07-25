@@ -1022,36 +1022,6 @@ pub async fn configure_db(
     return Ok((sorted_tables, constraints_config));
 }
 
-/// Given the global config map, a table name, a column name, and a database connection pool
-/// used to determine the database type return the column's SQL type.
-pub fn get_sql_type_from_global_config(
-    global_config: &SerdeMap,
-    table: &str,
-    column: &str,
-    pool: &AnyPool,
-) -> Option<String> {
-    let dt_config = global_config
-        .get("datatype")
-        .and_then(|d| d.as_object())
-        .unwrap();
-    let normal_table_name;
-    if let Some(s) = table.strip_suffix("_conflict") {
-        normal_table_name = String::from(s);
-    } else {
-        normal_table_name = table.to_string();
-    }
-    let dt = global_config
-        .get("table")
-        .and_then(|t| t.get(normal_table_name))
-        .and_then(|t| t.get("column"))
-        .and_then(|c| c.get(column))
-        .and_then(|c| c.get("datatype"))
-        .and_then(|d| d.as_str())
-        .and_then(|d| Some(d.to_string()))
-        .unwrap();
-    get_sql_type(&dt_config, &dt, pool)
-}
-
 /// Various VALVE commands, used with [valve()](valve).
 #[derive(Debug, PartialEq, Eq)]
 pub enum ValveCommand {
@@ -1180,6 +1150,81 @@ pub async fn valve(
     Ok(config.to_string())
 }
 
+/// TODO: Add docstring here
+pub fn query_with_message_values(table: &str, global_config: &SerdeMap, pool: &AnyPool) -> String {
+    let is_clause = if pool.any_kind() == AnyKind::Sqlite {
+        "IS"
+    } else {
+        "IS NOT DISTINCT FROM"
+    };
+
+    let real_columns = global_config
+        .get("table")
+        .and_then(|t| t.get(table))
+        .and_then(|t| t.as_object())
+        .and_then(|t| t.get("column"))
+        .and_then(|t| t.as_object())
+        .and_then(|t| Some(t.keys()))
+        .and_then(|k| Some(k.map(|k| k.to_string())))
+        .and_then(|t| Some(t.collect::<Vec<_>>()))
+        .unwrap();
+
+    let mut inner_columns = real_columns
+        .iter()
+        .map(|c| {
+            format!(
+                r#"CASE
+                     WHEN "{column}" {is_clause} NULL THEN (
+                       SELECT value
+                       FROM "message"
+                       WHERE "row" = "row_number"
+                         AND "column" = '{column}'
+                         AND "table" = '{table}'
+                       ORDER BY "message_id" DESC
+                       LIMIT 1
+                     )
+                     ELSE {casted_column}
+                   END AS "{column}_extended""#,
+                casted_column = if pool.any_kind() == AnyKind::Sqlite {
+                    cast_column_sql_to_text(c, "non-text")
+                } else {
+                    format!("\"{}\"::TEXT", c)
+                },
+                column = c,
+                table = table,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let mut outer_columns = real_columns
+        .iter()
+        .map(|c| format!("t.\"{}_extended\"", c))
+        .collect::<Vec<_>>();
+
+    let inner_columns = {
+        let mut v = vec!["row_number".to_string(), "message".to_string()];
+        v.append(&mut inner_columns);
+        v
+    };
+
+    let outer_columns = {
+        let mut v = vec!["t.row_number".to_string(), "t.message".to_string()];
+        v.append(&mut outer_columns);
+        v
+    };
+
+    format!(
+        r#"SELECT {outer_columns}
+                 FROM (
+                   SELECT {inner_columns}
+                   FROM "{table}_view"
+                 ) t"#,
+        outer_columns = outer_columns.join(", "),
+        inner_columns = inner_columns.join(", "),
+        table = table,
+    )
+}
+
 /// Given a global config map, a database connection pool, a database transaction, a table name, a
 /// column name, and a value for that column: get the rows, other than the one indicated by
 /// `except`, that would need to be revalidated if the given value were to replace the actual
@@ -1193,82 +1238,13 @@ pub async fn get_affected_rows(
     pool: &AnyPool,
     tx: &mut Transaction<'_, sqlx::Any>,
 ) -> Result<IndexMap<u32, SerdeMap>, String> {
+    // Since the consequence of an update could involve currently invalid rows
+    // (in the conflict table) becoming valid or vice versa, we need to check rows for
+    // which the value of the column is the same as `value`
     let sql = {
-        let is_clause = if pool.any_kind() == AnyKind::Sqlite {
-            "IS"
-        } else {
-            "IS NOT DISTINCT FROM"
-        };
-
-        let real_columns = global_config
-            .get("table")
-            .and_then(|t| t.get(table))
-            .and_then(|t| t.as_object())
-            .and_then(|t| t.get("column"))
-            .and_then(|t| t.as_object())
-            .and_then(|t| Some(t.keys()))
-            .and_then(|k| Some(k.map(|k| k.to_string())))
-            .and_then(|t| Some(t.collect::<Vec<_>>()))
-            .unwrap();
-
-        let mut inner_columns = real_columns
-            .iter()
-            .map(|c| {
-                format!(
-                    r#"CASE
-                         WHEN "{column}" {is_clause} NULL THEN (
-                           SELECT value
-                           FROM "message"
-                           WHERE "row" = "row_number"
-                             AND "column" = '{column}'
-                             AND "table" = '{table}'
-                           ORDER BY "message_id" DESC
-                           LIMIT 1
-                         )
-                         ELSE {casted_column}
-                       END AS "{column}_extended""#,
-                    casted_column = if pool.any_kind() == AnyKind::Sqlite {
-                        cast_column_sql_to_text(c, "non-text")
-                    } else {
-                        format!("\"{}\"::TEXT", c)
-                    },
-                    column = c,
-                    table = table,
-                )
-            })
-            .collect::<Vec<_>>();
-
-        let mut outer_columns = real_columns
-            .iter()
-            .map(|c| format!("t.\"{}_extended\"", c))
-            .collect::<Vec<_>>();
-
-        let inner_columns = {
-            let mut v = vec!["row_number".to_string()];
-            v.append(&mut inner_columns);
-            v
-        };
-
-        let outer_columns = {
-            let mut v = vec!["t.row_number".to_string()];
-            v.append(&mut outer_columns);
-            v
-        };
-
-        // Since the consequence of an update could involve currently invalid rows
-        // (in the conflict table) becoming valid or vice versa, we need to check rows for
-        // which the value of the column is the same as `value`
-
         format!(
-            r#"SELECT {outer_columns}
-                 FROM (
-                   SELECT {inner_columns}
-                   FROM "{table}_view"
-                 ) t
-                 WHERE "{column}_extended" = '{value}'{except}"#,
-            outer_columns = outer_columns.join(", "),
-            inner_columns = inner_columns.join(", "),
-            table = table,
+            r#"{main_query} WHERE "{column}_extended" = '{value}'{except}"#,
+            main_query = query_with_message_values(table, global_config, pool),
             column = column,
             value = value,
             except = match except {
@@ -1293,7 +1269,7 @@ pub async fn get_affected_rows(
             let cname = column.name();
             if cname == "row_number" {
                 row_number = Some(row.get::<i64, _>("row_number") as u32);
-            } else {
+            } else if cname != "message" {
                 let raw_value = row.try_get_raw(format!(r#"{}"#, cname).as_str()).unwrap();
                 let value;
                 if !raw_value.is_null() {
@@ -1329,8 +1305,8 @@ pub async fn insert_update_message(
     cell_value: &str,
 ) -> Result<(), sqlx::Error> {
     // TODO: We should be able to do this in one query instead of two. See the SQL code in
-    // get_affected_rows() where we solve the problem this two-query approach is meant to solve
-    // simply by re-aliasing the subquery as <column>_extended.
+    // get_affected_rows() (which calls query_with_message_values()) where we solve the problem this
+    // two-query approach is meant to solve simply by re-aliasing the subquery as <column>_extended.
 
     // In some cases the current value of the column will have to retrieved from the last
     // generated message, so we retrieve that from the database:
@@ -1410,48 +1386,62 @@ pub async fn get_row_from_db(
     row_number: &u32,
 ) -> Result<SerdeMap, sqlx::Error> {
     let sql = format!(
-        "SELECT * FROM \"{}_view\" WHERE row_number = {}",
-        table, row_number
+        "{} WHERE row_number = {}",
+        query_with_message_values(table, global_config, pool),
+        row_number
     );
     let query = sqlx_query(&sql);
     let sql_row = query.fetch_one(tx.acquire().await?).await?;
 
+    let messages = {
+        let raw_messages = sql_row.try_get_raw("message")?;
+        if raw_messages.is_null() {
+            vec![]
+        } else {
+            let messages: &str = sql_row.get("message");
+            match serde_json::from_str::<SerdeValue>(messages) {
+                Err(e) => return Err(SqlxCErr(e.into())),
+                Ok(SerdeValue::Array(m)) => m,
+                _ => return Err(SqlxCErr(format!("{} is not an array.", messages).into())),
+            }
+        }
+    };
+
     let mut row = SerdeMap::new();
     for column in sql_row.columns() {
-        let cname = column.name();
-        if !vec!["row_number", "message"].contains(&cname) {
-            let raw_value = sql_row.try_get_raw(format!(r#"{}"#, cname).as_str())?;
+        let cname_extended = column.name();
+        if !vec!["row_number", "message"].contains(&cname_extended) {
+            let raw_value = sql_row.try_get_raw(format!(r#"{}"#, cname_extended).as_str())?;
             let value;
             if !raw_value.is_null() {
-                let sql_type = get_sql_type_from_global_config(global_config, &table, &cname, pool)
-                    .ok_or(SqlxCErr(
-                        format!("Unable to determine SQL type for {}.{}", table, cname).into(),
-                    ))?;
-                value = get_column_value(&sql_row, &cname, &sql_type);
+                // The extended query returned by query_with_message_values() casts all column
+                // values to text, so we pass "text" to get_column_value() for every column:
+                value = get_column_value(&sql_row, &cname_extended, "text");
             } else {
                 value = String::from("");
             }
+            let cname = match cname_extended.strip_suffix("_extended") {
+                None => cname_extended.clone(),
+                Some(cname) => cname,
+            };
+            let column_messages = messages
+                .iter()
+                .filter(|m| m.get("column").unwrap().as_str() == Some(cname))
+                .collect::<Vec<_>>();
+            let valid = column_messages
+                .iter()
+                .filter(|m| m.get("level").unwrap().as_str() == Some("error"))
+                .collect::<Vec<_>>()
+                .is_empty();
             let cell = json!({
                 "value": value,
-                "valid": true,
-                "messages": json!([]),
+                "valid": valid,
+                "messages": column_messages,
             });
             row.insert(cname.to_string(), json!(cell));
         }
     }
-    // Validate the row and return it:
-    validate_row(
-        global_config,
-        compiled_datatype_conditions,
-        compiled_rule_conditions,
-        pool,
-        Some(tx),
-        table,
-        &row,
-        Some(*row_number),
-        None,
-    )
-    .await
+    Ok(row)
 }
 
 /// Given a database connection pool, a database transaction, a table name, a column name, and a row
@@ -1805,6 +1795,158 @@ pub async fn record_row_change(
     Ok(())
 }
 
+/// TODO: Add docstring here.
+#[async_recursion]
+pub async fn undo(
+    global_config: &SerdeMap,
+    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
+    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    pool: &AnyPool,
+) -> Result<SerdeMap, sqlx::Error> {
+    // Look in the history table, get the row with the greatest ID, get the row number,
+    // from, and to, and determine whether the last operation was a delete, insert, or update.
+    fn get_json_from_row(row: &AnyRow, column: &str) -> Option<SerdeMap> {
+        let raw_value = row.try_get_raw(column).unwrap();
+        if !raw_value.is_null() {
+            let value: &str = row.get(column);
+            match serde_json::from_str::<SerdeValue>(value) {
+                Err(e) => {
+                    eprintln!("WARN: {}", e);
+                    None
+                }
+                Ok(SerdeValue::Object(value)) => Some(value),
+                _ => {
+                    eprintln!("WARN: {} is not an object.", value);
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    }
+
+    let sql = r#"SELECT * FROM "history" ORDER BY "history_id" DESC LIMIT 1"#;
+    let query = sqlx_query(&sql);
+    let result_row = query.fetch_optional(pool).await?;
+    let result_row = match result_row {
+        None => {
+            eprintln!("WARN: Nothing to undo.");
+            return Ok(SerdeMap::new());
+        }
+        Some(r) => r,
+    };
+    let id: i32 = result_row.get("history_id");
+    let id = id as u16;
+    let table: &str = result_row.get("table");
+    let row_number: i64 = result_row.get("row");
+    let row_number = row_number as u32;
+    let from = get_json_from_row(&result_row, "from");
+    let to = get_json_from_row(&result_row, "to");
+    let user: &str = result_row.get("user");
+
+    // Algorithm:
+    // 1. If it was an insert, from will be None and to will contain Some(row).
+    //    a. Call delete_row() to remove the given `row_number` from the database, setting the
+    //       `skip_history` flag to true.
+    //    b. Delete the record from the history table.
+    //    c. Delete the corresponding 'update' messages from the message table.
+    //    d. Return `row` to the caller so that she can later use it to redo the operation if she
+    //       wants to.
+    // 2. If it was a delete, from will contain Some(row) and to will be None.
+    //    a. Call insert_new_row() to insert `row` to the database, reusing the given `row_number`.
+    //    b. Delete the record from the history table.
+    //    c. Delete the corresponding 'update' messages from the message table.
+    //    d. Return an empty map to the caller.
+    //
+    // Notes:
+    // 1) We should use the _tx versions of the API functions, since we want to both edit the
+    //    history table and delete/insert/update the given row in the same transaction.
+    // 2) We should always set the skip_history flag to true when calling delete/update/insert.
+    match (from, to) {
+        (None, None) => {
+            return Err(SqlxCErr(
+                "Impossible double NULL values for from and to in history table".into(),
+            ))
+        }
+        (None, Some(to)) => {
+            // Undo an insert:
+            eprintln!("UNDOING AN INSERT");
+            Ok(SerdeMap::new())
+        }
+        (Some(to), None) => {
+            // Undo a delete:
+            eprintln!("UNDOING A DELETE");
+            Ok(SerdeMap::new())
+        }
+        (Some(from), Some(to)) => {
+            // Undo an an update:
+            eprintln!("UNDOING THE UPDATE FROM {:#?} to {:#?}", from, to);
+            let mut tx = pool.begin().await?;
+
+            // Delete the history record from the history table.
+            let sql = format!("DELETE FROM history WHERE history_id = {}", id);
+            let query = sqlx_query(&sql);
+            query.execute(tx.acquire().await?).await?;
+
+            // Delete all messages including update messages for the row.
+            let sql = format!(
+                r#"DELETE FROM "message" WHERE "table" = '{}' AND "row" = {}"#,
+                table, row_number
+            );
+            let query = sqlx_query(&sql);
+            query.execute(tx.acquire().await?).await?;
+
+            // Update the row to the old value, `from`:
+            update_row_tx(
+                global_config,
+                compiled_datatype_conditions,
+                compiled_rule_conditions,
+                pool,
+                &mut tx,
+                table,
+                &from,
+                &row_number,
+                false,
+                false,
+                // Set the skip_history flag to true:
+                true,
+                user,
+            )
+            .await?;
+
+            // Commit the transaction:
+            tx.commit().await?;
+
+            // Return `to`, the version of the row that we undid, to the caller, which it can
+            // then potentially use as the input for a later call to redo():
+            Ok(to)
+        }
+    }
+}
+
+/// TODO: Add docstring here.
+#[async_recursion]
+pub async fn redo(
+    global_config: &SerdeMap,
+    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
+    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    pool: &AnyPool,
+    row_number: &u32,
+    row: Option<&SerdeMap>,
+) -> Result<(), sqlx::Error> {
+    // If row is None, then we are redoing a delete operation. Call delete_row() on the given
+    // row_number.
+
+    // Otherwise do a logical update (i.e., delete + insert) using the given row number and row.
+
+    // Notes:
+    // 1) We should use the _tx versions of the API functions, since we want to both edit the
+    //    history table and delete/insert/update the given row in the same transaction.
+    // 2) The skip_history flag needs to be set to false (since we want to record this action).
+
+    Ok(())
+}
+
 /// A wrapper around [insert_new_row_tx()] in which the database transaction is implicitly created
 /// and then committed once the given new row has been inserted.
 #[async_recursion]
@@ -1880,7 +2022,7 @@ pub async fn insert_new_row_tx(
             Some(tx),
             base_table,
             row,
-            None,
+            new_row_number,
             None,
         )
         .await?
@@ -2860,6 +3002,36 @@ fn get_sql_type(dt_config: &SerdeMap, datatype: &String, pool: &AnyPool) -> Opti
         .unwrap();
 
     return get_sql_type(dt_config, &parent_datatype.to_string(), pool);
+}
+
+/// Given the global config map, a table name, a column name, and a database connection pool
+/// used to determine the database type return the column's SQL type.
+pub fn get_sql_type_from_global_config(
+    global_config: &SerdeMap,
+    table: &str,
+    column: &str,
+    pool: &AnyPool,
+) -> Option<String> {
+    let dt_config = global_config
+        .get("datatype")
+        .and_then(|d| d.as_object())
+        .unwrap();
+    let normal_table_name;
+    if let Some(s) = table.strip_suffix("_conflict") {
+        normal_table_name = String::from(s);
+    } else {
+        normal_table_name = table.to_string();
+    }
+    let dt = global_config
+        .get("table")
+        .and_then(|t| t.get(normal_table_name))
+        .and_then(|t| t.get("column"))
+        .and_then(|c| c.get(column))
+        .and_then(|c| c.get("datatype"))
+        .and_then(|d| d.as_str())
+        .and_then(|d| Some(d.to_string()))
+        .unwrap();
+    get_sql_type(&dt_config, &dt, pool)
 }
 
 /// Given a SQL type, return the appropriate CAST(...) statement for casting the SQL_PARAM
