@@ -539,7 +539,14 @@ pub fn read_config_files(
                 "user": {
                     "table": "history",
                     "column": "user",
-                    "description": "The user responsible for the change",
+                    "description": "User responsible for the change",
+                    "datatype": "line",
+                    "structure": "",
+                },
+                "undone_by": {
+                    "table": "history",
+                    "column": "undone_by",
+                    "description": "User who has undone the change. Null if it has not been undone",
                     "datatype": "line",
                     "structure": "",
                 },
@@ -946,7 +953,8 @@ pub async fn configure_db(
                   "row" BIGINT,
                   "from" TEXT,
                   "to" TEXT,
-                  "user" TEXT
+                  "user" TEXT,
+                  "undone_by" TEXT
                 );
               "#},
             {
@@ -1802,6 +1810,7 @@ pub async fn undo(
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     pool: &AnyPool,
+    undo_user: &str,
 ) -> Result<SerdeMap, sqlx::Error> {
     // Look in the history table, get the row with the greatest ID, get the row number,
     // from, and to, and determine whether the last operation was a delete, insert, or update.
@@ -1825,6 +1834,7 @@ pub async fn undo(
         }
     }
 
+    // TODO: Change this query so that we look only for history items that have not been undone:
     let sql = r#"SELECT * FROM "history" ORDER BY "history_id" DESC LIMIT 1"#;
     let query = sqlx_query(&sql);
     let result_row = query.fetch_optional(pool).await?;
@@ -1844,24 +1854,8 @@ pub async fn undo(
     let to = get_json_from_row(&result_row, "to");
     let user: &str = result_row.get("user");
 
-    // Algorithm:
-    // 1. If it was an insert, from will be None and to will contain Some(row).
-    //    a. Call delete_row() to remove the given `row_number` from the database, setting the
-    //       `skip_history` flag to true.
-    //    b. Delete the record from the history table.
-    //    c. Delete the corresponding 'update' messages from the message table.
-    //    d. Return `row` to the caller so that she can later use it to redo the operation if she
-    //       wants to.
-    // 2. If it was a delete, from will contain Some(row) and to will be None.
-    //    a. Call insert_new_row() to insert `row` to the database, reusing the given `row_number`.
-    //    b. Delete the record from the history table.
-    //    c. Delete the corresponding 'update' messages from the message table.
-    //    d. Return an empty map to the caller.
-    //
-    // Notes:
-    // 1) We should use the _tx versions of the API functions, since we want to both edit the
-    //    history table and delete/insert/update the given row in the same transaction.
-    // 2) We should always set the skip_history flag to true when calling delete/update/insert.
+    // TODO: Follow the new version of the algorithm that does not require update messages etc.
+
     match (from, to) {
         (None, None) => {
             return Err(SqlxCErr(
@@ -1939,11 +1933,7 @@ pub async fn redo(
 
     // Otherwise do a logical update (i.e., delete + insert) using the given row number and row.
 
-    // Notes:
-    // 1) We should use the _tx versions of the API functions, since we want to both edit the
-    //    history table and delete/insert/update the given row in the same transaction.
-    // 2) The skip_history flag needs to be set to false (since we want to record this action).
-
+    todo!();
     Ok(())
 }
 
@@ -2233,7 +2223,7 @@ pub async fn insert_new_row_tx(
     .await?;
 
     // Add an entry to the history table here corresponding to the new insertion, unless this is the
-    // last part of a logical update operation.
+    // last part of a logical update operation, or if the skip history flag has been set:
     if !logical_update && !skip_history {
         record_row_change(tx, base_table, &new_row_number, None, Some(&row), user).await?;
     }
@@ -2296,7 +2286,7 @@ pub async fn delete_row_tx(
     };
 
     // Record the row deletion in the history table, unless this delete is just part 1 of a
-    // logical update:
+    // logical update, or if the skip_history flag is set to true:
     if !logical_update && !skip_history {
         let row = get_row_from_db(
             global_config,
@@ -2357,7 +2347,8 @@ pub async fn delete_row_tx(
         query.execute(tx.acquire().await?).await?;
     }
 
-    // Now delete all messages associated with the row:
+    // Now delete all messages associated with the row, unless this is not really a delete but a
+    // logical update operation, in which case we keep previous 'update' messages for the row:
     let logical_update_clause = {
         if logical_update {
             r#"AND "level" <> 'update'"#
