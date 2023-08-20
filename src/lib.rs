@@ -536,6 +536,13 @@ pub fn read_config_files(
                     "datatype": "text",
                     "structure": "",
                 },
+                "summary": {
+                    "table": "history",
+                    "column": "summary",
+                    "description": "Summarizes the changes to each column of the row",
+                    "datatype": "text",
+                    "structure": "",
+                },
                 "user": {
                     "table": "history",
                     "column": "user",
@@ -864,25 +871,25 @@ pub async fn configure_db(
 
         // Create a view as the union of the regular and conflict versions of the table:
         let mut drop_view_sql = format!(r#"DROP VIEW IF EXISTS "{}_view""#, table_name);
-        let inner_t;
+        let message_t;
         if pool.any_kind() == AnyKind::Postgres {
             drop_view_sql.push_str(" CASCADE");
-            inner_t = format!(
+            message_t = format!(
                 indoc! {r#"
                     (
-                      SELECT JSON_AGG(t)::TEXT FROM (
+                      SELECT JSON_AGG(m)::TEXT FROM (
                         SELECT "column", "value", "level", "rule", "message"
                         FROM "message"
                         WHERE "table" = '{t}'
                           AND "row" = union_t."row_number"
                         ORDER BY "column", "message_id"
-                      ) t
+                      ) m
                     )
                 "#},
                 t = table_name,
             );
         } else {
-            inner_t = format!(
+            message_t = format!(
                 indoc! {r#"
                     (
                       SELECT NULLIF(
@@ -908,12 +915,52 @@ pub async fn configure_db(
         }
         drop_view_sql.push_str(";");
 
+        let history_t;
+        if pool.any_kind() == AnyKind::Postgres {
+            history_t = format!(
+                indoc! {r#"
+                    (
+                      SELECT '[' || STRING_AGG("summary", ',') || ']'
+                      FROM (
+                        SELECT "summary"
+                        FROM "history"
+                        WHERE "table" = '{t}'
+                          AND "row" = union_t."row_number"
+                          AND "summary" IS DISTINCT FROM NULL
+                          AND "undone_by" IS NOT DISTINCT FROM NULL
+                        ORDER BY "history_id"
+                      ) h
+                    )
+                "#},
+                t = table_name,
+            );
+        } else {
+            history_t = format!(
+                indoc! {r#"
+                    (
+                      SELECT '[' || GROUP_CONCAT("summary") || ']'
+                      FROM (
+                        SELECT "summary"
+                        FROM "history"
+                        WHERE "table" = '{t}'
+                          AND "row" = union_t."row_number"
+                          AND "summary" IS NOT NULL
+                          AND "undone_by" IS NULL
+                        ORDER BY "history_id"
+                      ) h
+                    )
+                "#},
+                t = table_name,
+            );
+        }
+
         let create_view_sql = format!(
             indoc! {r#"
               CREATE VIEW "{t}_view" AS
                 SELECT
                   union_t.*,
-                  {inner_t} AS "message"
+                  {message_t} AS "message",
+                  {history_t} AS "history"
                 FROM (
                   SELECT * FROM "{t}"
                   UNION ALL
@@ -921,7 +968,8 @@ pub async fn configure_db(
                 ) as union_t;
             "#},
             t = table_name,
-            inner_t = inner_t,
+            message_t = message_t,
+            history_t = history_t,
         );
         table_statements.push(drop_view_sql);
         table_statements.push(create_view_sql);
@@ -953,6 +1001,7 @@ pub async fn configure_db(
                   "row" BIGINT,
                   "from" TEXT,
                   "to" TEXT,
+                  "summary" TEXT,
                   "user" TEXT,
                   "undone_by" TEXT
                 );
@@ -1778,21 +1827,76 @@ pub async fn record_row_change(
         ));
     }
 
-    fn to_text(smap: Option<&SerdeMap>) -> String {
+    fn to_text(smap: Option<&SerdeMap>, quoted: bool) -> String {
         match smap {
             None => "NULL".to_string(),
             Some(r) => {
                 let inner = format!("{}", json!(r)).replace("'", "''");
-                format!("'{}'", inner)
+                if !quoted {
+                    inner
+                } else {
+                    format!("'{}'", inner)
+                }
             }
         }
     }
 
-    let (from, to) = (to_text(from), to_text(to));
+    fn format_value(value: &String, numeric_re: &Regex) -> String {
+        if numeric_re.is_match(value) {
+            value.to_string()
+        } else {
+            format!("'{}'", value)
+        }
+    }
+
+    fn summarize(
+        table: &str,
+        row_number: &u32,
+        from: Option<&SerdeMap>,
+        to: Option<&SerdeMap>,
+    ) -> Result<String, String> {
+        let mut summary = vec![];
+        match (from, to) {
+            (None, _) | (_, None) => Ok("NULL".to_string()),
+            (Some(from), Some(to)) => {
+                let numeric_re = Regex::new(r"^[0-9]*\.?[0-9]+$").unwrap();
+                for (column, cell) in from.iter() {
+                    let old_value = cell
+                        .get("value")
+                        .and_then(|v| v.as_str())
+                        .ok_or(format!("No value in {}", cell))?;
+                    let new_value = to
+                        .get(column)
+                        .and_then(|v| v.get("value"))
+                        .and_then(|v| v.as_str())
+                        .ok_or(format!("No value for column: {} in {:?}", column, to))?;
+                    if new_value != old_value {
+                        let old_value = format_value(&old_value.to_string(), &numeric_re);
+                        let new_value = format_value(&new_value.to_string(), &numeric_re);
+                        let mut column_summary = SerdeMap::new();
+                        column_summary.insert("column".to_string(), json!(column));
+                        column_summary.insert("level".to_string(), json!("update"));
+                        column_summary.insert("old_value".to_string(), json!(old_value));
+                        column_summary.insert("value".to_string(), json!(new_value));
+                        column_summary.insert(
+                            "message".to_string(),
+                            json!(format!("Value changed from {} to {}", old_value, new_value)),
+                        );
+                        let column_summary = to_text(Some(&column_summary), false);
+                        summary.push(column_summary);
+                    }
+                }
+                Ok(format!("'[{}]'", summary.join(",")))
+            }
+        }
+    }
+
+    let summary = summarize(table, row_number, from, to).map_err(|e| SqlxCErr(e.into()))?;
+    let (from, to) = (to_text(from, true), to_text(to, true));
     let sql = format!(
-        r#"INSERT INTO "history" ("table", "row", "from", "to", "user")
-           VALUES ('{}', {}, {}, {}, '{}')"#,
-        table, row_number, from, to, user
+        r#"INSERT INTO "history" ("table", "row", "from", "to", "summary", "user")
+           VALUES ('{}', {}, {}, {}, {}, '{}')"#,
+        table, row_number, from, to, summary, user
     );
     let query = sqlx_query(&sql);
     query.execute(tx.acquire().await?).await?;
