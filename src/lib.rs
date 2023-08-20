@@ -1301,6 +1301,7 @@ pub async fn get_affected_rows(
     Ok(table_rows)
 }
 
+// TODO: Remove this function:
 /// Given a database connection pool, a database transaction, a table name, a column name, a row
 /// number, and a cell value for the column, insert an update message to the message table
 /// indicating that the actual value of the column has been changed to cell_value.
@@ -1312,10 +1313,6 @@ pub async fn insert_update_message(
     row_number: &u32,
     cell_value: &str,
 ) -> Result<(), sqlx::Error> {
-    // TODO: We should be able to do this in one query instead of two. See the SQL code in
-    // get_affected_rows() (which calls query_with_message_values()) where we solve the problem this
-    // two-query approach is meant to solve simply by re-aliasing the subquery as <column>_extended.
-
     // In some cases the current value of the column will have to retrieved from the last
     // generated message, so we retrieve that from the database:
     let last_msg_val = {
@@ -2347,18 +2344,9 @@ pub async fn delete_row_tx(
         query.execute(tx.acquire().await?).await?;
     }
 
-    // Now delete all messages associated with the row, unless this is not really a delete but a
-    // logical update operation, in which case we keep previous 'update' messages for the row:
-    let logical_update_clause = {
-        if logical_update {
-            r#"AND "level" <> 'update'"#
-        } else {
-            ""
-        }
-    };
     let sql = format!(
-        r#"DELETE FROM "message" WHERE "table" = '{}' AND "row" = {} {}"#,
-        base_table, row_number, logical_update_clause
+        r#"DELETE FROM "message" WHERE "table" = '{}' AND "row" = {}"#,
+        base_table, row_number
     );
     let query = sqlx_query(&sql);
     query.execute(tx.acquire().await?).await?;
@@ -2522,10 +2510,6 @@ pub async fn update_row_tx(
             format!("No str named 'value' in {:?}", cell).into(),
         ))?;
 
-        // Begin by adding an extra 'update' row to the message table indicating that the value of
-        // this column has been updated (if that is the case).
-        insert_update_message(pool, tx, table_name, column, row_number, cell_value).await?;
-
         // Generate the assignment statements and messages for each column:
         let mut cell_for_insert = cell.clone();
         if cell_valid {
@@ -2670,9 +2654,9 @@ pub async fn update_row_tx(
     }
 
     // Now delete any messages that had been previously inserted to the message table for the old
-    // version of this row (other than any 'update'-level messages):
+    // version of this row:
     let delete_sql = format!(
-        r#"DELETE FROM "message" WHERE "table" = '{}' AND "row" = {} AND "level" <> 'update'"#,
+        r#"DELETE FROM "message" WHERE "table" = '{}' AND "row" = {}"#,
         table_name, row_number
     );
     let query = sqlx_query(&delete_sql);
