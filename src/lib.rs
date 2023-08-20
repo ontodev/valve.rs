@@ -1209,6 +1209,10 @@ pub async fn valve(
 
 /// TODO: Add docstring here
 pub fn query_with_message_values(table: &str, global_config: &SerdeMap, pool: &AnyPool) -> String {
+    let table = match table.strip_suffix("_conflict") {
+        None => table.clone(),
+        Some(base) => base,
+    };
     let is_clause = if pool.any_kind() == AnyKind::Sqlite {
         "IS"
     } else {
@@ -1803,7 +1807,6 @@ pub async fn process_updates(
                 row_number,
                 false,
                 do_not_recurse,
-                true,
                 user,
             )
             .await?;
@@ -1863,12 +1866,22 @@ pub async fn record_row_change(
                 for (column, cell) in from.iter() {
                     let old_value = cell
                         .get("value")
-                        .and_then(|v| v.as_str())
+                        .and_then(|v| match v {
+                            SerdeValue::String(s) => Some(format!("{}", s)),
+                            SerdeValue::Number(n) => Some(format!("{}", n)),
+                            SerdeValue::Bool(b) => Some(format!("{}", b)),
+                            _ => None,
+                        })
                         .ok_or(format!("No value in {}", cell))?;
                     let new_value = to
                         .get(column)
                         .and_then(|v| v.get("value"))
-                        .and_then(|v| v.as_str())
+                        .and_then(|v| match v {
+                            SerdeValue::String(s) => Some(format!("{}", s)),
+                            SerdeValue::Number(n) => Some(format!("{}", n)),
+                            SerdeValue::Bool(b) => Some(format!("{}", b)),
+                            _ => None,
+                        })
                         .ok_or(format!("No value for column: {} in {:?}", column, to))?;
                     if new_value != old_value {
                         let old_value = format_value(&old_value.to_string(), &numeric_re);
@@ -1891,6 +1904,11 @@ pub async fn record_row_change(
         }
     }
 
+    // Always ignore the table suffix when recording a row change:
+    let table = match table.strip_suffix("_conflict") {
+        None => table.clone(),
+        Some(base) => base,
+    };
     let summary = summarize(table, row_number, from, to).map_err(|e| SqlxCErr(e.into()))?;
     let (from, to) = (to_text(from, true), to_text(to, true));
     let sql = format!(
@@ -2003,8 +2021,6 @@ pub async fn undo(
                 &row_number,
                 false,
                 false,
-                // Set the skip_history flag to true:
-                true,
                 user,
             )
             .await?;
@@ -2049,9 +2065,6 @@ pub async fn insert_new_row(
     table_to_write: &str,
     row: &SerdeMap,
     new_row_number: Option<u32>,
-    skip_validation: bool,
-    logical_update: bool,
-    skip_history: bool,
     user: &str,
 ) -> Result<u32, sqlx::Error> {
     let mut tx = pool.begin().await?;
@@ -2064,12 +2077,14 @@ pub async fn insert_new_row(
         table_to_write,
         row,
         new_row_number,
-        skip_validation,
-        logical_update,
-        skip_history,
+        false,
         user,
     )
     .await?;
+
+    // Add an entry to the history table here corresponding to the new insertion:
+    record_row_change(&mut tx, table_to_write, &rn, None, Some(&row), user).await?;
+
     tx.commit().await?;
     Ok(rn)
 }
@@ -2078,9 +2093,7 @@ pub async fn insert_new_row(
 /// database transaction, a table name, and a row, assign a new row number to the row and insert it
 /// to the database using the given transaction, then return the new row number. Optionally, if
 /// row_number is provided, use that to identify the new row. If skip_validation is set to true,
-/// omit the implicit call to [validate_row()]. If logical_update is set to true, then no entry
-/// corresponding to this insert will be recorded to the history table, since logically this is
-/// part of an update operation.
+/// omit the implicit call to [validate_row()].
 #[async_recursion]
 pub async fn insert_new_row_tx(
     global_config: &SerdeMap,
@@ -2092,8 +2105,6 @@ pub async fn insert_new_row_tx(
     row: &SerdeMap,
     new_row_number: Option<u32>,
     skip_validation: bool,
-    logical_update: bool,
-    skip_history: bool,
     user: &str,
 ) -> Result<u32, sqlx::Error> {
     // Extract the base table name in case table_to_write has a _conflict suffix:
@@ -2323,12 +2334,6 @@ pub async fn insert_new_row_tx(
     )
     .await?;
 
-    // Add an entry to the history table here corresponding to the new insertion, unless this is the
-    // last part of a logical update operation, or if the skip history flag has been set:
-    if !logical_update && !skip_history {
-        record_row_change(tx, base_table, &new_row_number, None, Some(&row), user).await?;
-    }
-
     Ok(new_row_number)
 }
 
@@ -2342,11 +2347,28 @@ pub async fn delete_row(
     pool: &AnyPool,
     table_to_write: &str,
     row_number: &u32,
-    logical_update: bool,
-    skip_history: bool,
     user: &str,
 ) -> Result<(), sqlx::Error> {
     let mut tx = pool.begin().await?;
+
+    // Record the row deletion in the history table, unless this delete is just part 1 of a
+    // logical update:
+    let base_table = match table_to_write.strip_suffix("_conflict") {
+        None => table_to_write.clone(),
+        Some(base) => base,
+    };
+    let row = get_row_from_db(
+        global_config,
+        compiled_datatype_conditions,
+        compiled_rule_conditions,
+        pool,
+        &mut tx,
+        &base_table,
+        row_number,
+    )
+    .await?;
+    record_row_change(&mut tx, &base_table, row_number, Some(&row), None, user).await?;
+
     delete_row_tx(
         global_config,
         compiled_datatype_conditions,
@@ -2355,8 +2377,6 @@ pub async fn delete_row(
         &mut tx,
         table_to_write,
         row_number,
-        logical_update,
-        skip_history,
         user,
     )
     .await?;
@@ -2377,30 +2397,12 @@ pub async fn delete_row_tx(
     tx: &mut Transaction<sqlx::Any>,
     table_to_write: &str,
     row_number: &u32,
-    logical_update: bool,
-    skip_history: bool,
     user: &str,
 ) -> Result<(), sqlx::Error> {
     let base_table = match table_to_write.strip_suffix("_conflict") {
         None => table_to_write.clone(),
         Some(base) => base,
     };
-
-    // Record the row deletion in the history table, unless this delete is just part 1 of a
-    // logical update, or if the skip_history flag is set to true:
-    if !logical_update && !skip_history {
-        let row = get_row_from_db(
-            global_config,
-            compiled_datatype_conditions,
-            compiled_rule_conditions,
-            pool,
-            tx,
-            base_table,
-            row_number,
-        )
-        .await?;
-        record_row_change(tx, base_table, row_number, Some(&row), None, user).await?;
-    }
 
     // Used to validate the given row, counterfactually, "as if" the row did not exist in the
     // database:
@@ -2484,12 +2486,22 @@ pub async fn update_row(
     table_name: &str,
     row: &SerdeMap,
     row_number: &u32,
-    skip_validation: bool,
-    do_not_recurse: bool,
-    skip_history: bool,
     user: &str,
 ) -> Result<(), sqlx::Error> {
     let mut tx = pool.begin().await?;
+
+    // Get the old version of the row from the database
+    let old_row = get_row_from_db(
+        global_config,
+        compiled_datatype_conditions,
+        compiled_rule_conditions,
+        pool,
+        &mut tx,
+        table_name,
+        row_number,
+    )
+    .await?;
+
     update_row_tx(
         global_config,
         compiled_datatype_conditions,
@@ -2499,12 +2511,23 @@ pub async fn update_row(
         table_name,
         row,
         row_number,
-        skip_validation,
-        do_not_recurse,
-        skip_history,
+        false,
+        false,
         user,
     )
     .await?;
+
+    // Record the row update in the history table:
+    record_row_change(
+        &mut tx,
+        table_name,
+        row_number,
+        Some(&old_row),
+        Some(&row),
+        user,
+    )
+    .await?;
+
     tx.commit().await?;
     Ok(())
 }
@@ -2524,7 +2547,6 @@ pub async fn update_row_tx(
     row_number: &u32,
     skip_validation: bool,
     do_not_recurse: bool,
-    skip_history: bool,
     user: &str,
 ) -> Result<(), sqlx::Error> {
     // First, look through the valve config to see which tables are dependent on this table and find
@@ -2546,23 +2568,6 @@ pub async fn update_row_tx(
                 .await
                 .map_err(|e| SqlxCErr(e.into()))?
         }
-    };
-
-    // Save the current version of the row for later recording in the history table:
-    let old_row = match skip_history {
-        true => None,
-        false => Some(
-            get_row_from_db(
-                global_config,
-                compiled_datatype_conditions,
-                compiled_rule_conditions,
-                pool,
-                tx,
-                table_name,
-                row_number,
-            )
-            .await?,
-        ),
     };
 
     // Process the updates that need to be performed before the update of the target row:
@@ -2735,8 +2740,6 @@ pub async fn update_row_tx(
             tx,
             &current_table,
             row_number,
-            true,
-            true,
             user,
         )
         .await?;
@@ -2750,8 +2753,6 @@ pub async fn update_row_tx(
             &row,
             Some(*row_number),
             false,
-            true,
-            true,
             user,
         )
         .await?;
@@ -2813,12 +2814,6 @@ pub async fn update_row_tx(
         user,
     )
     .await?;
-
-    // Record the row update in the history table:
-    if !skip_history {
-        let old_row = old_row.unwrap();
-        record_row_change(tx, table_name, row_number, Some(&old_row), Some(&row), user).await?;
-    }
 
     Ok(())
 }

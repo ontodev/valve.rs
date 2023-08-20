@@ -1,6 +1,6 @@
 use ontodev_valve::{
     delete_row, get_compiled_datatype_conditions, get_compiled_rule_conditions,
-    get_parsed_structure_conditions, insert_new_row, update_row,
+    get_parsed_structure_conditions, insert_new_row, undo, update_row,
     validate::{get_matching_values, validate_row},
     valve,
     valve_grammar::StartParser,
@@ -169,12 +169,12 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         "table2",
         &row.as_object().unwrap(),
         &1,
-        false,
-        false,
-        false,
         "VALVE",
     )
     .await?;
+
+    //undo(&config, &compiled_datatype_conditions, &compiled_rule_conditions, &pool, "VALVE").await?;
+    //todo!();
 
     // Validate and insert a new row:
     let row = json!({
@@ -212,9 +212,6 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         "table3",
         &result_row,
         None,
-        false,
-        false,
-        false,
         "VALVE",
     )
     .await?;
@@ -255,9 +252,6 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         "table6",
         &result_row,
         &1,
-        false,
-        false,
-        false,
         "VALVE",
     )
     .await?;
@@ -298,9 +292,6 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         "table6",
         &result_row,
         None,
-        false,
-        false,
-        false,
         "VALVE",
     )
     .await?;
@@ -320,9 +311,6 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         "table10",
         &row.as_object().unwrap(),
         &1,
-        false,
-        false,
-        false,
         "VALVE",
     )
     .await?;
@@ -343,9 +331,6 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         "table11",
         &row.as_object().unwrap(),
         &2,
-        false,
-        false,
-        false,
         "VALVE",
     )
     .await?;
@@ -357,8 +342,6 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         &pool,
         "table11",
         &4,
-        false,
-        false,
         "VALVE",
     )
     .await?;
@@ -377,9 +360,6 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         "table10",
         &row.as_object().unwrap(),
         None,
-        false,
-        false,
-        false,
         "VALVE",
     )
     .await?;
