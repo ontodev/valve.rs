@@ -173,8 +173,15 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
     )
     .await?;
 
-    //undo(&config, &compiled_datatype_conditions, &compiled_rule_conditions, &pool, "VALVE").await?;
-    //todo!();
+    undo(
+        &config,
+        &compiled_datatype_conditions,
+        &compiled_rule_conditions,
+        &pool,
+        "VALVE",
+    )
+    .await?;
+    todo!();
 
     // Validate and insert a new row:
     let row = json!({

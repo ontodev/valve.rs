@@ -1930,7 +1930,7 @@ pub async fn undo(
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     pool: &AnyPool,
     undo_user: &str,
-) -> Result<SerdeMap, sqlx::Error> {
+) -> Result<(), sqlx::Error> {
     // Look in the history table, get the row with the greatest ID, get the row number,
     // from, and to, and determine whether the last operation was a delete, insert, or update.
     fn get_json_from_row(row: &AnyRow, column: &str) -> Option<SerdeMap> {
@@ -1953,27 +1953,56 @@ pub async fn undo(
         }
     }
 
-    // TODO: Change this query so that we look only for history items that have not been undone:
-    let sql = r#"SELECT * FROM "history" ORDER BY "history_id" DESC LIMIT 1"#;
+    async fn toggle_undone(
+        user: &str,
+        history_id: u16,
+        undone_state: bool,
+        tx: &mut Transaction<'_, sqlx::Any>,
+    ) -> Result<(), sqlx::Error> {
+        // Set the history record to undone:
+        let undone_by = if undone_state == true {
+            format!("'{}'", user)
+        } else {
+            "NULL".to_string()
+        };
+        let sql = format!(
+            r#"UPDATE "history" SET "undone_by" = {} WHERE "history_id" = {}"#,
+            undone_by, history_id
+        );
+        let query = sqlx_query(&sql);
+        query.execute(tx.acquire().await?).await?;
+        Ok(())
+    }
+
+    let is_clause = if pool.any_kind() == AnyKind::Sqlite {
+        "IS"
+    } else {
+        "IS NOT DISTINCT FROM"
+    };
+    let sql = format!(
+        r#"SELECT * FROM "history"
+           WHERE "undone_by" {} NULL
+           ORDER BY "history_id" DESC LIMIT 1"#,
+        is_clause
+    );
+
     let query = sqlx_query(&sql);
     let result_row = query.fetch_optional(pool).await?;
     let result_row = match result_row {
         None => {
             eprintln!("WARN: Nothing to undo.");
-            return Ok(SerdeMap::new());
+            return Ok(());
         }
         Some(r) => r,
     };
-    let id: i32 = result_row.get("history_id");
-    let id = id as u16;
+    let history_id: i32 = result_row.get("history_id");
+    let history_id = history_id as u16;
     let table: &str = result_row.get("table");
     let row_number: i64 = result_row.get("row");
     let row_number = row_number as u32;
     let from = get_json_from_row(&result_row, "from");
     let to = get_json_from_row(&result_row, "to");
     let user: &str = result_row.get("user");
-
-    // TODO: Follow the new version of the algorithm that does not require update messages etc.
 
     match (from, to) {
         (None, None) => {
@@ -1984,30 +2013,51 @@ pub async fn undo(
         (None, Some(to)) => {
             // Undo an insert:
             eprintln!("UNDOING AN INSERT");
-            Ok(SerdeMap::new())
+            let mut tx = pool.begin().await?;
+
+            delete_row_tx(
+                global_config,
+                compiled_datatype_conditions,
+                compiled_rule_conditions,
+                pool,
+                &mut tx,
+                table,
+                &row_number,
+                user,
+            )
+            .await?;
+
+            // Mark the history record as undone and commit the transaction:
+            toggle_undone(user, history_id, true, &mut tx).await?;
+            tx.commit().await?;
         }
-        (Some(to), None) => {
+        (Some(from), None) => {
             // Undo a delete:
             eprintln!("UNDOING A DELETE");
-            Ok(SerdeMap::new())
+            let mut tx = pool.begin().await?;
+
+            insert_new_row_tx(
+                global_config,
+                compiled_datatype_conditions,
+                compiled_rule_conditions,
+                pool,
+                &mut tx,
+                table,
+                &from,
+                Some(row_number),
+                false,
+                user,
+            )
+            .await?;
+
+            // Mark the history record as undone and commit the transaction:
+            toggle_undone(user, history_id, true, &mut tx).await?;
+            tx.commit().await?;
         }
         (Some(from), Some(to)) => {
             // Undo an an update:
             eprintln!("UNDOING THE UPDATE FROM {:#?} to {:#?}", from, to);
             let mut tx = pool.begin().await?;
-
-            // Delete the history record from the history table.
-            let sql = format!("DELETE FROM history WHERE history_id = {}", id);
-            let query = sqlx_query(&sql);
-            query.execute(tx.acquire().await?).await?;
-
-            // Delete all messages including update messages for the row.
-            let sql = format!(
-                r#"DELETE FROM "message" WHERE "table" = '{}' AND "row" = {}"#,
-                table, row_number
-            );
-            let query = sqlx_query(&sql);
-            query.execute(tx.acquire().await?).await?;
 
             // Update the row to the old value, `from`:
             update_row_tx(
@@ -2025,14 +2075,12 @@ pub async fn undo(
             )
             .await?;
 
-            // Commit the transaction:
+            // Mark the history record as undone and commit the transaction:
+            toggle_undone(user, history_id, true, &mut tx).await?;
             tx.commit().await?;
-
-            // Return `to`, the version of the row that we undid, to the caller, which it can
-            // then potentially use as the input for a later call to redo():
-            Ok(to)
         }
     }
+    Ok(())
 }
 
 /// TODO: Add docstring here.
@@ -2045,10 +2093,9 @@ pub async fn redo(
     row_number: &u32,
     row: Option<&SerdeMap>,
 ) -> Result<(), sqlx::Error> {
-    // If row is None, then we are redoing a delete operation. Call delete_row() on the given
-    // row_number.
-
-    // Otherwise do a logical update (i.e., delete + insert) using the given row number and row.
+    // TODO: This should be implemented in pretty much the same way as undo (except in reverse).
+    // Given this it might be better to combine them into one function with a switch, or refactor
+    // undo so you can resuse the components.
 
     todo!();
     Ok(())
