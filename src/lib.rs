@@ -1922,6 +1922,50 @@ pub async fn record_row_change(
     Ok(())
 }
 
+/// TODO: Docstring
+fn get_json_from_row(row: &AnyRow, column: &str) -> Option<SerdeMap> {
+    let raw_value = row.try_get_raw(column).unwrap();
+    if !raw_value.is_null() {
+        let value: &str = row.get(column);
+        match serde_json::from_str::<SerdeValue>(value) {
+            Err(e) => {
+                eprintln!("WARN: {}", e);
+                None
+            }
+            Ok(SerdeValue::Object(value)) => Some(value),
+            _ => {
+                eprintln!("WARN: {} is not an object.", value);
+                None
+            }
+        }
+    } else {
+        None
+    }
+}
+
+/// TODO: Docstring
+async fn switch_undone_state(
+    user: &str,
+    history_id: u16,
+    undone_state: bool,
+    tx: &mut Transaction<'_, sqlx::Any>,
+) -> Result<(), sqlx::Error> {
+    // Set the history record to undone:
+    let undone_by = if undone_state == true {
+        format!(r#""undone_by" = '{}'"#, user)
+    } else {
+        format!(r#""undone_by" = NULL, "user" = '{}'"#, user)
+    };
+    let sql = format!(
+        r#"UPDATE "history" SET {} WHERE "history_id" = {}"#,
+        undone_by, history_id
+    );
+    let query = sqlx_query(&sql);
+    query.execute(tx.acquire().await?).await?;
+    Ok(())
+}
+
+// TODO: undo and redo have a lot in common. See if it is possible to refactor.
 /// TODO: Add docstring here.
 #[async_recursion]
 pub async fn undo(
@@ -1933,47 +1977,6 @@ pub async fn undo(
 ) -> Result<(), sqlx::Error> {
     // Look in the history table, get the row with the greatest ID, get the row number,
     // from, and to, and determine whether the last operation was a delete, insert, or update.
-    fn get_json_from_row(row: &AnyRow, column: &str) -> Option<SerdeMap> {
-        let raw_value = row.try_get_raw(column).unwrap();
-        if !raw_value.is_null() {
-            let value: &str = row.get(column);
-            match serde_json::from_str::<SerdeValue>(value) {
-                Err(e) => {
-                    eprintln!("WARN: {}", e);
-                    None
-                }
-                Ok(SerdeValue::Object(value)) => Some(value),
-                _ => {
-                    eprintln!("WARN: {} is not an object.", value);
-                    None
-                }
-            }
-        } else {
-            None
-        }
-    }
-
-    async fn toggle_undone(
-        user: &str,
-        history_id: u16,
-        undone_state: bool,
-        tx: &mut Transaction<'_, sqlx::Any>,
-    ) -> Result<(), sqlx::Error> {
-        // Set the history record to undone:
-        let undone_by = if undone_state == true {
-            format!("'{}'", user)
-        } else {
-            "NULL".to_string()
-        };
-        let sql = format!(
-            r#"UPDATE "history" SET "undone_by" = {} WHERE "history_id" = {}"#,
-            undone_by, history_id
-        );
-        let query = sqlx_query(&sql);
-        query.execute(tx.acquire().await?).await?;
-        Ok(())
-    }
-
     let is_clause = if pool.any_kind() == AnyKind::Sqlite {
         "IS"
     } else {
@@ -2007,12 +2010,11 @@ pub async fn undo(
     match (from, to) {
         (None, None) => {
             return Err(SqlxCErr(
-                "Impossible double NULL values for from and to in history table".into(),
+                "Cannot redo unknown operation from None to None".into(),
             ))
         }
         (None, Some(to)) => {
             // Undo an insert:
-            eprintln!("UNDOING AN INSERT");
             let mut tx = pool.begin().await?;
 
             delete_row_tx(
@@ -2028,12 +2030,11 @@ pub async fn undo(
             .await?;
 
             // Mark the history record as undone and commit the transaction:
-            toggle_undone(user, history_id, true, &mut tx).await?;
+            switch_undone_state(user, history_id, true, &mut tx).await?;
             tx.commit().await?;
         }
         (Some(from), None) => {
             // Undo a delete:
-            eprintln!("UNDOING A DELETE");
             let mut tx = pool.begin().await?;
 
             insert_new_row_tx(
@@ -2051,12 +2052,11 @@ pub async fn undo(
             .await?;
 
             // Mark the history record as undone and commit the transaction:
-            toggle_undone(user, history_id, true, &mut tx).await?;
+            switch_undone_state(user, history_id, true, &mut tx).await?;
             tx.commit().await?;
         }
         (Some(from), Some(to)) => {
             // Undo an an update:
-            eprintln!("UNDOING THE UPDATE FROM {:#?} to {:#?}", from, to);
             let mut tx = pool.begin().await?;
 
             // Update the row to the old value, `from`:
@@ -2076,7 +2076,7 @@ pub async fn undo(
             .await?;
 
             // Mark the history record as undone and commit the transaction:
-            toggle_undone(user, history_id, true, &mut tx).await?;
+            switch_undone_state(user, history_id, true, &mut tx).await?;
             tx.commit().await?;
         }
     }
@@ -2090,14 +2090,113 @@ pub async fn redo(
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     pool: &AnyPool,
-    row_number: &u32,
-    row: Option<&SerdeMap>,
+    undo_user: &str,
 ) -> Result<(), sqlx::Error> {
-    // TODO: This should be implemented in pretty much the same way as undo (except in reverse).
-    // Given this it might be better to combine them into one function with a switch, or refactor
-    // undo so you can resuse the components.
+    let is_clause = if pool.any_kind() == AnyKind::Sqlite {
+        "IS"
+    } else {
+        "IS NOT DISTINCT FROM"
+    };
+    let sql = r#"SELECT * FROM "history" ORDER BY "history_id" DESC LIMIT 1"#;
 
-    todo!();
+    let query = sqlx_query(&sql);
+    let result_row = query.fetch_optional(pool).await?;
+    let result_row = match result_row {
+        None => {
+            eprintln!("WARN: Nothing to redo.");
+            return Ok(());
+        }
+        Some(result_row) => {
+            let undone_by = result_row.try_get_raw("undone_by")?;
+            if undone_by.is_null() {
+                eprintln!("WARN: Nothing to redo.");
+                return Ok(());
+            }
+            result_row
+        }
+    };
+    let history_id: i32 = result_row.get("history_id");
+    let history_id = history_id as u16;
+    let table: &str = result_row.get("table");
+    let row_number: i64 = result_row.get("row");
+    let row_number = row_number as u32;
+    let from = get_json_from_row(&result_row, "from");
+    let to = get_json_from_row(&result_row, "to");
+    let user: &str = result_row.get("user");
+
+    match (from, to) {
+        (None, None) => {
+            return Err(SqlxCErr(
+                "Cannot redo unknown operation from None to None".into(),
+            ))
+        }
+        (None, Some(to)) => {
+            // Redo an insert:
+            let mut tx = pool.begin().await?;
+
+            insert_new_row_tx(
+                global_config,
+                compiled_datatype_conditions,
+                compiled_rule_conditions,
+                pool,
+                &mut tx,
+                table,
+                &to,
+                Some(row_number),
+                false,
+                user,
+            )
+            .await?;
+
+            // Mark the history record as redone and commit the transaction:
+            switch_undone_state(user, history_id, false, &mut tx).await?;
+            tx.commit().await?;
+        }
+        (Some(from), None) => {
+            // Redo a delete:
+            let mut tx = pool.begin().await?;
+
+            delete_row_tx(
+                global_config,
+                compiled_datatype_conditions,
+                compiled_rule_conditions,
+                pool,
+                &mut tx,
+                table,
+                &row_number,
+                user,
+            )
+            .await?;
+
+            // Mark the history record as redone and commit the transaction:
+            switch_undone_state(user, history_id, false, &mut tx).await?;
+            tx.commit().await?;
+        }
+        (Some(from), Some(to)) => {
+            // Redo an an update:
+            let mut tx = pool.begin().await?;
+
+            // Update the row to the old value, `from`:
+            update_row_tx(
+                global_config,
+                compiled_datatype_conditions,
+                compiled_rule_conditions,
+                pool,
+                &mut tx,
+                table,
+                &to,
+                &row_number,
+                false,
+                false,
+                user,
+            )
+            .await?;
+
+            // Mark the history record as redone and commit the transaction:
+            switch_undone_state(user, history_id, false, &mut tx).await?;
+            tx.commit().await?;
+        }
+    }
     Ok(())
 }
 
