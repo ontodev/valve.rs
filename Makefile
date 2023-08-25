@@ -72,6 +72,8 @@ sqlite_api_test: valve test/src/table.tsv build/valve.db test/insert_update.sh |
 	$(word 4,$^) $(word 3,$^)
 	scripts/export.py messages $(word 3,$^) $| $(tables_to_test)
 	diff --strip-trailing-cr -q test/expected/messages_after_api_test.tsv test/output/messages.tsv
+	echo "select * from history order by history_id" | sqlite3 -header -tabs build/valve.db > test/output/history.tsv
+	diff --strip-trailing-cr -q test/expected/history.tsv test/output/history.tsv
 	@echo "Test succeeded!"
 
 pg_api_test: valve test/src/table.tsv test/insert_update.sh | test/output
@@ -81,6 +83,8 @@ pg_api_test: valve test/src/table.tsv test/insert_update.sh | test/output
 	$(word 3,$^) postgresql:///valve_postgres
 	scripts/export.py messages postgresql:///valve_postgres $| $(tables_to_test)
 	diff --strip-trailing-cr -q test/expected/messages_after_api_test.tsv test/output/messages.tsv
+	psql postgresql:///valve_postgres -c "COPY (select * from history order by history_id) TO STDOUT WITH NULL AS ''" > test/output/history.tsv
+	tail -n +2 test/expected/history.tsv | diff --strip-trailing-cr -q test/output/history.tsv -
 	@echo "Test succeeded!"
 
 sqlite_random_db = build/valve_random.db
