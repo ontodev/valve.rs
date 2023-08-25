@@ -1085,6 +1085,22 @@ fn remove_duplicate_messages(row: &SerdeMap) -> Result<SerdeMap, sqlx::Error> {
             .and_then(|m| m.as_array())
             .unwrap_or(&vec![])
             .clone();
+        messages.sort_by(|a, b| {
+            // TODO: Can we use a checksum or something more efficient than this string comparison?
+            let a = format!(
+                "{}{}{}",
+                a.get("level").unwrap(),
+                a.get("rule").unwrap(),
+                a.get("message").unwrap()
+            );
+            let b = format!(
+                "{}{}{}",
+                b.get("level").unwrap(),
+                b.get("rule").unwrap(),
+                b.get("message").unwrap()
+            );
+            a.partial_cmp(&b).unwrap()
+        });
         messages.dedup_by(|a, b| {
             a.get("level").unwrap() == b.get("level").unwrap()
                 && a.get("rule").unwrap() == b.get("rule").unwrap()
@@ -1170,6 +1186,10 @@ fn select_with_extra_row(
         } else {
             second_select.push_str(format!(r#" FROM "{}""#, table_name).as_str());
         }
+    }
+
+    if let Some(rn) = extra_row.row_number {
+        second_select.push_str(format!(r#"WHERE "row_number" <> {}"#, rn).as_str());
     }
 
     (

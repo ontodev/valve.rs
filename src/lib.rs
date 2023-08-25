@@ -508,6 +508,7 @@ pub fn read_config_files(
                 "user",
             ],
             "column": {
+                // TODO: Add a timestamp column
                 "table": {
                     "table": "history",
                     "column": "table",
@@ -2214,6 +2215,18 @@ pub async fn insert_new_row(
     user: &str,
 ) -> Result<u32, sqlx::Error> {
     let mut tx = pool.begin().await?;
+    let row = validate_row(
+        global_config,
+        compiled_datatype_conditions,
+        compiled_rule_conditions,
+        pool,
+        Some(&mut tx),
+        table_to_write,
+        row,
+        new_row_number,
+        None,
+    )
+    .await?;
     let rn = insert_new_row_tx(
         global_config,
         compiled_datatype_conditions,
@@ -2221,9 +2234,9 @@ pub async fn insert_new_row(
         pool,
         &mut tx,
         table_to_write,
-        row,
+        &row,
         new_row_number,
-        false,
+        true,
         user,
     )
     .await?;
@@ -2648,6 +2661,19 @@ pub async fn update_row(
     )
     .await?;
 
+    let row = validate_row(
+        global_config,
+        compiled_datatype_conditions,
+        compiled_rule_conditions,
+        pool,
+        Some(&mut tx),
+        table_name,
+        row,
+        Some(*row_number),
+        None,
+    )
+    .await?;
+
     update_row_tx(
         global_config,
         compiled_datatype_conditions,
@@ -2655,9 +2681,9 @@ pub async fn update_row(
         pool,
         &mut tx,
         table_name,
-        row,
+        &row,
         row_number,
-        false,
+        true,
         false,
         user,
     )
@@ -2877,6 +2903,33 @@ pub async fn update_row_tx(
             query = query.bind(param);
         }
         query.execute(tx.acquire().await?).await?;
+
+        // Now delete any messages that had been previously inserted to the message table for the
+        // old version of this row:
+        let delete_sql = format!(
+            r#"DELETE FROM "message" WHERE "table" = '{}' AND "row" = {}"#,
+            table_name, row_number
+        );
+        let query = sqlx_query(&delete_sql);
+        query.execute(tx.acquire().await?).await?;
+
+        // Now add the messages to the message table for the new version of this row:
+        for m in messages {
+            let column = m.get("column").and_then(|c| c.as_str()).unwrap();
+            let value = m.get("value").and_then(|c| c.as_str()).unwrap();
+            let level = m.get("level").and_then(|c| c.as_str()).unwrap();
+            let rule = m.get("rule").and_then(|c| c.as_str()).unwrap();
+            let message = m.get("message").and_then(|c| c.as_str()).unwrap();
+            let message = message.replace("'", "''");
+            let insert_sql = format!(
+                r#"INSERT INTO "message"
+               ("table", "row", "column", "value", "level", "rule", "message")
+               VALUES ('{}', {}, '{}', '{}', '{}', '{}', '{}')"#,
+                table_name, row_number, column, value, level, rule, message
+            );
+            let query = sqlx_query(&insert_sql);
+            query.execute(tx.acquire().await?).await?;
+        }
     } else {
         delete_row_tx(
             global_config,
@@ -2902,33 +2955,6 @@ pub async fn update_row_tx(
             user,
         )
         .await?;
-    }
-
-    // Now delete any messages that had been previously inserted to the message table for the old
-    // version of this row:
-    let delete_sql = format!(
-        r#"DELETE FROM "message" WHERE "table" = '{}' AND "row" = {}"#,
-        table_name, row_number
-    );
-    let query = sqlx_query(&delete_sql);
-    query.execute(tx.acquire().await?).await?;
-
-    // Now add the messages to the message table for the new version of this row:
-    for m in messages {
-        let column = m.get("column").and_then(|c| c.as_str()).unwrap();
-        let value = m.get("value").and_then(|c| c.as_str()).unwrap();
-        let level = m.get("level").and_then(|c| c.as_str()).unwrap();
-        let rule = m.get("rule").and_then(|c| c.as_str()).unwrap();
-        let message = m.get("message").and_then(|c| c.as_str()).unwrap();
-        let message = message.replace("'", "''");
-        let insert_sql = format!(
-            r#"INSERT INTO "message"
-               ("table", "row", "column", "value", "level", "rule", "message")
-               VALUES ('{}', {}, '{}', '{}', '{}', '{}', '{}')"#,
-            table_name, row_number, column, value, level, rule, message
-        );
-        let query = sqlx_query(&insert_sql);
-        query.execute(tx.acquire().await?).await?;
     }
 
     // Now process the rows from the same table as the target table that need to be re-validated
