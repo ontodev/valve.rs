@@ -1189,7 +1189,7 @@ fn select_with_extra_row(
     }
 
     if let Some(rn) = extra_row.row_number {
-        second_select.push_str(format!(r#"WHERE "row_number" <> {}"#, rn).as_str());
+        second_select.push_str(format!(r#" WHERE "row_number" <> {}"#, rn).as_str());
     }
 
     (

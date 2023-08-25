@@ -1,6 +1,6 @@
 use ontodev_valve::{
     delete_row, get_compiled_datatype_conditions, get_compiled_rule_conditions,
-    get_parsed_structure_conditions, insert_new_row, undo, update_row,
+    get_parsed_structure_conditions, insert_new_row, redo, undo, update_row,
     validate::{get_matching_values, validate_row},
     valve,
     valve_grammar::StartParser,
@@ -172,16 +172,6 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         "VALVE",
     )
     .await?;
-
-    //undo(
-    //    &config,
-    //    &compiled_datatype_conditions,
-    //    &compiled_rule_conditions,
-    //    &pool,
-    //    "VALVE",
-    //)
-    //.await?;
-    //todo!();
 
     // Validate and insert a new row:
     let row = json!({
@@ -367,6 +357,223 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         "table10",
         &row.as_object().unwrap(),
         None,
+        "VALVE",
+    )
+    .await?;
+
+    // Undo/redo tests
+    let row_1 = json!({
+        "foreign_column": {"messages": [], "valid": true, "value": "j"},
+        "other_foreign_column": {"messages": [], "valid": true, "value": "j"},
+        "numeric_foreign_column": {"messages": [], "valid": true, "value": "10"},
+    });
+    let row_2 = json!({
+        "foreign_column": {"messages": [], "valid": true, "value": "k"},
+        "other_foreign_column": {"messages": [], "valid": true, "value": "k"},
+        "numeric_foreign_column": {"messages": [], "valid": true, "value": "11"},
+    });
+
+    // Undo/redo test 1:
+    let rn = insert_new_row(
+        &config,
+        &compiled_datatype_conditions,
+        &compiled_rule_conditions,
+        &pool,
+        "table10",
+        &row_1.as_object().unwrap(),
+        None,
+        "VALVE",
+    )
+    .await?;
+
+    undo(
+        &config,
+        &compiled_datatype_conditions,
+        &compiled_rule_conditions,
+        &pool,
+        "VALVE",
+    )
+    .await?;
+
+    redo(
+        &config,
+        &compiled_datatype_conditions,
+        &compiled_rule_conditions,
+        &pool,
+        "VALVE",
+    )
+    .await?;
+
+    undo(
+        &config,
+        &compiled_datatype_conditions,
+        &compiled_rule_conditions,
+        &pool,
+        "VALVE",
+    )
+    .await?;
+
+    // Undo/redo test 2:
+    update_row(
+        &config,
+        &compiled_datatype_conditions,
+        &compiled_rule_conditions,
+        &pool,
+        "table10",
+        &row_2.as_object().unwrap(),
+        &8,
+        "VALVE",
+    )
+    .await?;
+
+    undo(
+        &config,
+        &compiled_datatype_conditions,
+        &compiled_rule_conditions,
+        &pool,
+        "VALVE",
+    )
+    .await?;
+
+    redo(
+        &config,
+        &compiled_datatype_conditions,
+        &compiled_rule_conditions,
+        &pool,
+        "VALVE",
+    )
+    .await?;
+
+    undo(
+        &config,
+        &compiled_datatype_conditions,
+        &compiled_rule_conditions,
+        &pool,
+        "VALVE",
+    )
+    .await?;
+
+    // Undo/redo test 3:
+    delete_row(
+        &config,
+        &compiled_datatype_conditions,
+        &compiled_rule_conditions,
+        &pool,
+        "table10",
+        &8,
+        "VALVE",
+    )
+    .await?;
+
+    undo(
+        &config,
+        &compiled_datatype_conditions,
+        &compiled_rule_conditions,
+        &pool,
+        "VALVE",
+    )
+    .await?;
+
+    redo(
+        &config,
+        &compiled_datatype_conditions,
+        &compiled_rule_conditions,
+        &pool,
+        "VALVE",
+    )
+    .await?;
+
+    undo(
+        &config,
+        &compiled_datatype_conditions,
+        &compiled_rule_conditions,
+        &pool,
+        "VALVE",
+    )
+    .await?;
+
+    // Undo/redo test 4:
+    let rn = insert_new_row(
+        &config,
+        &compiled_datatype_conditions,
+        &compiled_rule_conditions,
+        &pool,
+        "table10",
+        &row_1.as_object().unwrap(),
+        None,
+        "VALVE",
+    )
+    .await?;
+
+    update_row(
+        &config,
+        &compiled_datatype_conditions,
+        &compiled_rule_conditions,
+        &pool,
+        "table10",
+        &row_2.as_object().unwrap(),
+        &rn,
+        "VALVE",
+    )
+    .await?;
+
+    // Undo update:
+    undo(
+        &config,
+        &compiled_datatype_conditions,
+        &compiled_rule_conditions,
+        &pool,
+        "VALVE",
+    )
+    .await?;
+
+    // Redo update:
+    redo(
+        &config,
+        &compiled_datatype_conditions,
+        &compiled_rule_conditions,
+        &pool,
+        "VALVE",
+    )
+    .await?;
+
+    delete_row(
+        &config,
+        &compiled_datatype_conditions,
+        &compiled_rule_conditions,
+        &pool,
+        "table10",
+        &rn,
+        "VALVE",
+    )
+    .await?;
+
+    // Undo delete:
+    undo(
+        &config,
+        &compiled_datatype_conditions,
+        &compiled_rule_conditions,
+        &pool,
+        "VALVE",
+    )
+    .await?;
+
+    // Undo update:
+    undo(
+        &config,
+        &compiled_datatype_conditions,
+        &compiled_rule_conditions,
+        &pool,
+        "VALVE",
+    )
+    .await?;
+
+    // Undo insert:
+    undo(
+        &config,
+        &compiled_datatype_conditions,
+        &compiled_rule_conditions,
+        &pool,
         "VALVE",
     )
     .await?;
