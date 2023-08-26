@@ -2775,71 +2775,7 @@ pub async fn update_row_tx(
         row.clone()
     };
 
-    // Now prepare the row and messages for the database update:
-    let mut assignments = vec![];
-    let mut params = vec![];
-    let mut messages = vec![];
-    let sorted_datatypes = get_sorted_datatypes(global_config);
-    for (column, cell) in row.iter() {
-        let cell = cell
-            .as_object()
-            .ok_or(SqlxCErr(format!("Cell {:?} is not an object", cell).into()))?;
-        let cell_valid = cell.get("valid").and_then(|v| v.as_bool()).ok_or(SqlxCErr(
-            format!("No flag named 'valid' in {:?}", cell).into(),
-        ))?;
-        let cell_value = cell.get("value").and_then(|v| v.as_str()).ok_or(SqlxCErr(
-            format!("No str named 'value' in {:?}", cell).into(),
-        ))?;
-
-        // Generate the assignment statements and messages for each column:
-        let mut cell_for_insert = cell.clone();
-        if cell_valid {
-            cell_for_insert.remove("value");
-            let sql_type = get_sql_type_from_global_config(
-                &global_config,
-                &table_name.to_string(),
-                &column,
-                pool,
-            )
-            .ok_or(SqlxCErr(
-                format!("Unable to determine SQL type for {}.{}", table_name, column).into(),
-            ))?;
-            assignments.push(format!(
-                r#""{}" = {}"#,
-                column,
-                cast_sql_param_from_text(&sql_type)
-            ));
-            params.push(String::from(cell_value));
-        } else {
-            assignments.push(format!(r#""{}" = NULL"#, column));
-            let cell_messages = sort_messages(
-                &sorted_datatypes,
-                cell.get("messages")
-                    .and_then(|m| m.as_array())
-                    .ok_or(SqlxCErr(
-                        format!("No array named 'messages' in {:?}", cell).into(),
-                    ))?,
-            );
-            for cell_message in cell_messages {
-                messages.push(json!({
-                    "column": String::from(column),
-                    "value": String::from(cell_value),
-                    "level": cell_message.get("level").and_then(|s| s.as_str()).ok_or(
-                            SqlxCErr(format!("No 'level' in {:?}", cell_message).into())
-                        )?,
-                    "rule": cell_message.get("rule").and_then(|s| s.as_str()).ok_or(
-                            SqlxCErr(format!("No 'rule' in {:?}", cell_message).into())
-                        )?,
-                    "message": cell_message.get("message").and_then(|s| s.as_str()).ok_or(
-                            SqlxCErr(format!("No 'message' in {:?}", cell_message).into())
-                        )?,
-                }));
-            }
-        }
-    }
-
-    // Now update the target row. First, figure out whether the row is currently in the base table
-    // or the conflict table:
+    // Now figure out whether the row is currently in the base table or the conflict table:
     let sql = format!(
         "SELECT 1 FROM \"{}\" WHERE row_number = {}",
         table_name, row_number
@@ -2891,9 +2827,81 @@ pub async fn update_row_tx(
         }
     }
 
-    // If table_to_write and current_table are the same, update it. Otherwise delete the current
-    // version of the row from the database and insert the new version to table_to_write:
-    if table_to_write == current_table {
+    async fn direct_update(
+        global_config: &SerdeMap,
+        pool: &AnyPool,
+        tx: &mut Transaction<'_, sqlx::Any>,
+        table_to_write: &str,
+        row_number: &u32,
+        row: &SerdeMap,
+    ) -> Result<(), sqlx::Error> {
+        let base_table = match table_to_write.strip_suffix("_conflict") {
+            None => table_to_write.clone(),
+            Some(base) => base,
+        };
+        // Prepare the row and messages for the database update:
+        let mut assignments = vec![];
+        let mut params = vec![];
+        let mut messages = vec![];
+        let sorted_datatypes = get_sorted_datatypes(global_config);
+        for (column, cell) in row.iter() {
+            let cell = cell
+                .as_object()
+                .ok_or(SqlxCErr(format!("Cell {:?} is not an object", cell).into()))?;
+            let cell_valid = cell.get("valid").and_then(|v| v.as_bool()).ok_or(SqlxCErr(
+                format!("No flag named 'valid' in {:?}", cell).into(),
+            ))?;
+            let cell_value = cell.get("value").and_then(|v| v.as_str()).ok_or(SqlxCErr(
+                format!("No str named 'value' in {:?}", cell).into(),
+            ))?;
+
+            // Generate the assignment statements and messages for each column:
+            let mut cell_for_insert = cell.clone();
+            if cell_valid {
+                cell_for_insert.remove("value");
+                let sql_type = get_sql_type_from_global_config(
+                    &global_config,
+                    &base_table.to_string(),
+                    &column,
+                    pool,
+                )
+                .ok_or(SqlxCErr(
+                    format!("Unable to determine SQL type for {}.{}", base_table, column).into(),
+                ))?;
+                assignments.push(format!(
+                    r#""{}" = {}"#,
+                    column,
+                    cast_sql_param_from_text(&sql_type)
+                ));
+                params.push(String::from(cell_value));
+            } else {
+                assignments.push(format!(r#""{}" = NULL"#, column));
+                let cell_messages = sort_messages(
+                    &sorted_datatypes,
+                    cell.get("messages")
+                        .and_then(|m| m.as_array())
+                        .ok_or(SqlxCErr(
+                            format!("No array named 'messages' in {:?}", cell).into(),
+                        ))?,
+                );
+                for cell_message in cell_messages {
+                    messages.push(json!({
+                        "column": String::from(column),
+                        "value": String::from(cell_value),
+                        "level": cell_message.get("level").and_then(|s| s.as_str()).ok_or(
+                            SqlxCErr(format!("No 'level' in {:?}", cell_message).into())
+                        )?,
+                        "rule": cell_message.get("rule").and_then(|s| s.as_str()).ok_or(
+                            SqlxCErr(format!("No 'rule' in {:?}", cell_message).into())
+                        )?,
+                        "message": cell_message.get("message").and_then(|s| s.as_str()).ok_or(
+                            SqlxCErr(format!("No 'message' in {:?}", cell_message).into())
+                        )?,
+                    }));
+                }
+            }
+        }
+
         let mut update_stmt = format!(r#"UPDATE "{}" SET "#, table_to_write);
         update_stmt.push_str(&assignments.join(", "));
         update_stmt.push_str(&format!(r#" WHERE "row_number" = {}"#, row_number));
@@ -2908,7 +2916,7 @@ pub async fn update_row_tx(
         // old version of this row:
         let delete_sql = format!(
             r#"DELETE FROM "message" WHERE "table" = '{}' AND "row" = {}"#,
-            table_name, row_number
+            base_table, row_number
         );
         let query = sqlx_query(&delete_sql);
         query.execute(tx.acquire().await?).await?;
@@ -2925,11 +2933,19 @@ pub async fn update_row_tx(
                 r#"INSERT INTO "message"
                ("table", "row", "column", "value", "level", "rule", "message")
                VALUES ('{}', {}, '{}', '{}', '{}', '{}', '{}')"#,
-                table_name, row_number, column, value, level, rule, message
+                base_table, row_number, column, value, level, rule, message
             );
             let query = sqlx_query(&insert_sql);
             query.execute(tx.acquire().await?).await?;
         }
+
+        Ok(())
+    }
+
+    // If table_to_write and current_table are the same, update it. Otherwise delete the current
+    // version of the row from the database and insert the new version to table_to_write:
+    if table_to_write == current_table {
+        direct_update(global_config, pool, tx, &table_to_write, row_number, &row).await?;
     } else {
         delete_row_tx(
             global_config,
