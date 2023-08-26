@@ -16,7 +16,7 @@ jobs:
       - name: Install postgresql server and client
         run: |
           sudo apt-get update
-          sudo apt-get install postgresql postgresql-contrib postgresql-client
+          sudo apt-get install postgresql postgresql-contrib postgresql-client sqlite3
       - name: Start the database server
         run: |
           sudo systemctl start postgresql.service
