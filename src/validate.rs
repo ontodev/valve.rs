@@ -50,10 +50,11 @@ pub struct QueryAsIf {
 }
 
 /// Given a config map, maps of compiled datatype and rule conditions, a database connection
-/// pool, a table name, a row to validate, and a row number in case the row already exists,
+/// pool, a table name, a row to validate and a row number in the case where the row already exists,
 /// perform both intra- and inter-row validation and return the validated row. Optionally, if a
-/// transaction is given, use that instead of the pool for database access. Note that this
-/// function is idempotent.
+/// transaction is given, use that instead of the pool for database access. Optionally, if
+/// query_as_if is given, validate the row counterfactually according to that parameter.
+/// Note that this function is idempotent.
 pub async fn validate_row(
     config: &SerdeMap,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
@@ -72,6 +73,12 @@ pub async fn validate_row(
     let tx = match tx {
         Some(tx) => tx,
         None => default_tx,
+    };
+
+    // Remove the _conflict suffix from the table_name if it has one:
+    let table_name = match table_name.strip_suffix("_conflict") {
+        None => table_name.clone(),
+        Some(base) => base,
     };
 
     // Initialize the result row with the values from the given row:
@@ -1086,7 +1093,6 @@ fn remove_duplicate_messages(row: &SerdeMap) -> Result<SerdeMap, sqlx::Error> {
             .unwrap_or(&vec![])
             .clone();
         messages.sort_by(|a, b| {
-            // TODO: Can we use a checksum or something more efficient than this string comparison?
             let a = format!(
                 "{}{}{}",
                 a.get("level").unwrap(),

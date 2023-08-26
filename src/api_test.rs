@@ -374,7 +374,7 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
     });
 
     // Undo/redo test 1:
-    let rn = insert_new_row(
+    let _rn = insert_new_row(
         &config,
         &compiled_datatype_conditions,
         &compiled_rule_conditions,

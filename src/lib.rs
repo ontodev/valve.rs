@@ -1208,7 +1208,9 @@ pub async fn valve(
     Ok(config.to_string())
 }
 
-/// TODO: Add docstring here
+/// Given a table name, a global configuration map, and a database connection pool, construct an
+/// SQL query that one can use to get the logical contents of the row (whether or not the row is
+/// valid) including any messages.
 pub fn query_with_message_values(table: &str, global_config: &SerdeMap, pool: &AnyPool) -> String {
     let table = match table.strip_suffix("_conflict") {
         None => table.clone(),
@@ -1355,90 +1357,11 @@ pub async fn get_affected_rows(
     Ok(table_rows)
 }
 
-// TODO: Remove this function:
-/// Given a database connection pool, a database transaction, a table name, a column name, a row
-/// number, and a cell value for the column, insert an update message to the message table
-/// indicating that the actual value of the column has been changed to cell_value.
-pub async fn insert_update_message(
-    pool: &AnyPool,
-    tx: &mut Transaction<'_, sqlx::Any>,
-    table: &str,
-    column: &str,
-    row_number: &u32,
-    cell_value: &str,
-) -> Result<(), sqlx::Error> {
-    // In some cases the current value of the column will have to retrieved from the last
-    // generated message, so we retrieve that from the database:
-    let last_msg_val = {
-        let sql = format!(
-            r#"SELECT value
-                     FROM "message"
-                     WHERE "row" = {row}
-                       AND "column" = '{column}'
-                       AND "table" = '{table}'
-                     ORDER BY "message_id" DESC
-                     LIMIT 1"#,
-            column = column,
-            table = table,
-            row = row_number,
-        );
-        let query = sqlx_query(&sql);
-
-        let results = query.fetch_all(tx.acquire().await?).await?;
-        if results.is_empty() {
-            "".to_string()
-        } else {
-            let row = &results[0];
-            let raw_value = row.try_get_raw("value").unwrap();
-            if !raw_value.is_null() {
-                get_column_value(&row, "value", "text")
-            } else {
-                "".to_string()
-            }
-        }
-    };
-
-    // Construct the SQL for the insert of the 'update' message using last_msg_val:
-    let casted_column = cast_column_sql_to_text(column, "non-text");
-    let is_clause = if pool.any_kind() == AnyKind::Sqlite {
-        "IS"
-    } else {
-        "IS NOT DISTINCT FROM"
-    };
-
-    let insert_sql = format!(
-        r#"INSERT INTO "message"
-               ("table", "row", "column", "value", "level", "rule", "message")
-               SELECT
-                 '{table}', "row_number", '{column}', '{value}', 'update', 'rule:update',
-                 'Value changed from ''' ||
-                   CASE
-                     WHEN "{column}" {is_clause} NULL THEN '{last_msg_val}'
-                     ELSE {casted_column}
-                   END ||
-                 ''' to ''{value}'''
-               FROM "{table}_view"
-               WHERE "row_number" = {row} AND (
-                 ("{column}" {is_clause} NULL AND '{last_msg_val}' != '{value}')
-                   OR {casted_column} != '{value}'
-               )"#,
-        column = column,
-        last_msg_val = last_msg_val,
-        is_clause = is_clause,
-        row = row_number,
-        table = table,
-        value = cell_value,
-    );
-    let query = sqlx_query(&insert_sql);
-    query.execute(tx.acquire().await?).await?;
-    Ok(())
-}
-
-/// TODO Add docstring here
+/// Given a global configuration map, a database connection pool, a database transaction, a table
+/// name and a row number, get the logical contents of that row (whether or not it is valid),
+/// including any messages, from the database.
 pub async fn get_row_from_db(
     global_config: &SerdeMap,
-    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
-    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     pool: &AnyPool,
     tx: &mut Transaction<'_, sqlx::Any>,
     table: &str,
@@ -1778,7 +1701,6 @@ pub async fn process_updates(
     updates: &IndexMap<String, IndexMap<u32, SerdeMap>>,
     query_as_if: &QueryAsIf,
     do_not_recurse: bool,
-    user: &str,
 ) -> Result<(), sqlx::Error> {
     for (update_table, rows_to_update) in updates {
         for (row_number, row) in rows_to_update {
@@ -1808,7 +1730,6 @@ pub async fn process_updates(
                 row_number,
                 false,
                 do_not_recurse,
-                user,
             )
             .await?;
         }
@@ -1816,7 +1737,10 @@ pub async fn process_updates(
     Ok(())
 }
 
-/// TODO: Add a docstring here.
+/// Given a database transaction, a table name, a row number, optionally: the version of the row we
+/// are going to change it from, optionally: the version of the row we are going to change it to,
+/// and the name of the user making the change, record the change to the history table in the
+/// database. Note that `from` and `to` cannot both be None.
 pub async fn record_row_change(
     tx: &mut Transaction<'_, sqlx::Any>,
     table: &str,
@@ -1853,12 +1777,15 @@ pub async fn record_row_change(
         }
     }
 
-    fn summarize(
-        table: &str,
-        row_number: &u32,
-        from: Option<&SerdeMap>,
-        to: Option<&SerdeMap>,
-    ) -> Result<String, String> {
+    fn summarize(from: Option<&SerdeMap>, to: Option<&SerdeMap>) -> Result<String, String> {
+        // Constructs a summary of the form:
+        // {
+        //   "column":"bar",
+        //   "level":"update",
+        //   "message":"Value changed from 'A' to 'B'",
+        //   "old_value":"'A'",
+        //   "value":"'B'"
+        // }
         let mut summary = vec![];
         match (from, to) {
             (None, _) | (_, None) => Ok("NULL".to_string()),
@@ -1885,8 +1812,6 @@ pub async fn record_row_change(
                         })
                         .ok_or(format!("No value for column: {} in {:?}", column, to))?;
                     if new_value != old_value {
-                        let old_value = format_value(&old_value.to_string(), &numeric_re);
-                        let new_value = format_value(&new_value.to_string(), &numeric_re);
                         let mut column_summary = SerdeMap::new();
                         column_summary.insert("column".to_string(), json!(column));
                         column_summary.insert("level".to_string(), json!("update"));
@@ -1894,7 +1819,11 @@ pub async fn record_row_change(
                         column_summary.insert("value".to_string(), json!(new_value));
                         column_summary.insert(
                             "message".to_string(),
-                            json!(format!("Value changed from {} to {}", old_value, new_value)),
+                            json!(format!(
+                                "Value changed from {} to {}",
+                                format_value(&old_value.to_string(), &numeric_re),
+                                format_value(&new_value.to_string(), &numeric_re),
+                            )),
                         );
                         let column_summary = to_text(Some(&column_summary), false);
                         summary.push(column_summary);
@@ -1910,7 +1839,7 @@ pub async fn record_row_change(
         None => table.clone(),
         Some(base) => base,
     };
-    let summary = summarize(table, row_number, from, to).map_err(|e| SqlxCErr(e.into()))?;
+    let summary = summarize(from, to).map_err(|e| SqlxCErr(e.into()))?;
     let (from, to) = (to_text(from, true), to_text(to, true));
     let sql = format!(
         r#"INSERT INTO "history" ("table", "row", "from", "to", "summary", "user")
@@ -1923,7 +1852,7 @@ pub async fn record_row_change(
     Ok(())
 }
 
-/// TODO: Docstring
+/// Given a row and a column name, extract the contents of the row as a JSON object and return it.
 fn get_json_from_row(row: &AnyRow, column: &str) -> Option<SerdeMap> {
     let raw_value = row.try_get_raw(column).unwrap();
     if !raw_value.is_null() {
@@ -1944,7 +1873,11 @@ fn get_json_from_row(row: &AnyRow, column: &str) -> Option<SerdeMap> {
     }
 }
 
-/// TODO: Docstring
+/// Given a user, a history_id, a database transaction, and an undone_state indicating whether to
+/// set the associated history record as undone (if undone_state == true) or as not undone
+/// (otherwise). When setting the record to undone, user is used for the 'undone_by' field of the
+/// history table, otherwise undone_by is set to NULL and the user is indicated as the one
+/// responsible for the change (instead of whoever made the change originally).
 async fn switch_undone_state(
     user: &str,
     history_id: u16,
@@ -1966,8 +1899,9 @@ async fn switch_undone_state(
     Ok(())
 }
 
-// TODO: undo and redo have a lot in common. See if it is possible to refactor.
-/// TODO: Add docstring here.
+/// Given a global configuration map, maps of compiled datatype and ruled conditions, a database
+/// connection pool, and the user who initiated the undo, find the last recorded change to the
+/// database and undo it, indicating in the history table that undo_user is responsible.
 #[async_recursion]
 pub async fn undo(
     global_config: &SerdeMap,
@@ -1989,7 +1923,6 @@ pub async fn undo(
            ORDER BY "history_id" DESC LIMIT 1"#,
         is_clause
     );
-
     let query = sqlx_query(&sql);
     let result_row = query.fetch_optional(pool).await?;
     let result_row = match result_row {
@@ -2006,7 +1939,6 @@ pub async fn undo(
     let row_number = row_number as u32;
     let from = get_json_from_row(&result_row, "from");
     let to = get_json_from_row(&result_row, "to");
-    let user: &str = result_row.get("user");
 
     match (from, to) {
         (None, None) => {
@@ -2014,7 +1946,7 @@ pub async fn undo(
                 "Cannot redo unknown operation from None to None".into(),
             ))
         }
-        (None, Some(to)) => {
+        (None, Some(_)) => {
             // Undo an insert:
             let mut tx = pool.begin().await?;
 
@@ -2026,12 +1958,10 @@ pub async fn undo(
                 &mut tx,
                 table,
                 &row_number,
-                user,
             )
             .await?;
 
-            // Mark the history record as undone and commit the transaction:
-            switch_undone_state(user, history_id, true, &mut tx).await?;
+            switch_undone_state(undo_user, history_id, true, &mut tx).await?;
             tx.commit().await?;
         }
         (Some(from), None) => {
@@ -2048,19 +1978,16 @@ pub async fn undo(
                 &from,
                 Some(row_number),
                 false,
-                user,
             )
             .await?;
 
-            // Mark the history record as undone and commit the transaction:
-            switch_undone_state(user, history_id, true, &mut tx).await?;
+            switch_undone_state(undo_user, history_id, true, &mut tx).await?;
             tx.commit().await?;
         }
-        (Some(from), Some(to)) => {
+        (Some(from), Some(_)) => {
             // Undo an an update:
             let mut tx = pool.begin().await?;
 
-            // Update the row to the old value, `from`:
             update_row_tx(
                 global_config,
                 compiled_datatype_conditions,
@@ -2072,34 +1999,29 @@ pub async fn undo(
                 &row_number,
                 false,
                 false,
-                user,
             )
             .await?;
 
-            // Mark the history record as undone and commit the transaction:
-            switch_undone_state(user, history_id, true, &mut tx).await?;
+            switch_undone_state(undo_user, history_id, true, &mut tx).await?;
             tx.commit().await?;
         }
     }
     Ok(())
 }
 
-/// TODO: Add docstring here.
+/// Given a global configuration map, maps of compiled datatype and ruled conditions, a database
+/// connection pool, and the user who initiated the redo, find the last recorded change to the
+/// database that was undone and redo it, indicating in the history table that redo_user is
+/// responsible for the redo.
 #[async_recursion]
 pub async fn redo(
     global_config: &SerdeMap,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     pool: &AnyPool,
-    undo_user: &str,
+    redo_user: &str,
 ) -> Result<(), sqlx::Error> {
-    let is_clause = if pool.any_kind() == AnyKind::Sqlite {
-        "IS"
-    } else {
-        "IS NOT DISTINCT FROM"
-    };
     let sql = r#"SELECT * FROM "history" ORDER BY "history_id" DESC LIMIT 1"#;
-
     let query = sqlx_query(&sql);
     let result_row = query.fetch_optional(pool).await?;
     let result_row = match result_row {
@@ -2123,7 +2045,6 @@ pub async fn redo(
     let row_number = row_number as u32;
     let from = get_json_from_row(&result_row, "from");
     let to = get_json_from_row(&result_row, "to");
-    let user: &str = result_row.get("user");
 
     match (from, to) {
         (None, None) => {
@@ -2145,15 +2066,13 @@ pub async fn redo(
                 &to,
                 Some(row_number),
                 false,
-                user,
             )
             .await?;
 
-            // Mark the history record as redone and commit the transaction:
-            switch_undone_state(user, history_id, false, &mut tx).await?;
+            switch_undone_state(redo_user, history_id, false, &mut tx).await?;
             tx.commit().await?;
         }
-        (Some(from), None) => {
+        (Some(_), None) => {
             // Redo a delete:
             let mut tx = pool.begin().await?;
 
@@ -2165,19 +2084,16 @@ pub async fn redo(
                 &mut tx,
                 table,
                 &row_number,
-                user,
             )
             .await?;
 
-            // Mark the history record as redone and commit the transaction:
-            switch_undone_state(user, history_id, false, &mut tx).await?;
+            switch_undone_state(redo_user, history_id, false, &mut tx).await?;
             tx.commit().await?;
         }
-        (Some(from), Some(to)) => {
+        (Some(_), Some(to)) => {
             // Redo an an update:
             let mut tx = pool.begin().await?;
 
-            // Update the row to the old value, `from`:
             update_row_tx(
                 global_config,
                 compiled_datatype_conditions,
@@ -2189,70 +2105,69 @@ pub async fn redo(
                 &row_number,
                 false,
                 false,
-                user,
             )
             .await?;
 
-            // Mark the history record as redone and commit the transaction:
-            switch_undone_state(user, history_id, false, &mut tx).await?;
+            switch_undone_state(redo_user, history_id, false, &mut tx).await?;
             tx.commit().await?;
         }
     }
     Ok(())
 }
 
-/// A wrapper around [insert_new_row_tx()] in which the database transaction is implicitly created
-/// and then committed once the given new row has been inserted.
+/// A wrapper around [insert_new_row_tx()] in which the following steps are also performed:
+/// - A database transaction is created and then committed once the given new row has been inserted.
+/// - The row is validated before insertion and the update to the database is recorded to the
+///   history table indicating that the given user is responsible for the change.
 #[async_recursion]
 pub async fn insert_new_row(
     global_config: &SerdeMap,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     pool: &AnyPool,
-    table_to_write: &str,
+    table: &str,
     row: &SerdeMap,
     new_row_number: Option<u32>,
     user: &str,
 ) -> Result<u32, sqlx::Error> {
     let mut tx = pool.begin().await?;
+
     let row = validate_row(
         global_config,
         compiled_datatype_conditions,
         compiled_rule_conditions,
         pool,
         Some(&mut tx),
-        table_to_write,
+        table,
         row,
         new_row_number,
         None,
     )
     .await?;
+
     let rn = insert_new_row_tx(
         global_config,
         compiled_datatype_conditions,
         compiled_rule_conditions,
         pool,
         &mut tx,
-        table_to_write,
+        table,
         &row,
         new_row_number,
         true,
-        user,
     )
     .await?;
 
-    // Add an entry to the history table here corresponding to the new insertion:
-    record_row_change(&mut tx, table_to_write, &rn, None, Some(&row), user).await?;
+    record_row_change(&mut tx, table, &rn, None, Some(&row), user).await?;
 
     tx.commit().await?;
     Ok(rn)
 }
 
 /// Given a global config map, compiled datatype and rule conditions, a database connection pool, a
-/// database transaction, a table name, and a row, assign a new row number to the row and insert it
-/// to the database using the given transaction, then return the new row number. Optionally, if
-/// row_number is provided, use that to identify the new row. If skip_validation is set to true,
-/// omit the implicit call to [validate_row()].
+/// database transaction, a table name, and a row, assign the given new row number to the row and
+/// insert it to the database using the given transaction, then return the new row number.
+/// If skip_validation is set to true, omit the implicit call to [validate_row()].
 #[async_recursion]
 pub async fn insert_new_row_tx(
     global_config: &SerdeMap,
@@ -2260,15 +2175,14 @@ pub async fn insert_new_row_tx(
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     pool: &AnyPool,
     tx: &mut Transaction<sqlx::Any>,
-    table_to_write: &str,
+    table: &str,
     row: &SerdeMap,
     new_row_number: Option<u32>,
     skip_validation: bool,
-    user: &str,
 ) -> Result<u32, sqlx::Error> {
-    // Extract the base table name in case table_to_write has a _conflict suffix:
-    let base_table = match table_to_write.strip_suffix("_conflict") {
-        None => table_to_write.clone(),
+    // Remove any _conflict suffix from the table name:
+    let table = match table.strip_suffix("_conflict") {
+        None => table.clone(),
         Some(base) => base,
     };
 
@@ -2281,7 +2195,7 @@ pub async fn insert_new_row_tx(
             compiled_rule_conditions,
             pool,
             Some(tx),
-            base_table,
+            table,
             row,
             new_row_number,
             None,
@@ -2304,7 +2218,7 @@ pub async fn insert_new_row_tx(
                         FROM "history"
                        WHERE "table" = '{table}'
                    ) t"#,
-                table = base_table
+                table = table
             );
             let query = sqlx_query(&sql);
             let result_row = query.fetch_one(tx.acquire().await?).await?;
@@ -2339,13 +2253,10 @@ pub async fn insert_new_row_tx(
         let mut cell_for_insert = cell.clone();
         if cell_valid {
             cell_for_insert.remove("value");
-            let sql_type =
-                get_sql_type_from_global_config(&global_config, &base_table, &column, pool).ok_or(
-                    SqlxCErr(
-                        format!("Unable to determine SQL type for {}.{}", base_table, column)
-                            .into(),
-                    ),
-                )?;
+            let sql_type = get_sql_type_from_global_config(&global_config, &table, &column, pool)
+                .ok_or(SqlxCErr(
+                format!("Unable to determine SQL type for {}.{}", table, column).into(),
+            ))?;
             insert_values.push(cast_sql_param_from_text(&sql_type));
             insert_params.push(String::from(cell_value));
         } else {
@@ -2383,66 +2294,55 @@ pub async fn insert_new_row_tx(
     // database currently were replaced with `row`:
     let query_as_if = QueryAsIf {
         kind: QueryAsIfKind::Add,
-        table: base_table.to_string(),
-        alias: format!("{}_as_if", base_table),
+        table: table.to_string(),
+        alias: format!("{}_as_if", table),
         row_number: new_row_number,
         row: Some(row.clone()),
     };
 
     // Look through the valve config to see which tables are dependent on this table
     // and find the rows that need to be updated:
-    let (_, updates_after, _) =
-        get_rows_to_update(global_config, pool, tx, base_table, &query_as_if)
-            .await
-            .map_err(|e| SqlxCErr(e.into()))?;
+    let (_, updates_after, _) = get_rows_to_update(global_config, pool, tx, table, &query_as_if)
+        .await
+        .map_err(|e| SqlxCErr(e.into()))?;
 
-    // If the row is not already being directed to the conflict table, check it to see if it should
-    // be redirected there:
-    let table_to_write = {
-        if table_to_write.ends_with("_conflict") {
-            table_to_write.to_string()
-        } else {
-            let mut table_to_write = String::from(base_table);
-            for (column, cell) in row.iter() {
-                let valid = cell.get("valid").ok_or(SqlxCErr(
-                    format!("No flag named 'valid' in {:?}", cell).into(),
-                ))?;
-                if valid == false {
-                    let structure = global_config
-                        .get("table")
-                        .and_then(|t| t.as_object())
-                        .and_then(|t| t.get(base_table))
-                        .and_then(|t| t.as_object())
-                        .and_then(|t| t.get("column"))
-                        .and_then(|c| c.as_object())
-                        .and_then(|c| c.get(column))
-                        .and_then(|c| c.as_object())
-                        .and_then(|c| c.get("structure"))
-                        .and_then(|s| s.as_str())
-                        .unwrap_or_else(|| "");
-                    if vec!["primary", "unique"].contains(&structure)
-                        || structure.starts_with("tree(")
-                    {
-                        let messages = cell
-                            .get("messages")
-                            .and_then(|m| m.as_array())
-                            .ok_or(SqlxCErr(format!("No 'messages' in {:?}", cell).into()))?;
-                        for msg in messages {
-                            let level = msg
-                                .get("level")
-                                .and_then(|l| l.as_str())
-                                .ok_or(SqlxCErr(format!("No 'level' in {:?}", cell).into()))?;
-                            if level == "error" {
-                                table_to_write.push_str("_conflict");
-                                break;
-                            }
-                        }
+    // Check it to see if the row should be redirected to the conflict table:
+    let mut table_to_write = String::from(table);
+    for (column, cell) in row.iter() {
+        let valid = cell.get("valid").ok_or(SqlxCErr(
+            format!("No flag named 'valid' in {:?}", cell).into(),
+        ))?;
+        if valid == false {
+            let structure = global_config
+                .get("table")
+                .and_then(|t| t.as_object())
+                .and_then(|t| t.get(table))
+                .and_then(|t| t.as_object())
+                .and_then(|t| t.get("column"))
+                .and_then(|c| c.as_object())
+                .and_then(|c| c.get(column))
+                .and_then(|c| c.as_object())
+                .and_then(|c| c.get("structure"))
+                .and_then(|s| s.as_str())
+                .unwrap_or_else(|| "");
+            if vec!["primary", "unique"].contains(&structure) || structure.starts_with("tree(") {
+                let messages = cell
+                    .get("messages")
+                    .and_then(|m| m.as_array())
+                    .ok_or(SqlxCErr(format!("No 'messages' in {:?}", cell).into()))?;
+                for msg in messages {
+                    let level = msg
+                        .get("level")
+                        .and_then(|l| l.as_str())
+                        .ok_or(SqlxCErr(format!("No 'level' in {:?}", cell).into()))?;
+                    if level == "error" {
+                        table_to_write.push_str("_conflict");
+                        break;
                     }
                 }
             }
-            table_to_write
         }
-    };
+    }
 
     // Add the new row to the table:
     let insert_stmt = local_sql_syntax(
@@ -2473,7 +2373,7 @@ pub async fn insert_new_row_tx(
             r#"INSERT INTO "message"
                ("table", "row", "column", "value", "level", "rule", "message")
                VALUES ('{}', {}, '{}', '{}', '{}', '{}', '{}')"#,
-            base_table, new_row_number, column, value, level, rule, message
+            table, new_row_number, column, value, level, rule, message
         );
         let query = sqlx_query(&message_sql);
         query.execute(tx.acquire().await?).await?;
@@ -2489,7 +2389,6 @@ pub async fn insert_new_row_tx(
         &updates_after,
         &query_as_if,
         false,
-        user,
     )
     .await?;
 
@@ -2497,36 +2396,22 @@ pub async fn insert_new_row_tx(
 }
 
 /// A wrapper around [delete_row_tx()] in which the database transaction is implicitly created
-/// and then committed once the given row has been deleted.
+/// and then committed once the given row has been deleted, and the change to the database is
+/// recorded in the history table indicating that the given user is responsible for the change.
 #[async_recursion]
 pub async fn delete_row(
     global_config: &SerdeMap,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     pool: &AnyPool,
-    table_to_write: &str,
+    table: &str,
     row_number: &u32,
     user: &str,
 ) -> Result<(), sqlx::Error> {
     let mut tx = pool.begin().await?;
 
-    // Record the row deletion in the history table, unless this delete is just part 1 of a
-    // logical update:
-    let base_table = match table_to_write.strip_suffix("_conflict") {
-        None => table_to_write.clone(),
-        Some(base) => base,
-    };
-    let row = get_row_from_db(
-        global_config,
-        compiled_datatype_conditions,
-        compiled_rule_conditions,
-        pool,
-        &mut tx,
-        &base_table,
-        row_number,
-    )
-    .await?;
-    record_row_change(&mut tx, &base_table, row_number, Some(&row), None, user).await?;
+    let row = get_row_from_db(global_config, pool, &mut tx, &table, row_number).await?;
+    record_row_change(&mut tx, &table, row_number, Some(&row), None, user).await?;
 
     delete_row_tx(
         global_config,
@@ -2534,19 +2419,17 @@ pub async fn delete_row(
         compiled_rule_conditions,
         pool,
         &mut tx,
-        table_to_write,
+        table,
         row_number,
-        user,
     )
     .await?;
+
     tx.commit().await?;
     Ok(())
 }
 
 /// Given a global config map, maps of datatype and rule conditions, a database connection pool, a
-/// database transaction, a table name, a row number, and a flag indicating whether this delete
-/// is one part of what is effectively an update (i.e., a delete followed by an insert, as opposed
-/// to a straight delete), delete the given row from the database.
+/// database transaction, a table name, and a row number, delete the given row from the database.
 #[async_recursion]
 pub async fn delete_row_tx(
     global_config: &SerdeMap,
@@ -2554,12 +2437,12 @@ pub async fn delete_row_tx(
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     pool: &AnyPool,
     tx: &mut Transaction<sqlx::Any>,
-    table_to_write: &str,
+    table: &str,
     row_number: &u32,
-    user: &str,
 ) -> Result<(), sqlx::Error> {
-    let base_table = match table_to_write.strip_suffix("_conflict") {
-        None => table_to_write.clone(),
+    // Remove any _conflict suffix from the table name:
+    let table = match table.strip_suffix("_conflict") {
+        None => table.clone(),
         Some(base) => base,
     };
 
@@ -2567,8 +2450,8 @@ pub async fn delete_row_tx(
     // database:
     let query_as_if = QueryAsIf {
         kind: QueryAsIfKind::Remove,
-        table: base_table.to_string(),
-        alias: format!("{}_as_if", base_table),
+        table: table.to_string(),
+        alias: format!("{}_as_if", table),
         row_number: *row_number,
         row: None,
     };
@@ -2577,7 +2460,7 @@ pub async fn delete_row_tx(
     // rows that need to be updated. Since this is a delete there will only be rows to update
     // before and none after the delete:
     let (updates_before, _, updates_intra) =
-        get_rows_to_update(global_config, pool, tx, base_table, &query_as_if)
+        get_rows_to_update(global_config, pool, tx, table, &query_as_if)
             .await
             .map_err(|e| SqlxCErr(e.into()))?;
 
@@ -2591,18 +2474,17 @@ pub async fn delete_row_tx(
         &updates_before,
         &query_as_if,
         false,
-        user,
     )
     .await?;
 
     // Now delete the row:
     let sql1 = format!(
         "DELETE FROM \"{}\" WHERE row_number = {}",
-        base_table, row_number,
+        table, row_number,
     );
     let sql2 = format!(
         "DELETE FROM \"{}_conflict\" WHERE row_number = {}",
-        base_table, row_number
+        table, row_number
     );
     for sql in vec![sql1, sql2] {
         let query = sqlx_query(&sql);
@@ -2611,7 +2493,7 @@ pub async fn delete_row_tx(
 
     let sql = format!(
         r#"DELETE FROM "message" WHERE "table" = '{}' AND "row" = {}"#,
-        base_table, row_number
+        table, row_number
     );
     let query = sqlx_query(&sql);
     query.execute(tx.acquire().await?).await?;
@@ -2627,7 +2509,6 @@ pub async fn delete_row_tx(
         &updates_intra,
         &query_as_if,
         true,
-        user,
     )
     .await?;
 
@@ -2635,7 +2516,9 @@ pub async fn delete_row_tx(
 }
 
 /// A wrapper around [update_row_tx()] in which the database transaction is implicitly created
-/// and then committed once the given row has been updated..
+/// and then committed once the given row has been updated, the given row is validated before
+/// the update, and the update is recorded to the history table indicating that the given user
+/// is responsible for the change.
 #[async_recursion]
 pub async fn update_row(
     global_config: &SerdeMap,
@@ -2649,17 +2532,9 @@ pub async fn update_row(
 ) -> Result<(), sqlx::Error> {
     let mut tx = pool.begin().await?;
 
-    // Get the old version of the row from the database
-    let old_row = get_row_from_db(
-        global_config,
-        compiled_datatype_conditions,
-        compiled_rule_conditions,
-        pool,
-        &mut tx,
-        table_name,
-        row_number,
-    )
-    .await?;
+    // Get the old version of the row from the database so that we can later record it to the
+    // history table:
+    let old_row = get_row_from_db(global_config, pool, &mut tx, table_name, row_number).await?;
 
     let row = validate_row(
         global_config,
@@ -2685,7 +2560,6 @@ pub async fn update_row(
         row_number,
         true,
         false,
-        user,
     )
     .await?;
 
@@ -2704,9 +2578,11 @@ pub async fn update_row(
     Ok(())
 }
 
-/// Given global config map, a database connection pool, a database transaction, a table name, a
-/// row, and the row number to update, update the corresponding row in the database, using the given
-/// transaction, with new values as specified by `row`. TODO: Update this docstring.
+/// Given global config map, maps of compiled datatype and rule conditions, a database connection
+/// pool, a database transaction, a table name, a row, and the row number to update, update the
+/// corresponding row in the database. If skip_validation is set, skip the implicit call to
+/// [validate_row()]. If do_not_recurse, is set, do not look for rows which could be affected by
+/// this update.
 #[async_recursion]
 pub async fn update_row_tx(
     global_config: &SerdeMap,
@@ -2714,120 +2590,16 @@ pub async fn update_row_tx(
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     pool: &AnyPool,
     tx: &mut Transaction<sqlx::Any>,
-    table_name: &str,
+    table: &str,
     row: &SerdeMap,
     row_number: &u32,
     skip_validation: bool,
     do_not_recurse: bool,
-    user: &str,
 ) -> Result<(), sqlx::Error> {
-    // First, look through the valve config to see which tables are dependent on this table and find
-    // the rows that need to be updated. The variable query_as_if is used to validate the given row,
-    // counterfactually, "as if" the version of the row in the database currently were replaced with
-    // `row`:
-    let query_as_if = QueryAsIf {
-        kind: QueryAsIfKind::Replace,
-        table: table_name.to_string(),
-        alias: format!("{}_as_if", table_name),
-        row_number: *row_number,
-        row: Some(row.clone()),
-    };
-    let (updates_before, updates_after, updates_intra) = {
-        if do_not_recurse {
-            (IndexMap::new(), IndexMap::new(), IndexMap::new())
-        } else {
-            get_rows_to_update(global_config, pool, tx, table_name, &query_as_if)
-                .await
-                .map_err(|e| SqlxCErr(e.into()))?
-        }
-    };
-
-    // Process the updates that need to be performed before the update of the target row:
-    process_updates(
-        global_config,
-        compiled_datatype_conditions,
-        compiled_rule_conditions,
-        pool,
-        tx,
-        &updates_before,
-        &query_as_if,
-        false,
-        user,
-    )
-    .await?;
-
-    // Send the row through the row validator to determine if any fields are problematic and
-    // to mark them with appropriate messages:
-    let row = if !skip_validation {
-        validate_row(
-            global_config,
-            compiled_datatype_conditions,
-            compiled_rule_conditions,
-            pool,
-            Some(tx),
-            table_name,
-            row,
-            Some(*row_number),
-            None,
-        )
-        .await?
-    } else {
-        row.clone()
-    };
-
-    // Now figure out whether the row is currently in the base table or the conflict table:
-    let sql = format!(
-        "SELECT 1 FROM \"{}\" WHERE row_number = {}",
-        table_name, row_number
-    );
-    let query = sqlx_query(&sql);
-    let rows = query.fetch_all(tx.acquire().await?).await?;
-    let mut current_table = String::from(table_name);
-    if rows.len() == 0 {
-        current_table.push_str("_conflict");
-    }
-
-    // Next, figure out where to put the new version of the row:
-    let mut table_to_write = String::from(table_name);
-    for (column, cell) in row.iter() {
-        let valid = cell.get("valid").ok_or(SqlxCErr(
-            format!("No flag named 'valid' in {:?}", cell).into(),
-        ))?;
-        if valid == false {
-            let structure = global_config
-                .get("table")
-                .and_then(|t| t.as_object())
-                .and_then(|t| t.get(table_name))
-                .and_then(|t| t.as_object())
-                .and_then(|t| t.get("column"))
-                .and_then(|c| c.as_object())
-                .and_then(|c| c.get(column))
-                .and_then(|c| c.as_object())
-                .and_then(|c| c.get("structure"))
-                .and_then(|s| s.as_str())
-                .unwrap_or_else(|| "");
-            if vec!["primary", "unique"].contains(&structure) || structure.starts_with("tree(") {
-                let messages = cell
-                    .get("messages")
-                    .and_then(|m| m.as_array())
-                    .ok_or(SqlxCErr(
-                        format!("No array named 'messages' in {:?}", cell).into(),
-                    ))?;
-                for msg in messages {
-                    let level = msg
-                        .get("level")
-                        .and_then(|l| l.as_str())
-                        .ok_or(SqlxCErr(format!("No 'level' in {:?}", msg).into()))?;
-                    if level == "error" {
-                        table_to_write.push_str("_conflict");
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
     async fn direct_update(
+        // Function to update the database table directly using an UPDATE statement, as opposed to
+        // a DELETE followed by an INSERT which must be used when the row needs to move from the
+        // normal to the conflict table or vice versa.
         global_config: &SerdeMap,
         pool: &AnyPool,
         tx: &mut Transaction<'_, sqlx::Any>,
@@ -2942,6 +2714,117 @@ pub async fn update_row_tx(
         Ok(())
     }
 
+    // Remove any _conflict suffix from the table name:
+    let table = match table.strip_suffix("_conflict") {
+        None => table.clone(),
+        Some(base) => base,
+    };
+
+    // First, look through the valve config to see which tables are dependent on this table and find
+    // the rows that need to be updated. The variable query_as_if is used to validate the given row,
+    // counterfactually, "as if" the version of the row in the database currently were replaced with
+    // `row`:
+    let query_as_if = QueryAsIf {
+        kind: QueryAsIfKind::Replace,
+        table: table.to_string(),
+        alias: format!("{}_as_if", table),
+        row_number: *row_number,
+        row: Some(row.clone()),
+    };
+    let (updates_before, updates_after, updates_intra) = {
+        if do_not_recurse {
+            (IndexMap::new(), IndexMap::new(), IndexMap::new())
+        } else {
+            get_rows_to_update(global_config, pool, tx, table, &query_as_if)
+                .await
+                .map_err(|e| SqlxCErr(e.into()))?
+        }
+    };
+
+    // Process the updates that need to be performed before the update of the target row:
+    process_updates(
+        global_config,
+        compiled_datatype_conditions,
+        compiled_rule_conditions,
+        pool,
+        tx,
+        &updates_before,
+        &query_as_if,
+        false,
+    )
+    .await?;
+
+    // Send the row through the row validator to determine if any fields are problematic and
+    // to mark them with appropriate messages:
+    let row = if !skip_validation {
+        validate_row(
+            global_config,
+            compiled_datatype_conditions,
+            compiled_rule_conditions,
+            pool,
+            Some(tx),
+            table,
+            row,
+            Some(*row_number),
+            None,
+        )
+        .await?
+    } else {
+        row.clone()
+    };
+
+    // Now figure out whether the row is currently in the base table or the conflict table:
+    let sql = format!(
+        "SELECT 1 FROM \"{}\" WHERE row_number = {}",
+        table, row_number
+    );
+    let query = sqlx_query(&sql);
+    let rows = query.fetch_all(tx.acquire().await?).await?;
+    let mut current_table = String::from(table);
+    if rows.len() == 0 {
+        current_table.push_str("_conflict");
+    }
+
+    // Next, figure out where to put the new version of the row:
+    let mut table_to_write = String::from(table);
+    for (column, cell) in row.iter() {
+        let valid = cell.get("valid").ok_or(SqlxCErr(
+            format!("No flag named 'valid' in {:?}", cell).into(),
+        ))?;
+        if valid == false {
+            let structure = global_config
+                .get("table")
+                .and_then(|t| t.as_object())
+                .and_then(|t| t.get(table))
+                .and_then(|t| t.as_object())
+                .and_then(|t| t.get("column"))
+                .and_then(|c| c.as_object())
+                .and_then(|c| c.get(column))
+                .and_then(|c| c.as_object())
+                .and_then(|c| c.get("structure"))
+                .and_then(|s| s.as_str())
+                .unwrap_or_else(|| "");
+            if vec!["primary", "unique"].contains(&structure) || structure.starts_with("tree(") {
+                let messages = cell
+                    .get("messages")
+                    .and_then(|m| m.as_array())
+                    .ok_or(SqlxCErr(
+                        format!("No array named 'messages' in {:?}", cell).into(),
+                    ))?;
+                for msg in messages {
+                    let level = msg
+                        .get("level")
+                        .and_then(|l| l.as_str())
+                        .ok_or(SqlxCErr(format!("No 'level' in {:?}", msg).into()))?;
+                    if level == "error" {
+                        table_to_write.push_str("_conflict");
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     // If table_to_write and current_table are the same, update it. Otherwise delete the current
     // version of the row from the database and insert the new version to table_to_write:
     if table_to_write == current_table {
@@ -2953,9 +2836,8 @@ pub async fn update_row_tx(
             compiled_rule_conditions,
             pool,
             tx,
-            &current_table,
+            table,
             row_number,
-            user,
         )
         .await?;
         insert_new_row_tx(
@@ -2964,11 +2846,10 @@ pub async fn update_row_tx(
             compiled_rule_conditions,
             pool,
             tx,
-            &table_to_write,
+            table,
             &row,
             Some(*row_number),
             false,
-            user,
         )
         .await?;
     }
@@ -2984,7 +2865,6 @@ pub async fn update_row_tx(
         &updates_intra,
         &query_as_if,
         true,
-        user,
     )
     .await?;
 
@@ -2999,7 +2879,6 @@ pub async fn update_row_tx(
         &updates_after,
         &query_as_if,
         false,
-        user,
     )
     .await?;
 
