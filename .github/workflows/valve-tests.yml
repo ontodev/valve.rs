@@ -16,7 +16,16 @@ jobs:
       - name: Install postgresql server and client
         run: |
           sudo apt-get update
-          sudo apt-get install postgresql postgresql-contrib postgresql-client sqlite3
+          sudo apt-get install postgresql postgresql-contrib postgresql-client
+          sudo apt install build-essential
+          sudo mkdir /opt/sqlite3
+          wget https://www.sqlite.org/2023/sqlite-autoconf-3430000.tar.gz
+          tar xvfz sqlite-autoconf-3430000.tar.gz
+          sudo mv sqlite-autoconf-3430000 /opt/sqlite3
+          cd /opt/sqlite3/sqlite-autoconf-3430000
+          ./configure
+          make -j 2
+          sudo make install
       - name: Start the database server
         run: |
           sudo systemctl start postgresql.service
