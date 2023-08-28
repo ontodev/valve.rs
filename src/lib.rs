@@ -1373,7 +1373,17 @@ pub async fn get_row_from_db(
         row_number
     );
     let query = sqlx_query(&sql);
-    let sql_row = query.fetch_one(tx.acquire().await?).await?;
+    let rows = query.fetch_all(tx.acquire().await?).await?;
+    if rows.len() == 0 {
+        return Err(SqlxCErr(
+            format!(
+                "In get_row_from_db(). No rows found for row_number: {}",
+                row_number
+            )
+            .into(),
+        ));
+    }
+    let sql_row = &rows[0];
 
     let messages = {
         let raw_messages = sql_row.try_get_raw("message")?;
@@ -1468,10 +1478,17 @@ pub async fn get_db_value(
     );
 
     let query = sqlx_query(&sql);
-    let result_row = query
-        .fetch_one(tx.acquire().await.map_err(|e| e.to_string())?)
+    let rows = query
+        .fetch_all(tx.acquire().await.map_err(|e| e.to_string())?)
         .await
         .map_err(|e| e.to_string())?;
+    if rows.len() == 0 {
+        return Err(format!(
+            "In get_db_value(). No rows found for row_number: {}",
+            row_number
+        ));
+    }
+    let result_row = &rows[0];
     let value: &str = result_row.try_get(column).unwrap();
     Ok(value.to_string())
 }
@@ -2159,7 +2176,6 @@ pub async fn insert_new_row(
     .await?;
 
     record_row_change(&mut tx, table, &rn, None, Some(&row), user).await?;
-
     tx.commit().await?;
     Ok(rn)
 }
@@ -2221,13 +2237,18 @@ pub async fn insert_new_row_tx(
                 table = table
             );
             let query = sqlx_query(&sql);
-            let result_row = query.fetch_one(tx.acquire().await?).await?;
-            let result = result_row.try_get_raw("row_number")?;
+            let result_rows = query.fetch_all(tx.acquire().await?).await?;
             let new_row_number: i64;
-            if result.is_null() {
+            if result_rows.len() == 0 {
                 new_row_number = 1;
             } else {
-                new_row_number = result_row.get("row_number");
+                let result_row = &result_rows[0];
+                let result = result_row.try_get_raw("row_number")?;
+                if result.is_null() {
+                    new_row_number = 1;
+                } else {
+                    new_row_number = result_row.get("row_number");
+                }
             }
             let new_row_number = new_row_number as u32 + 1;
             new_row_number
@@ -2308,7 +2329,11 @@ pub async fn insert_new_row_tx(
 
     // Check it to see if the row should be redirected to the conflict table:
     let mut table_to_write = String::from(table);
+    let mut outer_break = false;
     for (column, cell) in row.iter() {
+        if outer_break {
+            break;
+        }
         let valid = cell.get("valid").ok_or(SqlxCErr(
             format!("No flag named 'valid' in {:?}", cell).into(),
         ))?;
@@ -2337,6 +2362,7 @@ pub async fn insert_new_row_tx(
                         .ok_or(SqlxCErr(format!("No 'level' in {:?}", cell).into()))?;
                     if level == "error" {
                         table_to_write.push_str("_conflict");
+                        outer_break = true;
                         break;
                     }
                 }

@@ -6,10 +6,14 @@ use ontodev_valve::{
     valve_grammar::StartParser,
     ColumnRule, CompiledCondition, ParsedStructure, SerdeMap, ValveCommand,
 };
+use rand::distributions::{Alphanumeric, DistString, Distribution, Uniform};
+use rand::{random, thread_rng};
 use serde_json::{json, Value as SerdeValue};
 use sqlx::{
     any::{AnyConnectOptions, AnyKind, AnyPool, AnyPoolOptions},
     query as sqlx_query,
+    Error::Configuration as SqlxCErr,
+    Row, ValueRef,
 };
 use std::{collections::HashMap, str::FromStr};
 
@@ -368,6 +372,228 @@ async fn test_dependencies(
     Ok(())
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DbOperation {
+    Insert,
+    Delete,
+    Update,
+    Undo,
+    Redo,
+}
+
+async fn generate_operation_sequence(pool: &AnyPool) -> Result<Vec<DbOperation>, sqlx::Error> {
+    /*
+    Algorithm:
+    ----------
+    1. Determine the number of "modify" operations to randomly generate.
+    2. Generate a modify/undo pair
+    3. Do the modify
+    4. Either add an undo immediately after the given modigy, or defer the undo by adding it to a
+       stack.
+    5. Once all of the modify operations are processed, go through the undo stack:
+       a. For each undo, once it's been processed, possibly generate a redo/undo pair and treat
+          it in the same way as you do above, i.e., possibly defer the undo.
+     */
+
+    // The number of "modify" (insert/update/delete) operations to generate:
+    let list_len = {
+        let between = Uniform::from(10..26);
+        let mut rng = thread_rng();
+        between.sample(&mut rng)
+    };
+
+    let mut operations = vec![];
+    let mut undo_stack = vec![];
+    for _ in 0..list_len {
+        let between = Uniform::from(0..3);
+        let mut rng = thread_rng();
+        match between.sample(&mut rng) {
+            0 => operations.push(DbOperation::Insert),
+            1 => {
+                let query = sqlx_query("SELECT MAX(row_number) AS row_number FROM table1_view");
+                let rows = query.fetch_all(pool).await?;
+                if rows.len() != 0 {
+                    operations.push(DbOperation::Delete)
+                } else {
+                    operations.push(DbOperation::Insert)
+                }
+            }
+            2 => {
+                let query = sqlx_query("SELECT MAX(row_number) AS row_number FROM table1_view");
+                let rows = query.fetch_all(pool).await?;
+                if rows.len() != 0 {
+                    operations.push(DbOperation::Update)
+                } else {
+                    operations.push(DbOperation::Insert)
+                }
+            }
+            _ => unreachable!(),
+        };
+        // Randomly either add an undo immediately after the modify, or add it to the undo_stack:
+        if random::<bool>() == true {
+            operations.push(DbOperation::Undo);
+        } else {
+            undo_stack.push(DbOperation::Undo);
+        }
+    }
+
+    // Go through the items in the undo stack:
+    let mut further_operations = vec![];
+    let mut final_undos = vec![];
+    while let Some(_) = undo_stack.pop() {
+        // Add the undo to the list of further operations to perform:
+        further_operations.push(DbOperation::Undo);
+        // Randomly add a redo as well:
+        if random::<bool>() == true {
+            further_operations.push(DbOperation::Redo);
+            // Randomly either add an undo immediately after the redo, or add it to a further
+            // stack of undos to be performed at the end:
+            if random::<bool>() == true {
+                further_operations.push(DbOperation::Undo);
+            } else {
+                final_undos.push(DbOperation::Undo);
+            }
+        }
+    }
+
+    operations.append(&mut further_operations);
+    // Since final_undos is essentially a stack, we need to reverse it:
+    final_undos.reverse();
+    operations.append(&mut final_undos);
+    Ok(operations)
+}
+
+// TODO: Add a comment here.
+async fn test_random_undo_redo(
+    config: &SerdeMap,
+    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
+    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    pool: &AnyPool,
+) -> Result<(), sqlx::Error> {
+    fn generate_value() -> String {
+        let mut value = Alphanumeric.sample_string(&mut rand::thread_rng(), 10);
+        while random::<bool>() && random::<bool>() {
+            value.push_str(" ");
+            value.push_str(&Alphanumeric.sample_string(&mut rand::thread_rng(), 10));
+        }
+        if random::<bool>() && random::<bool>() {
+            value.push_str(" ");
+        }
+        value
+    }
+
+    fn generate_row() -> SerdeMap {
+        let mut row = SerdeMap::new();
+        row.insert(
+            "prefix".to_string(),
+            json!({"messages": [], "valid": true, "value": generate_value()}),
+        );
+        row.insert(
+            "base".to_string(),
+            json!({"messages": [], "valid": true, "value": generate_value()}),
+        );
+        row.insert(
+            "ontology IRI".to_string(),
+            json!({"messages": [], "valid": true, "value": generate_value()}),
+        );
+        row.insert(
+            "version IRI".to_string(),
+            json!({"messages": [], "valid": true, "value": generate_value()}),
+        );
+        row
+    }
+
+    let op_seq = generate_operation_sequence(pool).await?;
+    for operation in op_seq {
+        match operation {
+            DbOperation::Delete => {
+                let query = sqlx_query("SELECT MAX(row_number) AS row_number FROM table1_view");
+                let sql_row = query.fetch_one(pool).await?;
+                let raw_row_number = sql_row.try_get_raw("row_number")?;
+                if raw_row_number.is_null() {
+                    return Err(SqlxCErr("No rows in table1_view".into()));
+                } else {
+                    let row_number: i64 = sql_row.get("row_number");
+                    let row_number = row_number as u32;
+                    delete_row(
+                        &config,
+                        &compiled_datatype_conditions,
+                        &compiled_rule_conditions,
+                        &pool,
+                        "table1",
+                        &row_number,
+                        "VALVE",
+                    )
+                    .await?;
+                }
+            }
+            DbOperation::Update => {
+                let query = sqlx_query("SELECT MAX(row_number) AS row_number FROM table1_view");
+                let sql_row = query.fetch_one(pool).await?;
+                let raw_row_number = sql_row.try_get_raw("row_number")?;
+                if raw_row_number.is_null() {
+                    return Err(SqlxCErr("No rows in table1_view".into()));
+                } else {
+                    let row_number: i64 = sql_row.get("row_number");
+                    let row_number = row_number as u32;
+                    let row = generate_row();
+                    update_row(
+                        &config,
+                        &compiled_datatype_conditions,
+                        &compiled_rule_conditions,
+                        &pool,
+                        "table1",
+                        &row,
+                        &row_number,
+                        "VALVE",
+                    )
+                    .await?;
+                }
+            }
+            DbOperation::Insert => {
+                let row = generate_row();
+                let _rn = insert_new_row(
+                    &config,
+                    &compiled_datatype_conditions,
+                    &compiled_rule_conditions,
+                    &pool,
+                    "table1",
+                    &row,
+                    None,
+                    "VALVE",
+                )
+                .await?;
+            }
+            DbOperation::Undo => {
+                undo(
+                    &config,
+                    &compiled_datatype_conditions,
+                    &compiled_rule_conditions,
+                    &pool,
+                    "VALVE",
+                )
+                .await?;
+            }
+            DbOperation::Redo => {
+                redo(
+                    &config,
+                    &compiled_datatype_conditions,
+                    &compiled_rule_conditions,
+                    &pool,
+                    "VALVE",
+                )
+                .await?;
+            }
+        };
+    }
+
+    Ok(())
+}
+
+// The data in a given row will be easy to randomize, but it would be nice if we could also
+// randomize the function calls. This would be nice: Represent the possible operations in terms of
+// a state transition diagram, and generate random paths through the state space whose length is
+// between some minimum and maximum.
 async fn test_undo_redo(
     config: &SerdeMap,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
@@ -682,6 +908,13 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
     )
     .await?;
     test_undo_redo(
+        &config,
+        &compiled_datatype_conditions,
+        &compiled_rule_conditions,
+        &pool,
+    )
+    .await?;
+    test_random_undo_redo(
         &config,
         &compiled_datatype_conditions,
         &compiled_rule_conditions,
