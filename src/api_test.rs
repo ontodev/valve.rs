@@ -4,58 +4,21 @@ use ontodev_valve::{
     validate::{get_matching_values, validate_row},
     valve,
     valve_grammar::StartParser,
-    ValveCommand,
+    ColumnRule, CompiledCondition, ParsedStructure, SerdeMap, ValveCommand,
 };
 use serde_json::{json, Value as SerdeValue};
 use sqlx::{
-    any::{AnyConnectOptions, AnyKind, AnyPoolOptions},
+    any::{AnyConnectOptions, AnyKind, AnyPool, AnyPoolOptions},
     query as sqlx_query,
 };
-use std::str::FromStr;
+use std::{collections::HashMap, str::FromStr};
 
-pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Error> {
-    let config = valve(table, database, &ValveCommand::Config, false, "table").await?;
-    let config: SerdeValue = serde_json::from_str(config.as_str()).unwrap();
-    let config = config.as_object().unwrap();
-
-    // To connect to a postgresql database listening to a unix domain socket:
-    // ----------------------------------------------------------------------
-    // let connection_options =
-    //     AnyConnectOptions::from_str("postgres:///testdb?host=/var/run/postgresql")?;
-    //
-    // To query the connection type at runtime via the pool:
-    // -----------------------------------------------------
-    // let db_type = pool.any_kind();
-
-    let connection_options;
-    if database.starts_with("postgresql://") {
-        connection_options = AnyConnectOptions::from_str(database)?;
-    } else {
-        let connection_string;
-        if !database.starts_with("sqlite://") {
-            connection_string = format!("sqlite://{}?mode=rwc", database);
-        } else {
-            connection_string = database.to_string();
-        }
-        connection_options = AnyConnectOptions::from_str(connection_string.as_str()).unwrap();
-    }
-
-    let pool = AnyPoolOptions::new()
-        .max_connections(5)
-        .connect_with(connection_options)
-        .await?;
-    if pool.any_kind() == AnyKind::Sqlite {
-        sqlx_query("PRAGMA foreign_keys = ON")
-            .execute(&pool)
-            .await?;
-    }
-
-    let parser = StartParser::new();
-    let compiled_datatype_conditions = get_compiled_datatype_conditions(&config, &parser);
-    let parsed_structure_conditions = get_parsed_structure_conditions(&config, &parser);
-    let compiled_rule_conditions =
-        get_compiled_rule_conditions(&config, compiled_datatype_conditions.clone(), &parser);
-
+async fn test_matching(
+    config: &SerdeMap,
+    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
+    parsed_structure_conditions: &HashMap<String, ParsedStructure>,
+    pool: &AnyPool,
+) -> Result<(), sqlx::Error> {
     // Test the get_matching_values() function:
     let matching_values = get_matching_values(
         &config,
@@ -100,6 +63,15 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         ])
     );
 
+    Ok(())
+}
+
+async fn test_idempotent_validate_and_update(
+    config: &SerdeMap,
+    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
+    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    pool: &AnyPool,
+) -> Result<(), sqlx::Error> {
     // We test that validate_row() is idempotent by running it multiple times on the same row:
     let row = json!({
         "child": {"messages": [], "valid": true, "value": "b"},
@@ -156,10 +128,6 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
     .await?;
     assert_eq!(result_row, result_row_2);
 
-    // Test update, delete, and insert. NOTE that there are no calls to assert() below. You must use
-    // an external script to fetch the data from the database and run a diff against a known good
-    // sample.
-
     // Update the row we constructed and validated above in the database:
     update_row(
         &config,
@@ -173,6 +141,15 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
     )
     .await?;
 
+    Ok(())
+}
+
+async fn test_validate_and_insert_1(
+    config: &SerdeMap,
+    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
+    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    pool: &AnyPool,
+) -> Result<(), sqlx::Error> {
     // Validate and insert a new row:
     let row = json!({
         "id": {"messages": [], "valid": true, "value": "BFO:0000027"},
@@ -213,6 +190,15 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
     )
     .await?;
 
+    Ok(())
+}
+
+async fn test_validate_and_update(
+    config: &SerdeMap,
+    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
+    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    pool: &AnyPool,
+) -> Result<(), sqlx::Error> {
     // Validate and update an existing row:
     let row = json!({
         "child": {"messages": [], "valid": true, "value": 2},
@@ -253,6 +239,15 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
     )
     .await?;
 
+    Ok(())
+}
+
+async fn test_validate_and_insert_2(
+    config: &SerdeMap,
+    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
+    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    pool: &AnyPool,
+) -> Result<(), sqlx::Error> {
     // Validate and insert a new row:
     let row = json!({
         "child": {"messages": [], "valid": true, "value": 2},
@@ -293,6 +288,15 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
     )
     .await?;
 
+    Ok(())
+}
+
+async fn test_dependencies(
+    config: &SerdeMap,
+    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
+    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    pool: &AnyPool,
+) -> Result<(), sqlx::Error> {
     // Test cases for updates/inserts/deletes with dependencies.
     let row = json!({
         "foreign_column": {"messages": [], "valid": true, "value": "w"},
@@ -361,6 +365,15 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
     )
     .await?;
 
+    Ok(())
+}
+
+async fn test_undo_redo(
+    config: &SerdeMap,
+    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
+    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    pool: &AnyPool,
+) -> Result<(), sqlx::Error> {
     // Undo/redo tests
     let row_1 = json!({
         "foreign_column": {"messages": [], "valid": true, "value": "j"},
@@ -575,6 +588,104 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         &compiled_rule_conditions,
         &pool,
         "VALVE",
+    )
+    .await?;
+
+    Ok(())
+}
+
+pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Error> {
+    let config = valve(table, database, &ValveCommand::Config, false, "table").await?;
+    let config: SerdeValue = serde_json::from_str(config.as_str()).unwrap();
+    let config = config.as_object().unwrap();
+
+    // To connect to a postgresql database listening to a unix domain socket:
+    // ----------------------------------------------------------------------
+    // let connection_options =
+    //     AnyConnectOptions::from_str("postgres:///testdb?host=/var/run/postgresql")?;
+    //
+    // To query the connection type at runtime via the pool:
+    // -----------------------------------------------------
+    // let db_type = pool.any_kind();
+
+    let connection_options;
+    if database.starts_with("postgresql://") {
+        connection_options = AnyConnectOptions::from_str(database)?;
+    } else {
+        let connection_string;
+        if !database.starts_with("sqlite://") {
+            connection_string = format!("sqlite://{}?mode=rwc", database);
+        } else {
+            connection_string = database.to_string();
+        }
+        connection_options = AnyConnectOptions::from_str(connection_string.as_str()).unwrap();
+    }
+
+    let pool = AnyPoolOptions::new()
+        .max_connections(5)
+        .connect_with(connection_options)
+        .await?;
+    if pool.any_kind() == AnyKind::Sqlite {
+        sqlx_query("PRAGMA foreign_keys = ON")
+            .execute(&pool)
+            .await?;
+    }
+
+    let parser = StartParser::new();
+    let compiled_datatype_conditions = get_compiled_datatype_conditions(&config, &parser);
+    let parsed_structure_conditions = get_parsed_structure_conditions(&config, &parser);
+    let compiled_rule_conditions =
+        get_compiled_rule_conditions(&config, compiled_datatype_conditions.clone(), &parser);
+
+    // NOTE that you must use an external script to fetch the data from the database and run a diff
+    // against a known good sample to verify that these tests yield the expected results:
+    test_matching(
+        &config,
+        &compiled_datatype_conditions,
+        &parsed_structure_conditions,
+        &pool,
+    )
+    .await?;
+    test_idempotent_validate_and_update(
+        &config,
+        &compiled_datatype_conditions,
+        &compiled_rule_conditions,
+        &pool,
+    )
+    .await?;
+    test_validate_and_insert_1(
+        &config,
+        &compiled_datatype_conditions,
+        &compiled_rule_conditions,
+        &pool,
+    )
+    .await?;
+    test_validate_and_update(
+        &config,
+        &compiled_datatype_conditions,
+        &compiled_rule_conditions,
+        &pool,
+    )
+    .await?;
+    test_validate_and_insert_2(
+        &config,
+        &compiled_datatype_conditions,
+        &compiled_rule_conditions,
+        &pool,
+    )
+    .await?;
+    test_dependencies(
+        &config,
+        &compiled_datatype_conditions,
+        &compiled_rule_conditions,
+        &pool,
+    )
+    .await?;
+    test_undo_redo(
+        &config,
+        &compiled_datatype_conditions,
+        &compiled_rule_conditions,
+        &pool,
     )
     .await?;
 
