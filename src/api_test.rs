@@ -490,14 +490,14 @@ async fn generate_operation_sequence(pool: &AnyPool) -> Result<Vec<DbOperation>,
     Ok(operations)
 }
 
-// Randomly generate a number of insert/update/delete operations, possibly followed by undos and/or
-// redos.
 async fn test_randomized_api_test_with_undo_redo(
     config: &SerdeMap,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     pool: &AnyPool,
 ) -> Result<(), sqlx::Error> {
+    // Randomly generate a number of insert/update/delete operations, possibly followed by undos
+    // and/or redos.
     eprint!("Running test_randomized_api_test_with_undo_redo() ... ");
     fn generate_value() -> String {
         let mut value = Alphanumeric.sample_string(&mut rand::thread_rng(), 10);
@@ -620,10 +620,6 @@ async fn test_randomized_api_test_with_undo_redo(
     Ok(())
 }
 
-// The data in a given row will be easy to randomize, but it would be nice if we could also
-// randomize the function calls. This would be nice: Represent the possible operations in terms of
-// a state transition diagram, and generate random paths through the state space whose length is
-// between some minimum and maximum.
 async fn test_undo_redo(
     config: &SerdeMap,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
