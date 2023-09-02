@@ -508,7 +508,6 @@ pub fn read_config_files(
                 "user",
             ],
             "column": {
-                // TODO: Add a timestamp column
                 "table": {
                     "table": "history",
                     "column": "table",
@@ -997,21 +996,29 @@ pub async fn configure_db(
         history_statements.push(format!(
             indoc! {r#"
                 CREATE TABLE "history" (
-                  {}
+                  {row_number}
                   "table" TEXT,
                   "row" BIGINT,
                   "from" TEXT,
                   "to" TEXT,
                   "summary" TEXT,
                   "user" TEXT,
-                  "undone_by" TEXT
+                  "undone_by" TEXT,
+                  {timestamp}
                 );
               "#},
-            {
+            row_number = {
                 if pool.any_kind() == AnyKind::Sqlite {
                     "\"history_id\" INTEGER PRIMARY KEY,"
                 } else {
                     "\"history_id\" SERIAL PRIMARY KEY,"
+                }
+            },
+            timestamp = {
+                if pool.any_kind() == AnyKind::Sqlite {
+                    "\"timestamp\" TIMESTAMP DEFAULT(STRFTIME('%Y-%m-%d %H:%M:%f', 'NOW'))"
+                } else {
+                    "\"timestamp\" TIMESTAMP DEFAULT CURRENT_TIMESTAMP"
                 }
             },
         ));
@@ -1900,12 +1907,23 @@ async fn switch_undone_state(
     history_id: u16,
     undone_state: bool,
     tx: &mut Transaction<'_, sqlx::Any>,
+    pool: &AnyPool,
 ) -> Result<(), sqlx::Error> {
     // Set the history record to undone:
+    let timestamp = {
+        if pool.any_kind() == AnyKind::Sqlite {
+            "STRFTIME('%Y-%m-%d %H:%M:%f', 'NOW')"
+        } else {
+            "CURRENT_TIMESTAMP"
+        }
+    };
     let undone_by = if undone_state == true {
-        format!(r#""undone_by" = '{}'"#, user)
+        format!(r#""undone_by" = '{}', "timestamp" = {}"#, user, timestamp)
     } else {
-        format!(r#""undone_by" = NULL, "user" = '{}'"#, user)
+        format!(
+            r#""undone_by" = NULL, "user" = '{}', "timestamp" = {}"#,
+            user, timestamp
+        )
     };
     let sql = format!(
         r#"UPDATE "history" SET {} WHERE "history_id" = {}"#,
@@ -1978,7 +1996,7 @@ pub async fn undo(
             )
             .await?;
 
-            switch_undone_state(undo_user, history_id, true, &mut tx).await?;
+            switch_undone_state(undo_user, history_id, true, &mut tx, pool).await?;
             tx.commit().await?;
         }
         (Some(from), None) => {
@@ -1998,7 +2016,7 @@ pub async fn undo(
             )
             .await?;
 
-            switch_undone_state(undo_user, history_id, true, &mut tx).await?;
+            switch_undone_state(undo_user, history_id, true, &mut tx, pool).await?;
             tx.commit().await?;
         }
         (Some(from), Some(_)) => {
@@ -2019,7 +2037,7 @@ pub async fn undo(
             )
             .await?;
 
-            switch_undone_state(undo_user, history_id, true, &mut tx).await?;
+            switch_undone_state(undo_user, history_id, true, &mut tx, pool).await?;
             tx.commit().await?;
         }
     }
@@ -2038,7 +2056,19 @@ pub async fn redo(
     pool: &AnyPool,
     redo_user: &str,
 ) -> Result<(), sqlx::Error> {
-    let sql = r#"SELECT * FROM "history" ORDER BY "history_id" DESC LIMIT 1"#;
+    // Look in the history table, get the row with the greatest ID, get the row number,
+    // from, and to, and determine whether the last operation was a delete, insert, or update.
+    let is_not_clause = if pool.any_kind() == AnyKind::Sqlite {
+        "IS NOT"
+    } else {
+        "IS DISTINCT FROM"
+    };
+    let sql = format!(
+        r#"SELECT * FROM "history"
+           WHERE "undone_by" {} NULL
+           ORDER BY "timestamp" DESC LIMIT 1"#,
+        is_not_clause
+    );
     let query = sqlx_query(&sql);
     let result_row = query.fetch_optional(pool).await?;
     let result_row = match result_row {
@@ -2086,7 +2116,7 @@ pub async fn redo(
             )
             .await?;
 
-            switch_undone_state(redo_user, history_id, false, &mut tx).await?;
+            switch_undone_state(redo_user, history_id, false, &mut tx, pool).await?;
             tx.commit().await?;
         }
         (Some(_), None) => {
@@ -2104,7 +2134,7 @@ pub async fn redo(
             )
             .await?;
 
-            switch_undone_state(redo_user, history_id, false, &mut tx).await?;
+            switch_undone_state(redo_user, history_id, false, &mut tx, pool).await?;
             tx.commit().await?;
         }
         (Some(_), Some(to)) => {
@@ -2125,7 +2155,7 @@ pub async fn redo(
             )
             .await?;
 
-            switch_undone_state(redo_user, history_id, false, &mut tx).await?;
+            switch_undone_state(redo_user, history_id, false, &mut tx, pool).await?;
             tx.commit().await?;
         }
     }

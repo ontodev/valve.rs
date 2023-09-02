@@ -23,6 +23,7 @@ async fn test_matching(
     parsed_structure_conditions: &HashMap<String, ParsedStructure>,
     pool: &AnyPool,
 ) -> Result<(), sqlx::Error> {
+    eprint!("Running test_matching() ... ");
     // Test the get_matching_values() function:
     let matching_values = get_matching_values(
         &config,
@@ -67,6 +68,7 @@ async fn test_matching(
         ])
     );
 
+    eprintln!("done.");
     Ok(())
 }
 
@@ -76,6 +78,7 @@ async fn test_idempotent_validate_and_update(
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     pool: &AnyPool,
 ) -> Result<(), sqlx::Error> {
+    eprint!("Running test_idempotent_validate_and_update() ... ");
     // We test that validate_row() is idempotent by running it multiple times on the same row:
     let row = json!({
         "child": {"messages": [], "valid": true, "value": "b"},
@@ -145,6 +148,7 @@ async fn test_idempotent_validate_and_update(
     )
     .await?;
 
+    eprintln!("done.");
     Ok(())
 }
 
@@ -154,6 +158,7 @@ async fn test_validate_and_insert_1(
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     pool: &AnyPool,
 ) -> Result<(), sqlx::Error> {
+    eprint!("Running test_validate_and_insert_1() ... ");
     // Validate and insert a new row:
     let row = json!({
         "id": {"messages": [], "valid": true, "value": "BFO:0000027"},
@@ -194,6 +199,7 @@ async fn test_validate_and_insert_1(
     )
     .await?;
 
+    eprintln!("done.");
     Ok(())
 }
 
@@ -203,6 +209,7 @@ async fn test_validate_and_update(
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     pool: &AnyPool,
 ) -> Result<(), sqlx::Error> {
+    eprint!("Running test_validate_and_update() ... ");
     // Validate and update an existing row:
     let row = json!({
         "child": {"messages": [], "valid": true, "value": 2},
@@ -243,6 +250,7 @@ async fn test_validate_and_update(
     )
     .await?;
 
+    eprintln!("done.");
     Ok(())
 }
 
@@ -252,6 +260,7 @@ async fn test_validate_and_insert_2(
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     pool: &AnyPool,
 ) -> Result<(), sqlx::Error> {
+    eprint!("Running test_validate_and_insert_2() ... ");
     // Validate and insert a new row:
     let row = json!({
         "child": {"messages": [], "valid": true, "value": 2},
@@ -292,6 +301,7 @@ async fn test_validate_and_insert_2(
     )
     .await?;
 
+    eprintln!("done.");
     Ok(())
 }
 
@@ -301,6 +311,7 @@ async fn test_dependencies(
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     pool: &AnyPool,
 ) -> Result<(), sqlx::Error> {
+    eprint!("Running test_dependencies() ... ");
     // Test cases for updates/inserts/deletes with dependencies.
     let row = json!({
         "foreign_column": {"messages": [], "valid": true, "value": "w"},
@@ -369,6 +380,7 @@ async fn test_dependencies(
     )
     .await?;
 
+    eprintln!("done.");
     Ok(())
 }
 
@@ -385,19 +397,23 @@ async fn generate_operation_sequence(pool: &AnyPool) -> Result<Vec<DbOperation>,
     /*
     Algorithm:
     ----------
-    1. Determine the number of "modify" operations to randomly generate.
+    1. Determine the number of "modify" operations to randomly generate. Then for each operation do
+       the following:
     2. Generate a modify/undo pair
     3. Do the modify
-    4. Either add an undo immediately after the given modigy, or defer the undo by adding it to a
-       stack.
-    5. Once all of the modify operations are processed, go through the undo stack:
-       a. For each undo, once it's been processed, possibly generate a redo/undo pair and treat
-          it in the same way as you do above, i.e., possibly defer the undo.
+    4. Either add an undo immediately after the given modify, or defer the undo by adding it to an
+       undo stack.
+    5. Possibly generate a redo/undo pair such that the undo comes immediately after the undo, or
+       is deferred to the undo stack.
+    6. Once all of the modify operations have been processed, go through the undo stack:
+       a. For each undo, once it's been processed, possibly generate a redo/undo pair such that the
+          undo comes immediately after the undo, or is deferred to the undo stack.
+
+    After this function returns, the database should be in the same logical state as it was before.
      */
 
-    // The number of "modify" (insert/update/delete) operations to generate:
     let list_len = {
-        let between = Uniform::from(10..26);
+        let between = Uniform::from(25..51);
         let mut rng = thread_rng();
         between.sample(&mut rng)
     };
@@ -432,6 +448,17 @@ async fn generate_operation_sequence(pool: &AnyPool) -> Result<Vec<DbOperation>,
         // Randomly either add an undo immediately after the modify, or add it to the undo_stack:
         if random::<bool>() == true {
             operations.push(DbOperation::Undo);
+            // Randomly add a redo as well:
+            if random::<bool>() == true {
+                operations.push(DbOperation::Redo);
+                // Randomly either add an undo either immediately after the redo, or to the
+                // undo_stack:
+                if random::<bool>() == true {
+                    operations.push(DbOperation::Undo);
+                } else {
+                    undo_stack.push(DbOperation::Undo);
+                }
+            }
         } else {
             undo_stack.push(DbOperation::Undo);
         }
@@ -439,37 +466,39 @@ async fn generate_operation_sequence(pool: &AnyPool) -> Result<Vec<DbOperation>,
 
     // Go through the items in the undo stack:
     let mut further_operations = vec![];
-    let mut final_undos = vec![];
+    let mut further_undo_stack = vec![];
     while let Some(_) = undo_stack.pop() {
         // Add the undo to the list of further operations to perform:
         further_operations.push(DbOperation::Undo);
         // Randomly add a redo as well:
         if random::<bool>() == true {
             further_operations.push(DbOperation::Redo);
-            // Randomly either add an undo immediately after the redo, or add it to a further
+            // Randomly add an undo either immediately after the redo, or to a further
             // stack of undos to be performed at the end:
             if random::<bool>() == true {
                 further_operations.push(DbOperation::Undo);
             } else {
-                final_undos.push(DbOperation::Undo);
+                further_undo_stack.push(DbOperation::Undo);
             }
         }
     }
 
     operations.append(&mut further_operations);
-    // Since final_undos is essentially a stack, we need to reverse it:
-    final_undos.reverse();
-    operations.append(&mut final_undos);
+    // Since further_undo_stack is a stack, we need to reverse it:
+    further_undo_stack.reverse();
+    operations.append(&mut further_undo_stack);
     Ok(operations)
 }
 
-// TODO: Add a comment here.
-async fn test_random_undo_redo(
+// Randomly generate a number of insert/update/delete operations, possibly followed by undos and/or
+// redos.
+async fn test_randomized_api_test_with_undo_redo(
     config: &SerdeMap,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     pool: &AnyPool,
 ) -> Result<(), sqlx::Error> {
+    eprint!("Running test_randomized_api_test_with_undo_redo() ... ");
     fn generate_value() -> String {
         let mut value = Alphanumeric.sample_string(&mut rand::thread_rng(), 10);
         while random::<bool>() && random::<bool>() {
@@ -503,8 +532,8 @@ async fn test_random_undo_redo(
         row
     }
 
-    let op_seq = generate_operation_sequence(pool).await?;
-    for operation in op_seq {
+    let operations_list = generate_operation_sequence(pool).await?;
+    for operation in operations_list {
         match operation {
             DbOperation::Delete => {
                 let query = sqlx_query("SELECT MAX(row_number) AS row_number FROM table1_view");
@@ -587,6 +616,7 @@ async fn test_random_undo_redo(
         };
     }
 
+    eprintln!("done.");
     Ok(())
 }
 
@@ -600,6 +630,7 @@ async fn test_undo_redo(
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     pool: &AnyPool,
 ) -> Result<(), sqlx::Error> {
+    eprint!("Running test_undo_redo() ... ");
     // Undo/redo tests
     let row_1 = json!({
         "foreign_column": {"messages": [], "valid": true, "value": "j"},
@@ -817,6 +848,7 @@ async fn test_undo_redo(
     )
     .await?;
 
+    eprintln!("done.");
     Ok(())
 }
 
@@ -914,7 +946,8 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         &pool,
     )
     .await?;
-    test_random_undo_redo(
+
+    test_randomized_api_test_with_undo_redo(
         &config,
         &compiled_datatype_conditions,
         &compiled_rule_conditions,
