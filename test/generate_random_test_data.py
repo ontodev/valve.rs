@@ -65,7 +65,7 @@ CONFIG = {
         },
         "foo": {
             "allow_empty": True,
-            "datatype": "integer",
+            "datatype": "real",
             "structure": {
                 "type": "foreign",
                 "ftable": "table4",
@@ -131,7 +131,7 @@ CONFIG = {
         },
         "numeric_foreign_column": {
             "allow_empty": False,
-            "datatype": "integer",
+            "datatype": "real",
             "structure": {
                 "type": "primary",
             },
@@ -153,7 +153,7 @@ CONFIG = {
     "table6": {
         "child": {
             "allow_empty": False,
-            "datatype": "integer",
+            "datatype": "real",
             "structure": {
                 "type": "foreign",
                 "ftable": "table4",
@@ -162,7 +162,7 @@ CONFIG = {
         },
         "parent": {
             "allow_empty": True,
-            "datatype": "integer",
+            "datatype": "real",
             "structure": {
                 "type": "tree",
                 "tcolumn": "child",
@@ -170,7 +170,7 @@ CONFIG = {
         },
         "xyzzy": {
             "allow_empty": True,
-            "datatype": "integer",
+            "datatype": "real",
             "structure": {
                 "type": "under",
                 "ttable": "table6",
@@ -184,7 +184,7 @@ CONFIG = {
         },
         "bar": {
             "allow_empty": True,
-            "datatype": "integer",
+            "datatype": "numeric",
         },
     },
 }
@@ -261,11 +261,18 @@ def get_constrained_cell_value(table, column, row_num, prev_inserts):
             + " "
             + "".join(random.choices(string.ascii_lowercase, k=TOKEN_LENGTH))
         )
-    elif CONFIG[table][column]["datatype"] == "integer":
+    elif CONFIG[table][column]["datatype"] in ["integer", "real", "numeric"]:
         # No leading 0s:
         cell = "".join(random.choices("123456789", k=1)) + "".join(
             random.choices(string.digits, k=TOKEN_LENGTH - 1)
         )
+        if CONFIG[table][column]["datatype"] != "integer":
+            cell = (
+                cell
+                + "."
+                + "".join(random.choices("0123456789", k=1))
+                + "".join(random.choices(string.digits, k=3))
+            )
     else:
         print(
             f"Warning: Unknown datatype: {CONFIG[table][column]['datatype']}. "
@@ -349,14 +356,33 @@ def main():
                             + " "
                             + "".join(random.choices(string.ascii_lowercase, k=TOKEN_LENGTH))
                         )
-                    else:
-                        if CONFIG[table][column]["datatype"] == "integer":
-                            cell = "".join(random.choices(string.ascii_lowercase, k=TOKEN_LENGTH))
-                        else:
-                            # No leading 0s:
-                            cell = "".join(random.choices("123456789", k=1)) + "".join(
-                                random.choices(string.digits, k=TOKEN_LENGTH - 1)
+                    elif CONFIG[table][column]["datatype"] == "text":
+                        # No leading 0s:
+                        cell = "".join(random.choices("123456789", k=1)) + "".join(
+                            random.choices(string.digits, k=TOKEN_LENGTH - 1)
+                        )
+                        # Randomly add some decimal places:
+                        if random.choice([True, False]):
+                            cell = (
+                                cell
+                                + "."
+                                + "".join(random.choices("0123456789", k=1))
+                                + "".join(random.choices(string.digits, k=3))
                             )
+                    elif CONFIG[table][column]["datatype"] != "integer":
+                        cell = "".join(random.choices(string.ascii_lowercase, k=TOKEN_LENGTH))
+                    elif random.choice([True, False]):
+                        cell = "".join(random.choices(string.ascii_lowercase, k=TOKEN_LENGTH))
+                    else:
+                        cell = "".join(random.choices("123456789", k=1)) + "".join(
+                            random.choices(string.digits, k=TOKEN_LENGTH - 1)
+                        )
+                        cell = (
+                            cell
+                            + "."
+                            + "".join(random.choices("0123456789", k=1))
+                            + "".join(random.choices(string.digits, k=3))
+                        )
 
                 row[column] = cell
                 if not prev_inserts.get(table):
