@@ -262,7 +262,7 @@ def get_constrained_cell_value(table, column, row_num, prev_inserts):
             + "".join(random.choices(string.ascii_lowercase, k=TOKEN_LENGTH))
         )
     elif CONFIG[table][column]["datatype"] in ["integer", "real", "numeric"]:
-        # No leading 0s:
+        # No leading zeros:
         cell = "".join(random.choices("123456789", k=1)) + "".join(
             random.choices(string.digits, k=TOKEN_LENGTH - 1)
         )
@@ -271,7 +271,8 @@ def get_constrained_cell_value(table, column, row_num, prev_inserts):
                 cell
                 + "."
                 + "".join(random.choices("0123456789", k=1))
-                + "".join(random.choices(string.digits, k=3))
+                # No trailing zeros:
+                + "".join(random.choices("123456789", k=3))
             )
     else:
         print(
@@ -357,7 +358,7 @@ def main():
                             + "".join(random.choices(string.ascii_lowercase, k=TOKEN_LENGTH))
                         )
                     elif CONFIG[table][column]["datatype"] == "text":
-                        # No leading 0s:
+                        # No leading zeros:
                         cell = "".join(random.choices("123456789", k=1)) + "".join(
                             random.choices(string.digits, k=TOKEN_LENGTH - 1)
                         )
@@ -367,13 +368,15 @@ def main():
                                 cell
                                 + "."
                                 + "".join(random.choices("0123456789", k=1))
-                                + "".join(random.choices(string.digits, k=3))
+                                # No trailing zeros:
+                                + "".join(random.choices("123456789", k=3))
                             )
                     elif CONFIG[table][column]["datatype"] != "integer":
                         cell = "".join(random.choices(string.ascii_lowercase, k=TOKEN_LENGTH))
                     elif random.choice([True, False]):
                         cell = "".join(random.choices(string.ascii_lowercase, k=TOKEN_LENGTH))
                     else:
+                        # No leading zeros:
                         cell = "".join(random.choices("123456789", k=1)) + "".join(
                             random.choices(string.digits, k=TOKEN_LENGTH - 1)
                         )
@@ -381,7 +384,8 @@ def main():
                             cell
                             + "."
                             + "".join(random.choices("0123456789", k=1))
-                            + "".join(random.choices(string.digits, k=3))
+                            # No trailing zeros:
+                            + "".join(random.choices("123456789", k=3))
                         )
 
                 row[column] = cell
