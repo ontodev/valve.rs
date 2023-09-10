@@ -2632,7 +2632,7 @@ fn get_column_value(row: &AnyRow, column: &str, sql_type: &str) -> String {
         let value: i32 = row.get(format!(r#"{}"#, column).as_str());
         value.to_string()
     } else if s == "real" {
-        let value: f64 = row.get(format!(r#"{}"#, column).as_str());
+        let value: f32 = row.get(format!(r#"{}"#, column).as_str());
         value.to_string()
     } else {
         let value: &str = row.get(format!(r#"{}"#, column).as_str());
