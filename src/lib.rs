@@ -725,6 +725,219 @@ pub fn get_parsed_structure_conditions(
     parsed_structure_conditions
 }
 
+/// TODO: Add docstring here.
+fn get_sql_for_standard_view(table: &str, pool: &AnyPool) -> (String, String) {
+    let table = match table.strip_suffix("_conflict") {
+        None => table.clone(),
+        Some(base) => base,
+    };
+    let mut drop_view_sql = format!(r#"DROP VIEW IF EXISTS "{}_view""#, table);
+    let message_t;
+    if pool.any_kind() == AnyKind::Postgres {
+        drop_view_sql.push_str(" CASCADE");
+        message_t = format!(
+            indoc! {r#"
+                (
+                  SELECT JSON_AGG(m)::TEXT FROM (
+                    SELECT "column", "value", "level", "rule", "message"
+                    FROM "message"
+                    WHERE "table" = '{t}'
+                      AND "row" = union_t."row_number"
+                    ORDER BY "column", "message_id"
+                  ) m
+                )
+            "#},
+            t = table,
+        );
+    } else {
+        message_t = format!(
+            indoc! {r#"
+                (
+                  SELECT NULLIF(
+                    JSON_GROUP_ARRAY(
+                      JSON_OBJECT(
+                        'column', "column",
+                        'value', "value",
+                        'level', "level",
+                        'rule', "rule",
+                        'message', "message"
+                      )
+                    ),
+                    '[]'
+                  )
+                  FROM "message"
+                  WHERE "table" = '{t}'
+                    AND "row" = union_t."row_number"
+                  ORDER BY "column", "message_id"
+                )
+            "#},
+            t = table,
+        );
+    }
+    drop_view_sql.push_str(";");
+
+    let history_t;
+    if pool.any_kind() == AnyKind::Postgres {
+        history_t = format!(
+            indoc! {r#"
+                (
+                  SELECT '[' || STRING_AGG("summary", ',') || ']'
+                  FROM (
+                    SELECT "summary"
+                    FROM "history"
+                    WHERE "table" = '{t}'
+                      AND "row" = union_t."row_number"
+                      AND "summary" IS DISTINCT FROM NULL
+                      AND "undone_by" IS NOT DISTINCT FROM NULL
+                    ORDER BY "history_id"
+                  ) h
+                )
+            "#},
+            t = table,
+        );
+    } else {
+        history_t = format!(
+            indoc! {r#"
+                (
+                  SELECT '[' || GROUP_CONCAT("summary") || ']'
+                  FROM (
+                    SELECT "summary"
+                    FROM "history"
+                    WHERE "table" = '{t}'
+                      AND "row" = union_t."row_number"
+                      AND "summary" IS NOT NULL
+                      AND "undone_by" IS NULL
+                    ORDER BY "history_id"
+                  ) h
+                )
+            "#},
+            t = table,
+        );
+    }
+
+    let create_view_sql = format!(
+        indoc! {r#"
+          CREATE VIEW "{t}_view" AS
+            SELECT
+              union_t.*,
+              {message_t} AS "message",
+              {history_t} AS "history"
+            FROM (
+              SELECT * FROM "{t}"
+              UNION ALL
+              SELECT * FROM "{t}_conflict"
+            ) as union_t;
+        "#},
+        t = table,
+        message_t = message_t,
+        history_t = history_t,
+    );
+
+    (drop_view_sql, create_view_sql)
+}
+
+/// TODO: Add docstring here.
+fn get_sql_for_user_view(
+    tables_config: &mut SerdeMap,
+    table: &str,
+    pool: &AnyPool,
+) -> (String, String) {
+    let table = match table.strip_suffix("_conflict") {
+        None => table.clone(),
+        Some(base) => base,
+    };
+    let is_clause = if pool.any_kind() == AnyKind::Sqlite {
+        "IS"
+    } else {
+        "IS NOT DISTINCT FROM"
+    };
+
+    // The config map can be the global map, or just the tables configuration map:
+    let real_columns = tables_config
+        .get(table)
+        .and_then(|t| t.as_object())
+        .and_then(|t| t.get("column"))
+        .and_then(|t| t.as_object())
+        .and_then(|t| Some(t.keys()))
+        .and_then(|k| Some(k.map(|k| k.to_string())))
+        .and_then(|t| Some(t.collect::<Vec<_>>()))
+        .unwrap();
+
+    // Add a second "user view" such that the datatypes of all values are TEXT and appear
+    // directly in their corresponsing columns (rather than as NULLs) even when they have
+    // errors.
+    let mut drop_view_sql = format!(r#"DROP VIEW IF EXISTS "{}_user_view""#, table);
+    if pool.any_kind() == AnyKind::Postgres {
+        drop_view_sql.push_str(" CASCADE");
+    }
+
+    let mut inner_columns = real_columns
+        .iter()
+        .map(|c| {
+            format!(
+                r#"CASE
+                     WHEN "{column}" {is_clause} NULL THEN (
+                       SELECT value
+                       FROM "message"
+                       WHERE "row" = "row_number"
+                         AND "column" = '{column}'
+                         AND "table" = '{table}'
+                       ORDER BY "message_id" DESC
+                       LIMIT 1
+                     )
+                     ELSE {casted_column}
+                   END AS "{column}""#,
+                casted_column = if pool.any_kind() == AnyKind::Sqlite {
+                    cast_column_sql_to_text(c, "non-text")
+                } else {
+                    format!("\"{}\"::TEXT", c)
+                },
+                column = c,
+                table = table,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let mut outer_columns = real_columns
+        .iter()
+        .map(|c| format!("t.\"{}\"", c))
+        .collect::<Vec<_>>();
+
+    let inner_columns = {
+        let mut v = vec![
+            "row_number".to_string(),
+            "message".to_string(),
+            "history".to_string(),
+        ];
+        v.append(&mut inner_columns);
+        v
+    };
+
+    let outer_columns = {
+        let mut v = vec![
+            "t.row_number".to_string(),
+            "t.message".to_string(),
+            "t.history".to_string(),
+        ];
+        v.append(&mut outer_columns);
+        v
+    };
+
+    let create_view_sql = format!(
+        r#"CREATE VIEW "{table}_user_view" AS
+           SELECT {outer_columns}
+           FROM (
+               SELECT {inner_columns}
+               FROM "{table}_view"
+           ) t"#,
+        outer_columns = outer_columns.join(", "),
+        inner_columns = inner_columns.join(", "),
+        table = table,
+    );
+
+    (drop_view_sql, create_view_sql)
+}
+
 /// Given config maps for tables and datatypes, a database connection pool, and a StartParser,
 /// read in the TSV files corresponding to the tables defined in the tables config, and use that
 /// information to fill in constraints information into a new config map that is then returned along
@@ -869,110 +1082,13 @@ pub async fn configure_db(
             }
         }
 
-        // Create a view as the union of the regular and conflict versions of the table:
-        let mut drop_view_sql = format!(r#"DROP VIEW IF EXISTS "{}_view""#, table_name);
-        let message_t;
-        if pool.any_kind() == AnyKind::Postgres {
-            drop_view_sql.push_str(" CASCADE");
-            message_t = format!(
-                indoc! {r#"
-                    (
-                      SELECT JSON_AGG(m)::TEXT FROM (
-                        SELECT "column", "value", "level", "rule", "message"
-                        FROM "message"
-                        WHERE "table" = '{t}'
-                          AND "row" = union_t."row_number"
-                        ORDER BY "column", "message_id"
-                      ) m
-                    )
-                "#},
-                t = table_name,
-            );
-        } else {
-            message_t = format!(
-                indoc! {r#"
-                    (
-                      SELECT NULLIF(
-                        JSON_GROUP_ARRAY(
-                          JSON_OBJECT(
-                            'column', "column",
-                            'value', "value",
-                            'level', "level",
-                            'rule', "rule",
-                            'message', "message"
-                          )
-                        ),
-                        '[]'
-                      )
-                      FROM "message"
-                      WHERE "table" = '{t}'
-                        AND "row" = union_t."row_number"
-                      ORDER BY "column", "message_id"
-                    )
-                "#},
-                t = table_name,
-            );
-        }
-        drop_view_sql.push_str(";");
-
-        let history_t;
-        if pool.any_kind() == AnyKind::Postgres {
-            history_t = format!(
-                indoc! {r#"
-                    (
-                      SELECT '[' || STRING_AGG("summary", ',') || ']'
-                      FROM (
-                        SELECT "summary"
-                        FROM "history"
-                        WHERE "table" = '{t}'
-                          AND "row" = union_t."row_number"
-                          AND "summary" IS DISTINCT FROM NULL
-                          AND "undone_by" IS NOT DISTINCT FROM NULL
-                        ORDER BY "history_id"
-                      ) h
-                    )
-                "#},
-                t = table_name,
-            );
-        } else {
-            history_t = format!(
-                indoc! {r#"
-                    (
-                      SELECT '[' || GROUP_CONCAT("summary") || ']'
-                      FROM (
-                        SELECT "summary"
-                        FROM "history"
-                        WHERE "table" = '{t}'
-                          AND "row" = union_t."row_number"
-                          AND "summary" IS NOT NULL
-                          AND "undone_by" IS NULL
-                        ORDER BY "history_id"
-                      ) h
-                    )
-                "#},
-                t = table_name,
-            );
-        }
-
-        let create_view_sql = format!(
-            indoc! {r#"
-              CREATE VIEW "{t}_view" AS
-                SELECT
-                  union_t.*,
-                  {message_t} AS "message",
-                  {history_t} AS "history"
-                FROM (
-                  SELECT * FROM "{t}"
-                  UNION ALL
-                  SELECT * FROM "{t}_conflict"
-                ) as union_t;
-            "#},
-            t = table_name,
-            message_t = message_t,
-            history_t = history_t,
-        );
+        let (drop_view_sql, create_view_sql) = get_sql_for_standard_view(&table_name, pool);
+        let (drop_user_view_sql, create_user_view_sql) =
+            get_sql_for_user_view(tables_config, &table_name, pool);
+        table_statements.push(drop_user_view_sql);
         table_statements.push(drop_view_sql);
         table_statements.push(create_view_sql);
+        table_statements.push(create_user_view_sql);
 
         setup_statements.insert(table_name.to_string(), table_statements);
     }
