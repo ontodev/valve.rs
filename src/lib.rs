@@ -2312,6 +2312,19 @@ fn get_conflict_columns(global_config: &SerdeMap, table_name: &str) -> Vec<Serde
         .and_then(|t| t.as_array())
         .unwrap();
 
+    let foreigns = global_config
+        .get("constraints")
+        .and_then(|c| c.as_object())
+        .and_then(|o| o.get("foreign"))
+        .and_then(|t| t.as_object())
+        .and_then(|o| o.get(table_name))
+        .and_then(|t| t.as_array())
+        .unwrap()
+        .iter()
+        .map(|v| v.as_object().unwrap())
+        .map(|v| v.get("fcolumn").unwrap().clone())
+        .collect::<Vec<_>>();
+
     let trees = global_config
         .get("constraints")
         .and_then(|c| c.as_object())
@@ -2325,7 +2338,20 @@ fn get_conflict_columns(global_config: &SerdeMap, table_name: &str) -> Vec<Serde
         .map(|v| v.get("child").unwrap().clone())
         .collect::<Vec<_>>();
 
-    for key_columns in vec![primaries, uniques, &trees] {
+    let unders = global_config
+        .get("constraints")
+        .and_then(|c| c.as_object())
+        .and_then(|o| o.get("under"))
+        .and_then(|t| t.as_object())
+        .and_then(|o| o.get(table_name))
+        .and_then(|t| t.as_array())
+        .unwrap()
+        .iter()
+        .map(|v| v.as_object().unwrap())
+        .map(|v| v.get("tcolumn").unwrap().clone())
+        .collect::<Vec<_>>();
+
+    for key_columns in vec![primaries, uniques, &foreigns, &trees, &unders] {
         for column in key_columns {
             if !conflict_columns.contains(column) {
                 conflict_columns.push(column.clone());
@@ -2517,7 +2543,9 @@ pub async fn insert_new_row_tx(
                     .and_then(|l| l.as_str())
                     .ok_or(SqlxCErr(format!("No 'rule' in {:?}", cell).into()))?;
                 if level == "error" && causes_db_error(&rule) {
-                    insert_null = true;
+                    if !use_conflict_table || rule.starts_with("datatype:") {
+                        insert_null = true;
+                    }
                 }
                 messages.push(json!({
                     "column": column,
@@ -3973,8 +4001,10 @@ async fn make_inserts(
                         let level = cell_message.get("level").and_then(|l| l.as_str()).unwrap();
                         let rule = cell_message.get("rule").and_then(|l| l.as_str()).unwrap();
                         if level == "error" && causes_db_error(&rule) {
-                            insert_null = true;
-                            break;
+                            if !table_name.ends_with("_conflict") || rule.starts_with("datatype:") {
+                                insert_null = true;
+                                break;
+                            }
                         }
                     }
                 }
