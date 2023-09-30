@@ -75,9 +75,6 @@ lazy_static! {
     static ref PG_SQL_TYPES: Vec<&'static str> =
         vec!["text", "varchar", "numeric", "integer", "real"];
     static ref SL_SQL_TYPES: Vec<&'static str> = vec!["text", "numeric", "integer", "real"];
-    // TODO: CHECK THAT NO CONFLICT RULES ARE MISSING FROM THIS LIST.
-    static ref CONFLICT_RULES: Vec<&'static str> =
-        vec!["key:primary", "key:unique", "key:foreign", "tree:child-unique", "tree:foreign"];
 }
 
 /// An alias for [serde_json::Map](..//serde_json/struct.Map.html)<String, [serde_json::Value](../serde_json/enum.Value.html)>.
@@ -2293,6 +2290,68 @@ pub async fn redo(
     Ok(())
 }
 
+/// Given a global config map and a table name, return a list of the columns from the table
+/// that may potentially result in database conflicts.
+fn get_conflict_columns(global_config: &SerdeMap, table_name: &str) -> Vec<SerdeValue> {
+    let mut conflict_columns = vec![];
+    let primaries = global_config
+        .get("constraints")
+        .and_then(|c| c.as_object())
+        .and_then(|c| c.get("primary"))
+        .and_then(|t| t.as_object())
+        .and_then(|t| t.get(table_name))
+        .and_then(|t| t.as_array())
+        .unwrap();
+
+    let uniques = global_config
+        .get("constraints")
+        .and_then(|c| c.as_object())
+        .and_then(|c| c.get("unique"))
+        .and_then(|t| t.as_object())
+        .and_then(|t| t.get(table_name))
+        .and_then(|t| t.as_array())
+        .unwrap();
+
+    let trees = global_config
+        .get("constraints")
+        .and_then(|c| c.as_object())
+        .and_then(|o| o.get("tree"))
+        .and_then(|t| t.as_object())
+        .and_then(|o| o.get(table_name))
+        .and_then(|t| t.as_array())
+        .unwrap()
+        .iter()
+        .map(|v| v.as_object().unwrap())
+        .map(|v| v.get("child").unwrap().clone())
+        .collect::<Vec<_>>();
+
+    for key_columns in vec![primaries, uniques, &trees] {
+        for column in key_columns {
+            if !conflict_columns.contains(column) {
+                conflict_columns.push(column.clone());
+            }
+        }
+    }
+
+    conflict_columns
+}
+
+/// Given a string describing a rule violation, return true if it is the kind of violation that
+/// will trigger a database error or false otherwise.
+fn causes_db_error(rule: &str) -> bool {
+    vec![
+        "key:primary",
+        "key:unique",
+        "key:foreign",
+        "tree:child-unique",
+        "tree:foreign",
+        "under:not-in-tree",
+        "under:not-under",
+    ]
+    .contains(&rule)
+        || rule.starts_with("datatype:")
+}
+
 /// A wrapper around [insert_new_row_tx()] in which the following steps are also performed:
 /// - A database transaction is created and then committed once the given new row has been inserted.
 /// - The row is validated before insertion and the update to the database is recorded to the
@@ -2421,6 +2480,7 @@ pub async fn insert_new_row_tx(
     let mut insert_params = vec![];
     let mut messages = vec![];
     let sorted_datatypes = get_sorted_datatypes(global_config);
+    let conflict_columns = get_conflict_columns(global_config, table);
     let mut use_conflict_table = false;
     for (column, cell) in row.iter() {
         insert_columns.append(&mut vec![format!(r#""{}""#, column)]);
@@ -2433,6 +2493,10 @@ pub async fn insert_new_row_tx(
         let cell_value = cell.get("value").and_then(|v| v.as_str()).ok_or(SqlxCErr(
             format!("No string named 'value' in {:?}", cell).into(),
         ))?;
+
+        if !use_conflict_table && !cell_valid && conflict_columns.contains(&json!(column)) {
+            use_conflict_table = true;
+        }
         let mut insert_null = false;
         if !cell_valid {
             let cell_messages = sort_messages(
@@ -2452,14 +2516,8 @@ pub async fn insert_new_row_tx(
                     .get("rule")
                     .and_then(|l| l.as_str())
                     .ok_or(SqlxCErr(format!("No 'rule' in {:?}", cell).into()))?;
-                if level == "error" {
-                    if CONFLICT_RULES.contains(&rule) {
-                        use_conflict_table = true;
-                    }
-                    if rule.starts_with("datatype:") {
-                        use_conflict_table = true;
-                        insert_null = true;
-                    }
+                if level == "error" && causes_db_error(&rule) {
+                    insert_null = true;
                 }
                 messages.push(json!({
                     "column": column,
@@ -3887,50 +3945,6 @@ async fn make_inserts(
     ),
     sqlx::Error,
 > {
-    let conflict_columns = {
-        let mut conflict_columns = vec![];
-        let primaries = config
-            .get("constraints")
-            .and_then(|c| c.as_object())
-            .and_then(|c| c.get("primary"))
-            .and_then(|t| t.as_object())
-            .and_then(|t| t.get(table_name))
-            .and_then(|t| t.as_array())
-            .unwrap();
-
-        let uniques = config
-            .get("constraints")
-            .and_then(|c| c.as_object())
-            .and_then(|c| c.get("unique"))
-            .and_then(|t| t.as_object())
-            .and_then(|t| t.get(table_name))
-            .and_then(|t| t.as_array())
-            .unwrap();
-
-        let trees = config
-            .get("constraints")
-            .and_then(|c| c.as_object())
-            .and_then(|o| o.get("tree"))
-            .and_then(|t| t.as_object())
-            .and_then(|o| o.get(table_name))
-            .and_then(|t| t.as_array())
-            .unwrap()
-            .iter()
-            .map(|v| v.as_object().unwrap())
-            .map(|v| v.get("child").unwrap().clone())
-            .collect::<Vec<_>>();
-
-        for key_columns in vec![primaries, uniques, &trees] {
-            for column in key_columns {
-                if !conflict_columns.contains(column) {
-                    conflict_columns.push(column.clone());
-                }
-            }
-        }
-
-        conflict_columns
-    };
-
     fn generate_sql(
         config: &SerdeMap,
         table_name: &String,
@@ -3949,10 +3963,22 @@ async fn make_inserts(
             let mut values = vec![format!("{}", row.row_number.unwrap())];
             for column in column_names {
                 let cell = row.contents.get(column).unwrap();
-
-                // Insert the value of the cell into the column unless it is invalid or has the
-                // nulltype field set, in which case insert NULL:
-                if cell.nulltype == None && cell.valid {
+                // Insert the value of the cell into the column unless inserting it will cause a db
+                // error or it has the nulltype field set, in which case insert NULL:
+                let mut insert_null = false;
+                if cell.nulltype != None {
+                    insert_null = true;
+                } else if !cell.valid {
+                    for cell_message in &cell.messages {
+                        let level = cell_message.get("level").and_then(|l| l.as_str()).unwrap();
+                        let rule = cell_message.get("rule").and_then(|l| l.as_str()).unwrap();
+                        if level == "error" && causes_db_error(&rule) {
+                            insert_null = true;
+                            break;
+                        }
+                    }
+                }
+                if !insert_null {
                     let sql_type =
                         get_sql_type_from_global_config(&config, &table_name, &column, pool)
                             .unwrap();
@@ -4053,23 +4079,24 @@ async fn make_inserts(
         (output, params, message_output, message_params)
     }
 
-    fn has_conflict(row: &ResultRow, conflict_columns: &Vec<SerdeValue>) -> bool {
+    fn has_error_in_conflict_column(row: &ResultRow, conflict_columns: &Vec<SerdeValue>) -> bool {
         for (column, cell) in &row.contents {
             let column = SerdeValue::String(column.to_string());
-            if conflict_columns.contains(&column) && !cell.valid {
+            if !cell.valid && conflict_columns.contains(&column) {
                 return true;
             }
         }
         return false;
     }
 
+    let conflict_columns = get_conflict_columns(config, table_name);
     let mut main_rows = vec![];
     let mut conflict_rows = vec![];
     for (i, row) in rows.iter_mut().enumerate() {
         // enumerate begins at 0 but we need to begin at 1:
         let i = i + 1;
         row.row_number = Some(i as u32 + chunk_number as u32 * CHUNK_SIZE as u32);
-        if has_conflict(&row, &conflict_columns) {
+        if has_error_in_conflict_column(&row, &conflict_columns) {
             conflict_rows.push(row.clone());
         } else {
             main_rows.push(row.clone());
