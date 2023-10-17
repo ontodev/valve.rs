@@ -2322,6 +2322,7 @@ fn get_conflict_columns(global_config: &SerdeMap, table_name: &str) -> Vec<Serde
         .unwrap()
         .iter()
         .map(|v| v.as_object().unwrap())
+        .filter(|o| o.get("ftable").unwrap().as_str() == Some(table_name))
         .map(|v| v.get("fcolumn").unwrap().clone())
         .collect::<Vec<_>>();
 
@@ -2348,6 +2349,7 @@ fn get_conflict_columns(global_config: &SerdeMap, table_name: &str) -> Vec<Serde
         .unwrap()
         .iter()
         .map(|v| v.as_object().unwrap())
+        .filter(|o| o.get("ttable").unwrap().as_str() == Some(table_name))
         .map(|v| v.get("tcolumn").unwrap().clone())
         .collect::<Vec<_>>();
 
