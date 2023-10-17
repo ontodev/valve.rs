@@ -2312,7 +2312,20 @@ fn get_conflict_columns(global_config: &SerdeMap, table_name: &str) -> Vec<Serde
         .and_then(|t| t.as_array())
         .unwrap();
 
-    let foreigns = global_config
+    let foreign_sources = global_config
+        .get("constraints")
+        .and_then(|c| c.as_object())
+        .and_then(|o| o.get("foreign"))
+        .and_then(|t| t.as_object())
+        .and_then(|o| o.get(table_name))
+        .and_then(|t| t.as_array())
+        .unwrap()
+        .iter()
+        .map(|v| v.as_object().unwrap())
+        .map(|v| v.get("column").unwrap().clone())
+        .collect::<Vec<_>>();
+
+    let foreign_targets = global_config
         .get("constraints")
         .and_then(|c| c.as_object())
         .and_then(|o| o.get("foreign"))
@@ -2326,7 +2339,20 @@ fn get_conflict_columns(global_config: &SerdeMap, table_name: &str) -> Vec<Serde
         .map(|v| v.get("fcolumn").unwrap().clone())
         .collect::<Vec<_>>();
 
-    let trees = global_config
+    let tree_parents = global_config
+        .get("constraints")
+        .and_then(|c| c.as_object())
+        .and_then(|o| o.get("tree"))
+        .and_then(|t| t.as_object())
+        .and_then(|o| o.get(table_name))
+        .and_then(|t| t.as_array())
+        .unwrap()
+        .iter()
+        .map(|v| v.as_object().unwrap())
+        .map(|v| v.get("parent").unwrap().clone())
+        .collect::<Vec<_>>();
+
+    let tree_children = global_config
         .get("constraints")
         .and_then(|c| c.as_object())
         .and_then(|o| o.get("tree"))
@@ -2339,7 +2365,20 @@ fn get_conflict_columns(global_config: &SerdeMap, table_name: &str) -> Vec<Serde
         .map(|v| v.get("child").unwrap().clone())
         .collect::<Vec<_>>();
 
-    let unders = global_config
+    let under_sources = global_config
+        .get("constraints")
+        .and_then(|c| c.as_object())
+        .and_then(|o| o.get("under"))
+        .and_then(|t| t.as_object())
+        .and_then(|o| o.get(table_name))
+        .and_then(|t| t.as_array())
+        .unwrap()
+        .iter()
+        .map(|v| v.as_object().unwrap())
+        .map(|v| v.get("column").unwrap().clone())
+        .collect::<Vec<_>>();
+
+    let under_targets = global_config
         .get("constraints")
         .and_then(|c| c.as_object())
         .and_then(|o| o.get("under"))
@@ -2353,7 +2392,16 @@ fn get_conflict_columns(global_config: &SerdeMap, table_name: &str) -> Vec<Serde
         .map(|v| v.get("tcolumn").unwrap().clone())
         .collect::<Vec<_>>();
 
-    for key_columns in vec![primaries, uniques, &foreigns, &trees, &unders] {
+    for key_columns in vec![
+        primaries,
+        uniques,
+        &foreign_sources,
+        &foreign_targets,
+        &tree_parents,
+        &tree_children,
+        &under_sources,
+        &under_targets,
+    ] {
         for column in key_columns {
             if !conflict_columns.contains(column) {
                 conflict_columns.push(column.clone());
@@ -2366,7 +2414,7 @@ fn get_conflict_columns(global_config: &SerdeMap, table_name: &str) -> Vec<Serde
 
 /// Given a string describing a rule violation, return true if it is the kind of violation that
 /// will trigger a database error or false otherwise.
-fn causes_db_error(rule: &str) -> bool {
+fn is_db_key_error(rule: &str) -> bool {
     vec![
         "key:primary",
         "key:unique",
@@ -2377,7 +2425,35 @@ fn causes_db_error(rule: &str) -> bool {
         "under:not-under",
     ]
     .contains(&rule)
-        || rule.starts_with("datatype:")
+}
+
+/// TODO: Add a docstring here
+fn is_sql_type_error(sql_type: &str, value: &str) -> bool {
+    let sql_type = sql_type.to_lowercase();
+    if sql_type == "numeric" {
+        // f64
+        let numeric_value: Result<f64, std::num::ParseFloatError> = value.parse();
+        match numeric_value {
+            Ok(_) => false,
+            Err(_) => true,
+        }
+    } else if sql_type == "integer" {
+        // i32
+        let integer_value: Result<i32, std::num::ParseIntError> = value.parse();
+        match integer_value {
+            Ok(_) => false,
+            Err(_) => true,
+        }
+    } else if sql_type == "real" {
+        // f64 (actually f32)
+        let float_value: Result<f64, std::num::ParseFloatError> = value.parse();
+        match float_value {
+            Ok(_) => false,
+            Err(_) => true,
+        }
+    } else {
+        false
+    }
 }
 
 /// A wrapper around [insert_new_row_tx()] in which the following steps are also performed:
@@ -2544,8 +2620,14 @@ pub async fn insert_new_row_tx(
                     .get("rule")
                     .and_then(|l| l.as_str())
                     .ok_or(SqlxCErr(format!("No 'rule' in {:?}", cell).into()))?;
-                if level == "error" && causes_db_error(&rule) {
-                    if !use_conflict_table || rule.starts_with("datatype:") {
+                let is_db_key_error = is_db_key_error(&rule);
+                let sql_type = get_sql_type_from_global_config(global_config, table, column, pool)
+                    .ok_or(SqlxCErr(
+                        format!("Could not get SQL type for {}.{}", table, column).into(),
+                    ))?;
+                let is_sql_type_error = is_sql_type_error(&sql_type, cell_value);
+                if level == "error" && (is_db_key_error || is_sql_type_error) {
+                    if !use_conflict_table || is_sql_type_error {
                         insert_null = true;
                     }
                 }
@@ -3984,6 +4066,10 @@ async fn make_inserts(
         verbose: bool,
         pool: &AnyPool,
     ) -> (String, Vec<String>, String, Vec<String>) {
+        let normal_table_name = match table_name.strip_suffix("_conflict") {
+            None => table_name.clone(),
+            Some(base) => base.to_string(),
+        };
         let mut lines = vec![];
         let mut params = vec![];
         let mut message_lines = vec![];
@@ -4002,8 +4088,17 @@ async fn make_inserts(
                     for cell_message in &cell.messages {
                         let level = cell_message.get("level").and_then(|l| l.as_str()).unwrap();
                         let rule = cell_message.get("rule").and_then(|l| l.as_str()).unwrap();
-                        if level == "error" && causes_db_error(&rule) {
-                            if !table_name.ends_with("_conflict") || rule.starts_with("datatype:") {
+                        let is_db_key_error = is_db_key_error(&rule);
+                        let sql_type = get_sql_type_from_global_config(
+                            config,
+                            &normal_table_name,
+                            column,
+                            pool,
+                        )
+                        .unwrap();
+                        let is_sql_type_error = is_sql_type_error(&sql_type, &cell.value);
+                        if level == "error" && (is_db_key_error || is_sql_type_error) {
+                            if !table_name.ends_with("_conflict") || is_sql_type_error {
                                 insert_null = true;
                                 break;
                             }
