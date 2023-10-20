@@ -1343,20 +1343,54 @@ pub async fn valve(
     Ok(config.to_string())
 }
 
-/// Given a table name, a global configuration map, and a database connection pool, construct an
-/// SQL query that one can use to get the logical contents of the row (whether or not the row is
-/// valid) including any messages.
-pub fn query_with_message_values(table: &str, global_config: &SerdeMap, pool: &AnyPool) -> String {
+/// Given a table name, a column name, and a database pool, construct an SQL string to extract the
+/// value of the column, such that when the value of a given column is null, the query attempts to
+/// extract it from the message table. Returns a String representing the SQL to retrieve the value
+/// of the column.
+pub fn query_column_with_message_value(table: &str, column: &str, pool: &AnyPool) -> String {
     let table = match table.strip_suffix("_conflict") {
         None => table.clone(),
         Some(base) => base,
     };
+
     let is_clause = if pool.any_kind() == AnyKind::Sqlite {
         "IS"
     } else {
         "IS NOT DISTINCT FROM"
     };
 
+    format!(
+        r#"CASE
+             WHEN "{column}" {is_clause} NULL THEN (
+               SELECT value
+               FROM "message"
+               WHERE "row" = "row_number"
+                 AND "column" = '{column}'
+                 AND "table" = '{table}'
+               ORDER BY "message_id" DESC
+               LIMIT 1
+             )
+             ELSE {casted_column}
+           END AS "{column}_with_mval""#,
+        casted_column = if pool.any_kind() == AnyKind::Sqlite {
+            cast_column_sql_to_text(column, "non-text")
+        } else {
+            format!("\"{}\"::TEXT", column)
+        },
+        column = column,
+        table = table,
+    )
+}
+
+/// Given a table name, a global configuration map, and a database connection pool, construct an
+/// SQL query that one can use to get the logical contents of the table, such that when the value
+/// of a given column is null, the query attempts to extract it from the message table. Returns a
+/// String representing the query.
+pub fn query_with_message_values(table: &str, global_config: &SerdeMap, pool: &AnyPool) -> String {
+    let table = match table.strip_suffix("_conflict") {
+        None => table.clone(),
+        Some(base) => base,
+    };
     let real_columns = global_config
         .get("table")
         .and_then(|t| t.get(table))
@@ -1370,34 +1404,12 @@ pub fn query_with_message_values(table: &str, global_config: &SerdeMap, pool: &A
 
     let mut inner_columns = real_columns
         .iter()
-        .map(|c| {
-            format!(
-                r#"CASE
-                     WHEN "{column}" {is_clause} NULL THEN (
-                       SELECT value
-                       FROM "message"
-                       WHERE "row" = "row_number"
-                         AND "column" = '{column}'
-                         AND "table" = '{table}'
-                       ORDER BY "message_id" DESC
-                       LIMIT 1
-                     )
-                     ELSE {casted_column}
-                   END AS "{column}_extended""#,
-                casted_column = if pool.any_kind() == AnyKind::Sqlite {
-                    cast_column_sql_to_text(c, "non-text")
-                } else {
-                    format!("\"{}\"::TEXT", c)
-                },
-                column = c,
-                table = table,
-            )
-        })
+        .map(|column| query_column_with_message_value(table, column, pool))
         .collect::<Vec<_>>();
 
     let mut outer_columns = real_columns
         .iter()
-        .map(|c| format!("t.\"{}_extended\"", c))
+        .map(|c| format!("t.\"{}_with_mval\"", c))
         .collect::<Vec<_>>();
 
     let inner_columns = {
@@ -1442,7 +1454,7 @@ pub async fn get_affected_rows(
     // which the value of the column is the same as `value`
     let sql = {
         format!(
-            r#"{main_query} WHERE "{column}_extended" = '{value}'{except}"#,
+            r#"{main_query} WHERE "{column}_with_mval" = '{value}'{except}"#,
             main_query = query_with_message_values(table, global_config, pool),
             column = column,
             value = value,
@@ -1481,7 +1493,7 @@ pub async fn get_affected_rows(
                     "valid": true,
                     "messages": json!([]),
                 });
-                let cname = cname.strip_suffix("_extended").unwrap();
+                let cname = cname.strip_suffix("_with_mval").unwrap();
                 table_row.insert(cname.to_string(), json!(cell));
             }
         }
@@ -1536,19 +1548,19 @@ pub async fn get_row_from_db(
 
     let mut row = SerdeMap::new();
     for column in sql_row.columns() {
-        let cname_extended = column.name();
-        if !vec!["row_number", "message"].contains(&cname_extended) {
-            let raw_value = sql_row.try_get_raw(format!(r#"{}"#, cname_extended).as_str())?;
+        let cname = column.name();
+        if !vec!["row_number", "message"].contains(&cname) {
+            let raw_value = sql_row.try_get_raw(format!(r#"{}"#, cname).as_str())?;
             let value;
             if !raw_value.is_null() {
                 // The extended query returned by query_with_message_values() casts all column
                 // values to text, so we pass "text" to get_column_value() for every column:
-                value = get_column_value(&sql_row, &cname_extended, "text");
+                value = get_column_value(&sql_row, &cname, "text");
             } else {
                 value = String::from("");
             }
-            let cname = match cname_extended.strip_suffix("_extended") {
-                None => cname_extended.clone(),
+            let cname = match cname.strip_suffix("_with_mval") {
+                None => cname.clone(),
                 Some(cname) => cname,
             };
             let column_messages = messages
