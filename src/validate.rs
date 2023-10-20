@@ -75,12 +75,6 @@ pub async fn validate_row(
         None => default_tx,
     };
 
-    // Remove the _conflict suffix from the table_name if it has one:
-    let table_name = match table_name.strip_suffix("_conflict") {
-        None => table_name.clone(),
-        Some(base) => base,
-    };
-
     // Initialize the result row with the values from the given row:
     let mut result_row = ResultRow {
         row_number: row_number,

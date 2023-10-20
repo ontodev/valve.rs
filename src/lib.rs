@@ -732,10 +732,6 @@ pub fn get_parsed_structure_conditions(
 /// Strings, with the first string being a SQL statement for dropping the view, and the second
 /// string being a SQL statement for creating it.
 fn get_sql_for_standard_view(table: &str, pool: &AnyPool) -> (String, String) {
-    let table = match table.strip_suffix("_conflict") {
-        None => table.clone(),
-        Some(base) => base,
-    };
     let mut drop_view_sql = format!(r#"DROP VIEW IF EXISTS "{}_view""#, table);
     let message_t;
     if pool.any_kind() == AnyKind::Postgres {
@@ -855,10 +851,6 @@ fn get_sql_for_user_view(
     table: &str,
     pool: &AnyPool,
 ) -> (String, String) {
-    let table = match table.strip_suffix("_conflict") {
-        None => table.clone(),
-        Some(base) => base,
-    };
     let is_clause = if pool.any_kind() == AnyKind::Sqlite {
         "IS"
     } else {
@@ -1348,11 +1340,6 @@ pub async fn valve(
 /// extract it from the message table. Returns a String representing the SQL to retrieve the value
 /// of the column.
 pub fn query_column_with_message_value(table: &str, column: &str, pool: &AnyPool) -> String {
-    let table = match table.strip_suffix("_conflict") {
-        None => table.clone(),
-        Some(base) => base,
-    };
-
     let is_clause = if pool.any_kind() == AnyKind::Sqlite {
         "IS"
     } else {
@@ -1387,10 +1374,6 @@ pub fn query_column_with_message_value(table: &str, column: &str, pool: &AnyPool
 /// of a given column is null, the query attempts to extract it from the message table. Returns a
 /// String representing the query.
 pub fn query_with_message_values(table: &str, global_config: &SerdeMap, pool: &AnyPool) -> String {
-    let table = match table.strip_suffix("_conflict") {
-        None => table.clone(),
-        Some(base) => base,
-    };
     let real_columns = global_config
         .get("table")
         .and_then(|t| t.get(table))
@@ -1998,11 +1981,6 @@ pub async fn record_row_change(
         }
     }
 
-    // Always ignore the table suffix when recording a row change:
-    let table = match table.strip_suffix("_conflict") {
-        None => table.clone(),
-        Some(base) => base,
-    };
     let summary = summarize(from, to).map_err(|e| SqlxCErr(e.into()))?;
     let (from, to) = (to_text(from, true), to_text(to, true));
     let sql = format!(
@@ -2532,12 +2510,6 @@ pub async fn insert_new_row_tx(
     new_row_number: Option<u32>,
     skip_validation: bool,
 ) -> Result<u32, sqlx::Error> {
-    // Remove any _conflict suffix from the table name:
-    let table = match table.strip_suffix("_conflict") {
-        None => table.clone(),
-        Some(base) => base,
-    };
-
     // Send the row through the row validator to determine if any fields are problematic and
     // to mark them with appropriate messages:
     let row = if !skip_validation {
@@ -2795,12 +2767,6 @@ pub async fn delete_row_tx(
     table: &str,
     row_number: &u32,
 ) -> Result<(), sqlx::Error> {
-    // Remove any _conflict suffix from the table name:
-    let table = match table.strip_suffix("_conflict") {
-        None => table.clone(),
-        Some(base) => base,
-    };
-
     // Used to validate the given row, counterfactually, "as if" the row did not exist in the
     // database:
     let query_as_if = QueryAsIf {
@@ -2951,12 +2917,6 @@ pub async fn update_row_tx(
     skip_validation: bool,
     do_not_recurse: bool,
 ) -> Result<(), sqlx::Error> {
-    // Remove any _conflict suffix from the table name:
-    let table = match table.strip_suffix("_conflict") {
-        None => table.clone(),
-        Some(base) => base,
-    };
-
     // First, look through the valve config to see which tables are dependent on this table and find
     // the rows that need to be updated. The variable query_as_if is used to validate the given row,
     // counterfactually, "as if" the version of the row in the database currently were replaced with
@@ -3337,15 +3297,9 @@ pub fn get_sql_type_from_global_config(
         .get("datatype")
         .and_then(|d| d.as_object())
         .unwrap();
-    let normal_table_name;
-    if let Some(s) = table.strip_suffix("_conflict") {
-        normal_table_name = String::from(s);
-    } else {
-        normal_table_name = table.to_string();
-    }
     let dt = global_config
         .get("table")
-        .and_then(|t| t.get(normal_table_name))
+        .and_then(|t| t.get(table))
         .and_then(|t| t.get("column"))
         .and_then(|c| c.get(column))
         .and_then(|c| c.get("datatype"))
@@ -4119,7 +4073,7 @@ async fn make_inserts(
                 }
                 if !insert_null {
                     let sql_type =
-                        get_sql_type_from_global_config(&config, &table_name, &column, pool)
+                        get_sql_type_from_global_config(&config, &normal_table_name, &column, pool)
                             .unwrap();
                     values.push(cast_sql_param_from_text(&sql_type));
                     params.push(cell.value.clone());
@@ -4140,15 +4094,7 @@ async fn make_inserts(
                         ];
 
                         let message = message.as_object().unwrap();
-                        message_params.push({
-                            let normal_table_name;
-                            if let Some(s) = table_name.strip_suffix("_conflict") {
-                                normal_table_name = String::from(s);
-                            } else {
-                                normal_table_name = table_name.to_string();
-                            }
-                            normal_table_name
-                        });
+                        message_params.push(normal_table_name.clone());
                         message_params.push(column.clone());
                         message_params.push(cell.value.clone());
                         message_params.push(
