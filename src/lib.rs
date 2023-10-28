@@ -2297,6 +2297,21 @@ fn get_conflict_columns(global_config: &SerdeMap, table_name: &str) -> Vec<Serde
         .and_then(|t| t.as_array())
         .unwrap();
 
+    // We take tree-children because these imply a unique database constraint on the corresponding
+    // column.
+    let tree_children = global_config
+        .get("constraints")
+        .and_then(|c| c.as_object())
+        .and_then(|o| o.get("tree"))
+        .and_then(|t| t.as_object())
+        .and_then(|o| o.get(table_name))
+        .and_then(|t| t.as_array())
+        .unwrap()
+        .iter()
+        .map(|v| v.as_object().unwrap())
+        .map(|v| v.get("child").unwrap().clone())
+        .collect::<Vec<_>>();
+
     let foreign_sources = global_config
         .get("constraints")
         .and_then(|c| c.as_object())
@@ -2324,68 +2339,12 @@ fn get_conflict_columns(global_config: &SerdeMap, table_name: &str) -> Vec<Serde
         .map(|v| v.get("fcolumn").unwrap().clone())
         .collect::<Vec<_>>();
 
-    let tree_parents = global_config
-        .get("constraints")
-        .and_then(|c| c.as_object())
-        .and_then(|o| o.get("tree"))
-        .and_then(|t| t.as_object())
-        .and_then(|o| o.get(table_name))
-        .and_then(|t| t.as_array())
-        .unwrap()
-        .iter()
-        .map(|v| v.as_object().unwrap())
-        .map(|v| v.get("parent").unwrap().clone())
-        .collect::<Vec<_>>();
-
-    let tree_children = global_config
-        .get("constraints")
-        .and_then(|c| c.as_object())
-        .and_then(|o| o.get("tree"))
-        .and_then(|t| t.as_object())
-        .and_then(|o| o.get(table_name))
-        .and_then(|t| t.as_array())
-        .unwrap()
-        .iter()
-        .map(|v| v.as_object().unwrap())
-        .map(|v| v.get("child").unwrap().clone())
-        .collect::<Vec<_>>();
-
-    let under_sources = global_config
-        .get("constraints")
-        .and_then(|c| c.as_object())
-        .and_then(|o| o.get("under"))
-        .and_then(|t| t.as_object())
-        .and_then(|o| o.get(table_name))
-        .and_then(|t| t.as_array())
-        .unwrap()
-        .iter()
-        .map(|v| v.as_object().unwrap())
-        .map(|v| v.get("column").unwrap().clone())
-        .collect::<Vec<_>>();
-
-    let under_targets = global_config
-        .get("constraints")
-        .and_then(|c| c.as_object())
-        .and_then(|o| o.get("under"))
-        .and_then(|t| t.as_object())
-        .and_then(|o| o.get(table_name))
-        .and_then(|t| t.as_array())
-        .unwrap()
-        .iter()
-        .map(|v| v.as_object().unwrap())
-        .filter(|o| o.get("ttable").unwrap().as_str() == Some(table_name))
-        .map(|v| v.get("tcolumn").unwrap().clone())
-        .collect::<Vec<_>>();
-
     for key_columns in vec![
         primaries,
         uniques,
+        &tree_children,
         &foreign_sources,
         &foreign_targets,
-        &tree_parents,
-        &tree_children,
-        &under_sources,
-        &under_targets,
     ] {
         for column in key_columns {
             if !conflict_columns.contains(column) {
@@ -4507,13 +4466,6 @@ async fn load_db(
             let level = record.get("level").and_then(|s| s.as_str()).unwrap();
             let rule = record.get("rule").and_then(|s| s.as_str()).unwrap();
             let message = record.get("message").and_then(|s| s.as_str()).unwrap();
-
-            let sql = format!(
-                r#"UPDATE "{}" SET "{}" = NULL WHERE "row_number" = {}"#,
-                table_name, column_name, row_number
-            );
-            let query = sqlx_query(&sql);
-            query.execute(pool).await?;
 
             let sql = local_sql_syntax(
                 &pool,
