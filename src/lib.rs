@@ -1358,7 +1358,7 @@ pub fn query_column_with_message_value(table: &str, column: &str, pool: &AnyPool
                LIMIT 1
              )
              ELSE {casted_column}
-           END AS "{column}_with_mval""#,
+           END AS "{column}""#,
         casted_column = if pool.any_kind() == AnyKind::Sqlite {
             cast_column_sql_to_text(column, "non-text")
         } else {
@@ -1392,7 +1392,7 @@ pub fn query_with_message_values(table: &str, global_config: &SerdeMap, pool: &A
 
     let mut outer_columns = real_columns
         .iter()
-        .map(|c| format!("t.\"{}_with_mval\"", c))
+        .map(|c| format!("t.\"{}\"", c))
         .collect::<Vec<_>>();
 
     let inner_columns = {
@@ -1437,7 +1437,7 @@ pub async fn get_affected_rows(
     // which the value of the column is the same as `value`
     let sql = {
         format!(
-            r#"{main_query} WHERE "{column}_with_mval" = '{value}'{except}"#,
+            r#"{main_query} WHERE "{column}" = '{value}'{except}"#,
             main_query = query_with_message_values(table, global_config, pool),
             column = column,
             value = value,
@@ -1476,7 +1476,6 @@ pub async fn get_affected_rows(
                     "valid": true,
                     "messages": json!([]),
                 });
-                let cname = cname.strip_suffix("_with_mval").unwrap();
                 table_row.insert(cname.to_string(), json!(cell));
             }
         }
@@ -1542,10 +1541,6 @@ pub async fn get_row_from_db(
             } else {
                 value = String::from("");
             }
-            let cname = match cname.strip_suffix("_with_mval") {
-                None => cname.clone(),
-                Some(cname) => cname,
-            };
             let column_messages = messages
                 .iter()
                 .filter(|m| m.get("column").unwrap().as_str() == Some(cname))
@@ -2402,22 +2397,7 @@ fn get_conflict_columns(global_config: &SerdeMap, table_name: &str) -> Vec<Serde
     conflict_columns
 }
 
-/// Given a string describing a rule violation, return true if it is the kind of violation that
-/// will trigger a database error or false otherwise.
-fn is_db_key_error(rule: &str) -> bool {
-    vec![
-        "key:primary",
-        "key:unique",
-        "key:foreign",
-        "tree:child-unique",
-        "tree:foreign",
-        "under:not-in-tree",
-        "under:not-under",
-    ]
-    .contains(&rule)
-}
-
-/// TODO: Add a docstring here
+/// Given a SQL type and a value, return true if the value does not conform to the SQL type.
 fn is_sql_type_error(sql_type: &str, value: &str) -> bool {
     let sql_type = sql_type.to_lowercase();
     if sql_type == "numeric" {
@@ -2566,75 +2546,54 @@ pub async fn insert_new_row_tx(
     let mut insert_columns = vec![];
     let mut insert_values = vec![];
     let mut insert_params = vec![];
-    let mut messages = vec![];
+    let mut all_messages = vec![];
     let sorted_datatypes = get_sorted_datatypes(global_config);
     let conflict_columns = get_conflict_columns(global_config, table);
     let mut use_conflict_table = false;
     for (column, cell) in row.iter() {
         insert_columns.append(&mut vec![format!(r#""{}""#, column)]);
+
         let cell = cell
             .as_object()
             .ok_or(SqlxCErr(format!("Cell {:?} is not an object", cell).into()))?;
-        let cell_valid = cell.get("valid").and_then(|v| v.as_bool()).ok_or(SqlxCErr(
+        let valid = cell.get("valid").and_then(|v| v.as_bool()).ok_or(SqlxCErr(
             format!("No bool named 'valid' in {:?}", cell).into(),
         ))?;
-        let cell_value = cell.get("value").and_then(|v| v.as_str()).ok_or(SqlxCErr(
+        let value = cell.get("value").and_then(|v| v.as_str()).ok_or(SqlxCErr(
             format!("No string named 'value' in {:?}", cell).into(),
         ))?;
+        let messages = sort_messages(
+            &sorted_datatypes,
+            cell.get("messages")
+                .and_then(|m| m.as_array())
+                .ok_or(SqlxCErr(
+                    format!("No array named 'messages' in {:?}", cell).into(),
+                ))?,
+        );
 
-        if !use_conflict_table && !cell_valid && conflict_columns.contains(&json!(column)) {
-            use_conflict_table = true;
-        }
-        let mut insert_null = false;
-        if !cell_valid {
-            let cell_messages = sort_messages(
-                &sorted_datatypes,
-                cell.get("messages")
-                    .and_then(|m| m.as_array())
-                    .ok_or(SqlxCErr(
-                        format!("No array named 'messages' in {:?}", cell).into(),
-                    ))?,
-            );
-            for cell_message in cell_messages {
-                let level = cell_message
-                    .get("level")
-                    .and_then(|l| l.as_str())
-                    .ok_or(SqlxCErr(format!("No 'level' in {:?}", cell).into()))?;
-                let rule = cell_message
-                    .get("rule")
-                    .and_then(|l| l.as_str())
-                    .ok_or(SqlxCErr(format!("No 'rule' in {:?}", cell).into()))?;
-                let is_db_key_error = is_db_key_error(&rule);
-                let sql_type = get_sql_type_from_global_config(global_config, table, column, pool)
-                    .ok_or(SqlxCErr(
-                        format!("Could not get SQL type for {}.{}", table, column).into(),
-                    ))?;
-                let is_sql_type_error = is_sql_type_error(&sql_type, cell_value);
-                if level == "error" && (is_db_key_error || is_sql_type_error) {
-                    if !use_conflict_table || is_sql_type_error {
-                        insert_null = true;
-                    }
-                }
-                messages.push(json!({
-                    "column": column,
-                    "value": cell_value,
-                    "level": cell_message.get("level").and_then(|s| s.as_str())
-                        .ok_or(
-                            SqlxCErr(format!("No 'level' in {:?}", cell_message).into())
-                        )?,
-                    "rule": cell_message.get("rule").and_then(|s| s.as_str())
-                        .ok_or(
-                            SqlxCErr(format!("No 'rule' in {:?}", cell_message).into())
-                        )?,
-                    "message": cell_message.get("message").and_then(|s| s.as_str())
-                        .ok_or(
-                            SqlxCErr(format!("No 'message' in {:?}", cell_message).into())
-                        )?,
-                }));
-            }
+        for message in messages {
+            all_messages.push(json!({
+                "column": column,
+                "value": value,
+                "level": message.get("level").and_then(|s| s.as_str())
+                    .ok_or(
+                        SqlxCErr(format!("No 'level' in {:?}", message).into())
+                    )?,
+                "rule": message.get("rule").and_then(|s| s.as_str())
+                    .ok_or(
+                        SqlxCErr(format!("No 'rule' in {:?}", message).into())
+                    )?,
+                "message": message.get("message").and_then(|s| s.as_str())
+                    .ok_or(
+                        SqlxCErr(format!("No 'message' in {:?}", message).into())
+                    )?,
+            }));
         }
 
-        if insert_null {
+        let sql_type = get_sql_type_from_global_config(global_config, table, column, pool).ok_or(
+            SqlxCErr(format!("Could not get SQL type for {}.{}", table, column).into()),
+        )?;
+        if is_sql_type_error(&sql_type, value) {
             insert_values.push(String::from("NULL"));
         } else {
             let sql_type = get_sql_type_from_global_config(&global_config, &table, &column, pool)
@@ -2642,7 +2601,11 @@ pub async fn insert_new_row_tx(
                 format!("Unable to determine SQL type for {}.{}", table, column).into(),
             ))?;
             insert_values.push(cast_sql_param_from_text(&sql_type));
-            insert_params.push(String::from(cell_value));
+            insert_params.push(String::from(value));
+        }
+
+        if !use_conflict_table && !valid && conflict_columns.contains(&json!(column)) {
+            use_conflict_table = true;
         }
     }
 
@@ -2689,7 +2652,7 @@ pub async fn insert_new_row_tx(
     query.execute(tx.acquire().await?).await?;
 
     // Next add any validation messages to the message table:
-    for m in messages {
+    for m in all_messages {
         let column = m.get("column").and_then(|c| c.as_str()).unwrap();
         let value = m.get("value").and_then(|c| c.as_str()).unwrap();
         let level = m.get("level").and_then(|c| c.as_str()).unwrap();
@@ -3305,7 +3268,7 @@ pub fn get_sql_type_from_global_config(
         .and_then(|c| c.get("datatype"))
         .and_then(|d| d.as_str())
         .and_then(|d| Some(d.to_string()))
-        .unwrap();
+        .expect(&format!("Could not get datatype for {}.{}", table, column));
     get_sql_type(&dt_config, &dt, pool)
 }
 
@@ -4018,136 +3981,148 @@ async fn make_inserts(
     pool: &AnyPool,
 ) -> Result<
     (
-        (String, Vec<String>, String, Vec<String>),
-        (String, Vec<String>, String, Vec<String>),
+        String,
+        Vec<String>,
+        String,
+        Vec<String>,
+        String,
+        Vec<String>,
     ),
     sqlx::Error,
 > {
+    fn is_conflict_row(row: &ResultRow, conflict_columns: &Vec<SerdeValue>) -> bool {
+        for (column, cell) in &row.contents {
+            let column = SerdeValue::String(column.to_string());
+            if !cell.valid && conflict_columns.contains(&column) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     fn generate_sql(
         config: &SerdeMap,
-        table_name: &String,
-        column_names: &Vec<String>,
-        rows: &Vec<ResultRow>,
+        main_table: &String,
+        columns: &Vec<String>,
+        rows: &mut Vec<ResultRow>,
+        chunk_number: usize,
         messages_stats: &mut HashMap<String, usize>,
         verbose: bool,
         pool: &AnyPool,
-    ) -> (String, Vec<String>, String, Vec<String>) {
-        let normal_table_name = match table_name.strip_suffix("_conflict") {
-            None => table_name.clone(),
-            Some(base) => base.to_string(),
-        };
-        let mut lines = vec![];
-        let mut params = vec![];
+    ) -> (
+        String,
+        Vec<String>,
+        String,
+        Vec<String>,
+        String,
+        Vec<String>,
+    ) {
+        let mut main_lines = vec![];
+        let mut main_params = vec![];
+        let mut conflict_lines = vec![];
+        let mut conflict_params = vec![];
         let mut message_lines = vec![];
         let mut message_params = vec![];
         let sorted_datatypes = get_sorted_datatypes(config);
-        for row in rows.iter() {
-            let mut values = vec![format!("{}", row.row_number.unwrap())];
-            for column in column_names {
+        let conflict_columns = get_conflict_columns(config, main_table);
+        for (i, row) in rows.iter_mut().enumerate() {
+            // enumerate begins at 0 but we need to begin at 1:
+            let i = i + 1;
+            row.row_number = Some(i as u32 + chunk_number as u32 * CHUNK_SIZE as u32);
+            let use_conflict_table = is_conflict_row(&row, &conflict_columns);
+            let mut row_values = vec![format!("{}", row.row_number.unwrap())];
+            let mut row_params = vec![];
+            for column in columns {
                 let cell = row.contents.get(column).unwrap();
                 // Insert the value of the cell into the column unless inserting it will cause a db
                 // error or it has the nulltype field set, in which case insert NULL:
-                let mut insert_null = false;
-                if cell.nulltype != None {
-                    insert_null = true;
-                } else if !cell.valid {
-                    for cell_message in &cell.messages {
-                        let level = cell_message.get("level").and_then(|l| l.as_str()).unwrap();
-                        let rule = cell_message.get("rule").and_then(|l| l.as_str()).unwrap();
-                        let is_db_key_error = is_db_key_error(&rule);
-                        let sql_type = get_sql_type_from_global_config(
-                            config,
-                            &normal_table_name,
-                            column,
-                            pool,
-                        )
-                        .unwrap();
-                        let is_sql_type_error = is_sql_type_error(&sql_type, &cell.value);
-                        if level == "error" && (is_db_key_error || is_sql_type_error) {
-                            if !table_name.ends_with("_conflict") || is_sql_type_error {
-                                insert_null = true;
-                                break;
-                            }
-                        }
-                    }
-                }
-                if !insert_null {
-                    let sql_type =
-                        get_sql_type_from_global_config(&config, &normal_table_name, &column, pool)
-                            .unwrap();
-                    values.push(cast_sql_param_from_text(&sql_type));
-                    params.push(cell.value.clone());
+                let sql_type =
+                    get_sql_type_from_global_config(config, &main_table, column, pool).unwrap();
+                if cell.nulltype != None || is_sql_type_error(&sql_type, &cell.value) {
+                    row_values.push(String::from("NULL"));
                 } else {
-                    values.push(String::from("NULL"));
+                    row_values.push(cast_sql_param_from_text(&sql_type));
+                    row_params.push(cell.value.clone());
                 }
 
-                // If the cell isn't valid, generate values and params to be used for the insert to
-                // the message table:
-                if !cell.valid {
-                    if verbose {
-                        add_message_counts(&cell.messages, messages_stats);
-                    }
-                    for message in sort_messages(&sorted_datatypes, &cell.messages) {
-                        let row = row.row_number.unwrap().to_string();
-                        let message_values = vec![
-                            SQL_PARAM, &row, SQL_PARAM, SQL_PARAM, SQL_PARAM, SQL_PARAM, SQL_PARAM,
-                        ];
+                // Generate values and params to be used for the insert to the message table:
+                if verbose {
+                    add_message_counts(&cell.messages, messages_stats);
+                }
 
-                        let message = message.as_object().unwrap();
-                        message_params.push(normal_table_name.clone());
-                        message_params.push(column.clone());
-                        message_params.push(cell.value.clone());
-                        message_params.push(
-                            message
-                                .get("level")
-                                .and_then(|s| s.as_str())
-                                .unwrap()
-                                .to_string(),
-                        );
-                        message_params.push(
-                            message
-                                .get("rule")
-                                .and_then(|s| s.as_str())
-                                .unwrap()
-                                .to_string(),
-                        );
-                        message_params.push(
-                            message
-                                .get("message")
-                                .and_then(|s| s.as_str())
-                                .unwrap()
-                                .to_string(),
-                        );
-                        let line = message_values.join(", ");
-                        let line = format!("({})", line);
-                        message_lines.push(line);
-                    }
+                for message in sort_messages(&sorted_datatypes, &cell.messages) {
+                    let row = row.row_number.unwrap().to_string();
+                    let message_values = vec![
+                        SQL_PARAM, &row, SQL_PARAM, SQL_PARAM, SQL_PARAM, SQL_PARAM, SQL_PARAM,
+                    ];
+
+                    let message = message.as_object().unwrap();
+                    message_params.push(main_table.clone());
+                    message_params.push(column.clone());
+                    message_params.push(cell.value.clone());
+                    message_params.push(
+                        message
+                            .get("level")
+                            .and_then(|s| s.as_str())
+                            .unwrap()
+                            .to_string(),
+                    );
+                    message_params.push(
+                        message
+                            .get("rule")
+                            .and_then(|s| s.as_str())
+                            .unwrap()
+                            .to_string(),
+                    );
+                    message_params.push(
+                        message
+                            .get("message")
+                            .and_then(|s| s.as_str())
+                            .unwrap()
+                            .to_string(),
+                    );
+                    let line = message_values.join(", ");
+                    let line = format!("({})", line);
+                    message_lines.push(line);
                 }
             }
-            let line = values.join(", ");
+            let line = row_values.join(", ");
             let line = format!("({})", line);
-            lines.push(line);
+            if use_conflict_table {
+                conflict_lines.push(line);
+                conflict_params.append(&mut row_params);
+            } else {
+                main_lines.push(line);
+                main_params.append(&mut row_params);
+            }
         }
 
         // Generate the SQL output for the insert to the table:
-        let mut output = String::from("");
-        if !lines.is_empty() {
-            output.push_str(&format!(
-                r#"INSERT INTO "{}" ("row_number", {}) VALUES"#,
-                table_name,
-                {
-                    let mut all_columns = vec![];
-                    for column_name in column_names {
-                        let quoted_column_name = format!(r#""{}""#, column_name);
-                        all_columns.push(quoted_column_name);
+        fn get_table_output(lines: &Vec<String>, table: &str, columns: &Vec<String>) -> String {
+            let mut output = String::from("");
+            if !lines.is_empty() {
+                output.push_str(&format!(
+                    r#"INSERT INTO "{}" ("row_number", {}) VALUES"#,
+                    table,
+                    {
+                        let mut quoted_columns = vec![];
+                        for column in columns {
+                            let quoted_column = format!(r#""{}""#, column);
+                            quoted_columns.push(quoted_column);
+                        }
+                        quoted_columns.join(", ")
                     }
-                    all_columns.join(", ")
-                }
-            ));
-            output.push_str("\n");
-            output.push_str(&lines.join(",\n"));
-            output.push_str(";");
+                ));
+                output.push_str("\n");
+                output.push_str(&lines.join(",\n"));
+                output.push_str(";");
+            }
+            output
         }
+
+        let main_output = get_table_output(&main_lines, &main_table, &columns);
+        let conflict_table = format!("{}_conflict", main_table);
+        let conflict_output = get_table_output(&conflict_lines, &conflict_table, &columns);
 
         // Generate the output for the insert to the message table:
         let mut message_output = String::from("");
@@ -4161,31 +4136,14 @@ async fn make_inserts(
             message_output.push_str(";");
         }
 
-        (output, params, message_output, message_params)
-    }
-
-    fn has_error_in_conflict_column(row: &ResultRow, conflict_columns: &Vec<SerdeValue>) -> bool {
-        for (column, cell) in &row.contents {
-            let column = SerdeValue::String(column.to_string());
-            if !cell.valid && conflict_columns.contains(&column) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    let conflict_columns = get_conflict_columns(config, table_name);
-    let mut main_rows = vec![];
-    let mut conflict_rows = vec![];
-    for (i, row) in rows.iter_mut().enumerate() {
-        // enumerate begins at 0 but we need to begin at 1:
-        let i = i + 1;
-        row.row_number = Some(i as u32 + chunk_number as u32 * CHUNK_SIZE as u32);
-        if has_error_in_conflict_column(&row, &conflict_columns) {
-            conflict_rows.push(row.clone());
-        } else {
-            main_rows.push(row.clone());
-        }
+        (
+            main_output,
+            main_params,
+            conflict_output,
+            conflict_params,
+            message_output,
+            message_params,
+        )
     }
 
     // Use the "column_order" field of the table config for this table to retrieve the column names
@@ -4200,34 +4158,25 @@ async fn make_inserts(
         .map(|v| v.as_str().unwrap().to_string())
         .collect::<Vec<_>>();
 
-    let (main_sql, main_params, main_message_sql, main_message_params) = generate_sql(
-        &config,
-        &table_name,
-        &column_names,
-        &main_rows,
-        messages_stats,
-        verbose,
-        pool,
-    );
-    let (conflict_sql, conflict_params, conflict_message_sql, conflict_message_params) =
+    let (main_sql, main_params, conflict_sql, conflict_params, message_sql, message_params) =
         generate_sql(
             &config,
-            &format!("{}_conflict", table_name),
+            &table_name,
             &column_names,
-            &conflict_rows,
+            rows,
+            chunk_number,
             messages_stats,
             verbose,
             pool,
         );
 
     Ok((
-        (main_sql, main_params, main_message_sql, main_message_params),
-        (
-            conflict_sql,
-            conflict_params,
-            conflict_message_sql,
-            conflict_message_params,
-        ),
+        main_sql,
+        main_params,
+        conflict_sql,
+        conflict_params,
+        message_sql,
+        message_params,
     ))
 }
 
@@ -4260,19 +4209,17 @@ async fn validate_rows_inter_and_insert(
     tmp_messages_stats.insert("error".to_string(), 0);
     tmp_messages_stats.insert("warning".to_string(), 0);
     tmp_messages_stats.insert("info".to_string(), 0);
-    let (
-        (main_sql, main_params, main_message_sql, main_message_params),
-        (conflict_sql, conflict_params, conflict_message_sql, conflict_message_params),
-    ) = make_inserts(
-        config,
-        table_name,
-        rows,
-        chunk_number,
-        &mut tmp_messages_stats,
-        verbose,
-        pool,
-    )
-    .await?;
+    let (main_sql, main_params, conflict_sql, conflict_params, message_sql, message_params) =
+        make_inserts(
+            config,
+            table_name,
+            rows,
+            chunk_number,
+            &mut tmp_messages_stats,
+            verbose,
+            pool,
+        )
+        .await?;
 
     let main_sql = local_sql_syntax(&pool, &main_sql);
     let mut main_query = sqlx_query(&main_sql);
@@ -4289,19 +4236,12 @@ async fn validate_rows_inter_and_insert(
             }
             conflict_query.execute(pool).await?;
 
-            let main_message_sql = local_sql_syntax(&pool, &main_message_sql);
-            let mut main_message_query = sqlx_query(&main_message_sql);
-            for param in &main_message_params {
-                main_message_query = main_message_query.bind(param);
+            let message_sql = local_sql_syntax(&pool, &message_sql);
+            let mut message_query = sqlx_query(&message_sql);
+            for param in &message_params {
+                message_query = message_query.bind(param);
             }
-            main_message_query.execute(pool).await?;
-
-            let conflict_message_sql = local_sql_syntax(&pool, &conflict_message_sql);
-            let mut conflict_message_query = sqlx_query(&conflict_message_sql);
-            for param in &conflict_message_params {
-                conflict_message_query = conflict_message_query.bind(param);
-            }
-            conflict_message_query.execute(pool).await?;
+            message_query.execute(pool).await?;
 
             if verbose {
                 let curr_errors = messages_stats.get("error").unwrap();
@@ -4323,20 +4263,17 @@ async fn validate_rows_inter_and_insert(
         }
         Err(_) => {
             validate_rows_constraints(config, pool, table_name, rows).await?;
-
-            let (
-                (main_sql, main_params, main_message_sql, main_message_params),
-                (conflict_sql, conflict_params, conflict_message_sql, conflict_message_params),
-            ) = make_inserts(
-                config,
-                table_name,
-                rows,
-                chunk_number,
-                messages_stats,
-                verbose,
-                pool,
-            )
-            .await?;
+            let (main_sql, main_params, conflict_sql, conflict_params, message_sql, message_params) =
+                make_inserts(
+                    config,
+                    table_name,
+                    rows,
+                    chunk_number,
+                    messages_stats,
+                    verbose,
+                    pool,
+                )
+                .await?;
 
             let main_sql = local_sql_syntax(&pool, &main_sql);
             let mut main_query = sqlx_query(&main_sql);
@@ -4352,19 +4289,12 @@ async fn validate_rows_inter_and_insert(
             }
             conflict_query.execute(pool).await?;
 
-            let main_message_sql = local_sql_syntax(&pool, &main_message_sql);
-            let mut main_message_query = sqlx_query(&main_message_sql);
-            for param in &main_message_params {
-                main_message_query = main_message_query.bind(param);
+            let message_sql = local_sql_syntax(&pool, &message_sql);
+            let mut message_query = sqlx_query(&message_sql);
+            for param in &message_params {
+                message_query = message_query.bind(param);
             }
-            main_message_query.execute(pool).await?;
-
-            let conflict_message_sql = local_sql_syntax(&pool, &conflict_message_sql);
-            let mut conflict_message_query = sqlx_query(&conflict_message_sql);
-            for param in &conflict_message_params {
-                conflict_message_query = conflict_message_query.bind(param);
-            }
-            conflict_message_query.execute(pool).await?;
+            message_query.execute(pool).await?;
         }
     };
 

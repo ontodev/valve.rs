@@ -32,6 +32,7 @@ table3	6	parent	error	tree:foreign	Value 'owl:Thing' of column parent is not in 
 table3	7	source	error	datatype:nonspace	source should be text without whitespace	CO B
 table3	7	source	error	datatype:prefix	source should be a prefix for a CURIE	CO B
 table3	7	source	error	datatype:word	source should be a single word: letters, numbers, underscore	CO B
+table3	7	source	error	key:foreign	Value 'CO B' of column source is not in table1.prefix	CO B
 table3	8	id	error	key:unique	Values of id must be unique	COB:0000013
 table3	10	id	error	key:unique	Values of id must be unique	VO:0000001
 table3	10	label	error	key:primary	Values of label must be unique	vaccine
