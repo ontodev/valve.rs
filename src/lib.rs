@@ -982,12 +982,16 @@ pub enum ValveCommand {
 /// optionally create and/or load it according to the value of `command` (see [ValveCommand]).
 /// If the `verbose` flag is set to true, output status messages while loading. If `config_table`
 /// is given and `table_table` indicates a database, query the table called `config_table` for the
-/// table table information. Returns the configuration map as a String.
+/// table table information. Returns the configuration map as a String. If `initial_load` is set to
+/// true, then (SQLite only) the database settings will be tuned for initial loading. Note that
+/// these settings are unsafe and should be used for initial loading only, as data integrity will
+/// not be guaranteed in the case of an interrupted transaction.
 pub async fn valve(
     table_table: &str,
     database: &str,
     command: &ValveCommand,
     verbose: bool,
+    initial_load: bool,
     config_table: &str,
 ) -> Result<String, sqlx::Error> {
     let parser = StartParser::new();
@@ -1025,6 +1029,20 @@ pub async fn valve(
         sqlx_query("PRAGMA foreign_keys = ON")
             .execute(&pool)
             .await?;
+        if initial_load {
+            // These pragmas are unsafe but they are used during initial loading since data
+            // integrity is not a priority in this case.
+            sqlx_query("PRAGMA journal_mode = OFF")
+                .execute(&pool)
+                .await?;
+            sqlx_query("PRAGMA synchronous = 0").execute(&pool).await?;
+            sqlx_query("PRAGMA cache_size = 1000000")
+                .execute(&pool)
+                .await?;
+            sqlx_query("PRAGMA temp_store = MEMORY")
+                .execute(&pool)
+                .await?;
+        }
     }
 
     let (sorted_table_list, constraints_config) = configure_db(
