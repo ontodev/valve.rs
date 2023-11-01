@@ -2047,17 +2047,9 @@ async fn switch_undone_state(
     Ok(())
 }
 
-/// Given a global configuration map, maps of compiled datatype and ruled conditions, a database
-/// connection pool, and the user who initiated the undo, find the last recorded change to the
-/// database and undo it, indicating in the history table that undo_user is responsible.
-#[async_recursion]
-pub async fn undo(
-    global_config: &SerdeMap,
-    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
-    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
-    pool: &AnyPool,
-    undo_user: &str,
-) -> Result<(), sqlx::Error> {
+/// Given a database pool fetch the last database change represented by the last row inserted to the
+/// history table that has not been undone.
+pub async fn get_last_change(pool: &AnyPool) -> Result<Option<AnyRow>, sqlx::Error> {
     // Look in the history table, get the row with the greatest ID, get the row number,
     // from, and to, and determine whether the last operation was a delete, insert, or update.
     let is_clause = if pool.any_kind() == AnyKind::Sqlite {
@@ -2073,20 +2065,55 @@ pub async fn undo(
     );
     let query = sqlx_query(&sql);
     let result_row = query.fetch_optional(pool).await?;
-    let result_row = match result_row {
+    Ok(result_row)
+}
+
+/// Given a database pool fetch the row in the history table that has been most recently marked as
+/// undone.
+pub async fn get_last_undo(pool: &AnyPool) -> Result<Option<AnyRow>, sqlx::Error> {
+    // Look in the history table, get the row with the greatest ID, get the row number,
+    // from, and to, and determine whether the last operation was a delete, insert, or update.
+    let is_not_clause = if pool.any_kind() == AnyKind::Sqlite {
+        "IS NOT"
+    } else {
+        "IS DISTINCT FROM"
+    };
+    let sql = format!(
+        r#"SELECT * FROM "history"
+           WHERE "undone_by" {} NULL
+           ORDER BY "timestamp" DESC LIMIT 1"#,
+        is_not_clause
+    );
+    let query = sqlx_query(&sql);
+    let result_row = query.fetch_optional(pool).await?;
+    Ok(result_row)
+}
+
+/// Given a global configuration map, maps of compiled datatype and ruled conditions, a database
+/// connection pool, and the user who initiated the undo, find the last recorded change to the
+/// database and undo it, indicating in the history table that undo_user is responsible.
+#[async_recursion]
+pub async fn undo(
+    global_config: &SerdeMap,
+    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
+    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    pool: &AnyPool,
+    undo_user: &str,
+) -> Result<(), sqlx::Error> {
+    let last_change = match get_last_change(pool).await? {
         None => {
             eprintln!("WARN: Nothing to undo.");
             return Ok(());
         }
         Some(r) => r,
     };
-    let history_id: i32 = result_row.get("history_id");
+    let history_id: i32 = last_change.get("history_id");
     let history_id = history_id as u16;
-    let table: &str = result_row.get("table");
-    let row_number: i64 = result_row.get("row");
+    let table: &str = last_change.get("table");
+    let row_number: i64 = last_change.get("row");
     let row_number = row_number as u32;
-    let from = get_json_from_row(&result_row, "from");
-    let to = get_json_from_row(&result_row, "to");
+    let from = get_json_from_row(&last_change, "from");
+    let to = get_json_from_row(&last_change, "to");
 
     match (from, to) {
         (None, None) => {
@@ -2169,42 +2196,27 @@ pub async fn redo(
     pool: &AnyPool,
     redo_user: &str,
 ) -> Result<(), sqlx::Error> {
-    // Look in the history table, get the row with the greatest ID, get the row number,
-    // from, and to, and determine whether the last operation was a delete, insert, or update.
-    let is_not_clause = if pool.any_kind() == AnyKind::Sqlite {
-        "IS NOT"
-    } else {
-        "IS DISTINCT FROM"
-    };
-    let sql = format!(
-        r#"SELECT * FROM "history"
-           WHERE "undone_by" {} NULL
-           ORDER BY "timestamp" DESC LIMIT 1"#,
-        is_not_clause
-    );
-    let query = sqlx_query(&sql);
-    let result_row = query.fetch_optional(pool).await?;
-    let result_row = match result_row {
+    let last_undo = match get_last_undo(pool).await? {
         None => {
             eprintln!("WARN: Nothing to redo.");
             return Ok(());
         }
-        Some(result_row) => {
-            let undone_by = result_row.try_get_raw("undone_by")?;
+        Some(last_undo) => {
+            let undone_by = last_undo.try_get_raw("undone_by")?;
             if undone_by.is_null() {
                 eprintln!("WARN: Nothing to redo.");
                 return Ok(());
             }
-            result_row
+            last_undo
         }
     };
-    let history_id: i32 = result_row.get("history_id");
+    let history_id: i32 = last_undo.get("history_id");
     let history_id = history_id as u16;
-    let table: &str = result_row.get("table");
-    let row_number: i64 = result_row.get("row");
+    let table: &str = last_undo.get("table");
+    let row_number: i64 = last_undo.get("row");
     let row_number = row_number as u32;
-    let from = get_json_from_row(&result_row, "from");
-    let to = get_json_from_row(&result_row, "to");
+    let from = get_json_from_row(&last_undo, "from");
+    let to = get_json_from_row(&last_undo, "to");
 
     match (from, to) {
         (None, None) => {
