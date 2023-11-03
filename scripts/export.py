@@ -132,34 +132,12 @@ def export_data(cursor, is_sqlite, args):
                 columns_info = get_column_order_and_info_for_postgres(cursor, table)
             unsorted_columns = columns_info["unsorted_columns"]
 
-            select = []
-            for column in unsorted_columns:
-                if column == "row_number":
-                    select.append(f'"{column}"')
-                else:
-                    cast = "" if is_sqlite else "::TEXT"
-                    is_clause = "IS" if is_sqlite else "IS NOT DISTINCT FROM"
-                    select.append(
-                        f"""
-                        CASE
-                          WHEN "{column}" {is_clause} NULL THEN (
-                            SELECT value
-                            FROM "message"
-                            WHERE "row" = "row_number"
-                              AND "column" = '{column}'
-                              AND "table" = '{table}'
-                            ORDER BY "message_id" DESC
-                            LIMIT 1
-                          )
-                          ELSE "{column}"{cast}
-                        END AS "{column}"
-                        """
-                    )
+            select = [f'"{column}"' for column in unsorted_columns]
             select = ", ".join(select)
 
             # Fetch the rows from the table and write them to a corresponding TSV file in the
             # output directory:
-            cursor.execute(f'SELECT {select} FROM "{table}_view" ORDER BY "row_number"')
+            cursor.execute(f'SELECT {select} FROM "{table}_text_view" ORDER BY "row_number"')
             colnames = [d[0] for d in cursor.description]
             rows = map(lambda r: dict(zip(colnames, r)), cursor)
             fieldnames = [c for c in colnames if c != "row_number"]
