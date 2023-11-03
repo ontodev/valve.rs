@@ -137,7 +137,7 @@ def export_data(cursor, is_sqlite, args):
 
             # Fetch the rows from the table and write them to a corresponding TSV file in the
             # output directory:
-            cursor.execute(f'SELECT {select} FROM "{table}_user_view" ORDER BY "row_number"')
+            cursor.execute(f'SELECT {select} FROM "{table}_text_view" ORDER BY "row_number"')
             colnames = [d[0] for d in cursor.description]
             rows = map(lambda r: dict(zip(colnames, r)), cursor)
             fieldnames = [c for c in colnames if c != "row_number"]
