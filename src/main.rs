@@ -22,6 +22,7 @@ async fn main() -> Result<(), sqlx::Error> {
     let mut create_only = false;
     let mut config_table = String::new();
     let mut verbose = false;
+    let mut initial_load = false;
     let mut source = String::new();
     let mut destination = String::new();
 
@@ -64,6 +65,14 @@ async fn main() -> Result<(), sqlx::Error> {
             StoreTrue,
             r#"Write the SQL used to create the database to stdout after configuring it, and then
                while loading the database, write progress messages to stderr."#,
+        );
+        ap.refer(&mut initial_load).add_option(
+            &["--initial_load"],
+            StoreTrue,
+            r#"(SQLite only) When this flag is set, the database settings will be tuned for initial
+               loading. Note that these settings are unsafe and should be used for initial loading
+               only, as data integrity will not be guaranteed in the case of an interrupted
+               transaction."#,
         );
         ap.refer(&mut source).add_argument(
             "SOURCE",
@@ -109,6 +118,7 @@ async fn main() -> Result<(), sqlx::Error> {
             &String::from(":memory:"),
             &ValveCommand::Config,
             false,
+            false,
             &config_table,
         )
         .await?;
@@ -141,6 +151,7 @@ async fn main() -> Result<(), sqlx::Error> {
             &destination,
             &ValveCommand::Create,
             verbose,
+            false,
             &config_table,
         )
         .await?;
@@ -150,6 +161,7 @@ async fn main() -> Result<(), sqlx::Error> {
             &destination,
             &ValveCommand::Load,
             verbose,
+            initial_load,
             &config_table,
         )
         .await?;

@@ -849,7 +849,15 @@ async fn test_undo_redo(
 }
 
 pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Error> {
-    let config = valve(table, database, &ValveCommand::Config, false, "table").await?;
+    let config = valve(
+        table,
+        database,
+        &ValveCommand::Config,
+        false,
+        false,
+        "table",
+    )
+    .await?;
     let config: SerdeValue = serde_json::from_str(config.as_str()).unwrap();
     let config = config.as_object().unwrap();
 
