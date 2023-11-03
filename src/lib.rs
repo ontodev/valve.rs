@@ -423,7 +423,7 @@ pub fn read_config_files(
         }
     }
 
-    // Manually add the messsage config:
+    // Manually add the messsage table config:
     tables_config.insert(
         "message".to_string(),
         json!({
@@ -489,6 +489,74 @@ pub fn read_config_files(
                     "datatype": "line",
                     "structure": ""
                 }
+            }
+        }),
+    );
+
+    // Manually add the history table config:
+    tables_config.insert(
+        "history".to_string(),
+        json!({
+            "table": "history",
+            "description": "History of changes to the VALVE database",
+            "type": "history",
+            "column_order": [
+                "table",
+                "row",
+                "from",
+                "to",
+                "user",
+            ],
+            "column": {
+                "table": {
+                    "table": "history",
+                    "column": "table",
+                    "description": "The table referred to by the history entry",
+                    "datatype": "table_name",
+                    "structure": "",
+                },
+                "row": {
+                    "table": "history",
+                    "column": "row",
+                    "description": "The row number of the table referred to by the history entry",
+                    "datatype": "natural_number",
+                    "structure": "",
+                },
+                "from": {
+                    "table": "history",
+                    "column": "from",
+                    "description": "The initial value of the row",
+                    "datatype": "text",
+                    "structure": "",
+                },
+                "to": {
+                    "table": "history",
+                    "column": "to",
+                    "description": "The final value of the row",
+                    "datatype": "text",
+                    "structure": "",
+                },
+                "summary": {
+                    "table": "history",
+                    "column": "summary",
+                    "description": "Summarizes the changes to each column of the row",
+                    "datatype": "text",
+                    "structure": "",
+                },
+                "user": {
+                    "table": "history",
+                    "column": "user",
+                    "description": "User responsible for the change",
+                    "datatype": "line",
+                    "structure": "",
+                },
+                "undone_by": {
+                    "table": "history",
+                    "column": "undone_by",
+                    "description": "User who has undone the change. Null if it has not been undone",
+                    "datatype": "line",
+                    "structure": "",
+                },
             }
         }),
     );
@@ -803,25 +871,25 @@ pub async fn configure_db(
 
         // Create a view as the union of the regular and conflict versions of the table:
         let mut drop_view_sql = format!(r#"DROP VIEW IF EXISTS "{}_view""#, table_name);
-        let inner_t;
+        let message_t;
         if pool.any_kind() == AnyKind::Postgres {
             drop_view_sql.push_str(" CASCADE");
-            inner_t = format!(
+            message_t = format!(
                 indoc! {r#"
                     (
-                      SELECT JSON_AGG(t)::TEXT FROM (
+                      SELECT JSON_AGG(m)::TEXT FROM (
                         SELECT "column", "value", "level", "rule", "message"
                         FROM "message"
                         WHERE "table" = '{t}'
                           AND "row" = union_t."row_number"
                         ORDER BY "column", "message_id"
-                      ) t
+                      ) m
                     )
                 "#},
                 t = table_name,
             );
         } else {
-            inner_t = format!(
+            message_t = format!(
                 indoc! {r#"
                     (
                       SELECT NULLIF(
@@ -847,12 +915,52 @@ pub async fn configure_db(
         }
         drop_view_sql.push_str(";");
 
+        let history_t;
+        if pool.any_kind() == AnyKind::Postgres {
+            history_t = format!(
+                indoc! {r#"
+                    (
+                      SELECT '[' || STRING_AGG("summary", ',') || ']'
+                      FROM (
+                        SELECT "summary"
+                        FROM "history"
+                        WHERE "table" = '{t}'
+                          AND "row" = union_t."row_number"
+                          AND "summary" IS DISTINCT FROM NULL
+                          AND "undone_by" IS NOT DISTINCT FROM NULL
+                        ORDER BY "history_id"
+                      ) h
+                    )
+                "#},
+                t = table_name,
+            );
+        } else {
+            history_t = format!(
+                indoc! {r#"
+                    (
+                      SELECT '[' || GROUP_CONCAT("summary") || ']'
+                      FROM (
+                        SELECT "summary"
+                        FROM "history"
+                        WHERE "table" = '{t}'
+                          AND "row" = union_t."row_number"
+                          AND "summary" IS NOT NULL
+                          AND "undone_by" IS NULL
+                        ORDER BY "history_id"
+                      ) h
+                    )
+                "#},
+                t = table_name,
+            );
+        }
+
         let create_view_sql = format!(
             indoc! {r#"
               CREATE VIEW "{t}_view" AS
                 SELECT
                   union_t.*,
-                  {inner_t} AS "message"
+                  {message_t} AS "message",
+                  {history_t} AS "history"
                 FROM (
                   SELECT * FROM "{t}"
                   UNION ALL
@@ -860,7 +968,8 @@ pub async fn configure_db(
                 ) as union_t;
             "#},
             t = table_name,
-            inner_t = inner_t,
+            message_t = message_t,
+            history_t = history_t,
         );
         table_statements.push(drop_view_sql);
         table_statements.push(create_view_sql);
@@ -874,17 +983,59 @@ pub async fn configure_db(
     let sorted_tables = verify_table_deps_and_sort(&unsorted_tables, &constraints_config);
 
     if *command != ValveCommand::Config || verbose {
+        // Generate DDL for the history table:
+        let mut history_statements = vec![];
+        history_statements.push({
+            let mut sql = r#"DROP TABLE IF EXISTS "history""#.to_string();
+            if pool.any_kind() == AnyKind::Postgres {
+                sql.push_str(" CASCADE");
+            }
+            sql.push_str(";");
+            sql
+        });
+        history_statements.push(format!(
+            indoc! {r#"
+                CREATE TABLE "history" (
+                  {row_number}
+                  "table" TEXT,
+                  "row" BIGINT,
+                  "from" TEXT,
+                  "to" TEXT,
+                  "summary" TEXT,
+                  "user" TEXT,
+                  "undone_by" TEXT,
+                  {timestamp}
+                );
+              "#},
+            row_number = {
+                if pool.any_kind() == AnyKind::Sqlite {
+                    "\"history_id\" INTEGER PRIMARY KEY,"
+                } else {
+                    "\"history_id\" SERIAL PRIMARY KEY,"
+                }
+            },
+            timestamp = {
+                if pool.any_kind() == AnyKind::Sqlite {
+                    "\"timestamp\" TIMESTAMP DEFAULT(STRFTIME('%Y-%m-%d %H:%M:%f', 'NOW'))"
+                } else {
+                    "\"timestamp\" TIMESTAMP DEFAULT CURRENT_TIMESTAMP"
+                }
+            },
+        ));
+        history_statements
+            .push(r#"CREATE INDEX "history_tr_idx" ON "history"("table", "row");"#.to_string());
+        setup_statements.insert("history".to_string(), history_statements);
+
         // Generate DDL for the message table:
         let mut message_statements = vec![];
-        let drop_sql = {
+        message_statements.push({
             let mut sql = r#"DROP TABLE IF EXISTS "message""#.to_string();
             if pool.any_kind() == AnyKind::Postgres {
                 sql.push_str(" CASCADE");
             }
             sql.push_str(";");
             sql
-        };
-        message_statements.push(drop_sql);
+        });
         message_statements.push(format!(
             indoc! {r#"
                 CREATE TABLE "message" (
@@ -911,9 +1062,10 @@ pub async fn configure_db(
         );
         setup_statements.insert("message".to_string(), message_statements);
 
-        // Add the message table to the beginning of the list of tables to create (we add it to the
-        // beginning since the table views all reference it).
-        let mut tables_to_create = vec!["message".to_string()];
+        // Add the message and history tables to the beginning of the list of tables to create
+        // (the message table in particular needs to be at the beginning since the table views all
+        // reference it).
+        let mut tables_to_create = vec!["message".to_string(), "history".to_string()];
         tables_to_create.append(&mut sorted_tables.clone());
         for table in &tables_to_create {
             let table_statements = setup_statements.get(table).unwrap();
@@ -933,36 +1085,6 @@ pub async fn configure_db(
     }
 
     return Ok((sorted_tables, constraints_config));
-}
-
-/// Given the global config map, a table name, a column name, and a database connection pool
-/// used to determine the database type return the column's SQL type.
-pub fn get_sql_type_from_global_config(
-    global_config: &SerdeMap,
-    table: &str,
-    column: &str,
-    pool: &AnyPool,
-) -> Option<String> {
-    let dt_config = global_config
-        .get("datatype")
-        .and_then(|d| d.as_object())
-        .unwrap();
-    let normal_table_name;
-    if let Some(s) = table.strip_suffix("_conflict") {
-        normal_table_name = String::from(s);
-    } else {
-        normal_table_name = table.to_string();
-    }
-    let dt = global_config
-        .get("table")
-        .and_then(|t| t.get(normal_table_name))
-        .and_then(|t| t.get("column"))
-        .and_then(|c| c.get(column))
-        .and_then(|c| c.get("datatype"))
-        .and_then(|d| d.as_str())
-        .and_then(|d| Some(d.to_string()))
-        .unwrap();
-    get_sql_type(&dt_config, &dt, pool)
 }
 
 /// Various VALVE commands, used with [valve()](valve).
@@ -1093,6 +1215,87 @@ pub async fn valve(
     Ok(config.to_string())
 }
 
+/// Given a table name, a global configuration map, and a database connection pool, construct an
+/// SQL query that one can use to get the logical contents of the row (whether or not the row is
+/// valid) including any messages.
+pub fn query_with_message_values(table: &str, global_config: &SerdeMap, pool: &AnyPool) -> String {
+    let table = match table.strip_suffix("_conflict") {
+        None => table.clone(),
+        Some(base) => base,
+    };
+    let is_clause = if pool.any_kind() == AnyKind::Sqlite {
+        "IS"
+    } else {
+        "IS NOT DISTINCT FROM"
+    };
+
+    let real_columns = global_config
+        .get("table")
+        .and_then(|t| t.get(table))
+        .and_then(|t| t.as_object())
+        .and_then(|t| t.get("column"))
+        .and_then(|t| t.as_object())
+        .and_then(|t| Some(t.keys()))
+        .and_then(|k| Some(k.map(|k| k.to_string())))
+        .and_then(|t| Some(t.collect::<Vec<_>>()))
+        .unwrap();
+
+    let mut inner_columns = real_columns
+        .iter()
+        .map(|c| {
+            format!(
+                r#"CASE
+                     WHEN "{column}" {is_clause} NULL THEN (
+                       SELECT value
+                       FROM "message"
+                       WHERE "row" = "row_number"
+                         AND "column" = '{column}'
+                         AND "table" = '{table}'
+                       ORDER BY "message_id" DESC
+                       LIMIT 1
+                     )
+                     ELSE {casted_column}
+                   END AS "{column}_extended""#,
+                casted_column = if pool.any_kind() == AnyKind::Sqlite {
+                    cast_column_sql_to_text(c, "non-text")
+                } else {
+                    format!("\"{}\"::TEXT", c)
+                },
+                column = c,
+                table = table,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let mut outer_columns = real_columns
+        .iter()
+        .map(|c| format!("t.\"{}_extended\"", c))
+        .collect::<Vec<_>>();
+
+    let inner_columns = {
+        let mut v = vec!["row_number".to_string(), "message".to_string()];
+        v.append(&mut inner_columns);
+        v
+    };
+
+    let outer_columns = {
+        let mut v = vec!["t.row_number".to_string(), "t.message".to_string()];
+        v.append(&mut outer_columns);
+        v
+    };
+
+    format!(
+        r#"SELECT {outer_columns}
+                 FROM (
+                   SELECT {inner_columns}
+                   FROM "{table}_view"
+                 ) t"#,
+        outer_columns = outer_columns.join(", "),
+        inner_columns = inner_columns.join(", "),
+        table = table,
+    )
+}
+
 /// Given a global config map, a database connection pool, a database transaction, a table name, a
 /// column name, and a value for that column: get the rows, other than the one indicated by
 /// `except`, that would need to be revalidated if the given value were to replace the actual
@@ -1106,82 +1309,13 @@ pub async fn get_affected_rows(
     pool: &AnyPool,
     tx: &mut Transaction<'_, sqlx::Any>,
 ) -> Result<IndexMap<u32, SerdeMap>, String> {
+    // Since the consequence of an update could involve currently invalid rows
+    // (in the conflict table) becoming valid or vice versa, we need to check rows for
+    // which the value of the column is the same as `value`
     let sql = {
-        let is_clause = if pool.any_kind() == AnyKind::Sqlite {
-            "IS"
-        } else {
-            "IS NOT DISTINCT FROM"
-        };
-
-        let real_columns = global_config
-            .get("table")
-            .and_then(|t| t.get(table))
-            .and_then(|t| t.as_object())
-            .and_then(|t| t.get("column"))
-            .and_then(|t| t.as_object())
-            .and_then(|t| Some(t.keys()))
-            .and_then(|k| Some(k.map(|k| k.to_string())))
-            .and_then(|t| Some(t.collect::<Vec<_>>()))
-            .unwrap();
-
-        let mut inner_columns = real_columns
-            .iter()
-            .map(|c| {
-                format!(
-                    r#"CASE
-                         WHEN "{column}" {is_clause} NULL THEN (
-                           SELECT value
-                           FROM "message"
-                           WHERE "row" = "row_number"
-                             AND "column" = '{column}'
-                             AND "table" = '{table}'
-                           ORDER BY "message_id" DESC
-                           LIMIT 1
-                         )
-                         ELSE {casted_column}
-                       END AS "{column}_extended""#,
-                    casted_column = if pool.any_kind() == AnyKind::Sqlite {
-                        cast_column_sql_to_text(c, "non-text")
-                    } else {
-                        format!("\"{}\"::TEXT", c)
-                    },
-                    column = c,
-                    table = table,
-                )
-            })
-            .collect::<Vec<_>>();
-
-        let mut outer_columns = real_columns
-            .iter()
-            .map(|c| format!("t.\"{}_extended\"", c))
-            .collect::<Vec<_>>();
-
-        let inner_columns = {
-            let mut v = vec!["row_number".to_string()];
-            v.append(&mut inner_columns);
-            v
-        };
-
-        let outer_columns = {
-            let mut v = vec!["t.row_number".to_string()];
-            v.append(&mut outer_columns);
-            v
-        };
-
-        // Since the consequence of an update could involve currently invalid rows
-        // (in the conflict table) becoming valid or vice versa, we need to check rows for
-        // which the value of the column is the same as `value`
-
         format!(
-            r#"SELECT {outer_columns}
-                 FROM (
-                   SELECT {inner_columns}
-                   FROM "{table}_view"
-                 ) t
-                 WHERE "{column}_extended" = '{value}'{except}"#,
-            outer_columns = outer_columns.join(", "),
-            inner_columns = inner_columns.join(", "),
-            table = table,
+            r#"{main_query} WHERE "{column}_extended" = '{value}'{except}"#,
+            main_query = query_with_message_values(table, global_config, pool),
             column = column,
             value = value,
             except = match except {
@@ -1206,7 +1340,7 @@ pub async fn get_affected_rows(
             let cname = column.name();
             if cname == "row_number" {
                 row_number = Some(row.get::<i64, _>("row_number") as u32);
-            } else {
+            } else if cname != "message" {
                 let raw_value = row.try_get_raw(format!(r#"{}"#, cname).as_str()).unwrap();
                 let value;
                 if !raw_value.is_null() {
@@ -1230,86 +1364,83 @@ pub async fn get_affected_rows(
     Ok(table_rows)
 }
 
-/// Given a database connection pool, a database transaction, a table name, a column name, a row
-/// number, and a cell value for the column, insert an update message to the message table
-/// indicating that the actual value of the column has been changed to cell_value.
-pub async fn insert_update_message(
+/// Given a global configuration map, a database connection pool, a database transaction, a table
+/// name and a row number, get the logical contents of that row (whether or not it is valid),
+/// including any messages, from the database.
+pub async fn get_row_from_db(
+    global_config: &SerdeMap,
     pool: &AnyPool,
     tx: &mut Transaction<'_, sqlx::Any>,
     table: &str,
-    column: &str,
     row_number: &u32,
-    cell_value: &str,
-) -> Result<(), sqlx::Error> {
-    // TODO: We should be able to do this in one query instead of two. See the SQL code in
-    // get_affected_rows() where we solve the problem this two-query approach is meant to solve
-    // simply by re-aliasing the subquery as <column>_extended.
+) -> Result<SerdeMap, sqlx::Error> {
+    let sql = format!(
+        "{} WHERE row_number = {}",
+        query_with_message_values(table, global_config, pool),
+        row_number
+    );
+    let query = sqlx_query(&sql);
+    let rows = query.fetch_all(tx.acquire().await?).await?;
+    if rows.len() == 0 {
+        return Err(SqlxCErr(
+            format!(
+                "In get_row_from_db(). No rows found for row_number: {}",
+                row_number
+            )
+            .into(),
+        ));
+    }
+    let sql_row = &rows[0];
 
-    // In some cases the current value of the column will have to retrieved from the last
-    // generated message, so we retrieve that from the database:
-    let last_msg_val = {
-        let sql = format!(
-            r#"SELECT value
-                     FROM "message"
-                     WHERE "row" = {row}
-                       AND "column" = '{column}'
-                       AND "table" = '{table}'
-                     ORDER BY "message_id" DESC
-                     LIMIT 1"#,
-            column = column,
-            table = table,
-            row = row_number,
-        );
-        let query = sqlx_query(&sql);
-
-        let results = query.fetch_all(tx.acquire().await?).await?;
-        if results.is_empty() {
-            "".to_string()
+    let messages = {
+        let raw_messages = sql_row.try_get_raw("message")?;
+        if raw_messages.is_null() {
+            vec![]
         } else {
-            let row = &results[0];
-            let raw_value = row.try_get_raw("value").unwrap();
-            if !raw_value.is_null() {
-                get_column_value(&row, "value", "text")
-            } else {
-                "".to_string()
+            let messages: &str = sql_row.get("message");
+            match serde_json::from_str::<SerdeValue>(messages) {
+                Err(e) => return Err(SqlxCErr(e.into())),
+                Ok(SerdeValue::Array(m)) => m,
+                _ => return Err(SqlxCErr(format!("{} is not an array.", messages).into())),
             }
         }
     };
 
-    // Construct the SQL for the insert of the 'update' message using last_msg_val:
-    let casted_column = cast_column_sql_to_text(column, "non-text");
-    let is_clause = if pool.any_kind() == AnyKind::Sqlite {
-        "IS"
-    } else {
-        "IS NOT DISTINCT FROM"
-    };
-
-    let insert_sql = format!(
-        r#"INSERT INTO "message"
-               ("table", "row", "column", "value", "level", "rule", "message")
-               SELECT
-                 '{table}', "row_number", '{column}', '{value}', 'update', 'rule:update',
-                 'Value changed from ''' ||
-                   CASE
-                     WHEN "{column}" {is_clause} NULL THEN '{last_msg_val}'
-                     ELSE {casted_column}
-                   END ||
-                 ''' to ''{value}'''
-               FROM "{table}_view"
-               WHERE "row_number" = {row} AND (
-                 ("{column}" {is_clause} NULL AND '{last_msg_val}' != '{value}')
-                   OR {casted_column} != '{value}'
-               )"#,
-        column = column,
-        last_msg_val = last_msg_val,
-        is_clause = is_clause,
-        row = row_number,
-        table = table,
-        value = cell_value,
-    );
-    let query = sqlx_query(&insert_sql);
-    query.execute(tx.acquire().await?).await?;
-    Ok(())
+    let mut row = SerdeMap::new();
+    for column in sql_row.columns() {
+        let cname_extended = column.name();
+        if !vec!["row_number", "message"].contains(&cname_extended) {
+            let raw_value = sql_row.try_get_raw(format!(r#"{}"#, cname_extended).as_str())?;
+            let value;
+            if !raw_value.is_null() {
+                // The extended query returned by query_with_message_values() casts all column
+                // values to text, so we pass "text" to get_column_value() for every column:
+                value = get_column_value(&sql_row, &cname_extended, "text");
+            } else {
+                value = String::from("");
+            }
+            let cname = match cname_extended.strip_suffix("_extended") {
+                None => cname_extended.clone(),
+                Some(cname) => cname,
+            };
+            let column_messages = messages
+                .iter()
+                .filter(|m| m.get("column").unwrap().as_str() == Some(cname))
+                .collect::<Vec<_>>();
+            let valid = column_messages
+                .iter()
+                .filter(|m| m.get("level").unwrap().as_str() == Some("error"))
+                .collect::<Vec<_>>()
+                .is_empty();
+            let cell = json!({
+                "value": value,
+                "valid": valid,
+                "messages": column_messages,
+            });
+            row.insert(cname.to_string(), json!(cell));
+        }
+    }
+    Ok(row)
 }
 
 /// Given a database connection pool, a database transaction, a table name, a column name, and a row
@@ -1354,10 +1485,17 @@ pub async fn get_db_value(
     );
 
     let query = sqlx_query(&sql);
-    let result_row = query
-        .fetch_one(tx.acquire().await.map_err(|e| e.to_string())?)
+    let rows = query
+        .fetch_all(tx.acquire().await.map_err(|e| e.to_string())?)
         .await
         .map_err(|e| e.to_string())?;
+    if rows.len() == 0 {
+        return Err(format!(
+            "In get_db_value(). No rows found for row_number: {}",
+            row_number
+        ));
+    }
+    let result_row = &rows[0];
     let value: &str = result_row.try_get(column).unwrap();
     Ok(value.to_string())
 }
@@ -1623,41 +1761,459 @@ pub async fn process_updates(
     Ok(())
 }
 
-/// A wrapper around [insert_new_row_tx()] in which the database transaction is implicitly created
-/// and then committed once the given new row has been inserted.
+/// Given a database transaction, a table name, a row number, optionally: the version of the row we
+/// are going to change it from, optionally: the version of the row we are going to change it to,
+/// and the name of the user making the change, record the change to the history table in the
+/// database. Note that `from` and `to` cannot both be None.
+pub async fn record_row_change(
+    tx: &mut Transaction<'_, sqlx::Any>,
+    table: &str,
+    row_number: &u32,
+    from: Option<&SerdeMap>,
+    to: Option<&SerdeMap>,
+    user: &str,
+) -> Result<(), sqlx::Error> {
+    if let (None, None) = (from, to) {
+        return Err(SqlxCErr(
+            "Arguments 'from' and 'to' to function record_row_change() cannot both be None".into(),
+        ));
+    }
+
+    fn to_text(smap: Option<&SerdeMap>, quoted: bool) -> String {
+        match smap {
+            None => "NULL".to_string(),
+            Some(r) => {
+                let inner = format!("{}", json!(r)).replace("'", "''");
+                if !quoted {
+                    inner
+                } else {
+                    format!("'{}'", inner)
+                }
+            }
+        }
+    }
+
+    fn format_value(value: &String, numeric_re: &Regex) -> String {
+        if numeric_re.is_match(value) {
+            value.to_string()
+        } else {
+            format!("'{}'", value)
+        }
+    }
+
+    fn summarize(from: Option<&SerdeMap>, to: Option<&SerdeMap>) -> Result<String, String> {
+        // Constructs a summary of the form:
+        // {
+        //   "column":"bar",
+        //   "level":"update",
+        //   "message":"Value changed from 'A' to 'B'",
+        //   "old_value":"'A'",
+        //   "value":"'B'"
+        // }
+        let mut summary = vec![];
+        match (from, to) {
+            (None, _) | (_, None) => Ok("NULL".to_string()),
+            (Some(from), Some(to)) => {
+                let numeric_re = Regex::new(r"^[0-9]*\.?[0-9]+$").unwrap();
+                for (column, cell) in from.iter() {
+                    let old_value = cell
+                        .get("value")
+                        .and_then(|v| match v {
+                            SerdeValue::String(s) => Some(format!("{}", s)),
+                            SerdeValue::Number(n) => Some(format!("{}", n)),
+                            SerdeValue::Bool(b) => Some(format!("{}", b)),
+                            _ => None,
+                        })
+                        .ok_or(format!("No value in {}", cell))?;
+                    let new_value = to
+                        .get(column)
+                        .and_then(|v| v.get("value"))
+                        .and_then(|v| match v {
+                            SerdeValue::String(s) => Some(format!("{}", s)),
+                            SerdeValue::Number(n) => Some(format!("{}", n)),
+                            SerdeValue::Bool(b) => Some(format!("{}", b)),
+                            _ => None,
+                        })
+                        .ok_or(format!("No value for column: {} in {:?}", column, to))?;
+                    if new_value != old_value {
+                        let mut column_summary = SerdeMap::new();
+                        column_summary.insert("column".to_string(), json!(column));
+                        column_summary.insert("level".to_string(), json!("update"));
+                        column_summary.insert("old_value".to_string(), json!(old_value));
+                        column_summary.insert("value".to_string(), json!(new_value));
+                        column_summary.insert(
+                            "message".to_string(),
+                            json!(format!(
+                                "Value changed from {} to {}",
+                                format_value(&old_value.to_string(), &numeric_re),
+                                format_value(&new_value.to_string(), &numeric_re),
+                            )),
+                        );
+                        let column_summary = to_text(Some(&column_summary), false);
+                        summary.push(column_summary);
+                    }
+                }
+                Ok(format!("'[{}]'", summary.join(",")))
+            }
+        }
+    }
+
+    // Always ignore the table suffix when recording a row change:
+    let table = match table.strip_suffix("_conflict") {
+        None => table.clone(),
+        Some(base) => base,
+    };
+    let summary = summarize(from, to).map_err(|e| SqlxCErr(e.into()))?;
+    let (from, to) = (to_text(from, true), to_text(to, true));
+    let sql = format!(
+        r#"INSERT INTO "history" ("table", "row", "from", "to", "summary", "user")
+           VALUES ('{}', {}, {}, {}, {}, '{}')"#,
+        table, row_number, from, to, summary, user
+    );
+    let query = sqlx_query(&sql);
+    query.execute(tx.acquire().await?).await?;
+
+    Ok(())
+}
+
+/// Given a row and a column name, extract the contents of the row as a JSON object and return it.
+fn get_json_from_row(row: &AnyRow, column: &str) -> Option<SerdeMap> {
+    let raw_value = row.try_get_raw(column).unwrap();
+    if !raw_value.is_null() {
+        let value: &str = row.get(column);
+        match serde_json::from_str::<SerdeValue>(value) {
+            Err(e) => {
+                eprintln!("WARN: {}", e);
+                None
+            }
+            Ok(SerdeValue::Object(value)) => Some(value),
+            _ => {
+                eprintln!("WARN: {} is not an object.", value);
+                None
+            }
+        }
+    } else {
+        None
+    }
+}
+
+/// Given a user, a history_id, a database transaction, and an undone_state indicating whether to
+/// set the associated history record as undone (if undone_state == true) or as not undone
+/// (otherwise). When setting the record to undone, user is used for the 'undone_by' field of the
+/// history table, otherwise undone_by is set to NULL and the user is indicated as the one
+/// responsible for the change (instead of whoever made the change originally).
+async fn switch_undone_state(
+    user: &str,
+    history_id: u16,
+    undone_state: bool,
+    tx: &mut Transaction<'_, sqlx::Any>,
+    pool: &AnyPool,
+) -> Result<(), sqlx::Error> {
+    // Set the history record to undone:
+    let timestamp = {
+        if pool.any_kind() == AnyKind::Sqlite {
+            "STRFTIME('%Y-%m-%d %H:%M:%f', 'NOW')"
+        } else {
+            "CURRENT_TIMESTAMP"
+        }
+    };
+    let undone_by = if undone_state == true {
+        format!(r#""undone_by" = '{}', "timestamp" = {}"#, user, timestamp)
+    } else {
+        format!(
+            r#""undone_by" = NULL, "user" = '{}', "timestamp" = {}"#,
+            user, timestamp
+        )
+    };
+    let sql = format!(
+        r#"UPDATE "history" SET {} WHERE "history_id" = {}"#,
+        undone_by, history_id
+    );
+    let query = sqlx_query(&sql);
+    query.execute(tx.acquire().await?).await?;
+    Ok(())
+}
+
+/// Given a global configuration map, maps of compiled datatype and ruled conditions, a database
+/// connection pool, and the user who initiated the undo, find the last recorded change to the
+/// database and undo it, indicating in the history table that undo_user is responsible.
+#[async_recursion]
+pub async fn undo(
+    global_config: &SerdeMap,
+    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
+    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    pool: &AnyPool,
+    undo_user: &str,
+) -> Result<(), sqlx::Error> {
+    // Look in the history table, get the row with the greatest ID, get the row number,
+    // from, and to, and determine whether the last operation was a delete, insert, or update.
+    let is_clause = if pool.any_kind() == AnyKind::Sqlite {
+        "IS"
+    } else {
+        "IS NOT DISTINCT FROM"
+    };
+    let sql = format!(
+        r#"SELECT * FROM "history"
+           WHERE "undone_by" {} NULL
+           ORDER BY "history_id" DESC LIMIT 1"#,
+        is_clause
+    );
+    let query = sqlx_query(&sql);
+    let result_row = query.fetch_optional(pool).await?;
+    let result_row = match result_row {
+        None => {
+            eprintln!("WARN: Nothing to undo.");
+            return Ok(());
+        }
+        Some(r) => r,
+    };
+    let history_id: i32 = result_row.get("history_id");
+    let history_id = history_id as u16;
+    let table: &str = result_row.get("table");
+    let row_number: i64 = result_row.get("row");
+    let row_number = row_number as u32;
+    let from = get_json_from_row(&result_row, "from");
+    let to = get_json_from_row(&result_row, "to");
+
+    match (from, to) {
+        (None, None) => {
+            return Err(SqlxCErr(
+                "Cannot redo unknown operation from None to None".into(),
+            ))
+        }
+        (None, Some(_)) => {
+            // Undo an insert:
+            let mut tx = pool.begin().await?;
+
+            delete_row_tx(
+                global_config,
+                compiled_datatype_conditions,
+                compiled_rule_conditions,
+                pool,
+                &mut tx,
+                table,
+                &row_number,
+            )
+            .await?;
+
+            switch_undone_state(undo_user, history_id, true, &mut tx, pool).await?;
+            tx.commit().await?;
+        }
+        (Some(from), None) => {
+            // Undo a delete:
+            let mut tx = pool.begin().await?;
+
+            insert_new_row_tx(
+                global_config,
+                compiled_datatype_conditions,
+                compiled_rule_conditions,
+                pool,
+                &mut tx,
+                table,
+                &from,
+                Some(row_number),
+                false,
+            )
+            .await?;
+
+            switch_undone_state(undo_user, history_id, true, &mut tx, pool).await?;
+            tx.commit().await?;
+        }
+        (Some(from), Some(_)) => {
+            // Undo an an update:
+            let mut tx = pool.begin().await?;
+
+            update_row_tx(
+                global_config,
+                compiled_datatype_conditions,
+                compiled_rule_conditions,
+                pool,
+                &mut tx,
+                table,
+                &from,
+                &row_number,
+                false,
+                false,
+            )
+            .await?;
+
+            switch_undone_state(undo_user, history_id, true, &mut tx, pool).await?;
+            tx.commit().await?;
+        }
+    }
+    Ok(())
+}
+
+/// Given a global configuration map, maps of compiled datatype and ruled conditions, a database
+/// connection pool, and the user who initiated the redo, find the last recorded change to the
+/// database that was undone and redo it, indicating in the history table that redo_user is
+/// responsible for the redo.
+#[async_recursion]
+pub async fn redo(
+    global_config: &SerdeMap,
+    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
+    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    pool: &AnyPool,
+    redo_user: &str,
+) -> Result<(), sqlx::Error> {
+    // Look in the history table, get the row with the greatest ID, get the row number,
+    // from, and to, and determine whether the last operation was a delete, insert, or update.
+    let is_not_clause = if pool.any_kind() == AnyKind::Sqlite {
+        "IS NOT"
+    } else {
+        "IS DISTINCT FROM"
+    };
+    let sql = format!(
+        r#"SELECT * FROM "history"
+           WHERE "undone_by" {} NULL
+           ORDER BY "timestamp" DESC LIMIT 1"#,
+        is_not_clause
+    );
+    let query = sqlx_query(&sql);
+    let result_row = query.fetch_optional(pool).await?;
+    let result_row = match result_row {
+        None => {
+            eprintln!("WARN: Nothing to redo.");
+            return Ok(());
+        }
+        Some(result_row) => {
+            let undone_by = result_row.try_get_raw("undone_by")?;
+            if undone_by.is_null() {
+                eprintln!("WARN: Nothing to redo.");
+                return Ok(());
+            }
+            result_row
+        }
+    };
+    let history_id: i32 = result_row.get("history_id");
+    let history_id = history_id as u16;
+    let table: &str = result_row.get("table");
+    let row_number: i64 = result_row.get("row");
+    let row_number = row_number as u32;
+    let from = get_json_from_row(&result_row, "from");
+    let to = get_json_from_row(&result_row, "to");
+
+    match (from, to) {
+        (None, None) => {
+            return Err(SqlxCErr(
+                "Cannot redo unknown operation from None to None".into(),
+            ))
+        }
+        (None, Some(to)) => {
+            // Redo an insert:
+            let mut tx = pool.begin().await?;
+
+            insert_new_row_tx(
+                global_config,
+                compiled_datatype_conditions,
+                compiled_rule_conditions,
+                pool,
+                &mut tx,
+                table,
+                &to,
+                Some(row_number),
+                false,
+            )
+            .await?;
+
+            switch_undone_state(redo_user, history_id, false, &mut tx, pool).await?;
+            tx.commit().await?;
+        }
+        (Some(_), None) => {
+            // Redo a delete:
+            let mut tx = pool.begin().await?;
+
+            delete_row_tx(
+                global_config,
+                compiled_datatype_conditions,
+                compiled_rule_conditions,
+                pool,
+                &mut tx,
+                table,
+                &row_number,
+            )
+            .await?;
+
+            switch_undone_state(redo_user, history_id, false, &mut tx, pool).await?;
+            tx.commit().await?;
+        }
+        (Some(_), Some(to)) => {
+            // Redo an an update:
+            let mut tx = pool.begin().await?;
+
+            update_row_tx(
+                global_config,
+                compiled_datatype_conditions,
+                compiled_rule_conditions,
+                pool,
+                &mut tx,
+                table,
+                &to,
+                &row_number,
+                false,
+                false,
+            )
+            .await?;
+
+            switch_undone_state(redo_user, history_id, false, &mut tx, pool).await?;
+            tx.commit().await?;
+        }
+    }
+    Ok(())
+}
+
+/// A wrapper around [insert_new_row_tx()] in which the following steps are also performed:
+/// - A database transaction is created and then committed once the given new row has been inserted.
+/// - The row is validated before insertion and the update to the database is recorded to the
+///   history table indicating that the given user is responsible for the change.
 #[async_recursion]
 pub async fn insert_new_row(
     global_config: &SerdeMap,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     pool: &AnyPool,
-    table_to_write: &str,
+    table: &str,
     row: &SerdeMap,
     new_row_number: Option<u32>,
-    skip_validation: bool,
+    user: &str,
 ) -> Result<u32, sqlx::Error> {
     let mut tx = pool.begin().await?;
+
+    let row = validate_row(
+        global_config,
+        compiled_datatype_conditions,
+        compiled_rule_conditions,
+        pool,
+        Some(&mut tx),
+        table,
+        row,
+        new_row_number,
+        None,
+    )
+    .await?;
+
     let rn = insert_new_row_tx(
         global_config,
         compiled_datatype_conditions,
         compiled_rule_conditions,
         pool,
         &mut tx,
-        table_to_write,
-        row,
+        table,
+        &row,
         new_row_number,
-        skip_validation,
+        true,
     )
     .await?;
+
+    record_row_change(&mut tx, table, &rn, None, Some(&row), user).await?;
     tx.commit().await?;
     Ok(rn)
 }
 
 /// Given a global config map, compiled datatype and rule conditions, a database connection pool, a
-/// database transaction, a table name, and a row, assign a new row number to the row and insert it
-/// to the database using the given transaction, then return the new row number. Optionally, if
-/// row_number is provided, use that to identify the new row. If skip_validation is set to true,
-/// omit the implicit call to [validate_row()].
+/// database transaction, a table name, and a row, assign the given new row number to the row and
+/// insert it to the database using the given transaction, then return the new row number.
+/// If skip_validation is set to true, omit the implicit call to [validate_row()].
 #[async_recursion]
 pub async fn insert_new_row_tx(
     global_config: &SerdeMap,
@@ -1665,14 +2221,14 @@ pub async fn insert_new_row_tx(
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     pool: &AnyPool,
     tx: &mut Transaction<sqlx::Any>,
-    table_to_write: &str,
+    table: &str,
     row: &SerdeMap,
     new_row_number: Option<u32>,
     skip_validation: bool,
 ) -> Result<u32, sqlx::Error> {
-    // Extract the base table name in case table_to_write has a _conflict suffix:
-    let base_table = match table_to_write.strip_suffix("_conflict") {
-        None => table_to_write.clone(),
+    // Remove any _conflict suffix from the table name:
+    let table = match table.strip_suffix("_conflict") {
+        None => table.clone(),
         Some(base) => base,
     };
 
@@ -1685,9 +2241,9 @@ pub async fn insert_new_row_tx(
             compiled_rule_conditions,
             pool,
             Some(tx),
-            base_table,
+            table,
             row,
-            None,
+            new_row_number,
             None,
         )
         .await?
@@ -1699,19 +2255,30 @@ pub async fn insert_new_row_tx(
     let new_row_number = match new_row_number {
         Some(n) => n,
         None => {
-            // The new row number to insert is the current highest row number + 1.
             let sql = format!(
-                r#"SELECT MAX("row_number") AS "row_number" FROM "{}_view""#,
-                base_table
+                r#"SELECT MAX("row_number") AS "row_number" FROM (
+                     SELECT MAX("row_number") AS "row_number"
+                       FROM "{table}_view"
+                     UNION ALL
+                      SELECT MAX("row") AS "row_number"
+                        FROM "history"
+                       WHERE "table" = '{table}'
+                   ) t"#,
+                table = table
             );
             let query = sqlx_query(&sql);
-            let result_row = query.fetch_one(tx.acquire().await?).await?;
-            let result = result_row.try_get_raw("row_number")?;
+            let result_rows = query.fetch_all(tx.acquire().await?).await?;
             let new_row_number: i64;
-            if result.is_null() {
+            if result_rows.len() == 0 {
                 new_row_number = 1;
             } else {
-                new_row_number = result_row.get("row_number");
+                let result_row = &result_rows[0];
+                let result = result_row.try_get_raw("row_number")?;
+                if result.is_null() {
+                    new_row_number = 1;
+                } else {
+                    new_row_number = result_row.get("row_number");
+                }
             }
             let new_row_number = new_row_number as u32 + 1;
             new_row_number
@@ -1737,13 +2304,10 @@ pub async fn insert_new_row_tx(
         let mut cell_for_insert = cell.clone();
         if cell_valid {
             cell_for_insert.remove("value");
-            let sql_type =
-                get_sql_type_from_global_config(&global_config, &base_table, &column, pool).ok_or(
-                    SqlxCErr(
-                        format!("Unable to determine SQL type for {}.{}", base_table, column)
-                            .into(),
-                    ),
-                )?;
+            let sql_type = get_sql_type_from_global_config(&global_config, &table, &column, pool)
+                .ok_or(SqlxCErr(
+                format!("Unable to determine SQL type for {}.{}", table, column).into(),
+            ))?;
             insert_values.push(cast_sql_param_from_text(&sql_type));
             insert_params.push(String::from(cell_value));
         } else {
@@ -1781,66 +2345,60 @@ pub async fn insert_new_row_tx(
     // database currently were replaced with `row`:
     let query_as_if = QueryAsIf {
         kind: QueryAsIfKind::Add,
-        table: base_table.to_string(),
-        alias: format!("{}_as_if", base_table),
+        table: table.to_string(),
+        alias: format!("{}_as_if", table),
         row_number: new_row_number,
         row: Some(row.clone()),
     };
 
     // Look through the valve config to see which tables are dependent on this table
     // and find the rows that need to be updated:
-    let (_, updates_after, _) =
-        get_rows_to_update(global_config, pool, tx, base_table, &query_as_if)
-            .await
-            .map_err(|e| SqlxCErr(e.into()))?;
+    let (_, updates_after, _) = get_rows_to_update(global_config, pool, tx, table, &query_as_if)
+        .await
+        .map_err(|e| SqlxCErr(e.into()))?;
 
-    // If the row is not already being directed to the conflict table, check it to see if it should
-    // be redirected there:
-    let table_to_write = {
-        if table_to_write.ends_with("_conflict") {
-            table_to_write.to_string()
-        } else {
-            let mut table_to_write = String::from(base_table);
-            for (column, cell) in row.iter() {
-                let valid = cell.get("valid").ok_or(SqlxCErr(
-                    format!("No flag named 'valid' in {:?}", cell).into(),
-                ))?;
-                if valid == false {
-                    let structure = global_config
-                        .get("table")
-                        .and_then(|t| t.as_object())
-                        .and_then(|t| t.get(base_table))
-                        .and_then(|t| t.as_object())
-                        .and_then(|t| t.get("column"))
-                        .and_then(|c| c.as_object())
-                        .and_then(|c| c.get(column))
-                        .and_then(|c| c.as_object())
-                        .and_then(|c| c.get("structure"))
-                        .and_then(|s| s.as_str())
-                        .unwrap_or_else(|| "");
-                    if vec!["primary", "unique"].contains(&structure)
-                        || structure.starts_with("tree(")
-                    {
-                        let messages = cell
-                            .get("messages")
-                            .and_then(|m| m.as_array())
-                            .ok_or(SqlxCErr(format!("No 'messages' in {:?}", cell).into()))?;
-                        for msg in messages {
-                            let level = msg
-                                .get("level")
-                                .and_then(|l| l.as_str())
-                                .ok_or(SqlxCErr(format!("No 'level' in {:?}", cell).into()))?;
-                            if level == "error" {
-                                table_to_write.push_str("_conflict");
-                                break;
-                            }
-                        }
+    // Check it to see if the row should be redirected to the conflict table:
+    let mut table_to_write = String::from(table);
+    let mut outer_break = false;
+    for (column, cell) in row.iter() {
+        if outer_break {
+            break;
+        }
+        let valid = cell.get("valid").ok_or(SqlxCErr(
+            format!("No flag named 'valid' in {:?}", cell).into(),
+        ))?;
+        if valid == false {
+            let structure = global_config
+                .get("table")
+                .and_then(|t| t.as_object())
+                .and_then(|t| t.get(table))
+                .and_then(|t| t.as_object())
+                .and_then(|t| t.get("column"))
+                .and_then(|c| c.as_object())
+                .and_then(|c| c.get(column))
+                .and_then(|c| c.as_object())
+                .and_then(|c| c.get("structure"))
+                .and_then(|s| s.as_str())
+                .unwrap_or_else(|| "");
+            if vec!["primary", "unique"].contains(&structure) || structure.starts_with("tree(") {
+                let messages = cell
+                    .get("messages")
+                    .and_then(|m| m.as_array())
+                    .ok_or(SqlxCErr(format!("No 'messages' in {:?}", cell).into()))?;
+                for msg in messages {
+                    let level = msg
+                        .get("level")
+                        .and_then(|l| l.as_str())
+                        .ok_or(SqlxCErr(format!("No 'level' in {:?}", cell).into()))?;
+                    if level == "error" {
+                        table_to_write.push_str("_conflict");
+                        outer_break = true;
+                        break;
                     }
                 }
             }
-            table_to_write
         }
-    };
+    }
 
     // Add the new row to the table:
     let insert_stmt = local_sql_syntax(
@@ -1871,7 +2429,7 @@ pub async fn insert_new_row_tx(
             r#"INSERT INTO "message"
                ("table", "row", "column", "value", "level", "rule", "message")
                VALUES ('{}', {}, '{}', '{}', '{}', '{}', '{}')"#,
-            base_table, new_row_number, column, value, level, rule, message
+            table, new_row_number, column, value, level, rule, message
         );
         let query = sqlx_query(&message_sql);
         query.execute(tx.acquire().await?).await?;
@@ -1894,37 +2452,40 @@ pub async fn insert_new_row_tx(
 }
 
 /// A wrapper around [delete_row_tx()] in which the database transaction is implicitly created
-/// and then committed once the given row has been deleted.
+/// and then committed once the given row has been deleted, and the change to the database is
+/// recorded in the history table indicating that the given user is responsible for the change.
 #[async_recursion]
 pub async fn delete_row(
     global_config: &SerdeMap,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     pool: &AnyPool,
-    table_to_write: &str,
+    table: &str,
     row_number: &u32,
-    simulated_update: bool,
+    user: &str,
 ) -> Result<(), sqlx::Error> {
     let mut tx = pool.begin().await?;
+
+    let row = get_row_from_db(global_config, pool, &mut tx, &table, row_number).await?;
+    record_row_change(&mut tx, &table, row_number, Some(&row), None, user).await?;
+
     delete_row_tx(
         global_config,
         compiled_datatype_conditions,
         compiled_rule_conditions,
         pool,
         &mut tx,
-        table_to_write,
+        table,
         row_number,
-        simulated_update,
     )
     .await?;
+
     tx.commit().await?;
     Ok(())
 }
 
 /// Given a global config map, maps of datatype and rule conditions, a database connection pool, a
-/// database transaction, a table name, a row number, and a flag indicating whether this delete
-/// is one part of what is effectively an update (i.e., a delete followed by an insert, as opposed
-/// to a straight delete), delete the given row from the database.
+/// database transaction, a table name, and a row number, delete the given row from the database.
 #[async_recursion]
 pub async fn delete_row_tx(
     global_config: &SerdeMap,
@@ -1932,12 +2493,12 @@ pub async fn delete_row_tx(
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     pool: &AnyPool,
     tx: &mut Transaction<sqlx::Any>,
-    table_to_write: &str,
+    table: &str,
     row_number: &u32,
-    simulated_update: bool,
 ) -> Result<(), sqlx::Error> {
-    let base_table = match table_to_write.strip_suffix("_conflict") {
-        None => table_to_write.clone(),
+    // Remove any _conflict suffix from the table name:
+    let table = match table.strip_suffix("_conflict") {
+        None => table.clone(),
         Some(base) => base,
     };
 
@@ -1945,8 +2506,8 @@ pub async fn delete_row_tx(
     // database:
     let query_as_if = QueryAsIf {
         kind: QueryAsIfKind::Remove,
-        table: base_table.to_string(),
-        alias: format!("{}_as_if", base_table),
+        table: table.to_string(),
+        alias: format!("{}_as_if", table),
         row_number: *row_number,
         row: None,
     };
@@ -1955,7 +2516,7 @@ pub async fn delete_row_tx(
     // rows that need to be updated. Since this is a delete there will only be rows to update
     // before and none after the delete:
     let (updates_before, _, updates_intra) =
-        get_rows_to_update(global_config, pool, tx, base_table, &query_as_if)
+        get_rows_to_update(global_config, pool, tx, table, &query_as_if)
             .await
             .map_err(|e| SqlxCErr(e.into()))?;
 
@@ -1975,28 +2536,20 @@ pub async fn delete_row_tx(
     // Now delete the row:
     let sql1 = format!(
         "DELETE FROM \"{}\" WHERE row_number = {}",
-        base_table, row_number,
+        table, row_number,
     );
     let sql2 = format!(
         "DELETE FROM \"{}_conflict\" WHERE row_number = {}",
-        base_table, row_number
+        table, row_number
     );
     for sql in vec![sql1, sql2] {
         let query = sqlx_query(&sql);
         query.execute(tx.acquire().await?).await?;
     }
 
-    // Now delete all messages associated with the row:
-    let simulated_update_clause = {
-        if simulated_update {
-            r#"AND "level" <> 'update'"#
-        } else {
-            ""
-        }
-    };
     let sql = format!(
-        r#"DELETE FROM "message" WHERE "table" = '{}' AND "row" = {} {}"#,
-        base_table, row_number, simulated_update_clause
+        r#"DELETE FROM "message" WHERE "table" = '{}' AND "row" = {}"#,
+        table, row_number
     );
     let query = sqlx_query(&sql);
     query.execute(tx.acquire().await?).await?;
@@ -2019,7 +2572,9 @@ pub async fn delete_row_tx(
 }
 
 /// A wrapper around [update_row_tx()] in which the database transaction is implicitly created
-/// and then committed once the given row has been updated..
+/// and then committed once the given row has been updated, the given row is validated before
+/// the update, and the update is recorded to the history table indicating that the given user
+/// is responsible for the change.
 #[async_recursion]
 pub async fn update_row(
     global_config: &SerdeMap,
@@ -2029,10 +2584,27 @@ pub async fn update_row(
     table_name: &str,
     row: &SerdeMap,
     row_number: &u32,
-    skip_validation: bool,
-    do_not_recurse: bool,
+    user: &str,
 ) -> Result<(), sqlx::Error> {
     let mut tx = pool.begin().await?;
+
+    // Get the old version of the row from the database so that we can later record it to the
+    // history table:
+    let old_row = get_row_from_db(global_config, pool, &mut tx, table_name, row_number).await?;
+
+    let row = validate_row(
+        global_config,
+        compiled_datatype_conditions,
+        compiled_rule_conditions,
+        pool,
+        Some(&mut tx),
+        table_name,
+        row,
+        Some(*row_number),
+        None,
+    )
+    .await?;
+
     update_row_tx(
         global_config,
         compiled_datatype_conditions,
@@ -2040,19 +2612,33 @@ pub async fn update_row(
         pool,
         &mut tx,
         table_name,
-        row,
+        &row,
         row_number,
-        skip_validation,
-        do_not_recurse,
+        true,
+        false,
     )
     .await?;
+
+    // Record the row update in the history table:
+    record_row_change(
+        &mut tx,
+        table_name,
+        row_number,
+        Some(&old_row),
+        Some(&row),
+        user,
+    )
+    .await?;
+
     tx.commit().await?;
     Ok(())
 }
 
-/// Given global config map, a database connection pool, a database transaction, a table name, a
-/// row, and the row number to update, update the corresponding row in the database, using the given
-/// transaction, with new values as specified by `row`.
+/// Given global config map, maps of compiled datatype and rule conditions, a database connection
+/// pool, a database transaction, a table name, a row, and the row number to update, update the
+/// corresponding row in the database. If skip_validation is set, skip the implicit call to
+/// [validate_row()]. If do_not_recurse, is set, do not look for rows which could be affected by
+/// this update.
 #[async_recursion]
 pub async fn update_row_tx(
     global_config: &SerdeMap,
@@ -2060,29 +2646,152 @@ pub async fn update_row_tx(
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     pool: &AnyPool,
     tx: &mut Transaction<sqlx::Any>,
-    table_name: &str,
+    table: &str,
     row: &SerdeMap,
     row_number: &u32,
     skip_validation: bool,
     do_not_recurse: bool,
 ) -> Result<(), sqlx::Error> {
-    // Used to validate the given row, counterfactually, "as if" the version of the row in the
-    // database currently were replaced with `row`:
+    async fn direct_update(
+        // Function to update the database table directly using an UPDATE statement, as opposed to
+        // a DELETE followed by an INSERT which must be used when the row needs to move from the
+        // normal to the conflict table or vice versa.
+        global_config: &SerdeMap,
+        pool: &AnyPool,
+        tx: &mut Transaction<'_, sqlx::Any>,
+        table_to_write: &str,
+        row_number: &u32,
+        row: &SerdeMap,
+    ) -> Result<(), sqlx::Error> {
+        let base_table = match table_to_write.strip_suffix("_conflict") {
+            None => table_to_write.clone(),
+            Some(base) => base,
+        };
+        // Prepare the row and messages for the database update:
+        let mut assignments = vec![];
+        let mut params = vec![];
+        let mut messages = vec![];
+        let sorted_datatypes = get_sorted_datatypes(global_config);
+        for (column, cell) in row.iter() {
+            let cell = cell
+                .as_object()
+                .ok_or(SqlxCErr(format!("Cell {:?} is not an object", cell).into()))?;
+            let cell_valid = cell.get("valid").and_then(|v| v.as_bool()).ok_or(SqlxCErr(
+                format!("No flag named 'valid' in {:?}", cell).into(),
+            ))?;
+            let cell_value = cell.get("value").and_then(|v| v.as_str()).ok_or(SqlxCErr(
+                format!("No str named 'value' in {:?}", cell).into(),
+            ))?;
+
+            // Generate the assignment statements and messages for each column:
+            let mut cell_for_insert = cell.clone();
+            if cell_valid {
+                cell_for_insert.remove("value");
+                let sql_type = get_sql_type_from_global_config(
+                    &global_config,
+                    &base_table.to_string(),
+                    &column,
+                    pool,
+                )
+                .ok_or(SqlxCErr(
+                    format!("Unable to determine SQL type for {}.{}", base_table, column).into(),
+                ))?;
+                assignments.push(format!(
+                    r#""{}" = {}"#,
+                    column,
+                    cast_sql_param_from_text(&sql_type)
+                ));
+                params.push(String::from(cell_value));
+            } else {
+                assignments.push(format!(r#""{}" = NULL"#, column));
+                let cell_messages = sort_messages(
+                    &sorted_datatypes,
+                    cell.get("messages")
+                        .and_then(|m| m.as_array())
+                        .ok_or(SqlxCErr(
+                            format!("No array named 'messages' in {:?}", cell).into(),
+                        ))?,
+                );
+                for cell_message in cell_messages {
+                    messages.push(json!({
+                        "column": String::from(column),
+                        "value": String::from(cell_value),
+                        "level": cell_message.get("level").and_then(|s| s.as_str()).ok_or(
+                            SqlxCErr(format!("No 'level' in {:?}", cell_message).into())
+                        )?,
+                        "rule": cell_message.get("rule").and_then(|s| s.as_str()).ok_or(
+                            SqlxCErr(format!("No 'rule' in {:?}", cell_message).into())
+                        )?,
+                        "message": cell_message.get("message").and_then(|s| s.as_str()).ok_or(
+                            SqlxCErr(format!("No 'message' in {:?}", cell_message).into())
+                        )?,
+                    }));
+                }
+            }
+        }
+
+        let mut update_stmt = format!(r#"UPDATE "{}" SET "#, table_to_write);
+        update_stmt.push_str(&assignments.join(", "));
+        update_stmt.push_str(&format!(r#" WHERE "row_number" = {}"#, row_number));
+        let update_stmt = local_sql_syntax(&pool, &update_stmt);
+        let mut query = sqlx_query(&update_stmt);
+        for param in &params {
+            query = query.bind(param);
+        }
+        query.execute(tx.acquire().await?).await?;
+
+        // Now delete any messages that had been previously inserted to the message table for the
+        // old version of this row:
+        let delete_sql = format!(
+            r#"DELETE FROM "message" WHERE "table" = '{}' AND "row" = {}"#,
+            base_table, row_number
+        );
+        let query = sqlx_query(&delete_sql);
+        query.execute(tx.acquire().await?).await?;
+
+        // Now add the messages to the message table for the new version of this row:
+        for m in messages {
+            let column = m.get("column").and_then(|c| c.as_str()).unwrap();
+            let value = m.get("value").and_then(|c| c.as_str()).unwrap();
+            let level = m.get("level").and_then(|c| c.as_str()).unwrap();
+            let rule = m.get("rule").and_then(|c| c.as_str()).unwrap();
+            let message = m.get("message").and_then(|c| c.as_str()).unwrap();
+            let message = message.replace("'", "''");
+            let insert_sql = format!(
+                r#"INSERT INTO "message"
+               ("table", "row", "column", "value", "level", "rule", "message")
+               VALUES ('{}', {}, '{}', '{}', '{}', '{}', '{}')"#,
+                base_table, row_number, column, value, level, rule, message
+            );
+            let query = sqlx_query(&insert_sql);
+            query.execute(tx.acquire().await?).await?;
+        }
+
+        Ok(())
+    }
+
+    // Remove any _conflict suffix from the table name:
+    let table = match table.strip_suffix("_conflict") {
+        None => table.clone(),
+        Some(base) => base,
+    };
+
+    // First, look through the valve config to see which tables are dependent on this table and find
+    // the rows that need to be updated. The variable query_as_if is used to validate the given row,
+    // counterfactually, "as if" the version of the row in the database currently were replaced with
+    // `row`:
     let query_as_if = QueryAsIf {
         kind: QueryAsIfKind::Replace,
-        table: table_name.to_string(),
-        alias: format!("{}_as_if", table_name),
+        table: table.to_string(),
+        alias: format!("{}_as_if", table),
         row_number: *row_number,
         row: Some(row.clone()),
     };
-
-    // First, look through the valve config to see which tables are dependent on this table
-    // and find the rows that need to be updated:
     let (updates_before, updates_after, updates_intra) = {
         if do_not_recurse {
             (IndexMap::new(), IndexMap::new(), IndexMap::new())
         } else {
-            get_rows_to_update(global_config, pool, tx, table_name, &query_as_if)
+            get_rows_to_update(global_config, pool, tx, table, &query_as_if)
                 .await
                 .map_err(|e| SqlxCErr(e.into()))?
         }
@@ -2110,7 +2819,7 @@ pub async fn update_row_tx(
             compiled_rule_conditions,
             pool,
             Some(tx),
-            table_name,
+            table,
             row,
             Some(*row_number),
             None,
@@ -2120,88 +2829,20 @@ pub async fn update_row_tx(
         row.clone()
     };
 
-    // Now prepare the row and messages for the database update:
-    let mut assignments = vec![];
-    let mut params = vec![];
-    let mut messages = vec![];
-    let sorted_datatypes = get_sorted_datatypes(global_config);
-    for (column, cell) in row.iter() {
-        let cell = cell
-            .as_object()
-            .ok_or(SqlxCErr(format!("Cell {:?} is not an object", cell).into()))?;
-        let cell_valid = cell.get("valid").and_then(|v| v.as_bool()).ok_or(SqlxCErr(
-            format!("No flag named 'valid' in {:?}", cell).into(),
-        ))?;
-        let cell_value = cell.get("value").and_then(|v| v.as_str()).ok_or(SqlxCErr(
-            format!("No str named 'value' in {:?}", cell).into(),
-        ))?;
-
-        // Begin by adding an extra 'update' row to the message table indicating that the value of
-        // this column has been updated (if that is the case).
-        insert_update_message(pool, tx, table_name, column, row_number, cell_value).await?;
-
-        // Generate the assignment statements and messages for each column:
-        let mut cell_for_insert = cell.clone();
-        if cell_valid {
-            cell_for_insert.remove("value");
-            let sql_type = get_sql_type_from_global_config(
-                &global_config,
-                &table_name.to_string(),
-                &column,
-                pool,
-            )
-            .ok_or(SqlxCErr(
-                format!("Unable to determine SQL type for {}.{}", table_name, column).into(),
-            ))?;
-            assignments.push(format!(
-                r#""{}" = {}"#,
-                column,
-                cast_sql_param_from_text(&sql_type)
-            ));
-            params.push(String::from(cell_value));
-        } else {
-            assignments.push(format!(r#""{}" = NULL"#, column));
-            let cell_messages = sort_messages(
-                &sorted_datatypes,
-                cell.get("messages")
-                    .and_then(|m| m.as_array())
-                    .ok_or(SqlxCErr(
-                        format!("No array named 'messages' in {:?}", cell).into(),
-                    ))?,
-            );
-            for cell_message in cell_messages {
-                messages.push(json!({
-                    "column": String::from(column),
-                    "value": String::from(cell_value),
-                    "level": cell_message.get("level").and_then(|s| s.as_str()).ok_or(
-                            SqlxCErr(format!("No 'level' in {:?}", cell_message).into())
-                        )?,
-                    "rule": cell_message.get("rule").and_then(|s| s.as_str()).ok_or(
-                            SqlxCErr(format!("No 'rule' in {:?}", cell_message).into())
-                        )?,
-                    "message": cell_message.get("message").and_then(|s| s.as_str()).ok_or(
-                            SqlxCErr(format!("No 'message' in {:?}", cell_message).into())
-                        )?,
-                }));
-            }
-        }
-    }
-
-    // Now update the target row. First, figure out whether the row is currently in the base table
-    // or the conflict table:
+    // Now figure out whether the row is currently in the base table or the conflict table:
     let sql = format!(
         "SELECT 1 FROM \"{}\" WHERE row_number = {}",
-        table_name, row_number
+        table, row_number
     );
     let query = sqlx_query(&sql);
     let rows = query.fetch_all(tx.acquire().await?).await?;
-    let mut current_table = String::from(table_name);
+    let mut current_table = String::from(table);
     if rows.len() == 0 {
         current_table.push_str("_conflict");
     }
 
     // Next, figure out where to put the new version of the row:
-    let mut table_to_write = String::from(table_name);
+    let mut table_to_write = String::from(table);
     for (column, cell) in row.iter() {
         let valid = cell.get("valid").ok_or(SqlxCErr(
             format!("No flag named 'valid' in {:?}", cell).into(),
@@ -2210,7 +2851,7 @@ pub async fn update_row_tx(
             let structure = global_config
                 .get("table")
                 .and_then(|t| t.as_object())
-                .and_then(|t| t.get(table_name))
+                .and_then(|t| t.get(table))
                 .and_then(|t| t.as_object())
                 .and_then(|t| t.get("column"))
                 .and_then(|c| c.as_object())
@@ -2243,15 +2884,7 @@ pub async fn update_row_tx(
     // If table_to_write and current_table are the same, update it. Otherwise delete the current
     // version of the row from the database and insert the new version to table_to_write:
     if table_to_write == current_table {
-        let mut update_stmt = format!(r#"UPDATE "{}" SET "#, table_to_write);
-        update_stmt.push_str(&assignments.join(", "));
-        update_stmt.push_str(&format!(r#" WHERE "row_number" = {}"#, row_number));
-        let update_stmt = local_sql_syntax(&pool, &update_stmt);
-        let mut query = sqlx_query(&update_stmt);
-        for param in &params {
-            query = query.bind(param);
-        }
-        query.execute(tx.acquire().await?).await?;
+        direct_update(global_config, pool, tx, &table_to_write, row_number, &row).await?;
     } else {
         delete_row_tx(
             global_config,
@@ -2259,9 +2892,8 @@ pub async fn update_row_tx(
             compiled_rule_conditions,
             pool,
             tx,
-            &current_table,
+            table,
             row_number,
-            true,
         )
         .await?;
         insert_new_row_tx(
@@ -2270,39 +2902,12 @@ pub async fn update_row_tx(
             compiled_rule_conditions,
             pool,
             tx,
-            &table_to_write,
+            table,
             &row,
             Some(*row_number),
             false,
         )
         .await?;
-    }
-
-    // Now delete any messages that had been previously inserted to the message table for the old
-    // version of this row (other than any 'update'-level messages):
-    let delete_sql = format!(
-        r#"DELETE FROM "message" WHERE "table" = '{}' AND "row" = {} AND "level" <> 'update'"#,
-        table_name, row_number
-    );
-    let query = sqlx_query(&delete_sql);
-    query.execute(tx.acquire().await?).await?;
-
-    // Now add the messages to the message table for the new version of this row:
-    for m in messages {
-        let column = m.get("column").and_then(|c| c.as_str()).unwrap();
-        let value = m.get("value").and_then(|c| c.as_str()).unwrap();
-        let level = m.get("level").and_then(|c| c.as_str()).unwrap();
-        let rule = m.get("rule").and_then(|c| c.as_str()).unwrap();
-        let message = m.get("message").and_then(|c| c.as_str()).unwrap();
-        let message = message.replace("'", "''");
-        let insert_sql = format!(
-            r#"INSERT INTO "message"
-               ("table", "row", "column", "value", "level", "rule", "message")
-               VALUES ('{}', {}, '{}', '{}', '{}', '{}', '{}')"#,
-            table_name, row_number, column, value, level, rule, message
-        );
-        let query = sqlx_query(&insert_sql);
-        query.execute(tx.acquire().await?).await?;
     }
 
     // Now process the rows from the same table as the target table that need to be re-validated
@@ -2594,6 +3199,36 @@ fn get_sql_type(dt_config: &SerdeMap, datatype: &String, pool: &AnyPool) -> Opti
         .unwrap();
 
     return get_sql_type(dt_config, &parent_datatype.to_string(), pool);
+}
+
+/// Given the global config map, a table name, a column name, and a database connection pool
+/// used to determine the database type return the column's SQL type.
+pub fn get_sql_type_from_global_config(
+    global_config: &SerdeMap,
+    table: &str,
+    column: &str,
+    pool: &AnyPool,
+) -> Option<String> {
+    let dt_config = global_config
+        .get("datatype")
+        .and_then(|d| d.as_object())
+        .unwrap();
+    let normal_table_name;
+    if let Some(s) = table.strip_suffix("_conflict") {
+        normal_table_name = String::from(s);
+    } else {
+        normal_table_name = table.to_string();
+    }
+    let dt = global_config
+        .get("table")
+        .and_then(|t| t.get(normal_table_name))
+        .and_then(|t| t.get("column"))
+        .and_then(|c| c.get(column))
+        .and_then(|c| c.get("datatype"))
+        .and_then(|d| d.as_str())
+        .and_then(|d| Some(d.to_string()))
+        .unwrap();
+    get_sql_type(&dt_config, &dt, pool)
 }
 
 /// Given a SQL type, return the appropriate CAST(...) statement for casting the SQL_PARAM

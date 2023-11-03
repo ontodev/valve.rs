@@ -4,21 +4,12 @@ table1	5	base	error	key:unique	Values of base must be unique	http://purl.obolibr
 table1	5	prefix	error	key:primary	Values of prefix must be unique	VO
 table1	10	base	error	key:unique	Values of base must be unique	http://www.w3.org/1999/02/22-rdf-syntax-ns#
 table1	10	prefix	error	key:primary	Values of prefix must be unique	rdf
-table10	1	foreign_column	update	rule:update	Value changed from 'a' to 'w'	w
 table10	1	numeric_foreign_column	error	datatype:integer	numeric_foreign_column should be a positive or negative integer	
 table10	1	numeric_foreign_column	error	datatype:trimmed_line	numeric_foreign_column should be a line of text that does not begin or end with whitespace	
-table10	1	numeric_foreign_column	update	rule:update	Value changed from '1' to ''	
-table10	1	other_foreign_column	update	rule:update	Value changed from 'a' to 'z'	z
 table11	2	foo	error	key:primary	Values of foo must be unique	d
-table11	2	foo	update	rule:update	Value changed from 'e' to 'd'	d
 table11	3	foo	error	key:primary	Values of foo must be unique	d
 table2	1	bar	error	custom:unrelated	An unrelated error	B
-table2	1	bar	update	rule:update	Value changed from '' to 'B'	B
-table2	1	child	update	rule:update	Value changed from 'a' to 'b'	b
 table2	1	child	error	tree:child-unique	Values of child must be unique	b
-table2	1	foo	update	rule:update	Value changed from '5' to '1'	1
-table2	1	parent	update	rule:update	Value changed from 'b' to 'f'	f
-table2	1	xyzzy	update	rule:update	Value changed from 'd' to 'w'	w
 table2	1	xyzzy	error	under:not-in-tree	Value 'w' of column xyzzy is not in table2.child	w
 table2	2	foo	error	rule:foo-1	bar must be null whenever foo is null	
 table2	2	xyzzy	error	under:not-under	Value 'e' of column xyzzy is not under 'd'	e
@@ -53,12 +44,7 @@ table4	9	foreign_column	error	key:unique	Values of foreign_column must be unique
 table4	10	foreign_column	error	key:unique	Values of foreign_column must be unique	b
 table4	10	numeric_foreign_column	error	key:primary	Values of numeric_foreign_column must be unique	9
 table6	1	bar	error	custom:unrelated	An unrelated error	2
-table6	1	bar	update	rule:update	Value changed from '' to '2'	2
-table6	1	child	update	rule:update	Value changed from '1' to '2'	2
 table6	1	child	error	tree:child-unique	Values of child must be unique	2
-table6	1	foo	update	rule:update	Value changed from 'e' to 'a'	a
-table6	1	parent	update	rule:update	Value changed from '2' to '6'	6
-table6	1	xyzzy	update	rule:update	Value changed from '4' to '23'	23
 table6	1	xyzzy	error	under:not-in-tree	Value '23' of column xyzzy is not in table6.child	23
 table6	2	foo	error	rule:foo-1	bar must be null whenever foo is null	
 table6	2	xyzzy	error	under:not-under	Value '5' of column xyzzy is not under '4'	5
