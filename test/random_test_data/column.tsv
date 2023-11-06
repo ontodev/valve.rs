@@ -12,7 +12,14 @@ column	structure		empty	trimmed_line		schema information for this column
 column	description		empty	description		a description of this column
 datatype	datatype			datatype_name	primary	the name of this datatype
 datatype	parent		empty	datatype_name	tree(datatype)	the parent datatype
+datatype	transform		empty	word		
 datatype	condition		empty	datatype_condition		
+datatype	structure		empty	trimmed_line		
+datatype	description		empty	trimmed_text		
+datatype	SQLite type		empty	datatype_name		
+datatype	PostgreSQL type		empty	datatype_name		
+datatype	RDF type		empty	datatype_name		
+datatype	HTML type		empty	datatype_name		
 rule	table			table_name		
 rule	when column			column_name		
 rule	when condition			datatype_condition		

@@ -969,31 +969,32 @@ pub async fn configure_db(
     // use that information to create the associated database tables, while saving constraint
     // information to constrains_config.
     let mut setup_statements = HashMap::new();
-    let table_names: Vec<String> = tables_config.keys().cloned().collect();
-    for table_name in table_names {
+    for table_name in tables_config.keys().cloned().collect::<Vec<_>>() {
         let optional_path = tables_config
             .get(&table_name)
             .and_then(|r| r.get("path"))
             .and_then(|p| p.as_str());
 
-        let path;
+        let mut path = None;
         match optional_path {
-            // If an entry of the tables_config has no path then it is an internal table which need
-            // not be configured explicitly. Currently the only example is the message table.
-            None => continue,
+            None => {
+                // If an entry of the tables_config has no path then it is an internal table which
+                // need not be configured explicitly. Currently the only examples are the message
+                // and history tables.
+                if table_name != "message" && table_name != "history" {
+                    panic!("No path defined for table {}", table_name);
+                }
+                continue;
+            }
             Some(p) if !Path::new(p).is_file() => {
                 eprintln!("WARN: File does not exist {}", p);
-                continue;
             }
             Some(p) if Path::new(p).canonicalize().is_err() => {
                 eprintln!("WARN: File path could not be made canonical {}", p);
-                continue;
             }
-
-            Some(p) => path = p.to_string(),
+            Some(p) => path = Some(p.to_string()),
         };
 
-        // Get the columns that have been previously configured:
         let defined_columns: Vec<String> = tables_config
             .get(&table_name)
             .and_then(|r| r.get("column"))
@@ -1003,65 +1004,58 @@ pub async fn configure_db(
             .and_then(|k| Some(k.collect()))
             .unwrap();
 
-        // Get the actual columns from the data itself. Note that we set has_headers to false
-        // (even though the files have header rows) in order to explicitly read the header row.
-        let mut rdr = csv::ReaderBuilder::new()
-            .has_headers(false)
-            .delimiter(b'\t')
-            .from_reader(File::open(path.clone()).unwrap_or_else(|err| {
-                panic!("Unable to open '{}': {}", path.clone(), err);
-            }));
-        let mut iter = rdr.records();
-        let actual_columns;
-        if let Some(result) = iter.next() {
-            actual_columns = result.unwrap();
-        } else {
-            panic!("'{}' is empty", path);
-        }
-
         // We use column_order to explicitly indicate the order in which the columns should appear
-        // in the table, for later reference.
+        // in the table, for later reference. The default is to preserve the order from the actual
+        // table file. If that does not exist, we use the ordering in defined_columns.
         let mut column_order = vec![];
-        let mut all_columns: SerdeMap = SerdeMap::new();
-        for column_name in &actual_columns {
-            let column;
-            if !defined_columns.contains(&column_name.to_string()) {
-                let mut cmap = SerdeMap::new();
-                cmap.insert(
-                    String::from("table"),
-                    SerdeValue::String(table_name.to_string()),
-                );
-                cmap.insert(
-                    String::from("column"),
-                    SerdeValue::String(column_name.to_string()),
-                );
-                cmap.insert(
-                    String::from("nulltype"),
-                    SerdeValue::String(String::from("empty")),
-                );
-                cmap.insert(
-                    String::from("datatype"),
-                    SerdeValue::String(String::from("text")),
-                );
-                column = SerdeValue::Object(cmap);
-            } else {
-                column = tables_config
-                    .get(&table_name)
-                    .and_then(|r| r.get("column"))
-                    .and_then(|v| v.as_object())
-                    .and_then(|o| o.get(column_name))
+        if let Some(path) = path {
+            // Get the actual columns from the data itself. Note that we set has_headers to
+            // false(even though the files have header rows) in order to explicitly read the
+            // header row.
+            let mut rdr = csv::ReaderBuilder::new()
+                .has_headers(false)
+                .delimiter(b'\t')
+                .from_reader(File::open(path.clone()).unwrap_or_else(|err| {
+                    panic!("Unable to open '{}': {}", path.clone(), err);
+                }));
+            let mut iter = rdr.records();
+            if let Some(result) = iter.next() {
+                let actual_columns = result
                     .unwrap()
-                    .clone();
+                    .iter()
+                    .map(|c| c.to_string())
+                    .collect::<Vec<_>>();
+                // Make sure that the actual columns found in the table file, and the columns
+                // defined in the column config, exactly match in terms of their content:
+                for column_name in &actual_columns {
+                    column_order.push(json!(column_name));
+                    if !defined_columns.contains(&column_name.to_string()) {
+                        panic!(
+                            "Column '{}.{}' not in column config",
+                            table_name, column_name
+                        );
+                    }
+                }
+                for column_name in &defined_columns {
+                    if !actual_columns.contains(&column_name.to_string()) {
+                        panic!(
+                            "Defined column '{}.{}' not found in table",
+                            table_name, column_name
+                        );
+                    }
+                }
+            } else {
+                panic!("'{}' is empty", path);
             }
-            column_order.push(SerdeValue::String(column_name.to_string()));
-            all_columns.insert(column_name.to_string(), column);
         }
 
+        if column_order.is_empty() {
+            column_order = defined_columns.iter().map(|c| json!(c)).collect::<Vec<_>>();
+        }
         tables_config
             .get_mut(&table_name)
             .and_then(|t| t.as_object_mut())
             .and_then(|o| {
-                o.insert(String::from("column"), SerdeValue::Object(all_columns));
                 o.insert(
                     String::from("column_order"),
                     SerdeValue::Array(column_order),
@@ -1097,9 +1091,11 @@ pub async fn configure_db(
     }
 
     // Sort the tables according to their foreign key dependencies so that tables are always loaded
-    // after the tables they depend on:
-    let unsorted_tables: Vec<String> = setup_statements.keys().cloned().collect();
-    let sorted_tables = verify_table_deps_and_sort(&unsorted_tables, &constraints_config);
+    // after the tables they depend on. Ignore the internal message and history tables:
+    let sorted_tables = verify_table_deps_and_sort(
+        &setup_statements.keys().cloned().collect(),
+        &constraints_config,
+    );
 
     if *command != ValveCommand::Config || verbose {
         // Generate DDL for the history table:
