@@ -95,8 +95,8 @@ random_test: sqlite_random_test pg_random_test
 $(random_test_dir)/ontology:
 	mkdir -p $(random_test_dir)/ontology
 
-random_test_data: test/generate_random_test_data.py | $(random_test_dir)/ontology
-	./$< $$(date +"%s") 100 5 $|
+random_test_data: test/generate_random_test_data.py valve valve test/random_test_data/table.tsv | $(random_test_dir)/ontology
+	./$< $$(date +"%s") 100 5 $(word 3,$^) $|
 
 sqlite_random_test: valve clean random_test_data | build test/output
 	@echo "Testing with random data on sqlite ..."
@@ -110,9 +110,9 @@ pg_random_test: valve clean random_test_data | build test/output
 	test/round_trip.sh postgresql:///valve_postgres $(random_test_dir)/table.tsv
 	@echo "Test succeeded!"
 
-test/perf_test_data/ontology: test/generate_random_test_data.py
+test/perf_test_data/ontology: test/generate_random_test_data.py valve test/random_test_data/table.tsv
 	mkdir $@
-	./$< 1 10000 5 $@
+	./$< 1 10000 5 $(word 3,$^) $@
 
 build/valve_perf.db: valve | test/perf_test_data/ontology build
 	@if [ -f $@ ]; \

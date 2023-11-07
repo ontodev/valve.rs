@@ -1,209 +1,65 @@
 #!/usr/bin/env python3
 
+import json
 import math
 import random
 import string
+import subprocess
+import sys
 
 from argparse import ArgumentParser
 
 
 TOKEN_LENGTH = 9
+WINDOW_SIZE = 100
 
 
-CONFIG = {
-    "table1": {
-        "prefix": {
-            "allow_empty": False,
-            "datatype": "prefix",
-            "structure": {
-                "type": "primary",
-            },
-        },
-        "base": {
-            "allow_empty": False,
-            "datatype": "IRI",
-            "structure": {
-                "type": "unique",
-            },
-        },
-        "ontology IRI": {
-            "allow_empty": True,
-            "datatype": "IRI",
-        },
-        "version IRI": {
-            "allow_empty": True,
-            "datatype": "IRI",
-        },
-    },
-    "table2": {
-        "child": {
-            "allow_empty": False,
-            "datatype": "trimmed_line",
-            "structure": {
-                "type": "foreign",
-                "ftable": "table4",
-                "fcolumn": "other_foreign_column",
-            },
-        },
-        "parent": {
-            "allow_empty": True,
-            "datatype": "trimmed_line",
-            "structure": {
-                "type": "tree",
-                "tcolumn": "child",
-            },
-        },
-        "xyzzy": {
-            "allow_empty": True,
-            "datatype": "trimmed_line",
-            "structure": {
-                "type": "under",
-                "ttable": "table2",
-                "tcolumn": "child",
-                "uval": "d",
-            },
-        },
-        "foo": {
-            "allow_empty": True,
-            "datatype": "integer",
-            "structure": {
-                "type": "foreign",
-                "ftable": "table4",
-                "fcolumn": "numeric_foreign_column",
-            },
-        },
-        "bar": {
-            "allow_empty": True,
-            "datatype": "text",
-        },
-    },
-    "table3": {
-        "source": {
-            "allow_empty": False,
-            "datatype": "prefix",
-            "structure": {
-                "type": "foreign",
-                "ftable": "table1",
-                "fcolumn": "prefix",
-            },
-        },
-        "id": {
-            "allow_empty": False,
-            "datatype": "curie",
-            "structure": {
-                "type": "unique",
-            },
-        },
-        "label": {
-            "allow_empty": False,
-            "datatype": "label",
-            "structure": {
-                "type": "primary",
-            },
-        },
-        "parent": {
-            "allow_empty": True,
-            "datatype": "label",
-            "structure": {
-                "type": "tree",
-                "tcolumn": "label",
-            },
-        },
-        "related": {
-            "allow_empty": True,
-            "datatype": "trimmed_line",
-        },
-    },
-    "table4": {
-        "foreign_column": {
-            "allow_empty": False,
-            "datatype": "text",
-            "structure": {
-                "type": "unique",
-            },
-        },
-        "other_foreign_column": {
-            "allow_empty": False,
-            "datatype": "text",
-            "structure": {
-                "type": "unique",
-            },
-        },
-        "numeric_foreign_column": {
-            "allow_empty": False,
-            "datatype": "integer",
-            "structure": {
-                "type": "primary",
-            },
-        },
-    },
-    "table5": {
-        "foo": {
-            "allow_empty": False,
-            "datatype": "word",
-            "structure": {
-                "type": "primary",
-            },
-        },
-        "bar": {
-            "allow_empty": False,
-            "datatype": "integer",
-        },
-    },
-    "table6": {
-        "child": {
-            "allow_empty": False,
-            "datatype": "integer",
-            "structure": {
-                "type": "foreign",
-                "ftable": "table4",
-                "fcolumn": "numeric_foreign_column",
-            },
-        },
-        "parent": {
-            "allow_empty": True,
-            "datatype": "integer",
-            "structure": {
-                "type": "tree",
-                "tcolumn": "child",
-            },
-        },
-        "xyzzy": {
-            "allow_empty": True,
-            "datatype": "integer",
-            "structure": {
-                "type": "under",
-                "ttable": "table6",
-                "tcolumn": "child",
-                "uval": "4",
-            },
-        },
-        "foo": {
-            "allow_empty": True,
-            "datatype": "text",
-        },
-        "bar": {
-            "allow_empty": True,
-            "datatype": "integer",
-        },
-    },
-}
+def get_special_tables(config):
+    return [k for k, v in config["special"].items() if v is not None]
 
 
-def get_value_from_prev_insert(prev_inserts, from_table, from_column, to_table, to_column):
-    global CONFIG
+def get_table_columns(config, table):
+    return [column for column in config["table"][table]["column_order"]]
+
+
+def has_nulltype(config, table, column):
+    return bool(config["table"][table]["column"][column].get("nulltype"))
+
+
+def get_column_structure(config, table, column):
+    return config["table"][table]["column"][column].get("structure")
+
+
+def get_column_datatype(config, table, column):
+    return config["table"][table]["column"][column]["datatype"]
+
+
+def get_foreign_key(config, table, column):
+    return [f for f in config["constraints"]["foreign"][table] if f["column"] == column][0]
+
+
+def get_tree(config, table, column):
+    return [f for f in config["constraints"]["tree"][table] if f["parent"] == column][0]
+
+
+def get_under(config, table, column):
+    return [f for f in config["constraints"]["under"][table] if f["column"] == column][0]
+
+
+def get_value_from_prev_insert(config, prev_inserts, from_table, from_column, to_table, to_column):
+    global WINDOW_SIZE
 
     # Note: because we are loading the tables and columns in the correct order (i.e. such that
     # all dependencies are loaded before the tables and columns they depend on), the list of
     # previous inserts for the from_table/from_column will never be empty.
     if len(prev_inserts[from_table][from_column]) == 1:
-        if CONFIG[to_table][to_column]["allow_empty"]:
+        if has_nulltype(config, to_table, to_column):
             return ""
         else:
             return prev_inserts[from_table][from_column][0]
     else:
-        # Select at random from the last 100 inserted values:
-        prev_inserts[from_table][from_column] = prev_inserts[from_table][from_column][-100:]
+        # Select at random from the last N inserted values, with N given by WINDOW_SIZE:
+        prev_inserts[from_table][from_column] = prev_inserts[from_table][from_column][-WINDOW_SIZE:]
         from_values = prev_inserts[from_table][from_column]
         # We'd ideally like to exclude the last inserted value from consideration, but we save it
         # here in case we cannot:
@@ -219,58 +75,58 @@ def get_value_from_prev_insert(prev_inserts, from_table, from_column, to_table, 
             return values_to_choose_from[random.randrange(len(values_to_choose_from))]
 
 
-def get_constrained_cell_value(table, column, row_num, prev_inserts):
+def get_constrained_cell_value(config, table, column, row_num, prev_inserts):
     global TOKEN_LENGTH
-    global CONFIG
 
-    structure = CONFIG[table][column].get("structure")
-    if structure and structure["type"] == "foreign":
-        ftable = structure["ftable"]
-        fcolumn = structure["fcolumn"]
-        cell = get_value_from_prev_insert(prev_inserts, ftable, fcolumn, table, column)
-    elif structure and structure["type"] == "tree":
-        tcolumn = structure["tcolumn"]
-        cell = get_value_from_prev_insert(prev_inserts, table, tcolumn, table, column)
-    elif structure and structure["type"] == "under":
+    structure = get_column_structure(config, table, column)
+    datatype = get_column_datatype(config, table, column).casefold()
+    if structure.startswith("from("):
+        fkey = get_foreign_key(config, table, column)
+        ftable = fkey["ftable"]
+        fcolumn = fkey["fcolumn"]
+        cell = get_value_from_prev_insert(config, prev_inserts, ftable, fcolumn, table, column)
+    elif structure.startswith("tree("):
+        tkey = get_tree(config, table, column)
+        tcolumn = tkey["child"]
+        cell = get_value_from_prev_insert(config, prev_inserts, table, tcolumn, table, column)
+    elif structure.startswith("under("):
         # Note that properly satisfying the under constraint requires, not only that
         # the cell is in the specified tree column, but also (a) that the tree
         # actually exists, and (b) that the value is "under" the under value. To do
         # this properly, though, would require a decent amount of memory. So perhaps
         # it's not worth it to check for (a) and (b) and allow any offending cells
         # to generate errors which we can then verify are handled properly by valve.
-        ttable = structure["ttable"]
-        tcolumn = structure["tcolumn"]
-        cell = get_value_from_prev_insert(prev_inserts, ttable, tcolumn, table, column)
-    elif CONFIG[table][column]["datatype"] in [
+        ukey = get_under(config, table, column)
+        ttable = ukey["ttable"]
+        tcolumn = ukey["tcolumn"]
+        cell = get_value_from_prev_insert(config, prev_inserts, ttable, tcolumn, table, column)
+    elif datatype in [
         "prefix",
-        "IRI",
+        "iri",
         "trimmed_line",
         "label",
         "word",
     ]:
         cell = "".join(random.choices(string.ascii_lowercase, k=TOKEN_LENGTH))
-    elif CONFIG[table][column]["datatype"] == "curie":
+    elif datatype == "curie":
         cell = (
             "".join(random.choices(string.ascii_lowercase, k=3)).upper()
             + ":"
             + "".join(random.choices(string.ascii_lowercase, k=TOKEN_LENGTH))
         )
-    elif CONFIG[table][column]["datatype"] == "text":
+    elif datatype == "text":
         cell = (
             "".join(random.choices(string.ascii_lowercase, k=TOKEN_LENGTH))
             + " "
             + "".join(random.choices(string.ascii_lowercase, k=TOKEN_LENGTH))
         )
-    elif CONFIG[table][column]["datatype"] == "integer":
+    elif datatype == "integer":
         # No leading 0s:
         cell = "".join(random.choices("123456789", k=1)) + "".join(
             random.choices(string.digits, k=TOKEN_LENGTH - 1)
         )
     else:
-        print(
-            f"Warning: Unknown datatype: {CONFIG[table][column]['datatype']}. "
-            "Generating a random string."
-        )
+        print(f"Warning: Unknown datatype: {datatype}. Generating a random string.")
         cell = "".join(random.choices(string.ascii_lowercase, k=TOKEN_LENGTH))
 
     return cell
@@ -278,19 +134,19 @@ def get_constrained_cell_value(table, column, row_num, prev_inserts):
 
 def main():
     global TOKEN_LENGTH
-    global CONFIG
 
     parser = ArgumentParser(
         description="""
     Deterministically generate a specified amount of data, a specified percentage of which are
-    errors, using a hard-coded VALVE configuration, given the specified seed, to a specified
-    output directory.
-    """
+    errors, using the given VALVE table configuration and seed, to the output directory."""
     )
     parser.add_argument("seed", help="The seed to use to generate the random data")
     parser.add_argument("num_rows", help="The number of rows per table to generate")
     parser.add_argument(
         "pct_errors", help="The percentage of rows in each table that should have errors"
+    )
+    parser.add_argument(
+        "input_table", help="The .TSV file representing the VALVE table configuration"
     )
     parser.add_argument(
         "output_dir", help="The output directory to write the new table configuration to"
@@ -299,48 +155,65 @@ def main():
     seed = int(args.seed)
     num_rows = int(args.num_rows)
     pct_errors = int(args.pct_errors)
+    input_table = args.input_table
     outdir = args.output_dir
 
+    # Use the seed argument to seed the random data that will be generated:
     random.seed(seed)
+
+    # Get the VALVE configuration:
+    result = subprocess.run(["valve", "--dump_config", input_table], capture_output=True)
+    if result.returncode != 0:
+        error = result.stderr.decode()
+        output = result.stdout.decode()
+        if output:
+            error = f"{error}\n{output}"
+        print(f"{error}", file=sys.stderr)
+        sys.exit(result.returncode)
+    config = json.loads(result.stdout.decode())
 
     # This is a record of the last inserted values for each table and column. When one column
     # takes its values from another column, then we look here and fetch the last inserted value of
     # the second column.
     prev_inserts = {}
+
+    # The data tables to generate:
+    data_tables = [t for t in config["sorted_table_list"] if t not in get_special_tables(config)]
+
+    # The TSV files corresponding to each data table:
     tsv_files = {}
-    tables_in_order = ["table4", "table1", "table2", "table3", "table5", "table6"]
-    for table in tables_in_order:
+    for table in data_tables:
         tsv_files[table] = open(f"{outdir}/{table}.tsv", "w")
-        columns = [column for column in CONFIG[table]]
+        columns = get_table_columns(config, table)
         print("\t".join(columns), file=tsv_files[table])
 
     num_error_rows = math.ceil((pct_errors / 100) * num_rows)
     error_proportion = None if not num_error_rows else math.floor(num_rows / num_error_rows)
     for row_num in range(1, num_rows + 1):
-        for table in tables_in_order:
+        for table in data_tables:
             is_error_row = error_proportion and row_num % error_proportion == 1
-            columns = [column for column in CONFIG[table]]
+            columns = get_table_columns(config, table)
             error_column = random.randrange(len(columns))
             row = {}
             for column_num, column in enumerate(columns):
                 is_error_column = is_error_row and column_num == error_column
                 if (
                     not is_error_column
-                    and CONFIG[table][column]["allow_empty"]
+                    and has_nulltype(config, table, column)
                     and row_num % random.randrange(2, num_rows) == 1
                 ):
                     # If the column allows empty values, assign an empty value "sometimes":
                     cell = ""
                 elif not is_error_column:
-                    cell = get_constrained_cell_value(table, column, row_num, prev_inserts)
+                    cell = get_constrained_cell_value(config, table, column, row_num, prev_inserts)
                 else:
-                    if CONFIG[table][column].get("structure") and CONFIG[table][column][
-                        "structure"
-                    ]["type"] in ["unique", "primary"]:
+                    structure = get_column_structure(config, table, column)
+                    datatype = get_column_datatype(config, table, column)
+                    if structure in ["unique", "primary"]:
                         cell = ""
-                    elif CONFIG[table][column]["datatype"] in [
+                    elif datatype in [
                         "prefix",
-                        "IRI",
+                        "iri",
                         "word",
                         "curie",
                     ]:
@@ -350,7 +223,7 @@ def main():
                             + "".join(random.choices(string.ascii_lowercase, k=TOKEN_LENGTH))
                         )
                     else:
-                        if CONFIG[table][column]["datatype"] == "integer":
+                        if datatype == "integer":
                             cell = "".join(random.choices(string.ascii_lowercase, k=TOKEN_LENGTH))
                         else:
                             # No leading 0s:
