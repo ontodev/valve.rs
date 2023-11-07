@@ -14,7 +14,7 @@ build:
 
 .PHONY: doc time test sqlite_test pg_test
 .PHONY: api_test sqlite_api_test pg_qpi_test
-.PHONY: random_test_data random_test sqlite_random_test pg_random_test
+.PHONY: random_test_data random_test sqlite_random_test pg_random_test valve_debug valve_release
 
 doc:
 	cargo doc --document-private-items
@@ -22,12 +22,17 @@ doc:
 readme:
 	cargo readme --no-title > README.md
 
-valve: src/*.rs src/*.lalrpop
+valve: valve_debug
+
+valve_release: src/*.rs src/*.lalrpop
 	rm -f valve
 	cargo build --release
 	ln -s target/release/ontodev_valve valve
-	# cargo build
-	# ln -s target/debug/ontodev_valve valve
+
+valve_debug: src/*.rs src/*.lalrpop
+	rm -f valve
+	cargo build
+	ln -s target/debug/ontodev_valve valve
 
 build/valve.db: test/src/table.tsv valve clean | build
 	./valve $< $@
@@ -93,7 +98,7 @@ random_test_dir = test/random_test_data
 random_test: sqlite_random_test pg_random_test
 
 $(random_test_dir)/ontology:
-	mkdir -p $(random_test_dir)/ontology
+	mkdir -p $@
 
 random_test_data: test/generate_random_test_data.py valve valve test/random_test_data/table.tsv | $(random_test_dir)/ontology
 	./$< $$(date +"%s") 100 5 $(word 3,$^) $|
@@ -110,7 +115,15 @@ pg_random_test: valve clean random_test_data | build test/output
 	test/round_trip.sh postgresql:///valve_postgres $(random_test_dir)/table.tsv
 	@echo "Test succeeded!"
 
-test/perf_test_data/ontology: test/generate_random_test_data.py valve test/random_test_data/table.tsv
+guess_test_dir = test/guess_test_data
+
+$(guess_test_dir)/ontology:
+	mkdir -p $@
+
+guess_test_data: test/generate_random_test_data.py valve valve $(guess_test_dir)/table.tsv | $(guess_test_dir)/ontology
+	./$< $$(date +"%s") 10000 5 $(word 3,$^) $|
+
+test/perf_test_data/ontology: test/generate_random_test_data.py valve test/perf_test_data/table.tsv
 	mkdir $@
 	./$< 1 10000 5 $(word 3,$^) $@
 
@@ -136,7 +149,7 @@ pg_perf_test: valve test/perf_test_data/ontology | test/output
 perf_test: sqlite_perf_test pg_perf_test
 
 clean:
-	rm -Rf build/valve.db build/valve_random.db test/output $(random_test_dir)/ontology
+	rm -Rf build/valve.db build/valve_random.db test/output $(random_test_dir)/ontology $(guess_test_dir)/ontology
 
 cleanperfdb:
 	rm -Rf build/valve_perf.db
