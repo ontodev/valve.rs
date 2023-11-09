@@ -22,7 +22,8 @@ doc:
 readme:
 	cargo readme --no-title > README.md
 
-valve: valve_debug
+valve: src/*.rs src/*.lalrpop
+	@$(MAKE) valve_debug
 
 valve_release: src/*.rs src/*.lalrpop
 	rm -f valve
@@ -34,7 +35,7 @@ valve_debug: src/*.rs src/*.lalrpop
 	cargo build
 	ln -s target/debug/ontodev_valve valve
 
-build/valve.db: test/src/table.tsv valve clean | build
+build/valve.db: test/src/table.tsv clean valve | build
 	./valve $< $@
 
 test/output:
@@ -116,47 +117,70 @@ pg_random_test: valve clean random_test_data | build test/output
 	@echo "Test succeeded!"
 
 guess_test_dir = test/guess_test_data
+guess_test_db = build/valve_guess.db
+.PHONY: guess_test_data
+
+$(guess_test_dir)/table1.tsv: test/generate_random_test_data.py valve $(guess_test_dir)/*.tsv
+	./$< $$(date +"%s") 50000 5 $(guess_test_dir)/table.tsv $(guess_test_dir)
 
 $(guess_test_dir)/ontology:
 	mkdir -p $@
 
-guess_test_data: test/generate_random_test_data.py valve valve $(guess_test_dir)/table.tsv | $(guess_test_dir)/ontology
-	./$< $$(date +"%s") 10000 5 $(word 3,$^) $|
+guess_test_data: test/generate_random_test_data.py $(guess_test_dir)/table1.tsv valve confirm_overwrite.sh $(guess_test_dir)/*.tsv | $(guess_test_dir)/ontology
+	./confirm_overwrite.sh $(guess_test_dir)/ontology
+	rm -f $(guess_test_dir)/table1.tsv
+	./$< $$(date +"%s") 50000 5 $(guess_test_dir)/table.tsv $(guess_test_dir)
+	rm -f $(guess_test_dir)/ontology/*.tsv
+	./$< $$(date +"%s") 50000 5 $(guess_test_dir)/table_expected.tsv $|
+	rm -f $(guess_test_dir)/ontology/table1.tsv
 
-test/perf_test_data/ontology: test/generate_random_test_data.py valve test/perf_test_data/table.tsv
-	mkdir $@
-	./$< 1 10000 5 $(word 3,$^) $@
+$(guess_test_db): valve guess_test_data $(guess_test_dir)/*.tsv | build $(guess_test_dir)/ontology
+	rm -f $@
+	./$< $(guess_test_dir)/table.tsv $@
 
-build/valve_perf.db: valve | test/perf_test_data/ontology build
-	@if [ -f $@ ]; \
-	then \
-		echo "'$@' exists but is out of date. To rebuild '$@', run \`make cleanperfdb\`" \
-		"before running \`make $@\`" ; \
-		false; \
-	fi
-	time -p ./$< --verbose test/perf_test_data/table.tsv $@
+perf_test_dir = test/perf_test_data
+perf_test_db = build/valve_perf.db
+.PHONY: perf_test_data
+
+$(perf_test_dir)/ontology:
+	mkdir -p $@
+
+perf_test_data: test/generate_random_test_data.py valve confirm_overwrite.sh $(perf_test_dir)/*.tsv | $(perf_test_dir)/ontology
+	./confirm_overwrite.sh $(perf_test_dir)/ontology
+	rm -f $(perf_test_dir)/ontology/*.tsv
+	./$< $$(date +"%s") 10000 5 $(perf_test_dir)/table.tsv $|
+
+$(perf_test_db): valve perf_test_data $(perf_test_dir)/*.tsv | build $(perf_test_dir)/ontology
+	rm -f $@
+	time -p ./$< --verbose $(perf_test_dir)/table.tsv $@
 
 .PHONY: sqlite_perf_test
 sqlite_perf_test: build/valve_perf.db | test/output
 	time -p scripts/export.py messages $< $| $(tables_to_test)
 
 .PHONY: pg_perf_test
-pg_perf_test: valve test/perf_test_data/ontology | test/output
-	time -p ./$< --verbose test/perf_test_data/table.tsv postgresql:///valve_postgres
+pg_perf_test: valve $(perf_test_dir)/ontology | test/output
+	time -p ./$< --verbose $(perf_test_dir)/table.tsv postgresql:///valve_postgres
 	time -p scripts/export.py messages postgresql:///valve_postgres $| $(tables_to_test)
 
 .PHONY: perf_test
 perf_test: sqlite_perf_test pg_perf_test
 
 clean:
-	rm -Rf build/valve.db build/valve_random.db test/output $(random_test_dir)/ontology $(guess_test_dir)/ontology
+	rm -Rf build/valve.db* build/valve_random.db* test/output $(random_test_dir)/ontology valve
 
-cleanperfdb:
+clean_guess_db:
+	rm -Rf build/valve_guess.db
+
+clean_guess_data:
+	rm -Rf $(guess_test_dir)/table1.tsv $(guess_test_dir)/ontology
+
+clean_perf_db:
 	rm -Rf build/valve_perf.db
 
-cleanperfdata:
-	rm -Rf test/perf_test_data/ontology
+clean_perf_data:
+	rm -Rf $(perf_test_dir)/ontology
 
-cleanall: clean cleanperfdb cleanperfdata
+cleanall: clean clean_perf_db clean_perf_data clean_guess_db clean_guess_data
 	cargo clean
-	rm -Rf valve
+	rm -f valve

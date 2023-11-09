@@ -1,9 +1,2 @@
 table	when column	when condition	then column	then condition	level	description
-table2	foo	null	bar	null	error	bar must be null whenever foo is null
-table2	foo	not null	bar	not null	error	bar cannot be null if foo is not null
-table2	foo	IRI	bar	label	error	bar must be a label if foo is an IRI
-table2	foo	equals(5)	bar	in('y', 'z')	error	bar must be 'y' or 'z' if foo = 5
-table6	foo	null	bar	null	error	bar must be null whenever foo is null
-table6	foo	not null	bar	not null	error	bar cannot be null if foo is not null
-table6	foo	IRI	bar	label	error	bar must be a label if foo is an IRI
-table6	foo	equals(e)	bar	in(25, 26)	error	bar must be 25 or 26 if foo = 'e'
+table1	ontology IRI	null	version IRI	null	error	'version IRI' must be null whenever 'ontology IRI' is null

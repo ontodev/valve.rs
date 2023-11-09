@@ -11,7 +11,7 @@ from argparse import ArgumentParser
 
 
 TOKEN_LENGTH = 9
-WINDOW_SIZE = 100
+WINDOW_SIZE = 50
 
 
 def get_special_tables(config):
