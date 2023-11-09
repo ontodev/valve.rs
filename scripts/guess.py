@@ -18,10 +18,8 @@ def get_random_sample(table, sample_size):
     with open(table, "rb") as f:
         total_rows = sum(1 for _ in f) - 1
 
-    if total_rows < sample_size:
+    if total_rows <= sample_size:
         sample_size = total_rows
-
-    if sample_size == total_rows:
         sample_row_numbers = range(1, total_rows + 1)
     else:
         sample_row_numbers = sorted(random.sample(range(1, total_rows + 1), sample_size))
