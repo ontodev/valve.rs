@@ -47,15 +47,30 @@ def get_random_sample(table, sample_size):
     return sample
 
 
-def annotate(label, sample, error_rate):
+def annotate(label, sample, error_rate, is_primary_candidate):
     def has_nulltype(target):
         num_values = len(target["values"])
         num_empties = target["values"].count("")
         return num_empties / num_values > error_rate
 
+    def has_duplicates(target, ignore_empties):
+        if ignore_empties:
+            values = [v for v in target["values"] if v != ""]
+        else:
+            values = target["values"]
+        distinct_values = set(values)
+        return (len(values) - len(distinct_values)) > (error_rate * len(values))
+
     target = sample[label]
     if has_nulltype(target):
         target["nulltype"] = "empty"
+    # Since the target has no nulltype (because the previous branch of the if-statement did not
+    # apply), all empties are assumed to be errors, so we pass True here:
+    elif not has_duplicates(target, True):
+        if is_primary_candidate:
+            target["structure"] = "primary"
+        else:
+            target["structure"] = "unique"
 
 
 if __name__ == "__main__":
@@ -91,12 +106,16 @@ if __name__ == "__main__":
     random.seed(seed)
 
     sample = get_random_sample(args.TABLE, args.sample_size)
-    for label in sample:
-        annotate(label, sample, args.error_rate)
+    for i, label in enumerate(sample):
+        annotate(label, sample, args.error_rate, i == 0)
 
     # For debugging
-    for label in sample:
-        print(f"{label}: ", end="")
-        for annotation in sample[label]:
-            print(f"{annotation} ", end="")
-        print()
+    # for label in sample:
+    #     print(f"{label}: ", end="")
+    #     for annotation in sample[label]:
+    #         print(f"{annotation} ", end="")
+    #     print()
+
+    from pprint import pprint
+
+    pprint(sample)
