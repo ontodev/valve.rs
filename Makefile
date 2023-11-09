@@ -12,9 +12,10 @@ MAKEFLAGS += --warn-undefined-variables
 build:
 	mkdir build
 
-.PHONY: doc time test sqlite_test pg_test
-.PHONY: api_test sqlite_api_test pg_qpi_test
-.PHONY: random_test_data random_test sqlite_random_test pg_random_test valve_debug valve_release
+.PHONY: doc readme valve_debug valve_release test sqlite_test pg_test api_test sqlite_api_test \
+	pg_qpi_test random_test_data random_test sqlite_random_test pg_random_test guess_test_data \
+	perf_test_data sqlite_perf_test pg_perf_test perf_test
+
 
 doc:
 	cargo doc --document-private-items
@@ -25,12 +26,12 @@ readme:
 valve: src/*.rs src/*.lalrpop
 	@$(MAKE) valve_debug
 
-valve_release: src/*.rs src/*.lalrpop
+valve_release:
 	rm -f valve
 	cargo build --release
 	ln -s target/release/ontodev_valve valve
 
-valve_debug: src/*.rs src/*.lalrpop
+valve_debug:
 	rm -f valve
 	cargo build
 	ln -s target/debug/ontodev_valve valve
@@ -43,7 +44,8 @@ test/output:
 
 test: sqlite_test pg_test api_test random_test
 
-tables_to_test = column datatype rule table table1 table2 table3 table4 table5 table6 table7 table8 table9 table10 table11
+tables_to_test = column datatype rule table table1 table2 table3 table4 table5 table6 table7 table8 \
+	table9 table10 table11
 
 sqlite_test: build/valve.db test/src/table.tsv | test/output
 	@echo "Testing valve on sqlite ..."
@@ -118,7 +120,6 @@ pg_random_test: valve clean random_test_data | build test/output
 
 guess_test_dir = test/guess_test_data
 guess_test_db = build/valve_guess.db
-.PHONY: guess_test_data
 
 $(guess_test_dir)/table1.tsv: test/generate_random_test_data.py valve $(guess_test_dir)/*.tsv
 	./$< $$(date +"%s") 50000 5 $(guess_test_dir)/table.tsv $(guess_test_dir)
@@ -140,7 +141,6 @@ $(guess_test_db): valve guess_test_data $(guess_test_dir)/*.tsv | build $(guess_
 
 perf_test_dir = test/perf_test_data
 perf_test_db = build/valve_perf.db
-.PHONY: perf_test_data
 
 $(perf_test_dir)/ontology:
 	mkdir -p $@
@@ -154,16 +154,13 @@ $(perf_test_db): valve perf_test_data $(perf_test_dir)/*.tsv | build $(perf_test
 	rm -f $@
 	time -p ./$< --verbose $(perf_test_dir)/table.tsv $@
 
-.PHONY: sqlite_perf_test
 sqlite_perf_test: build/valve_perf.db | test/output
 	time -p scripts/export.py messages $< $| $(tables_to_test)
 
-.PHONY: pg_perf_test
 pg_perf_test: valve $(perf_test_dir)/ontology | test/output
 	time -p ./$< --verbose $(perf_test_dir)/table.tsv postgresql:///valve_postgres
 	time -p scripts/export.py messages postgresql:///valve_postgres $| $(tables_to_test)
 
-.PHONY: perf_test
 perf_test: sqlite_perf_test pg_perf_test
 
 clean:
