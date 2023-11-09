@@ -47,6 +47,17 @@ def get_random_sample(table, sample_size):
     return sample
 
 
+def annotate(label, sample, error_rate):
+    def has_nulltype(target):
+        num_values = len(target["values"])
+        num_empties = target["values"].count("")
+        return num_empties / num_values > error_rate
+
+    target = sample[label]
+    if has_nulltype(target):
+        target["nulltype"] = "empty"
+
+
 if __name__ == "__main__":
     parser = ArgumentParser(description="VALVE guesser (prototype)")
     parser.add_argument(
@@ -80,4 +91,12 @@ if __name__ == "__main__":
     random.seed(seed)
 
     sample = get_random_sample(args.TABLE, args.sample_size)
-    print(sample)
+    for label in sample:
+        annotate(label, sample, args.error_rate)
+
+    # For debugging
+    for label in sample:
+        print(f"{label}: ", end="")
+        for annotation in sample[label]:
+            print(f"{annotation} ", end="")
+        print()
