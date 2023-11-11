@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 
 import csv
+import json
 import random
 import re
+import subprocess
 import sys
 import time
 
 from argparse import ArgumentParser
+
+# TODO: Remove this import later (used only for debugging):
+from pprint import pprint, pformat
 
 
 def has_ncolumn(sample, ncolumn):
@@ -45,7 +50,19 @@ def get_random_sample(table, sample_size):
     return sample
 
 
-def annotate(label, sample, error_rate, is_primary_candidate):
+def get_valve_config(valve_table):
+    result = subprocess.run(["./valve", "--dump_config", valve_table], capture_output=True)
+    if result.returncode != 0:
+        error = result.stderr.decode()
+        output = result.stdout.decode()
+        if output:
+            error = f"{error}\n{output}"
+        print(f"{error}", file=sys.stderr)
+        sys.exit(result.returncode)
+    return json.loads(result.stdout.decode())
+
+
+def annotate(label, sample, dt_hierarchy, error_rate, is_primary_candidate):
     def has_nulltype(target):
         num_values = len(target["values"])
         num_empties = target["values"].count("")
@@ -59,6 +76,52 @@ def annotate(label, sample, error_rate, is_primary_candidate):
         distinct_values = set(values)
         return (len(values) - len(distinct_values)) > (error_rate * len(values))
 
+    def get_datatype(target):
+        # For each tree in the hierarchy:
+        #    Look for a match with the 0th element and possibly add it to matching_datatypes.
+        # If there are matches in matching_datatypes:
+        #    Use the tiebreaker rules to find the best match and annotate the target with it.
+        # Else:
+        #    Try again with the next highest element of each tree (if one exists)
+        #
+        # Note that this is guaranteed to work since the get_datatype_hierarchy() function includes
+        # the 'text' datatype which matches anything. So if no matches are found raise an error.
+
+        def is_match(datatype):
+            # If the datatype has no associated condition then it matches anything:
+            if not datatype.get("condition"):
+                return True
+            # TODO: Replace this with actual code to check if there is a match:
+            return bool(random.getrandbits(1))
+
+        def tiebreak(datatypes):
+            # TODO: Replace this with actual code to implement the tiebreaker rules:
+            return random.choice(datatypes)
+
+        curr_index = 0
+        while True:
+            matching_datatypes = []
+            datatypes_to_check = []
+            for dt_name in dt_hierarchy:
+                if len(dt_hierarchy[dt_name]) > curr_index:
+                    datatypes_to_check.append(dt_hierarchy[dt_name][curr_index])
+            if len(datatypes_to_check) == 0:
+                print(f"Could not find a datatype match for column '{label}'")
+                sys.exit(1)
+
+            for datatype in datatypes_to_check:
+                if is_match(datatype):
+                    matching_datatypes.append(datatype)
+
+            if len(matching_datatypes) == 0:
+                continue
+            elif len(matching_datatypes) == 1:
+                return matching_datatypes[0]
+            else:
+                return tiebreak(matching_datatypes)
+
+            curr_index += 1
+
     target = sample[label]
     if has_nulltype(target):
         target["nulltype"] = "empty"
@@ -69,6 +132,50 @@ def annotate(label, sample, error_rate, is_primary_candidate):
             target["structure"] = "primary"
         else:
             target["structure"] = "unique"
+
+    target["datatype"] = get_datatype(target)["datatype"]
+
+
+def get_datatype_hierarchy(config):
+    """
+    Given a VALVE configuration, return a datatype hierarchy that looks like this:
+    {'dt_name_1': [{'datatype': 'dt_name_1',
+                    'description': 'a description',
+                    ...},
+                   {'datatype': 'parent datatype',
+                    'description': 'a description',
+                    ...},
+                   {'datatype': 'grandparent datatype',
+                    'description': 'a description',
+                    ...},
+                   ...],
+     'dt_name_2': etc.
+    """
+
+    def get_hierarchy_for_dt(primary_dt_name):
+        def get_parents(dt_name):
+            datatypes = []
+            if dt_name is not None:
+                datatype = config["datatype"][dt_name]
+                if datatype["datatype"] != primary_dt_name:
+                    datatypes.append(datatype)
+                datatypes += get_parents(datatype.get("parent"))
+            return datatypes
+
+        return [config["datatype"][primary_dt_name]] + get_parents(primary_dt_name)
+
+    dt_config = config["datatype"]
+    dt_names = [dt_name for dt_name in dt_config]
+    leaf_dts = []
+    for dt in dt_names:
+        children = [child for child in dt_names if dt_config[child].get("parent") == dt]
+        if not children:
+            leaf_dts.append(dt)
+
+    dt_hierarchy = {}
+    for leaf_dt in leaf_dts:
+        dt_hierarchy[leaf_dt] = get_hierarchy_for_dt(leaf_dt)
+    return dt_hierarchy
 
 
 if __name__ == "__main__":
@@ -92,7 +199,10 @@ if __name__ == "__main__":
         "--seed", type=int, help="Seed to use for random sampling (default: current epoch time)"
     )
     parser.add_argument(
-        "TABLE", help="The name of the .TSV file containing the data for which we will be guessing"
+        "VALVE_TABLE", help="The VALVE table table from which to read the VALVE configuration"
+    )
+    parser.add_argument(
+        "TABLE", help="A .TSV file containing the data for which we will be guessing"
     )
     args = parser.parse_args()
 
@@ -103,17 +213,20 @@ if __name__ == "__main__":
         seed = time.time_ns()
     random.seed(seed)
 
+    # Get the valve configuration:
+    config = get_valve_config(args.VALVE_TABLE)
+
+    # Use the valve config to retrieve the valve datatype hierarchy:
+    dt_hierarchy = get_datatype_hierarchy(config)
+
     sample = get_random_sample(args.TABLE, args.sample_size)
     for i, label in enumerate(sample):
-        annotate(label, sample, args.error_rate, i == 0)
+        annotate(label, sample, dt_hierarchy, args.error_rate, i == 0)
 
+    pprint(sample)
     # For debugging
     # for label in sample:
     #     print(f"{label}: ", end="")
     #     for annotation in sample[label]:
     #         print(f"{annotation} ", end="")
     #     print()
-
-    from pprint import pprint
-
-    pprint(sample)
