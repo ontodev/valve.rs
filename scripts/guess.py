@@ -222,6 +222,11 @@ if __name__ == "__main__":
         "VALVE_TABLE", help="The VALVE table table from which to read the VALVE configuration"
     )
     parser.add_argument(
+        "DATABASE",
+        help="""Can be one of (A) A URL of the form `postgresql://...` or
+        `sqlite://...` (B) The filename (including path) of a sqlite database.""",
+    )
+    parser.add_argument(
         "TABLE", help="A .TSV file containing the data for which we will be guessing"
     )
     args = parser.parse_args()
@@ -233,8 +238,9 @@ if __name__ == "__main__":
         seed = time.time_ns()
     random.seed(seed)
 
-    # Get the valve configuration:
+    # Get the valve configuration and database info:
     config = get_valve_config(args.VALVE_TABLE)
+    config["db"] = args.DATABASE
 
     sample = get_random_sample(args.TABLE, args.sample_size)
     for i, label in enumerate(sample):
