@@ -62,7 +62,54 @@ def get_valve_config(valve_table):
     return json.loads(result.stdout.decode())
 
 
-def annotate(label, sample, dt_hierarchy, error_rate, is_primary_candidate):
+def get_datatype_hierarchy(config):
+    """
+    Given a VALVE configuration, return a datatype hierarchy that looks like this:
+    {'dt_name_1': [{'datatype': 'dt_name_1',
+                    'description': 'a description',
+                    ...},
+                   {'datatype': 'parent datatype',
+                    'description': 'a description',
+                    ...},
+                   {'datatype': 'grandparent datatype',
+                    'description': 'a description',
+                    ...},
+                   ...],
+     'dt_name_2': etc.
+    """
+
+    def get_hierarchy_for_dt(primary_dt_name):
+        def get_parents(dt_name):
+            datatypes = []
+            if dt_name is not None:
+                datatype = config["datatype"][dt_name]
+                if datatype["datatype"] != primary_dt_name:
+                    datatypes.append(datatype)
+                datatypes += get_parents(datatype.get("parent"))
+            return datatypes
+
+        return [config["datatype"][primary_dt_name]] + get_parents(primary_dt_name)
+
+    dt_config = config["datatype"]
+    dt_names = [dt_name for dt_name in dt_config]
+    leaf_dts = []
+    for dt in dt_names:
+        children = [child for child in dt_names if dt_config[child].get("parent") == dt]
+        if not children:
+            leaf_dts.append(dt)
+
+    dt_hierarchy = {}
+    for leaf_dt in leaf_dts:
+        dt_hierarchy[leaf_dt] = get_hierarchy_for_dt(leaf_dt)
+    return dt_hierarchy
+
+
+def get_foreign_column_data(config):
+    # TODO.
+    pass
+
+
+def annotate(label, sample, config, error_rate, is_primary_candidate):
     def has_nulltype(target):
         num_values = len(target["values"])
         num_empties = target["values"].count("")
@@ -76,7 +123,7 @@ def annotate(label, sample, dt_hierarchy, error_rate, is_primary_candidate):
         distinct_values = set(values)
         return (len(values) - len(distinct_values)) > (error_rate * len(values))
 
-    def get_datatype(target):
+    def get_datatype(target, dt_hierarchy):
         # For each tree in the hierarchy:
         #    Look for a match with the 0th element and possibly add it to matching_datatypes.
         # If there are matches in matching_datatypes:
@@ -122,6 +169,10 @@ def annotate(label, sample, dt_hierarchy, error_rate, is_primary_candidate):
 
             curr_index += 1
 
+    def get_from(target, foreign_column_data):
+        # TODO.
+        pass
+
     target = sample[label]
     if has_nulltype(target):
         target["nulltype"] = "empty"
@@ -133,49 +184,17 @@ def annotate(label, sample, dt_hierarchy, error_rate, is_primary_candidate):
         else:
             target["structure"] = "unique"
 
-    target["datatype"] = get_datatype(target)["datatype"]
+    # Use the valve config to retrieve the valve datatype hierarchy:
+    dt_hierarchy = get_datatype_hierarchy(config)
+    target["datatype"] = get_datatype(target, dt_hierarchy)["datatype"]
 
-
-def get_datatype_hierarchy(config):
-    """
-    Given a VALVE configuration, return a datatype hierarchy that looks like this:
-    {'dt_name_1': [{'datatype': 'dt_name_1',
-                    'description': 'a description',
-                    ...},
-                   {'datatype': 'parent datatype',
-                    'description': 'a description',
-                    ...},
-                   {'datatype': 'grandparent datatype',
-                    'description': 'a description',
-                    ...},
-                   ...],
-     'dt_name_2': etc.
-    """
-
-    def get_hierarchy_for_dt(primary_dt_name):
-        def get_parents(dt_name):
-            datatypes = []
-            if dt_name is not None:
-                datatype = config["datatype"][dt_name]
-                if datatype["datatype"] != primary_dt_name:
-                    datatypes.append(datatype)
-                datatypes += get_parents(datatype.get("parent"))
-            return datatypes
-
-        return [config["datatype"][primary_dt_name]] + get_parents(primary_dt_name)
-
-    dt_config = config["datatype"]
-    dt_names = [dt_name for dt_name in dt_config]
-    leaf_dts = []
-    for dt in dt_names:
-        children = [child for child in dt_names if dt_config[child].get("parent") == dt]
-        if not children:
-            leaf_dts.append(dt)
-
-    dt_hierarchy = {}
-    for leaf_dt in leaf_dts:
-        dt_hierarchy[leaf_dt] = get_hierarchy_for_dt(leaf_dt)
-    return dt_hierarchy
+    # TODO: Use the valve config to get a list of columns already loaded to the database, then
+    # compare the contents of each column with the contents of the target column and possibly
+    # annotate the target with a from() structure.
+    foreign_column_data = get_foreign_column_data(config)
+    from_structure = get_from(target, foreign_column_data)
+    if from_structure and not target.get("structure"):
+        target["structure"] = from_structure
 
 
 if __name__ == "__main__":
@@ -216,12 +235,9 @@ if __name__ == "__main__":
     # Get the valve configuration:
     config = get_valve_config(args.VALVE_TABLE)
 
-    # Use the valve config to retrieve the valve datatype hierarchy:
-    dt_hierarchy = get_datatype_hierarchy(config)
-
     sample = get_random_sample(args.TABLE, args.sample_size)
     for i, label in enumerate(sample):
-        annotate(label, sample, dt_hierarchy, args.error_rate, i == 0)
+        annotate(label, sample, config, args.error_rate, i == 0)
 
     pprint(sample)
     # For debugging
