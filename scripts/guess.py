@@ -191,10 +191,11 @@ def annotate(label, sample, config, error_rate, is_primary_candidate):
     # TODO: Use the valve config to get a list of columns already loaded to the database, then
     # compare the contents of each column with the contents of the target column and possibly
     # annotate the target with a from() structure.
-    foreign_column_data = get_foreign_column_data(config)
-    from_structure = get_from(target, foreign_column_data)
-    if from_structure and not target.get("structure"):
-        target["structure"] = from_structure
+    if not target.get("structure"):
+        foreign_column_data = get_foreign_column_data(config)
+        from_structure = get_from(target, foreign_column_data)
+        if from_structure:
+            target["structure"] = from_structure
 
 
 if __name__ == "__main__":
