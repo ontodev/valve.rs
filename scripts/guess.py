@@ -8,7 +8,11 @@ import subprocess
 import sys
 import time
 
+from guess_grammar import grammar, TreeToDict, reverse_parse
+
 from argparse import ArgumentParser
+from lark import Lark
+from lark.exceptions import VisitError
 
 # TODO: Remove this import later (used only for debugging):
 from pprint import pprint, pformat
@@ -105,9 +109,56 @@ def get_datatype_hierarchy(config):
 
 
 def get_potential_foreign_columns(config, datatype):
-    # TODO. Look for primary and unique columns in other tables that have the same SQL type as the
+    # TODO: Look for primary and unique columns in other tables that have the same SQL type as the
     # one associated with the given datatype.
     pass
+
+
+SAVED_CONDITIONS = {}
+
+
+def get_compiled_condition(condition, parser):
+    global SAVED_CONDITIONS
+
+    if condition in SAVED_CONDITIONS:
+        return SAVED_CONDITIONS[condition]
+
+    parsed_condition = parser.parse(condition)
+    if len(parsed_condition) != 1:
+        print(
+            f"'{condition}' is invalid. Only one condition per column is allowed.", file=sys.stderr
+        )
+        sys.exit(1)
+    parsed_condition = parsed_condition[0]
+    if parsed_condition["type"] == "function" and parsed_condition["name"] == "equals":
+        expected = re.sub(r"^['\"](.*)['\"]$", r"\1", parsed_condition["args"][0]["value"])
+        compiled_condition = lambda x: x == expected
+    elif parsed_condition["type"] == "function" and parsed_condition["name"] in (
+        "exclude",
+        "match",
+        "search",
+    ):
+        pattern = re.sub(r"^['\"](.*)['\"]$", r"\1", parsed_condition["args"][0]["pattern"])
+        flags = parsed_condition["args"][0]["flags"]
+        flags = "(?" + "".join(flags) + ")" if flags else ""
+        pattern = re.compile(flags + pattern)
+        if parsed_condition["name"] == "exclude":
+            compiled_condition = lambda x: not bool(pattern.search(x))
+        elif parsed_condition["name"] == "match":
+            compiled_condition = lambda x: bool(pattern.fullmatch(x))
+        else:
+            compiled_condition = lambda x: bool(pattern.search(x))
+    elif parsed_condition["type"] == "function" and parsed_condition["name"] == "in":
+        alternatives = [
+            re.sub(r"^['\"](.*)['\"]$", r"\1", arg["value"]) for arg in parsed_condition["args"]
+        ]
+        compiled_condition = lambda x: x in alternatives
+    else:
+        print(f"Unrecognized condition: {condition}", file=sys.stderr)
+        sys.exit(1)
+
+    SAVED_CONDITIONS[condition] = compiled_condition
+    return compiled_condition
 
 
 def annotate(label, sample, config, error_rate, is_primary_candidate):
@@ -139,12 +190,26 @@ def annotate(label, sample, config, error_rate, is_primary_candidate):
             # If the datatype has no associated condition then it matches anything:
             if not datatype.get("condition"):
                 return True
-            # TODO: Replace this with actual code to check if there is a match:
-            return bool(random.getrandbits(1))
+
+            condition = get_compiled_condition(datatype["condition"], config["parser"])
+            num_values = len(target["values"])
+            num_passed = [condition(v) for v in target["values"]].count(True)
+            success_rate = num_passed / num_values
+            if (1 - success_rate) <= error_rate:
+                return success_rate
 
         def tiebreak(datatypes):
-            # TODO: Replace this with actual code to implement the tiebreaker rules:
-            return random.choice(datatypes)
+            in_types = []
+            other_types = []
+            for dt in datatypes:
+                if dt["datatype"]["condition"].startswith("in("):
+                    in_types.append(dt)
+                else:
+                    other_types.append(dt)
+            sorted_types = sorted(in_types, key=lambda k: k["success_rate"], reverse=True) + sorted(
+                other_types, key=lambda k: k["success_rate"], reverse=True
+            )
+            return sorted_types[0]["datatype"]
 
         curr_index = 0
         while True:
@@ -158,20 +223,28 @@ def annotate(label, sample, config, error_rate, is_primary_candidate):
                 sys.exit(1)
 
             for datatype in datatypes_to_check:
-                if is_match(datatype):
-                    matching_datatypes.append(datatype)
+                success_rate = is_match(datatype)
+                if success_rate:
+                    matching_datatypes.append(
+                        {
+                            "datatype": datatype,
+                            "success_rate": success_rate,
+                        }
+                    )
 
             if len(matching_datatypes) == 0:
                 continue
             elif len(matching_datatypes) == 1:
-                return matching_datatypes[0]
+                return matching_datatypes[0]["datatype"]
             else:
                 return tiebreak(matching_datatypes)
 
             curr_index += 1
 
-    def get_from(target, foreign_column_data):
-        # TODO.
+    def get_from(target, potential_foreign_columns):
+        # TODO: If there is one and only potential foreign column that matches the target, return
+        # it. If there are none, return None. If there is more than one, then also return None, but
+        # print the potential matches to STDOUT.
         pass
 
     target = sample[label]
@@ -246,11 +319,15 @@ if __name__ == "__main__":
     config = get_valve_config(args.VALVE_TABLE)
     config["db"] = args.DATABASE
 
+    # Attach the condition parser to the config as well:
+    config["parser"] = Lark(grammar, parser="lalr", transformer=TreeToDict())
+
     sample = get_random_sample(args.TABLE, args.sample_size)
     for i, label in enumerate(sample):
         annotate(label, sample, config, args.error_rate, i == 0)
 
     pprint(sample)
+
     # For debugging
     # for label in sample:
     #     print(f"{label}: ", end="")
