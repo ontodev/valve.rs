@@ -207,7 +207,7 @@ if __name__ == "__main__":
         help="Sample size to use when guessing (default: 10,000)",
     )
     parser.add_argument(
-        "--error_rate", type=float, default=0.1, help="Proportion of errors expected (default: 10%)"
+        "--error_rate", type=float, default=0.1, help="Proportion of errors expected (default: 10%%)"
     )
     parser.add_argument(
         "--enum_size",
