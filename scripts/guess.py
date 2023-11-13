@@ -104,8 +104,9 @@ def get_datatype_hierarchy(config):
     return dt_hierarchy
 
 
-def get_foreign_column_data(config):
-    # TODO.
+def get_potential_foreign_columns(config, datatype):
+    # TODO. Look for primary and unique columns in other tables that have the same SQL type as the
+    # one associated with the given datatype.
     pass
 
 
@@ -192,8 +193,8 @@ def annotate(label, sample, config, error_rate, is_primary_candidate):
     # compare the contents of each column with the contents of the target column and possibly
     # annotate the target with a from() structure.
     if not target.get("structure"):
-        foreign_column_data = get_foreign_column_data(config)
-        from_structure = get_from(target, foreign_column_data)
+        potential_foreign_columns = get_potential_foreign_columns(config, target["datatype"])
+        from_structure = get_from(target, potential_foreign_columns)
         if from_structure:
             target["structure"] = from_structure
 
@@ -207,7 +208,10 @@ if __name__ == "__main__":
         help="Sample size to use when guessing (default: 10,000)",
     )
     parser.add_argument(
-        "--error_rate", type=float, default=0.1, help="Proportion of errors expected (default: 10%%)"
+        "--error_rate",
+        type=float,
+        default=0.1,
+        help="Proportion of errors expected (default: 10%%)",
     )
     parser.add_argument(
         "--enum_size",
