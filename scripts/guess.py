@@ -17,6 +17,9 @@ from lark import Lark
 from pprint import pprint, pformat
 
 
+SPECIAL_TABLES = ["table", "column", "datatype", "rule", "history", "message"]
+
+
 def has_ncolumn(sample, ncolumn):
     return bool([label for label in sample if sample[label]["normalized"] == ncolumn])
 
@@ -107,10 +110,39 @@ def get_datatype_hierarchy(config):
     return dt_hierarchy
 
 
+def get_sql_type(config, datatype):
+    """Given the config map and the name of a datatype, climb the datatype tree (as required),
+    and return the first 'SQL type' found."""
+    if "datatype" not in config:
+        print("Missing datatypes in config")
+        sys.exit(1)
+    if datatype not in config["datatype"]:
+        return None
+    if config["datatype"][datatype].get("SQL type"):
+        return config["datatype"][datatype]["SQL type"]
+    return get_sql_type(config, config["datatype"][datatype].get("parent"))
+
+
 def get_potential_foreign_columns(config, datatype):
-    # TODO: Look for primary and unique columns in other tables that have the same SQL type as the
-    # one associated with the given datatype.
-    pass
+    global SPECIAL_TABLES
+
+    def get_coarser_sql_type(datatype):
+        sql_type = get_sql_type(config, datatype)
+        if sql_type not in ["integer", "numeric", "real"]:
+            return "text"
+        else:
+            return sql_type.casefold()
+
+    potential_foreign_columns = []
+    this_sql_type = get_coarser_sql_type(datatype)
+    for table, table_config in config["table"].items():
+        if table not in SPECIAL_TABLES:
+            for column, column_config in table_config["column"].items():
+                if column_config.get("structure") in ["primary", "unique"]:
+                    foreign_sql_type = get_coarser_sql_type(column_config["datatype"])
+                    if foreign_sql_type == this_sql_type:
+                        potential_foreign_columns.append({"table": table, "column": column})
+    return potential_foreign_columns
 
 
 SAVED_CONDITIONS = {}
@@ -266,6 +298,7 @@ def annotate(label, sample, config, error_rate, is_primary_candidate):
     # annotate the target with a from() structure.
     if not target.get("structure"):
         potential_foreign_columns = get_potential_foreign_columns(config, target["datatype"])
+        pprint(potential_foreign_columns)
         from_structure = get_from(target, potential_foreign_columns)
         if from_structure:
             target["structure"] = from_structure
@@ -316,6 +349,9 @@ if __name__ == "__main__":
 
     # Get the valve configuration and database info:
     config = get_valve_config(args.VALVE_TABLE)
+    if args.TABLE.removesuffix(".tsv") in config["table"]:
+        print(f"{args.TABLE.removesuffix('.tsv')} is already configured.", file=sys.stderr)
+        sys.exit(0)
     config["db"] = args.DATABASE
 
     # Attach the condition parser to the config as well:
@@ -325,7 +361,7 @@ if __name__ == "__main__":
     for i, label in enumerate(sample):
         annotate(label, sample, config, args.error_rate, i == 0)
 
-    pprint(sample)
+    # pprint(sample)
 
     # For debugging
     # for label in sample:
