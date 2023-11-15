@@ -122,7 +122,7 @@ guess_test_dir = test/guess_test_data
 guess_test_db = build/valve_guess.db
 
 $(guess_test_dir)/table1.tsv: test/generate_random_test_data.py valve $(guess_test_dir)/*.tsv
-	./$< $$(date +"%s") 50000 5 $(guess_test_dir)/table.tsv $(guess_test_dir)
+	./$< 0 30000 5 $(guess_test_dir)/table.tsv $(guess_test_dir)
 
 $(guess_test_dir)/ontology:
 	mkdir -p $@
@@ -130,9 +130,9 @@ $(guess_test_dir)/ontology:
 guess_test_data: test/generate_random_test_data.py $(guess_test_dir)/table1.tsv valve confirm_overwrite.sh $(guess_test_dir)/*.tsv | $(guess_test_dir)/ontology
 	./confirm_overwrite.sh $(guess_test_dir)/ontology
 	rm -f $(guess_test_dir)/table1.tsv
-	./$< $$(date +"%s") 50000 5 $(guess_test_dir)/table.tsv $(guess_test_dir)
+	./$< 0 30000 5 $(guess_test_dir)/table.tsv $(guess_test_dir)
 	rm -f $(guess_test_dir)/ontology/*.tsv
-	./$< $$(date +"%s") 50000 5 $(guess_test_dir)/table_expected.tsv $|
+	./$< 0 30000 5 $(guess_test_dir)/table_expected.tsv $|
 	rm -f $(guess_test_dir)/ontology/table1.tsv
 
 $(guess_test_db): valve guess_test_data $(guess_test_dir)/*.tsv | build $(guess_test_dir)/ontology

@@ -308,13 +308,6 @@ def annotate(label, sample, config, error_rate, is_primary_candidate):
     target = sample[label]
     if has_nulltype(target):
         target["nulltype"] = "empty"
-    # Since the target has no nulltype (because the previous branch of the if-statement did not
-    # apply), all empties are assumed to be errors, so we pass True here:
-    elif not has_duplicates(target, True):
-        if is_primary_candidate:
-            target["structure"] = "primary"
-        else:
-            target["structure"] = "unique"
 
     # Use the valve config to retrieve the valve datatype hierarchy:
     dt_hierarchy = get_datatype_hierarchy(config)
@@ -323,13 +316,20 @@ def annotate(label, sample, config, error_rate, is_primary_candidate):
     # Use the valve config to get a list of columns already loaded to the database, then compare
     # the contents of each column with the contents of the target column and possibly annotate the
     # target with a from() structure, if there is one and only one candidate from().
+    potential_foreign_columns = get_potential_foreign_columns(config, target["datatype"])
+    froms = get_from(target, potential_foreign_columns)
+    if len(froms) == 1:
+        target["structure"] = froms[0]
+    elif len(froms) > 1:
+        print(f"Column '{label}' has multiple from() candidates: {pformat(froms)}")
+
+    # Check if the column is a unique/primary column:
     if not target.get("structure"):
-        potential_foreign_columns = get_potential_foreign_columns(config, target["datatype"])
-        froms = get_from(target, potential_foreign_columns)
-        if len(froms) == 1:
-            target["structure"] = froms[0]
-        elif len(froms) > 1:
-            print(f"Column '{label}' has multiple from() candidates: {pformat(froms)}")
+        if target.get("nulltype") is None and not has_duplicates(target, True):
+            if is_primary_candidate:
+                target["structure"] = "primary"
+            else:
+                target["structure"] = "unique"
 
 
 if __name__ == "__main__":
@@ -390,11 +390,13 @@ if __name__ == "__main__":
     for i, label in enumerate(sample):
         annotate(label, sample, config, args.error_rate, i == 0)
 
+    # For debugging:
     # pprint(sample)
 
-    # For debugging
-    # for label in sample:
-    #     print(f"{label}: ", end="")
-    #     for annotation in sample[label]:
-    #         print(f"{annotation} ", end="")
-    #     print()
+    # For debugging without values:
+    for label in sample:
+        print(f"{label}: ", end="")
+        for annotation, data in sample[label].items():
+            if annotation != "values":
+                print(f"{annotation}: {data}, ", end="")
+        print()
