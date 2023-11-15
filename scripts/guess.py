@@ -4,6 +4,7 @@ import csv
 import json
 import random
 import re
+import sqlite3
 import subprocess
 import sys
 import time
@@ -12,8 +13,7 @@ from guess_grammar import grammar, TreeToDict
 
 from argparse import ArgumentParser
 from lark import Lark
-
-# TODO: Remove this import later (used only for debugging):
+from numbers import Number
 from pprint import pprint, pformat
 
 
@@ -141,7 +141,13 @@ def get_potential_foreign_columns(config, datatype):
                 if column_config.get("structure") in ["primary", "unique"]:
                     foreign_sql_type = get_coarser_sql_type(column_config["datatype"])
                     if foreign_sql_type == this_sql_type:
-                        potential_foreign_columns.append({"table": table, "column": column})
+                        potential_foreign_columns.append(
+                            {
+                                "table": table,
+                                "column": column,
+                                "sql_type": foreign_sql_type,
+                            }
+                        )
     return potential_foreign_columns
 
 
@@ -273,10 +279,31 @@ def annotate(label, sample, config, error_rate, is_primary_candidate):
             curr_index += 1
 
     def get_from(target, potential_foreign_columns):
-        # TODO: If there is one and only potential foreign column that matches the target, return
-        # it. If there are none, return None. If there is more than one, then also return None, but
-        # print the potential matches to STDOUT.
-        pass
+        candidate_froms = []
+        for foreign in potential_foreign_columns:
+            table = foreign["table"]
+            column = foreign["column"]
+            sql_type = foreign["sql_type"]
+            num_matches = 0
+            num_values = len(target["values"])
+            for value in target["values"]:
+                if target.get("nulltype") == "empty" and value == "":
+                    # If this value is legitimately empty then it should not be taken into account
+                    # when counting the number of values in the target that are found in the
+                    # candidate foreign column:
+                    num_values -= 1
+                    continue
+                if sql_type != "text" and not isinstance(value, Number):
+                    # If this value is of the wrong type then there is no need to explicitly check
+                    # if it exists in the foreign column:
+                    continue
+                if sql_type == "text":
+                    value = f"'{value}'"
+                sql = f'SELECT 1 FROM "{table}" WHERE "{column}" = {value} LIMIT 1'
+                num_matches += len(config["db"].execute(sql).fetchall())
+            if ((num_values - num_matches) / num_values) < error_rate:
+                candidate_froms.append(foreign)
+        return candidate_froms
 
     target = sample[label]
     if has_nulltype(target):
@@ -293,15 +320,16 @@ def annotate(label, sample, config, error_rate, is_primary_candidate):
     dt_hierarchy = get_datatype_hierarchy(config)
     target["datatype"] = get_datatype(target, dt_hierarchy)["datatype"]
 
-    # TODO: Use the valve config to get a list of columns already loaded to the database, then
-    # compare the contents of each column with the contents of the target column and possibly
-    # annotate the target with a from() structure.
+    # Use the valve config to get a list of columns already loaded to the database, then compare
+    # the contents of each column with the contents of the target column and possibly annotate the
+    # target with a from() structure, if there is one and only one candidate from().
     if not target.get("structure"):
         potential_foreign_columns = get_potential_foreign_columns(config, target["datatype"])
-        pprint(potential_foreign_columns)
-        from_structure = get_from(target, potential_foreign_columns)
-        if from_structure:
-            target["structure"] = from_structure
+        froms = get_from(target, potential_foreign_columns)
+        if len(froms) == 1:
+            target["structure"] = froms[0]
+        elif len(froms) > 1:
+            print(f"Column '{label}' has multiple from() candidates: {pformat(froms)}")
 
 
 if __name__ == "__main__":
@@ -352,7 +380,8 @@ if __name__ == "__main__":
     if args.TABLE.removesuffix(".tsv") in config["table"]:
         print(f"{args.TABLE.removesuffix('.tsv')} is already configured.", file=sys.stderr)
         sys.exit(0)
-    config["db"] = args.DATABASE
+    with sqlite3.connect(args.DATABASE) as conn:
+        config["db"] = conn
 
     # Attach the condition parser to the config as well:
     config["parser"] = Lark(grammar, parser="lalr", transformer=TreeToDict())
