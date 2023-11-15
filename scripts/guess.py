@@ -8,11 +8,10 @@ import subprocess
 import sys
 import time
 
-from guess_grammar import grammar, TreeToDict, reverse_parse
+from guess_grammar import grammar, TreeToDict
 
 from argparse import ArgumentParser
 from lark import Lark
-from lark.exceptions import VisitError
 
 # TODO: Remove this import later (used only for debugging):
 from pprint import pprint, pformat
@@ -202,7 +201,7 @@ def annotate(label, sample, config, error_rate, is_primary_candidate):
             in_types = []
             other_types = []
             for dt in datatypes:
-                if dt["datatype"]["condition"].startswith("in("):
+                if dt["datatype"]["condition"].lstrip().startswith("in("):
                     in_types.append(dt)
                 else:
                     other_types.append(dt)
