@@ -242,9 +242,9 @@ def annotate(label, sample, config, error_rate, is_primary_candidate):
                     in_types.append(dt)
                 else:
                     other_types.append(dt)
-            sorted_types = sorted(in_types, key=lambda k: k["success_rate"], reverse=True) + sorted(
-                other_types, key=lambda k: k["success_rate"], reverse=True
-            )
+            sorted_types = sorted(
+                in_types, key=lambda k: (k["depth"], k["success_rate"]), reverse=True
+            ) + sorted(other_types, key=lambda k: (k["depth"], k["success_rate"]), reverse=True)
             return sorted_types[0]["datatype"]
 
         curr_index = 0
@@ -264,6 +264,7 @@ def annotate(label, sample, config, error_rate, is_primary_candidate):
                     matching_datatypes.append(
                         {
                             "datatype": datatype,
+                            "depth": curr_index,
                             "success_rate": success_rate,
                         }
                     )
