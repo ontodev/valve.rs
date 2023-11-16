@@ -14,7 +14,6 @@ from guess_grammar import grammar, TreeToDict
 from argparse import ArgumentParser
 from lark import Lark
 from numbers import Number
-from pprint import pprint, pformat
 
 
 SPECIAL_TABLES = ["table", "column", "datatype", "rule", "history", "message"]
@@ -302,7 +301,7 @@ def annotate(label, sample, config, error_rate, is_primary_candidate):
                 sql = f'SELECT 1 FROM "{table}" WHERE "{column}" = {value} LIMIT 1'
                 num_matches += len(config["db"].execute(sql).fetchall())
             if ((num_values - num_matches) / num_values) < error_rate:
-                candidate_froms.append(foreign)
+                candidate_froms.append(f"from({foreign['table']}.{foreign['column']})")
         return candidate_froms
 
     target = sample[label]
@@ -321,7 +320,7 @@ def annotate(label, sample, config, error_rate, is_primary_candidate):
     if len(froms) == 1:
         target["structure"] = froms[0]
     elif len(froms) > 1:
-        print(f"Column '{label}' has multiple from() candidates: {pformat(froms)}")
+        print(f"Column '{label}' has multiple from() candidates: {', '.join(froms)}")
 
     # Check if the column is a unique/primary column:
     if not target.get("structure"):
