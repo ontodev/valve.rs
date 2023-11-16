@@ -30,12 +30,11 @@ def get_random_sample(table, sample_size):
 
     if total_rows <= sample_size:
         sample_size = total_rows
-        sample_row_numbers = range(1, total_rows + 1)
+        sample_row_numbers = range(0, total_rows)
     else:
-        sample_row_numbers = random.sample(range(1, total_rows + 1), sample_size)
+        sample_row_numbers = random.sample(range(0, total_rows), sample_size)
     with open(table) as f:
-        rows = csv.DictReader(f, delimiter="\t", quoting=csv.QUOTE_NONE)
-        rows = [r for r in rows]
+        rows = [r for r in csv.DictReader(f, delimiter="\t", quoting=csv.QUOTE_NONE)]
         sample = {}
         pattern = re.compile(r"[^0-9a-zA-Z_]+")
         for i in sample_row_numbers:
