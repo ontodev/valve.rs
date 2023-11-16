@@ -67,6 +67,19 @@ def get_valve_config(valve_table):
     return json.loads(result.stdout.decode())
 
 
+def get_hierarchy_for_dt(config, primary_dt_name):
+    def get_parents(dt_name):
+        datatypes = []
+        if dt_name is not None:
+            datatype = config["datatype"][dt_name]
+            if datatype["datatype"] != primary_dt_name:
+                datatypes.append(datatype)
+            datatypes += get_parents(datatype.get("parent"))
+        return datatypes
+
+    return [config["datatype"][primary_dt_name]] + get_parents(primary_dt_name)
+
+
 def get_datatype_hierarchy(config):
     """
     Given a VALVE configuration, return a datatype hierarchy that looks like this:
@@ -82,19 +95,6 @@ def get_datatype_hierarchy(config):
                    ...],
      'dt_name_2': etc.
     """
-
-    def get_hierarchy_for_dt(primary_dt_name):
-        def get_parents(dt_name):
-            datatypes = []
-            if dt_name is not None:
-                datatype = config["datatype"][dt_name]
-                if datatype["datatype"] != primary_dt_name:
-                    datatypes.append(datatype)
-                datatypes += get_parents(datatype.get("parent"))
-            return datatypes
-
-        return [config["datatype"][primary_dt_name]] + get_parents(primary_dt_name)
-
     dt_config = config["datatype"]
     dt_names = [dt_name for dt_name in dt_config]
     leaf_dts = []
@@ -105,7 +105,7 @@ def get_datatype_hierarchy(config):
 
     dt_hierarchy = {}
     for leaf_dt in leaf_dts:
-        dt_hierarchy[leaf_dt] = get_hierarchy_for_dt(leaf_dt)
+        dt_hierarchy[leaf_dt] = get_hierarchy_for_dt(config, leaf_dt)
     return dt_hierarchy
 
 
@@ -235,6 +235,14 @@ def annotate(label, sample, config, error_rate, is_primary_candidate):
                 return success_rate
 
         def tiebreak(datatypes):
+            # TODO: There is a problem with this algorithm, since it implicitly assumes that if two
+            # datatypes are of the same depth, then neither can be a parent of the other. But this
+            # is false. We could have, for example,
+            #   leaf_1 -> non_space -> trimmed_line
+            #   leaf_2 -> word -> non_space -> trimmed_line
+            # Even though non-space is a parent of word, the algorithm classifies both as depth 1.
+            # We need to have another check in this function to determine whether there are any
+            # parent-child dependencies between the datatypes in the tiebreaker list.
             in_types = []
             other_types = []
             for dt in datatypes:
