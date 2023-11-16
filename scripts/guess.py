@@ -32,26 +32,27 @@ def get_random_sample(table, sample_size):
         sample_size = total_rows
         sample_row_numbers = range(1, total_rows + 1)
     else:
-        sample_row_numbers = sorted(random.sample(range(1, total_rows + 1), sample_size))
+        sample_row_numbers = random.sample(range(1, total_rows + 1), sample_size)
     with open(table) as f:
         rows = csv.DictReader(f, delimiter="\t", quoting=csv.QUOTE_NONE)
+        rows = [r for r in rows]
         sample = {}
-        for i, row in enumerate(rows, start=1):
-            if i in sample_row_numbers:
-                for label, value in row.items():
-                    if label not in sample:
-                        ncolumn = re.sub(r"[^0-9a-zA-Z_]+", "", label).casefold()
-                        if has_ncolumn(sample, ncolumn):
-                            print(
-                                "The data has more than one column with the normalized name "
-                                f"{ncolumn}"
-                            )
-                            sys.exit(1)
-                        sample[label] = {
-                            "normalized": ncolumn,
-                            "values": [],
-                        }
-                    sample[label]["values"].append(value)
+        pattern = re.compile(r"[^0-9a-zA-Z_]+")
+        for i in sample_row_numbers:
+            for label, value in rows[i].items():
+                if label not in sample:
+                    ncolumn = re.sub(pattern, "", label).casefold()
+                    if has_ncolumn(sample, ncolumn):
+                        print(
+                            "The data has more than one column with the normalized name "
+                            f"{ncolumn}"
+                        )
+                        sys.exit(1)
+                    sample[label] = {
+                        "normalized": ncolumn,
+                        "values": [],
+                    }
+                sample[label]["values"].append(value)
     return sample
 
 
