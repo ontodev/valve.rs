@@ -238,7 +238,7 @@ def annotate(label, sample, config, error_rate, is_primary_candidate):
             in_types = []
             other_types = []
             for dt in datatypes:
-                if dt["datatype"]["condition"].lstrip().startswith("in("):
+                if dt["datatype"].get("condition", "").lstrip().startswith("in("):
                     in_types.append(dt)
                 else:
                     other_types.append(dt)
@@ -269,6 +269,7 @@ def annotate(label, sample, config, error_rate, is_primary_candidate):
                     )
 
             if len(matching_datatypes) == 0:
+                curr_index += 1
                 continue
             elif len(matching_datatypes) == 1:
                 return matching_datatypes[0]["datatype"]
