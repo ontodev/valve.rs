@@ -252,7 +252,10 @@ def annotate(label, sample, config, error_rate, is_primary_candidate):
             matching_datatypes = []
             datatypes_to_check = []
             for dt_name in dt_hierarchy:
-                if len(dt_hierarchy[dt_name]) > curr_index:
+                if (
+                    len(dt_hierarchy[dt_name]) > curr_index
+                    and dt_hierarchy[dt_name][curr_index] not in datatypes_to_check
+                ):
                     datatypes_to_check.append(dt_hierarchy[dt_name][curr_index])
             if len(datatypes_to_check) == 0:
                 print(f"Could not find a datatype match for column '{label}'")
