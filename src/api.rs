@@ -147,7 +147,7 @@ impl Valve {
     /// add the row to the table in the database,
     /// and return the validated row, including its new row_number.
     /// Return an error invalid table name or database problem.
-    pub fn add_row(
+    pub fn insert_row(
         self,
         table_name: &str,
         row: &ValveRow,
