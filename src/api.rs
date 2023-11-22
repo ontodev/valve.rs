@@ -23,6 +23,7 @@ pub struct Valve {
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     pool: &AnyPool, // maybe default to an in-memory SQLite database
+    user: &str, // default to "VALVE"
 }
 
 impl Valve {
@@ -30,6 +31,14 @@ impl Valve {
     /// read it, configure VALVE, and return a new Valve struct.
     /// Return an error if reading or configuration fails.
     pub fn build(table_path: &str) -> Result<Self, ConfigError> {
+        todo!();
+        self
+    }
+
+    /// Set the user name for this instance.
+    /// The username must be a short string without newlines.
+    /// Return an error on invalid username.
+    pub fn set_user(&must self, user: &str) -> Result<Self, ConfigError> {
         todo!();
         self
     }
