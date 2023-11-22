@@ -19,6 +19,17 @@ from pprint import pformat
 
 
 SPECIAL_TABLES = ["table", "column", "datatype", "rule", "history", "message"]
+VERBOSE = False
+
+
+def log(message, force=False, suppress_time=False):
+    global VERBOSE
+
+    if force or VERBOSE:
+        if not suppress_time:
+            print(f"{time.asctime()} {message}", file=sys.stderr)
+        else:
+            print(f"{message}", file=sys.stderr)
 
 
 def has_ncolumn(sample, ncolumn):
@@ -325,7 +336,7 @@ def annotate(label, sample, config, error_rate, is_primary_candidate):
     if has_nulltype(target):
         target["nulltype"] = "empty"
 
-    # Use the valve config to retrieve the valve datatype hierarchy:
+    # Use the valve config to retrieve the valve datatype hierarchies:
     dt_hierarchies = get_dt_hierarchies(config)
     target["datatype"] = get_datatype(target, dt_hierarchies)["datatype"]
 
@@ -350,6 +361,7 @@ def annotate(label, sample, config, error_rate, is_primary_candidate):
 
 if __name__ == "__main__":
     parser = ArgumentParser(description="VALVE guesser (prototype)")
+    parser.add_argument("--verbose", action="store_true", help="Print logging output to STDERR.")
     parser.add_argument(
         "--sample_size",
         type=int,
@@ -384,6 +396,8 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
+    VERBOSE = args.verbose
+
     # Use the seed argument, or the epoch time if no seed is given, to set up the random generator:
     if args.seed is not None:
         seed = args.seed
@@ -402,9 +416,12 @@ if __name__ == "__main__":
     # Attach the condition parser to the config as well:
     config["parser"] = Lark(grammar, parser="lalr", transformer=TreeToDict())
 
+    log(f"Getting random sample of {args.sample_size} rows from {args.TABLE} ...")
     sample = get_random_sample(args.TABLE, args.sample_size)
     for i, label in enumerate(sample):
+        log(f"Annotating label '{label}' ...")
         annotate(label, sample, config, args.error_rate, i == 0)
+    log("Done!")
 
     # For debugging:
     # pprint(sample)
