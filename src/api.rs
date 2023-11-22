@@ -190,13 +190,13 @@ impl Valve {
 
     /// Return the next change to undo, or None.
     /// Return an error on database problem.
-    pub fn next_undo(self) -> Result<Option<ValveChange>, DatabaseError> {
+    pub fn get_record_to_undo(self) -> Result<Option<AnyRow>, DatabaseError> {
         todo!();
     }
 
     /// Return the next change to redo, or None.
     /// Return an error on database problem.
-    pub fn next_redo(self) -> Result<Option<ValveChange>, DatabaseError> {
+    pub fn get_record_to_redo(self) -> Result<Option<AnyRow>, DatabaseError> {
         todo!();
     }
 
