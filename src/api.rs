@@ -91,10 +91,11 @@ impl Valve {
         self
     }
 
-    /// Load all configured tables without validating, in dependency order.
+    /// Load all configured tables in dependency order.
+    /// If `validate` is false, just try to insert all rows.
     /// Return an error on database problem,
     /// including database conflicts that prevent rows being inserted.
-    pub fn load_all_tables(self) -> Result<Self, DatabaseError> {
+    pub fn load_all_tables(self, validate: bool) -> Result<Self, DatabaseError> {
         self.create_all_tables();
         self.truncate_all_tables();
         todo!();
@@ -102,28 +103,10 @@ impl Valve {
     }
 
     /// Given a vector of table names,
-    /// load those tables without validating, in the given order.
+    /// load those tables in the given order.
+    /// If `validate` is false, just try to insert all rows.
     /// Return an error on invalid table name or database problem.
-    pub fn load_tables(self, tables: Vec<&str>) -> Result<Self, ConfigOrDatabaseError> {
-        self.create_all_tables();
-        self.truncate_tables(tables);
-        todo!();
-        self
-    }
-
-    /// Load and validate all configured tables in dependency order.
-    /// Return an error on database problem.
-    pub fn validate_all_tables(self) -> Result<Self, DatabaseError> {
-        self.create_all_tables();
-        self.truncate_all_tables();
-        todo!();
-        self
-    }
-
-    /// Given a vector of table names,
-    /// load and validate those tables in the given order.
-    /// Return an error on invalid table name or database problem.
-    pub fn validate_tables(self, tables: Vec<&str>) -> Result<Self, ConfigOrDatabaseError> {
+    pub fn load_tables(self, tables: Vec<&str>, validate: bool) -> Result<Self, ConfigOrDatabaseError> {
         self.create_all_tables();
         self.truncate_tables(tables);
         todo!();
