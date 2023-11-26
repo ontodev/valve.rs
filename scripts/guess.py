@@ -15,7 +15,9 @@ from guess_grammar import grammar, TreeToDict
 from argparse import ArgumentParser
 from lark import Lark
 from numbers import Number
+from pathlib import Path
 from pprint import pformat
+from textwrap import dedent
 
 
 SPECIAL_TABLES = ["table", "column", "datatype", "rule", "history", "message"]
@@ -153,14 +155,14 @@ def get_dt_hierarchies(config):
 
 def get_sql_type(config, datatype):
     """Given the config map and the name of a datatype, climb the datatype tree (as required),
-    and return the first 'SQL type' found."""
+    and return the first 'SQLite type' found."""
     if "datatype" not in config:
         print("Missing datatypes in config")
         sys.exit(1)
     if datatype not in config["datatype"]:
         return None
-    if config["datatype"][datatype].get("SQL type"):
-        return config["datatype"][datatype]["SQL type"]
+    if config["datatype"][datatype].get("SQLite type"):
+        return config["datatype"][datatype]["SQLite type"]
     return get_sql_type(config, config["datatype"][datatype].get("parent"))
 
 
@@ -258,6 +260,10 @@ def annotate(label, sample, config, error_rate, is_primary_candidate):
             # If the datatype has no associated condition then it matches anything:
             if not datatype.get("condition"):
                 return True
+            # If the SQLite type is NULL this datatype is ruled out:
+            sqlite_type = datatype.get("SQLite type")
+            if sqlite_type and sqlite_type.casefold() == "null":
+                return False
 
             condition = get_compiled_condition(datatype["condition"], config["parser"])
             num_values = len(target["values"])
@@ -372,7 +378,8 @@ if __name__ == "__main__":
         "--error_rate",
         type=float,
         default=0.1,
-        help="Proportion of errors expected (default: 10%%)",
+        help="""A number between 0 and 1 (inclusive) representing the proportion of errors expected
+        (default: 0.1)""",
     )
     parser.add_argument(
         "--enum_size",
@@ -382,6 +389,11 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--seed", type=int, help="Seed to use for random sampling (default: current epoch time)"
+    )
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Do not ask for confirmation before writing suggested modifications to the database",
     )
     parser.add_argument(
         "VALVE_TABLE", help="The VALVE table table from which to read the VALVE configuration"
@@ -407,8 +419,10 @@ if __name__ == "__main__":
 
     # Get the valve configuration and database info:
     config = get_valve_config(args.VALVE_TABLE)
-    if args.TABLE.removesuffix(".tsv") in config["table"]:
-        print(f"{args.TABLE.removesuffix('.tsv')} is already configured.", file=sys.stderr)
+    table_tsv = args.TABLE
+    table = Path(args.TABLE).stem
+    if table in config["table"]:
+        print(f"{table} is already configured.", file=sys.stderr)
         sys.exit(0)
     with sqlite3.connect(args.DATABASE) as conn:
         config["db"] = conn
@@ -416,20 +430,95 @@ if __name__ == "__main__":
     # Attach the condition parser to the config as well:
     config["parser"] = Lark(grammar, parser="lalr", transformer=TreeToDict())
 
-    log(f"Getting random sample of {args.sample_size} rows from {args.TABLE} ...")
-    sample = get_random_sample(args.TABLE, args.sample_size)
+    log(f"Getting random sample of {args.sample_size} rows from {table_tsv} ...")
+    sample = get_random_sample(table_tsv, args.sample_size)
     for i, label in enumerate(sample):
         log(f"Annotating label '{label}' ...")
         annotate(label, sample, config, args.error_rate, i == 0)
     log("Done!")
 
-    # For debugging:
-    # pprint(sample)
-
-    # For debugging without values:
-    for label in sample:
-        print(f"{label}: ", end="")
-        for annotation, data in sample[label].items():
-            if annotation != "values":
-                print(f"{annotation}: {data}, ", end="")
+    table_table_headers = ["table", "path", "type", "description"]
+    column_table_headers = [
+        "table",
+        "column",
+        "label",
+        "nulltype",
+        "datatype",
+        "structure",
+        "description",
+    ]
+    if not args.yes:
         print()
+
+        print('The following row will be inserted to "table":')
+        data = [table_table_headers, [f"{table}", f"{table_tsv}", "", ""]]
+        # We add +2 for padding
+        col_width = max(len(word) for row in data for word in row) + 2
+        for row in data:
+            print("".join(word.ljust(col_width) for word in row))
+
+        print()
+
+        print('The following row will be inserted to "column":')
+        data = [column_table_headers]
+        for label in sample:
+            row = [
+                f"{table}",
+                f"{sample[label]['normalized']}",
+                f"{label}",
+                f"{sample[label].get('nulltype', '')}",
+                f"{sample[label]['datatype']}",
+                f"{sample[label].get('structure', '')}",
+                f"{sample[label].get('description', '')}",
+            ]
+            data.append(row)
+        # We add +2 for padding
+        col_width = max(len(word) for row in data for word in row) + 2
+        for row in data:
+            print("".join(word.ljust(col_width) for word in row))
+
+        print()
+
+        answer = input("Do you want to write this updated configuration to the database? (y/n) ")
+        if answer.casefold() != "y":
+            print("Not writing updated configuration to the database.")
+            sys.exit(0)
+
+    log("Updating table configuration in database ...")
+    row_number = conn.execute('SELECT MAX(row_number) FROM "table"').fetchall()[0][0] + 1
+    sql = dedent(
+        f"""
+    INSERT INTO "table" ("row_number", {', '.join([f'"{k}"' for k in table_table_headers])})
+    VALUES ({row_number}, '{table}', '{table_tsv}', NULL, NULL)"""
+    )
+    log(sql, suppress_time=True)
+    log("", suppress_time=True)
+    conn.execute(sql)
+    conn.commit()
+
+    log("Updating column configuration in database ...")
+    row_number = conn.execute('SELECT MAX(row_number) FROM "column"').fetchall()[0][0] + 1
+    for label in sample:
+        values = ", ".join(
+            [
+                f"{row_number}",
+                f"'{table}'",
+                f"'{sample[label]['normalized']}'",
+                f"'{label}'",
+                f"'{sample[label]['nulltype']}'" if sample[label].get("nulltype") else "NULL",
+                f"'{sample[label]['datatype']}'",
+                f"'{sample[label]['structure']}'" if sample[label].get("structure") else "NULL",
+                f"'{sample[label]['description']}'" if sample[label].get("description") else "NULL",
+            ]
+        )
+        sql = dedent(
+            f"""
+        INSERT INTO "column" ("row_number", {', '.join([f'"{k}"' for k in column_table_headers])})
+        VALUES ({values})"""
+        )
+        log(sql, suppress_time=True)
+        conn.execute(sql)
+        conn.commit()
+        row_number += 1
+    log("", suppress_time=True)
+    log("Done!")
