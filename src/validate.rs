@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use crate::{
     ast::Expression, cast_column_sql_to_text, cast_sql_param_from_text, get_column_value,
     get_sql_type_from_global_config, is_sql_type_error, local_sql_syntax, ColumnRule,
-    CompiledCondition, ParsedStructure, SerdeMap, SQL_PARAM,
+    CompiledCondition, ParsedStructure, SerdeMap, ValveRow, SQL_PARAM,
 };
 
 /// Represents a particular cell in a particular row of data with vaildation results.
@@ -46,7 +46,7 @@ pub struct QueryAsIf {
     // named 'foo' so we need to use an alias:
     pub alias: String,
     pub row_number: u32,
-    pub row: Option<SerdeMap>,
+    pub row: Option<ValveRow>,
 }
 
 /// Given a config map, maps of compiled datatype and rule conditions, a database connection
@@ -62,10 +62,10 @@ pub async fn validate_row(
     pool: &AnyPool,
     tx: Option<&mut Transaction<'_, sqlx::Any>>,
     table_name: &str,
-    row: &SerdeMap,
+    row: &ValveRow,
     row_number: Option<u32>,
     query_as_if: Option<&QueryAsIf>,
-) -> Result<SerdeMap, sqlx::Error> {
+) -> Result<ValveRow, sqlx::Error> {
     // Fallback to a default transaction if it is not given. Since we do not commit before it falls
     // out of scope the transaction will be rolled back at the end of this function. And since this
     // function is read-only the rollback is trivial and therefore inconsequential.
@@ -944,10 +944,10 @@ pub fn validate_rows_intra(
     result_rows
 }
 
-/// Given a row represented as a SerdeMap, remove any duplicate messages from the row's cells, so
+/// Given a row represented as a ValveRow, remove any duplicate messages from the row's cells, so
 /// that no cell has messages with the same level, rule, and message text.
-fn remove_duplicate_messages(row: &SerdeMap) -> Result<SerdeMap, sqlx::Error> {
-    let mut deduped_row = SerdeMap::new();
+fn remove_duplicate_messages(row: &ValveRow) -> Result<ValveRow, sqlx::Error> {
+    let mut deduped_row = ValveRow::new();
     for (column_name, cell) in row.iter() {
         let mut messages = cell
             .get("messages")
@@ -981,12 +981,12 @@ fn remove_duplicate_messages(row: &SerdeMap) -> Result<SerdeMap, sqlx::Error> {
     Ok(deduped_row)
 }
 
-/// Given a result row, convert it to a SerdeMap and return it.
+/// Given a result row, convert it to a ValveRow and return it.
 /// Note that if the incoming result row has an associated row_number, this is ignored.
-fn result_row_to_config_map(incoming: &ResultRow) -> SerdeMap {
-    let mut outgoing = SerdeMap::new();
+fn result_row_to_config_map(incoming: &ResultRow) -> ValveRow {
+    let mut outgoing = ValveRow::new();
     for (column, cell) in incoming.contents.iter() {
-        let mut cell_map = SerdeMap::new();
+        let mut cell_map = ValveRow::new();
         if let Some(nulltype) = &cell.nulltype {
             cell_map.insert(
                 "nulltype".to_string(),

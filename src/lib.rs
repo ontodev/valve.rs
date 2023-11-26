@@ -77,10 +77,11 @@ lazy_static! {
     static ref SL_SQL_TYPES: Vec<&'static str> = vec!["text", "numeric", "integer", "real"];
 }
 
-/// An alias for [serde_json::Map](..//serde_json/struct.Map.html)<String, [serde_json::Value](../serde_json/enum.Value.html)>.
+/// Aliases for [serde_json::Map](..//serde_json/struct.Map.html)<String, [serde_json::Value](../serde_json/enum.Value.html)>.
 // Note: serde_json::Map is
 // [backed by a BTreeMap by default](https://docs.serde.rs/serde_json/map/index.html)
 pub type SerdeMap = serde_json::Map<String, SerdeValue>;
+pub type ValveRow = serde_json::Map<String, SerdeValue>;
 
 /// Represents a structure such as those found in the `structure` column of the `column` table in
 /// both its parsed format (i.e., as an [Expression](ast/enum.Expression.html)) as well as in its
@@ -1444,7 +1445,7 @@ pub async fn get_affected_rows(
     global_config: &SerdeMap,
     pool: &AnyPool,
     tx: &mut Transaction<'_, sqlx::Any>,
-) -> Result<IndexMap<u32, SerdeMap>, String> {
+) -> Result<IndexMap<u32, ValveRow>, String> {
     // Since the consequence of an update could involve currently invalid rows
     // (in the conflict table) becoming valid or vice versa, we need to check rows for
     // which the value of the column is the same as `value`
@@ -1470,7 +1471,7 @@ pub async fn get_affected_rows(
         .await
         .map_err(|e| e.to_string())?
     {
-        let mut table_row = SerdeMap::new();
+        let mut table_row = ValveRow::new();
         let mut row_number: Option<u32> = None;
         for column in row.columns() {
             let cname = column.name();
@@ -1508,7 +1509,7 @@ pub async fn get_row_from_db(
     tx: &mut Transaction<'_, sqlx::Any>,
     table: &str,
     row_number: &u32,
-) -> Result<SerdeMap, sqlx::Error> {
+) -> Result<ValveRow, sqlx::Error> {
     let sql = format!(
         "{} WHERE row_number = {}",
         query_with_message_values(table, global_config, pool),
@@ -1541,7 +1542,7 @@ pub async fn get_row_from_db(
         }
     };
 
-    let mut row = SerdeMap::new();
+    let mut row = ValveRow::new();
     for column in sql_row.columns() {
         let cname = column.name();
         if !vec!["row_number", "message"].contains(&cname) {
@@ -1649,7 +1650,7 @@ pub async fn get_rows_to_update(
     ),
     String,
 > {
-    fn get_cell_value(row: &SerdeMap, column: &str) -> Result<String, String> {
+    fn get_cell_value(row: &ValveRow, column: &str) -> Result<String, String> {
         match row.get(column).and_then(|cell| cell.get("value")) {
             Some(SerdeValue::String(s)) => Ok(format!("{}", s)),
             Some(SerdeValue::Number(n)) => Ok(format!("{}", n)),
@@ -1900,8 +1901,8 @@ pub async fn record_row_change(
     tx: &mut Transaction<'_, sqlx::Any>,
     table: &str,
     row_number: &u32,
-    from: Option<&SerdeMap>,
-    to: Option<&SerdeMap>,
+    from: Option<&ValveRow>,
+    to: Option<&ValveRow>,
     user: &str,
 ) -> Result<(), sqlx::Error> {
     if let (None, None) = (from, to) {
@@ -1910,8 +1911,8 @@ pub async fn record_row_change(
         ));
     }
 
-    fn to_text(smap: Option<&SerdeMap>, quoted: bool) -> String {
-        match smap {
+    fn to_text(row: Option<&ValveRow>, quoted: bool) -> String {
+        match row {
             None => "NULL".to_string(),
             Some(r) => {
                 let inner = format!("{}", json!(r)).replace("'", "''");
@@ -1932,7 +1933,7 @@ pub async fn record_row_change(
         }
     }
 
-    fn summarize(from: Option<&SerdeMap>, to: Option<&SerdeMap>) -> Result<String, String> {
+    fn summarize(from: Option<&ValveRow>, to: Option<&ValveRow>) -> Result<String, String> {
         // Constructs a summary of the form:
         // {
         //   "column":"bar",
@@ -2420,7 +2421,7 @@ pub async fn insert_new_row(
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     pool: &AnyPool,
     table: &str,
-    row: &SerdeMap,
+    row: &ValveRow,
     new_row_number: Option<u32>,
     user: &str,
 ) -> Result<u32, sqlx::Error> {
@@ -2469,7 +2470,7 @@ pub async fn insert_new_row_tx(
     pool: &AnyPool,
     tx: &mut Transaction<sqlx::Any>,
     table: &str,
-    row: &SerdeMap,
+    row: &ValveRow,
     new_row_number: Option<u32>,
     skip_validation: bool,
 ) -> Result<u32, sqlx::Error> {
@@ -2789,7 +2790,7 @@ pub async fn update_row(
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     pool: &AnyPool,
     table_name: &str,
-    row: &SerdeMap,
+    row: &ValveRow,
     row_number: &u32,
     user: &str,
 ) -> Result<(), sqlx::Error> {
@@ -2854,7 +2855,7 @@ pub async fn update_row_tx(
     pool: &AnyPool,
     tx: &mut Transaction<sqlx::Any>,
     table: &str,
-    row: &SerdeMap,
+    row: &ValveRow,
     row_number: &u32,
     skip_validation: bool,
     do_not_recurse: bool,
@@ -2967,10 +2968,10 @@ pub async fn update_row_tx(
     Ok(())
 }
 
-/// Given a path, read a TSV file and return a vector of rows represented as SerdeMaps.
+/// Given a path, read a TSV file and return a vector of rows represented as ValveRows.
 /// Note: Use this function to read "small" TSVs only. In particular, use this for the special
 /// configuration tables.
-fn read_tsv_into_vector(path: &str) -> Vec<SerdeMap> {
+fn read_tsv_into_vector(path: &str) -> Vec<ValveRow> {
     let mut rdr =
         csv::ReaderBuilder::new()
             .delimiter(b'\t')
@@ -2981,7 +2982,7 @@ fn read_tsv_into_vector(path: &str) -> Vec<SerdeMap> {
     let rows: Vec<_> = rdr
         .deserialize()
         .map(|result| {
-            let row: SerdeMap = result.expect(format!("Error reading: {}", path).as_str());
+            let row: ValveRow = result.expect(format!("Error reading: {}", path).as_str());
             row
         })
         .collect();
@@ -3010,8 +3011,8 @@ fn read_tsv_into_vector(path: &str) -> Vec<SerdeMap> {
 }
 
 /// Given a database at the specified location, query the "table" table and return a vector of rows
-/// represented as SerdeMaps.
-fn read_db_table_into_vector(database: &str, config_table: &str) -> Vec<SerdeMap> {
+/// represented as ValveRows.
+fn read_db_table_into_vector(database: &str, config_table: &str) -> Vec<ValveRow> {
     let connection_options;
     if database.starts_with("postgresql://") {
         connection_options = AnyConnectOptions::from_str(database).unwrap();
@@ -3036,7 +3037,7 @@ fn read_db_table_into_vector(database: &str, config_table: &str) -> Vec<SerdeMap
     let rows = block_on(sqlx_query(&sql).fetch_all(&pool)).unwrap();
     let mut table_rows = vec![];
     for row in rows {
-        let mut table_row = SerdeMap::new();
+        let mut table_row = ValveRow::new();
         for column in row.columns() {
             let cname = column.name();
             if cname != "row_number" {
