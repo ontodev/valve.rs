@@ -4403,6 +4403,27 @@ async fn load_db(
     let mut total_infos = 0;
     let mut table_num = 1;
     for table_name in table_list {
+        let path = String::from(
+            config
+                .get("table")
+                .and_then(|t| t.as_object())
+                .and_then(|o| o.get(&table_name))
+                .and_then(|n| n.get("path"))
+                .and_then(|p| p.as_str())
+                .unwrap(),
+        );
+        let mut rdr = {
+            match File::open(path.clone()) {
+                Err(e) => {
+                    eprintln!("WARN: Unable to open '{}': {}", path.clone(), e);
+                    continue;
+                }
+                Ok(table_file) => csv::ReaderBuilder::new()
+                    .has_headers(false)
+                    .delimiter(b'\t')
+                    .from_reader(table_file),
+            }
+        };
         if verbose {
             eprintln!(
                 "{} - Loading table {}/{}: {}",
@@ -4413,21 +4434,6 @@ async fn load_db(
             );
         }
         table_num += 1;
-        let path = String::from(
-            config
-                .get("table")
-                .and_then(|t| t.as_object())
-                .and_then(|o| o.get(&table_name))
-                .and_then(|n| n.get("path"))
-                .and_then(|p| p.as_str())
-                .unwrap(),
-        );
-        let mut rdr = csv::ReaderBuilder::new()
-            .has_headers(false)
-            .delimiter(b'\t')
-            .from_reader(File::open(path.clone()).unwrap_or_else(|err| {
-                panic!("Unable to open '{}': {}", path.clone(), err);
-            }));
 
         // Extract the headers, which we will need later:
         let mut records = rdr.records();
