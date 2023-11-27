@@ -200,7 +200,7 @@ impl Valve {
     /// Create all configured database tables and views
     /// if they do not already exist as configured.
     /// Return an error on database problems.
-    pub async fn create_all_tables(&mut self, verbose: bool) -> Result<&mut Self, sqlx::Error> {
+    pub async fn create_missing_tables(&mut self, verbose: bool) -> Result<&mut Self, sqlx::Error> {
         // DatabaseError
         let mut tables_config = self
             .global_config
@@ -260,7 +260,7 @@ impl Valve {
     /// Return an error on invalid table name or database problem.
     pub fn truncate_tables(&self, tables: Vec<&str>) -> Result<&Self, sqlx::Error> {
         // ConfigOrDatabaseError
-        //self.create_all_tables();
+        //self.create_missing_tables();
         todo!();
         Ok(self)
     }
@@ -270,8 +270,10 @@ impl Valve {
     /// Return an error on database problem,
     /// including database conflicts that prevent rows being inserted.
     pub fn load_all_tables(&self, validate: bool) -> Result<&Self, sqlx::Error> {
+        // YOU ARE HERE.
+
         // DatabaseError
-        //self.create_all_tables();
+        //self.create_missing_tables();
         //self.truncate_all_tables();
         todo!();
         Ok(self)
@@ -283,7 +285,7 @@ impl Valve {
     /// Return an error on invalid table name or database problem.
     pub fn load_tables(&self, tables: Vec<&str>, validate: bool) -> Result<&Self, sqlx::Error> {
         // ConfigOrDatabaseError
-        //self.create_all_tables();
+        //self.create_missing_tables();
         //self.truncate_tables(tables);
         todo!();
         Ok(self)
