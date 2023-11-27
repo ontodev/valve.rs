@@ -105,9 +105,8 @@ impl Valve {
         // configuration. We will do that in read_config_files() instead.
         // Once this is implemented, the code below to construct the AnyPool which is used to
         // call configure_db() should be removed.
-        // We will also remove the `database`, `initial_load` and `verbose` parameters.
+        // We will also remove the `database`  and `verbose` parameters.
         database: &str,
-        initial_load: bool,
         verbose: bool,
     ) -> Result<Self, sqlx::Error> {
         // TODO: Error type should be ConfigError
@@ -202,6 +201,10 @@ impl Valve {
     /// Return an error on database problems.
     pub async fn create_missing_tables(&mut self, verbose: bool) -> Result<&mut Self, sqlx::Error> {
         // DatabaseError
+
+        // TODO: Revisit the implementation of this once te configure_db() function has been
+        // refactored. Currently it implicitly drops and recreates _all_ tables but eventually this
+        // function needs to do this only for _missing_ tables.
         let mut tables_config = self
             .global_config
             .get_mut("table")
@@ -217,7 +220,6 @@ impl Valve {
         let pool = self.pool.as_ref().unwrap();
         let parser = StartParser::new();
 
-        // TODO: Revisit this once te configure_db() function has been refactored:
         let (_, _) = configure_db(
             &mut tables_config,
             &mut datatypes_config,
@@ -269,13 +271,58 @@ impl Valve {
     /// If `validate` is false, just try to insert all rows.
     /// Return an error on database problem,
     /// including database conflicts that prevent rows being inserted.
-    pub fn load_all_tables(&self, validate: bool) -> Result<&Self, sqlx::Error> {
-        // YOU ARE HERE.
-
+    pub async fn load_all_tables(
+        &mut self,
+        validate: bool,
+        verbose: bool,
+        initial_load: bool,
+    ) -> Result<&mut Self, sqlx::Error> {
         // DatabaseError
-        //self.create_missing_tables();
+
+        self.create_missing_tables(verbose);
         //self.truncate_all_tables();
-        todo!();
+        if let Some(pool) = &self.pool {
+            if pool.any_kind() == AnyKind::Sqlite {
+                sqlx_query("PRAGMA foreign_keys = ON").execute(pool).await?;
+                if initial_load {
+                    // These pragmas are unsafe but they are used during initial loading since data
+                    // integrity is not a priority in this case.
+                    sqlx_query("PRAGMA journal_mode = OFF")
+                        .execute(pool)
+                        .await?;
+                    sqlx_query("PRAGMA synchronous = 0").execute(pool).await?;
+                    sqlx_query("PRAGMA cache_size = 1000000")
+                        .execute(pool)
+                        .await?;
+                    sqlx_query("PRAGMA temp_store = MEMORY")
+                        .execute(pool)
+                        .await?;
+                }
+            }
+
+            if verbose {
+                eprintln!(
+                    "{} - Processing {} tables.",
+                    Utc::now(),
+                    self.global_config
+                        .get("sorted_table_list")
+                        .and_then(|l| l.as_array())
+                        .unwrap()
+                        .len()
+                );
+            }
+            load_db(
+                &self.global_config,
+                &pool,
+                &self.compiled_datatype_conditions,
+                &self.compiled_rule_conditions,
+                verbose,
+            )
+            .await?;
+        } else {
+            eprintln!("WARN: Attempt to load tables but Valve is not connected to a database.");
+        }
+
         Ok(self)
     }
 
