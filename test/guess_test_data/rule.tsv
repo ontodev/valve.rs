@@ -1,0 +1,2 @@
+table	when column	when condition	then column	then condition	level	description
+table1	ontology IRI	null	version IRI	null	error	'version IRI' must be null whenever 'ontology IRI' is null
