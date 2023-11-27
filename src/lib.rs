@@ -279,7 +279,7 @@ impl Valve {
     ) -> Result<&mut Self, sqlx::Error> {
         // DatabaseError
 
-        self.create_missing_tables(verbose);
+        self.create_missing_tables(verbose).await?;
         //self.truncate_all_tables();
         if let Some(pool) = &self.pool {
             if pool.any_kind() == AnyKind::Sqlite {

@@ -159,7 +159,6 @@ async fn main() -> Result<(), sqlx::Error> {
     } else {
         let mut valve = Valve::build(&source, &config_table, &destination, verbose).await?;
         valve.connect(&destination).await?;
-        valve.create_missing_tables(verbose).await?;
         valve.load_all_tables(true, verbose, initial_load).await?;
         // valve(
         //     &source,
