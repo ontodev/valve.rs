@@ -83,22 +83,116 @@ lazy_static! {
 pub type SerdeMap = serde_json::Map<String, SerdeValue>;
 pub type ValveRow = serde_json::Map<String, SerdeValue>;
 
+#[derive(Debug)]
 pub struct Valve {
-    global_config: SerdeMap,
-    compiled_datatype_conditions: HashMap<String, CompiledCondition>,
-    compiled_rule_conditions: HashMap<String, HashMap<String, Vec<ColumnRule>>>,
-    pool: AnyPool,
-    user: String,
+    pub global_config: SerdeMap,
+    pub compiled_datatype_conditions: HashMap<String, CompiledCondition>,
+    pub compiled_rule_conditions: HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    pub pool: Option<AnyPool>,
+    pub user: String,
 }
 
+// TODO NEXT: Move the existing public functions into this interface:
 impl Valve {
-    /// Given a path to a table table,
-    /// read it, configure VALVE, and return a new Valve struct.
+    /// Given a path to a table table and its name, read the table table, configure VALVE
+    /// partially ... TODO: finish this.
+    /// , and return a new Valve struct.
     /// Return an error if reading or configuration fails.
-    pub fn build(mut self, table_path: &str) -> Result<Self, sqlx::Error> {
+    pub async fn build(
+        table_path: &str,
+        config_table: &str,
+        // TODO: We need to refactor configure_db() so that it no longer collects the constraints
+        // configuration. We will do that in read_config_files() instead.
+        // Once this is implemented, the code below to construct the AnyPool which is used to
+        // call configure_db() should be removed.
+        // We will also remove the `database`, `initial_load` and `verbose` parameters.
+        database: &str,
+        initial_load: bool,
+        verbose: bool,
+    ) -> Result<Self, sqlx::Error> {
         // Should be ConfigError
-        todo!();
-        Ok(self)
+
+        let parser = StartParser::new();
+
+        let (specials_config, mut tables_config, mut datatypes_config, rules_config) =
+            read_config_files(table_path, config_table);
+
+        ////////////////////////////////////////////////////////////////////////////////////////
+        // TODO: Remove this block of code later (see comment above)
+        let connection_options;
+        if database.starts_with("postgresql://") {
+            connection_options = AnyConnectOptions::from_str(database)?;
+        } else {
+            let connection_string;
+            if !database.starts_with("sqlite://") {
+                connection_string = format!("sqlite://{}?mode=rwc", database);
+            } else {
+                connection_string = database.to_string();
+            }
+            connection_options = AnyConnectOptions::from_str(connection_string.as_str()).unwrap();
+        }
+
+        let pool = AnyPoolOptions::new()
+            .max_connections(5)
+            .connect_with(connection_options)
+            .await?;
+
+        let (sorted_table_list, constraints_config) = configure_db(
+            &mut tables_config,
+            &mut datatypes_config,
+            &pool,
+            &parser,
+            verbose,
+            &ValveCommand::Config,
+        )
+        .await?;
+        ////////////////////////////////////////////////////////////////////////////////////////
+
+        let mut global_config = SerdeMap::new();
+        global_config.insert(
+            String::from("special"),
+            SerdeValue::Object(specials_config.clone()),
+        );
+        global_config.insert(
+            String::from("table"),
+            SerdeValue::Object(tables_config.clone()),
+        );
+        global_config.insert(
+            String::from("datatype"),
+            SerdeValue::Object(datatypes_config.clone()),
+        );
+        global_config.insert(
+            String::from("rule"),
+            SerdeValue::Object(rules_config.clone()),
+        );
+        global_config.insert(
+            String::from("constraints"),
+            SerdeValue::Object(constraints_config.clone()),
+        );
+        let mut sorted_table_serdevalue_list: Vec<SerdeValue> = vec![];
+        for table in &sorted_table_list {
+            sorted_table_serdevalue_list.push(SerdeValue::String(table.to_string()));
+        }
+        global_config.insert(
+            String::from("sorted_table_list"),
+            SerdeValue::Array(sorted_table_serdevalue_list),
+        );
+
+        let compiled_datatype_conditions =
+            get_compiled_datatype_conditions(&global_config, &parser);
+        let compiled_rule_conditions = get_compiled_rule_conditions(
+            &global_config,
+            compiled_datatype_conditions.clone(),
+            &parser,
+        );
+
+        Ok(Self {
+            global_config: global_config,
+            compiled_datatype_conditions: compiled_datatype_conditions,
+            compiled_rule_conditions: compiled_rule_conditions,
+            pool: None,
+            user: String::from("Valve"),
+        })
     }
 
     /// Set the user name for this instance.
@@ -106,7 +200,7 @@ impl Valve {
     /// Return an error on invalid username.
     pub fn set_user(mut self, user: &str) -> Result<Self, sqlx::Error> {
         // ConfigError
-        todo!();
+        self.user = user.to_string();
         Ok(self)
     }
 
