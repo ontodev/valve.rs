@@ -55,7 +55,7 @@ def get_random_sample(table, sample_size):
         for i in sample_row_numbers:
             for label, value in rows[i].items():
                 if label not in sample:
-                    ncolumn = re.sub(pattern, "", label).casefold()
+                    ncolumn = re.sub(pattern, "_", label).casefold().strip("_")
                     if has_ncolumn(sample, ncolumn):
                         print(
                             "The data has more than one column with the normalized name "
@@ -465,7 +465,7 @@ if __name__ == "__main__":
             row = [
                 f"{table}",
                 f"{sample[label]['normalized']}",
-                f"{label}",
+                f"{label if label != sample[label]['normalized'] else ''}",
                 f"{sample[label].get('nulltype', '')}",
                 f"{sample[label]['datatype']}",
                 f"{sample[label].get('structure', '')}",
@@ -504,7 +504,7 @@ if __name__ == "__main__":
                 f"{row_number}",
                 f"'{table}'",
                 f"'{sample[label]['normalized']}'",
-                f"'{label}'",
+                f"'{label}'" if label != sample[label]["normalized"] else "NULL",
                 f"'{sample[label]['nulltype']}'" if sample[label].get("nulltype") else "NULL",
                 f"'{sample[label]['datatype']}'",
                 f"'{sample[label]['structure']}'" if sample[label].get("structure") else "NULL",
