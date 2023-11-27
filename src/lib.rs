@@ -95,7 +95,7 @@ pub struct Valve {
 // TODO NEXT: Move the existing public functions into this interface:
 impl Valve {
     /// Given a path to a table table and its name, read the table table, configure VALVE
-    /// partially ... TODO: finish this.
+    /// partially ... TODO: finish rewriting this doc string.
     /// , and return a new Valve struct.
     /// Return an error if reading or configuration fails.
     pub async fn build(
@@ -110,7 +110,7 @@ impl Valve {
         initial_load: bool,
         verbose: bool,
     ) -> Result<Self, sqlx::Error> {
-        // Should be ConfigError
+        // TODO: Error type should be ConfigError
 
         let parser = StartParser::new();
 
@@ -119,24 +119,7 @@ impl Valve {
 
         ////////////////////////////////////////////////////////////////////////////////////////
         // TODO: Remove this block of code later (see comment above)
-        let connection_options;
-        if database.starts_with("postgresql://") {
-            connection_options = AnyConnectOptions::from_str(database)?;
-        } else {
-            let connection_string;
-            if !database.starts_with("sqlite://") {
-                connection_string = format!("sqlite://{}?mode=rwc", database);
-            } else {
-                connection_string = database.to_string();
-            }
-            connection_options = AnyConnectOptions::from_str(connection_string.as_str()).unwrap();
-        }
-
-        let pool = AnyPoolOptions::new()
-            .max_connections(5)
-            .connect_with(connection_options)
-            .await?;
-
+        let pool = get_pool_from_connection_string(database).await?;
         let (sorted_table_list, constraints_config) = configure_db(
             &mut tables_config,
             &mut datatypes_config,
@@ -198,7 +181,7 @@ impl Valve {
     /// Set the user name for this instance.
     /// The username must be a short string without newlines.
     /// Return an error on invalid username.
-    pub fn set_user(mut self, user: &str) -> Result<Self, sqlx::Error> {
+    pub fn set_user(&mut self, user: &str) -> Result<&mut Self, sqlx::Error> {
         // ConfigError
         self.user = user.to_string();
         Ok(self)
@@ -208,24 +191,48 @@ impl Valve {
     /// create a database connection for VALVE to use.
     /// Drop and replace any current database connection.
     /// Return an error if the connection cannot be created.
-    pub fn connect(mut self, connection: &str) -> Result<Self, sqlx::Error> {
+    pub async fn connect(&mut self, connection: &str) -> Result<&mut Self, sqlx::Error> {
         // DatabaseError
-        todo!();
+        self.pool = Some(get_pool_from_connection_string(connection).await?);
         Ok(self)
     }
 
     /// Create all configured database tables and views
     /// if they do not already exist as configured.
     /// Return an error on database problems.
-    pub fn create_all_tables(mut self) -> Result<Self, sqlx::Error> {
+    pub async fn create_all_tables(&mut self, verbose: bool) -> Result<&mut Self, sqlx::Error> {
         // DatabaseError
-        todo!();
+        let mut tables_config = self
+            .global_config
+            .get_mut("table")
+            .and_then(|t| t.as_object_mut())
+            .unwrap();
+        let mut tables_config = tables_config.clone();
+        let mut datatypes_config = self
+            .global_config
+            .get_mut("datatype")
+            .and_then(|d| d.as_object_mut())
+            .unwrap();
+        let mut datatypes_config = datatypes_config.clone();
+        let pool = self.pool.as_ref().unwrap();
+        let parser = StartParser::new();
+
+        // TODO: Revisit this once te configure_db() function has been refactored:
+        let (_, _) = configure_db(
+            &mut tables_config,
+            &mut datatypes_config,
+            &pool,
+            &parser,
+            verbose,
+            &ValveCommand::Create,
+        )
+        .await?;
         Ok(self)
     }
 
     /// Drop all configured tables, in reverse dependency order.
     /// Return an error on database problem.
-    pub fn drop_all_tables(self) -> Result<Self, sqlx::Error> {
+    pub fn drop_all_tables(&self) -> Result<&Self, sqlx::Error> {
         // DatabaseError
         todo!();
         Ok(self)
@@ -234,7 +241,7 @@ impl Valve {
     /// Given a vector of table names,
     /// drop those tables, in the given order.
     /// Return an error on invalid table name or database problem.
-    pub fn drop_tables(self, tables: Vec<&str>) -> Result<Self, sqlx::Error> {
+    pub fn drop_tables(&self, tables: Vec<&str>) -> Result<&Self, sqlx::Error> {
         // DatabaseError
         todo!();
         Ok(self)
@@ -242,7 +249,7 @@ impl Valve {
 
     /// Truncate all configured tables, in reverse dependency order.
     /// Return an error on database problem.
-    pub fn truncate_all_tables(self) -> Result<Self, sqlx::Error> {
+    pub fn truncate_all_tables(&self) -> Result<&Self, sqlx::Error> {
         // DatabaseError
         todo!();
         Ok(self)
@@ -251,7 +258,7 @@ impl Valve {
     /// Given a vector of table names,
     /// truncate those tables, in the given order.
     /// Return an error on invalid table name or database problem.
-    pub fn truncate_tables(self, tables: Vec<&str>) -> Result<Self, sqlx::Error> {
+    pub fn truncate_tables(&self, tables: Vec<&str>) -> Result<&Self, sqlx::Error> {
         // ConfigOrDatabaseError
         //self.create_all_tables();
         todo!();
@@ -262,7 +269,7 @@ impl Valve {
     /// If `validate` is false, just try to insert all rows.
     /// Return an error on database problem,
     /// including database conflicts that prevent rows being inserted.
-    pub fn load_all_tables(self, validate: bool) -> Result<Self, sqlx::Error> {
+    pub fn load_all_tables(&self, validate: bool) -> Result<&Self, sqlx::Error> {
         // DatabaseError
         //self.create_all_tables();
         //self.truncate_all_tables();
@@ -274,7 +281,7 @@ impl Valve {
     /// load those tables in the given order.
     /// If `validate` is false, just try to insert all rows.
     /// Return an error on invalid table name or database problem.
-    pub fn load_tables(self, tables: Vec<&str>, validate: bool) -> Result<Self, sqlx::Error> {
+    pub fn load_tables(&self, tables: Vec<&str>, validate: bool) -> Result<&Self, sqlx::Error> {
         // ConfigOrDatabaseError
         //self.create_all_tables();
         //self.truncate_tables(tables);
@@ -284,7 +291,7 @@ impl Valve {
 
     /// Save all configured tables to their 'path's.
     /// Return an error on writing or database problem.
-    pub fn save_all_tables(self) -> Result<Self, sqlx::Error> {
+    pub fn save_all_tables(&self) -> Result<&Self, sqlx::Error> {
         // WriteOrDatabaseError
         todo!();
         Ok(self)
@@ -293,7 +300,7 @@ impl Valve {
     /// Given a vector of table names,
     /// Save thosee tables to their 'path's, in the given order.
     /// Return an error on writing or database problem.
-    pub fn save_tables(self, tables: Vec<&str>) -> Result<Self, sqlx::Error> {
+    pub fn save_tables(&self, tables: Vec<&str>) -> Result<&Self, sqlx::Error> {
         // WriteOrDatabaseError
         todo!();
         Ok(self)
@@ -302,7 +309,7 @@ impl Valve {
     /// Given a table name and a row as JSON,
     /// return the validated row.
     /// Return an error on database problem.
-    pub fn validate_row(self, table_name: &str, row: &ValveRow) -> Result<ValveRow, sqlx::Error> {
+    pub fn validate_row(&self, table_name: &str, row: &ValveRow) -> Result<ValveRow, sqlx::Error> {
         // DatabaseError
         todo!();
     }
@@ -311,7 +318,7 @@ impl Valve {
     /// add the row to the table in the database,
     /// and return the validated row, including its new row_number.
     /// Return an error invalid table name or database problem.
-    pub fn insert_row(self, table_name: &str, row: &ValveRow) -> Result<ValveRow, sqlx::Error> {
+    pub fn insert_row(&self, table_name: &str, row: &ValveRow) -> Result<ValveRow, sqlx::Error> {
         // ConfigOrDatabaseError
         todo!();
     }
@@ -321,7 +328,7 @@ impl Valve {
     /// and return the validated row.
     /// Return an error invalid table name or row number or database problem.
     pub fn update_row(
-        self,
+        &self,
         table_name: &str,
         row_number: usize,
         row: &ValveRow,
@@ -333,21 +340,21 @@ impl Valve {
     /// Given a table name and a row number,
     /// delete that row from the table.
     /// Return an error invalid table name or row number or database problem.
-    pub fn delete_row(self, table_name: &str, row_number: usize) -> Result<(), sqlx::Error> {
+    pub fn delete_row(&self, table_name: &str, row_number: usize) -> Result<(), sqlx::Error> {
         // ConfigOrDatabaseError
         todo!();
     }
 
     /// Return the next change to undo, or None.
     /// Return an error on database problem.
-    pub fn get_record_to_undo(self) -> Result<Option<AnyRow>, sqlx::Error> {
+    pub fn get_record_to_undo(&self) -> Result<Option<AnyRow>, sqlx::Error> {
         // DatabaseError
         todo!();
     }
 
     /// Return the next change to redo, or None.
     /// Return an error on database problem.
-    pub fn get_record_to_redo(self) -> Result<Option<AnyRow>, sqlx::Error> {
+    pub fn get_record_to_redo(&self) -> Result<Option<AnyRow>, sqlx::Error> {
         // DatabaseError
         todo!();
     }
@@ -355,7 +362,7 @@ impl Valve {
     /// Undo one change and return the change record
     /// or None if there was no change to undo.
     /// Return an error on database problem.
-    pub fn undo(self) -> Result<Option<ValveRow>, sqlx::Error> {
+    pub fn undo(&self) -> Result<Option<ValveRow>, sqlx::Error> {
         // DatabaseError
         todo!();
     }
@@ -363,7 +370,7 @@ impl Valve {
     /// Redo one change and return the change record
     /// or None if there was no change to redo.
     /// Return an error on database problem.
-    pub fn redo(self) -> Result<Option<ValveRow>, sqlx::Error> {
+    pub fn redo(&self) -> Result<Option<ValveRow>, sqlx::Error> {
         // DatabaseError
         todo!();
     }
@@ -430,6 +437,29 @@ impl std::fmt::Debug for ColumnRule {
             &self.when, &self.then
         )
     }
+}
+
+/// TODO: Add docstring here. Note that once we have refactored configure_db() (see above) it may
+/// make more sense for this function to be an inner function of Valve.
+pub async fn get_pool_from_connection_string(database: &str) -> Result<AnyPool, sqlx::Error> {
+    let connection_options;
+    if database.starts_with("postgresql://") {
+        connection_options = AnyConnectOptions::from_str(database)?;
+    } else {
+        let connection_string;
+        if !database.starts_with("sqlite://") {
+            connection_string = format!("sqlite://{}?mode=rwc", database);
+        } else {
+            connection_string = database.to_string();
+        }
+        connection_options = AnyConnectOptions::from_str(connection_string.as_str()).unwrap();
+    }
+
+    let pool = AnyPoolOptions::new()
+        .max_connections(5)
+        .connect_with(connection_options)
+        .await?;
+    Ok(pool)
 }
 
 /// Given the path to a configuration table (either a table.tsv file or a database containing a
