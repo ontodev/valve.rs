@@ -7,6 +7,7 @@ use argparse::{ArgumentParser, Store, StoreTrue};
 use ontodev_valve::{
     get_compiled_datatype_conditions, get_compiled_rule_conditions,
     get_parsed_structure_conditions, valve, valve_grammar::StartParser, ValveCommand,
+    Valve
 };
 use serde_json::{from_str, Value as SerdeValue};
 use std::{env, process};
@@ -156,15 +157,19 @@ async fn main() -> Result<(), sqlx::Error> {
         )
         .await?;
     } else {
-        valve(
-            &source,
-            &destination,
-            &ValveCommand::Load,
-            verbose,
-            initial_load,
-            &config_table,
-        )
-        .await?;
+        let mut valve = Valve::build(&source, &config_table, &destination, verbose).await?;
+        valve.connect(&destination).await?;
+        valve.create_missing_tables(verbose).await?;
+        valve.load_all_tables(true, verbose, initial_load).await?;
+        // valve(
+        //     &source,
+        //     &destination,
+        //     &ValveCommand::Load,
+        //     verbose,
+        //     initial_load,
+        //     &config_table,
+        // )
+        // .await?;
     }
 
     Ok(())
