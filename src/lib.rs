@@ -2090,11 +2090,22 @@ pub async fn get_record_to_redo(pool: &AnyPool) -> Result<Option<AnyRow>, sqlx::
     } else {
         "IS DISTINCT FROM"
     };
+    let is_clause = if pool.any_kind() == AnyKind::Sqlite {
+        "IS"
+    } else {
+        "IS NOT DISTINCT FROM"
+    };
     let sql = format!(
-        r#"SELECT * FROM "history"
-           WHERE "undone_by" {} NULL
+        r#"SELECT * FROM "history" h1
+           WHERE "undone_by" {is_not} NULL
+             AND NOT EXISTS (
+               SELECT 1 FROM "history" h2
+               WHERE h2.history_id > h1.history_id
+                 AND "undone_by" {is} NULL
+             )
            ORDER BY "timestamp" DESC LIMIT 1"#,
-        is_not_clause
+        is_not = is_not_clause,
+        is = is_clause
     );
     let query = sqlx_query(&sql);
     let result_row = query.fetch_optional(pool).await?;
@@ -3278,7 +3289,7 @@ fn cast_column_sql_to_text(column: &str, sql_type: &str) -> String {
 
 /// Given a database row, the name of a column, and it's SQL type, return the value of that column
 /// from the given row as a String.
-fn get_column_value(row: &AnyRow, column: &str, sql_type: &str) -> String {
+pub fn get_column_value(row: &AnyRow, column: &str, sql_type: &str) -> String {
     let s = sql_type.to_lowercase();
     if s == "numeric" {
         let value: f64 = row.get(format!(r#"{}"#, column).as_str());
