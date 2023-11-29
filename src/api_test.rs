@@ -1,6 +1,7 @@
 use ontodev_valve::{
     delete_row, get_compiled_datatype_conditions, get_compiled_rule_conditions,
-    get_parsed_structure_conditions, insert_new_row, redo, undo, update_row,
+    get_parsed_structure_conditions, get_record_to_redo, get_record_to_undo, insert_new_row, redo,
+    undo, update_row,
     validate::{get_matching_values, validate_row},
     valve,
     valve_grammar::StartParser,
@@ -620,6 +621,36 @@ async fn test_randomized_api_test_with_undo_redo(
     Ok(())
 }
 
+async fn verify_undo_redo(
+    pool: &AnyPool,
+    undo_should_exist: bool,
+    redo_should_exist: bool,
+) -> Result<(), sqlx::Error> {
+    let rec_to_undo = get_record_to_undo(pool).await?;
+    if undo_should_exist {
+        if let None = rec_to_undo {
+            assert!(false, "Expected a record to undo.");
+        }
+    } else {
+        if let Some(_) = rec_to_undo {
+            assert!(false, "Did not expect a record to undo.");
+        }
+    }
+
+    let rec_to_redo = get_record_to_redo(pool).await?;
+    if redo_should_exist {
+        if let None = rec_to_redo {
+            assert!(false, "Expected a record to redo.");
+        }
+    } else {
+        if let Some(_) = rec_to_redo {
+            assert!(false, "Did not expect a record to redo.");
+        }
+    }
+
+    Ok(())
+}
+
 async fn test_undo_redo(
     config: &SerdeMap,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
@@ -639,6 +670,9 @@ async fn test_undo_redo(
         "numeric_foreign_column": {"messages": [], "valid": true, "value": "11"},
     });
 
+    // Our initial undo/redo state:
+    verify_undo_redo(pool, false, false).await?;
+
     // Undo/redo test 1:
     let _rn = insert_new_row(
         &config,
@@ -652,6 +686,8 @@ async fn test_undo_redo(
     )
     .await?;
 
+    verify_undo_redo(pool, true, false).await?;
+
     undo(
         &config,
         &compiled_datatype_conditions,
@@ -660,6 +696,8 @@ async fn test_undo_redo(
         "VALVE",
     )
     .await?;
+
+    verify_undo_redo(pool, false, true).await?;
 
     redo(
         &config,
@@ -670,6 +708,8 @@ async fn test_undo_redo(
     )
     .await?;
 
+    verify_undo_redo(pool, true, false).await?;
+
     undo(
         &config,
         &compiled_datatype_conditions,
@@ -678,6 +718,8 @@ async fn test_undo_redo(
         "VALVE",
     )
     .await?;
+
+    verify_undo_redo(pool, false, true).await?;
 
     // Undo/redo test 2:
     update_row(
@@ -692,6 +734,8 @@ async fn test_undo_redo(
     )
     .await?;
 
+    verify_undo_redo(pool, true, false).await?;
+
     undo(
         &config,
         &compiled_datatype_conditions,
@@ -700,6 +744,8 @@ async fn test_undo_redo(
         "VALVE",
     )
     .await?;
+
+    verify_undo_redo(pool, false, true).await?;
 
     redo(
         &config,
@@ -710,6 +756,8 @@ async fn test_undo_redo(
     )
     .await?;
 
+    verify_undo_redo(pool, true, false).await?;
+
     undo(
         &config,
         &compiled_datatype_conditions,
@@ -718,6 +766,8 @@ async fn test_undo_redo(
         "VALVE",
     )
     .await?;
+
+    verify_undo_redo(pool, false, true).await?;
 
     // Undo/redo test 3:
     delete_row(
@@ -731,6 +781,8 @@ async fn test_undo_redo(
     )
     .await?;
 
+    verify_undo_redo(pool, true, false).await?;
+
     undo(
         &config,
         &compiled_datatype_conditions,
@@ -739,6 +791,8 @@ async fn test_undo_redo(
         "VALVE",
     )
     .await?;
+
+    verify_undo_redo(pool, false, true).await?;
 
     redo(
         &config,
@@ -749,6 +803,8 @@ async fn test_undo_redo(
     )
     .await?;
 
+    verify_undo_redo(pool, true, false).await?;
+
     undo(
         &config,
         &compiled_datatype_conditions,
@@ -757,6 +813,8 @@ async fn test_undo_redo(
         "VALVE",
     )
     .await?;
+
+    verify_undo_redo(pool, false, true).await?;
 
     // Undo/redo test 4:
     let rn = insert_new_row(
@@ -771,6 +829,8 @@ async fn test_undo_redo(
     )
     .await?;
 
+    verify_undo_redo(pool, true, false).await?;
+
     update_row(
         &config,
         &compiled_datatype_conditions,
@@ -783,6 +843,8 @@ async fn test_undo_redo(
     )
     .await?;
 
+    verify_undo_redo(pool, true, false).await?;
+
     // Undo update:
     undo(
         &config,
@@ -793,6 +855,8 @@ async fn test_undo_redo(
     )
     .await?;
 
+    verify_undo_redo(pool, true, true).await?;
+
     // Redo update:
     redo(
         &config,
@@ -802,6 +866,8 @@ async fn test_undo_redo(
         "VALVE",
     )
     .await?;
+
+    verify_undo_redo(pool, true, false).await?;
 
     delete_row(
         &config,
@@ -814,6 +880,8 @@ async fn test_undo_redo(
     )
     .await?;
 
+    verify_undo_redo(pool, true, false).await?;
+
     // Undo delete:
     undo(
         &config,
@@ -823,6 +891,8 @@ async fn test_undo_redo(
         "VALVE",
     )
     .await?;
+
+    verify_undo_redo(pool, true, true).await?;
 
     // Undo update:
     undo(
@@ -834,6 +904,8 @@ async fn test_undo_redo(
     )
     .await?;
 
+    verify_undo_redo(pool, true, true).await?;
+
     // Undo insert:
     undo(
         &config,
@@ -843,6 +915,8 @@ async fn test_undo_redo(
         "VALVE",
     )
     .await?;
+
+    verify_undo_redo(pool, false, true).await?;
 
     eprintln!("done.");
     Ok(())
@@ -901,6 +975,13 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
 
     // NOTE that you must use an external script to fetch the data from the database and run a diff
     // against a known good sample to verify that these tests yield the expected results:
+    test_undo_redo(
+        &config,
+        &compiled_datatype_conditions,
+        &compiled_rule_conditions,
+        &pool,
+    )
+    .await?;
     test_matching(
         &config,
         &compiled_datatype_conditions,
@@ -943,14 +1024,6 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
         &pool,
     )
     .await?;
-    test_undo_redo(
-        &config,
-        &compiled_datatype_conditions,
-        &compiled_rule_conditions,
-        &pool,
-    )
-    .await?;
-
     test_randomized_api_test_with_undo_redo(
         &config,
         &compiled_datatype_conditions,
