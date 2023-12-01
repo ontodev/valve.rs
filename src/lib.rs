@@ -2557,15 +2557,6 @@ pub async fn insert_new_row_tx(
             format!("No string named 'value' in {:?}", cell).into(),
         ))?;
         let nulltype = cell.get("nulltype").and_then(|n| n.as_str());
-        let nulltype_condition = match nulltype {
-            None => None,
-            Some(nulltype) => Some(
-                compiled_datatype_conditions
-                    .get(&nulltype.to_string())
-                    .and_then(|cc| Some(&cc.compiled))
-                    .unwrap(),
-            ),
-        };
         let messages = sort_messages(
             &sorted_datatypes,
             cell.get("messages")
@@ -2595,10 +2586,7 @@ pub async fn insert_new_row_tx(
         }
 
         match nulltype {
-            Some(_) if nulltype_condition.unwrap()(value) => {
-                insert_values.push(String::from("NULL"));
-            }
-            _ => {
+            None => {
                 let sql_type = get_sql_type_from_global_config(global_config, table, column, pool)
                     .ok_or(SqlxCErr(
                         format!("Could not get SQL type for {}.{}", table, column).into(),
@@ -2609,6 +2597,9 @@ pub async fn insert_new_row_tx(
                     insert_values.push(cast_sql_param_from_text(&sql_type));
                     insert_params.push(String::from(value));
                 }
+            }
+            _ => {
+                insert_values.push(String::from("NULL"));
             }
         };
 
