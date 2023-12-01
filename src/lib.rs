@@ -2556,6 +2556,7 @@ pub async fn insert_new_row_tx(
         let value = cell.get("value").and_then(|v| v.as_str()).ok_or(SqlxCErr(
             format!("No string named 'value' in {:?}", cell).into(),
         ))?;
+        let nulltype = cell.get("nulltype");
         let messages = sort_messages(
             &sorted_datatypes,
             cell.get("messages")
@@ -2584,15 +2585,23 @@ pub async fn insert_new_row_tx(
             }));
         }
 
-        let sql_type = get_sql_type_from_global_config(global_config, table, column, pool).ok_or(
-            SqlxCErr(format!("Could not get SQL type for {}.{}", table, column).into()),
-        )?;
-        if is_sql_type_error(&sql_type, value) {
-            insert_values.push(String::from("NULL"));
-        } else {
-            insert_values.push(cast_sql_param_from_text(&sql_type));
-            insert_params.push(String::from(value));
-        }
+        match nulltype {
+            Some(nulltype) if nulltype == "empty" && value == "" => {
+                insert_values.push(String::from("NULL"));
+            }
+            _ => {
+                let sql_type = get_sql_type_from_global_config(global_config, table, column, pool)
+                    .ok_or(SqlxCErr(
+                        format!("Could not get SQL type for {}.{}", table, column).into(),
+                    ))?;
+                if is_sql_type_error(&sql_type, value) {
+                    insert_values.push(String::from("NULL"));
+                } else {
+                    insert_values.push(cast_sql_param_from_text(&sql_type));
+                    insert_params.push(String::from(value));
+                }
+            }
+        };
 
         if !use_conflict_table && !valid && conflict_columns.contains(&json!(column)) {
             use_conflict_table = true;
