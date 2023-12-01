@@ -2556,7 +2556,16 @@ pub async fn insert_new_row_tx(
         let value = cell.get("value").and_then(|v| v.as_str()).ok_or(SqlxCErr(
             format!("No string named 'value' in {:?}", cell).into(),
         ))?;
-        let nulltype = cell.get("nulltype");
+        let nulltype = cell.get("nulltype").and_then(|n| n.as_str());
+        let nulltype_condition = match nulltype {
+            None => None,
+            Some(nulltype) => Some(
+                compiled_datatype_conditions
+                    .get(&nulltype.to_string())
+                    .and_then(|cc| Some(&cc.compiled))
+                    .unwrap(),
+            ),
+        };
         let messages = sort_messages(
             &sorted_datatypes,
             cell.get("messages")
@@ -2586,7 +2595,7 @@ pub async fn insert_new_row_tx(
         }
 
         match nulltype {
-            Some(nulltype) if nulltype == "empty" && value == "" => {
+            Some(_) if nulltype_condition.unwrap()(value) => {
                 insert_values.push(String::from("NULL"));
             }
             _ => {
