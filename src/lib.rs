@@ -90,9 +90,10 @@ pub struct Valve {
     pub compiled_rule_conditions: HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     pub pool: Option<AnyPool>,
     pub user: String,
+    pub verbose: bool,
+    pub initial_load: bool,
 }
 
-// TODO NEXT: Move the existing public functions into this interface:
 impl Valve {
     /// Given a path to a table table and its name, read the table table, configure VALVE
     /// partially ... TODO: finish rewriting this doc string.
@@ -101,34 +102,22 @@ impl Valve {
     pub async fn build(
         table_path: &str,
         config_table: &str,
-        // TODO: We need to refactor configure_db() so that it no longer collects the constraints
-        // configuration. We will do that in read_config_files() instead.
-        // Once this is implemented, the code below to construct the AnyPool which is used to
-        // call configure_db() should be removed.
-        // We will also remove the `database`  and `verbose` parameters.
         database: &str,
         verbose: bool,
+        initial_load: bool,
     ) -> Result<Self, sqlx::Error> {
         // TODO: Error type should be ConfigError
 
-        let parser = StartParser::new();
-
-        let (specials_config, mut tables_config, mut datatypes_config, rules_config) =
-            read_config_files(table_path, config_table);
-
-        ////////////////////////////////////////////////////////////////////////////////////////
-        // TODO: Remove this block of code later (see comment above)
         let pool = get_pool_from_connection_string(database).await?;
-        let (sorted_table_list, constraints_config) = configure_db(
-            &mut tables_config,
-            &mut datatypes_config,
-            &pool,
-            &parser,
-            verbose,
-            &ValveCommand::Config,
-        )
-        .await?;
-        ////////////////////////////////////////////////////////////////////////////////////////
+        let parser = StartParser::new();
+        let (
+            specials_config,
+            tables_config,
+            datatypes_config,
+            rules_config,
+            constraints_config,
+            sorted_table_list,
+        ) = read_config_files(table_path, config_table, &parser, &pool);
 
         let mut global_config = SerdeMap::new();
         global_config.insert(
@@ -172,8 +161,10 @@ impl Valve {
             global_config: global_config,
             compiled_datatype_conditions: compiled_datatype_conditions,
             compiled_rule_conditions: compiled_rule_conditions,
-            pool: None,
+            pool: Some(pool),
             user: String::from("Valve"),
+            verbose: verbose,
+            initial_load: initial_load,
         })
     }
 
@@ -186,20 +177,10 @@ impl Valve {
         Ok(self)
     }
 
-    /// Given a database connection string,
-    /// create a database connection for VALVE to use.
-    /// Drop and replace any current database connection.
-    /// Return an error if the connection cannot be created.
-    pub async fn connect(&mut self, connection: &str) -> Result<&mut Self, sqlx::Error> {
-        // DatabaseError
-        self.pool = Some(get_pool_from_connection_string(connection).await?);
-        Ok(self)
-    }
-
     /// Create all configured database tables and views
     /// if they do not already exist as configured.
     /// Return an error on database problems.
-    pub async fn create_missing_tables(&mut self, verbose: bool) -> Result<&mut Self, sqlx::Error> {
+    pub async fn create_missing_tables(&mut self) -> Result<&mut Self, sqlx::Error> {
         // DatabaseError
 
         // TODO: Revisit the implementation of this once te configure_db() function has been
@@ -225,7 +206,7 @@ impl Valve {
             &mut datatypes_config,
             &pool,
             &parser,
-            verbose,
+            self.verbose,
             &ValveCommand::Create,
         )
         .await?;
@@ -274,17 +255,15 @@ impl Valve {
     pub async fn load_all_tables(
         &mut self,
         validate: bool,
-        verbose: bool,
-        initial_load: bool,
     ) -> Result<&mut Self, sqlx::Error> {
         // DatabaseError
 
-        self.create_missing_tables(verbose).await?;
+        self.create_missing_tables().await?;
         //self.truncate_all_tables();
         if let Some(pool) = &self.pool {
             if pool.any_kind() == AnyKind::Sqlite {
                 sqlx_query("PRAGMA foreign_keys = ON").execute(pool).await?;
-                if initial_load {
+                if self.initial_load {
                     // These pragmas are unsafe but they are used during initial loading since data
                     // integrity is not a priority in this case.
                     sqlx_query("PRAGMA journal_mode = OFF")
@@ -300,7 +279,7 @@ impl Valve {
                 }
             }
 
-            if verbose {
+            if self.verbose {
                 eprintln!(
                     "{} - Processing {} tables.",
                     Utc::now(),
@@ -316,7 +295,7 @@ impl Valve {
                 &pool,
                 &self.compiled_datatype_conditions,
                 &self.compiled_rule_conditions,
-                verbose,
+                self.verbose,
             )
             .await?;
         } else {
@@ -488,8 +467,7 @@ impl std::fmt::Debug for ColumnRule {
     }
 }
 
-/// TODO: Add docstring here. Note that once we have refactored configure_db() (see above) it may
-/// make more sense for this function to be an inner function of Valve.
+/// TODO: Add docstring here.
 pub async fn get_pool_from_connection_string(database: &str) -> Result<AnyPool, sqlx::Error> {
     let connection_options;
     if database.starts_with("postgresql://") {
@@ -505,6 +483,7 @@ pub async fn get_pool_from_connection_string(database: &str) -> Result<AnyPool, 
     }
 
     let pool = AnyPoolOptions::new()
+        // TODO: Make max_connections configurable.
         .max_connections(5)
         .connect_with(connection_options)
         .await?;
@@ -513,11 +492,21 @@ pub async fn get_pool_from_connection_string(database: &str) -> Result<AnyPool, 
 
 /// Given the path to a configuration table (either a table.tsv file or a database containing a
 /// table named "table"), load and check the 'table', 'column', and 'datatype' tables, and return
-/// SerdeMaps corresponding to specials, tables, datatypes, and rules.
+/// SerdeMaps corresponding to specials, tables, datatypes, rules, constraints, and a vector
+/// containing the names of the tables in the dattatabse in sorted order.
 pub fn read_config_files(
     path: &str,
     config_table: &str,
-) -> (SerdeMap, SerdeMap, SerdeMap, SerdeMap) {
+    parser: &StartParser,
+    pool: &AnyPool,
+) -> (
+    SerdeMap,
+    SerdeMap,
+    SerdeMap,
+    SerdeMap,
+    SerdeMap,
+    Vec<String>,
+) {
     let special_table_types = json!({
         "table": {"required": true},
         "column": {"required": true},
@@ -789,6 +778,124 @@ pub fn read_config_files(
         }
     }
 
+    // Initialize the constraints config:
+    let mut constraints_config = SerdeMap::new();
+    constraints_config.insert(String::from("foreign"), SerdeValue::Object(SerdeMap::new()));
+    constraints_config.insert(String::from("unique"), SerdeValue::Object(SerdeMap::new()));
+    constraints_config.insert(String::from("primary"), SerdeValue::Object(SerdeMap::new()));
+    constraints_config.insert(String::from("tree"), SerdeValue::Object(SerdeMap::new()));
+    constraints_config.insert(String::from("under"), SerdeValue::Object(SerdeMap::new()));
+
+    for table_name in tables_config.keys().cloned().collect::<Vec<_>>() {
+        let optional_path = tables_config
+            .get(&table_name)
+            .and_then(|r| r.get("path"))
+            .and_then(|p| p.as_str());
+
+        let mut path = None;
+        match optional_path {
+            None => {
+                // If an entry of the tables_config has no path then it is an internal table which
+                // need not be configured explicitly. Currently the only examples are the message
+                // and history tables.
+                if table_name != "message" && table_name != "history" {
+                    panic!("No path defined for table {}", table_name);
+                }
+                continue;
+            }
+            Some(p) if !Path::new(p).is_file() => {
+                eprintln!("WARN: File does not exist {}", p);
+            }
+            Some(p) if Path::new(p).canonicalize().is_err() => {
+                eprintln!("WARN: File path could not be made canonical {}", p);
+            }
+            Some(p) => path = Some(p.to_string()),
+        };
+
+        let defined_columns: Vec<String> = tables_config
+            .get(&table_name)
+            .and_then(|r| r.get("column"))
+            .and_then(|v| v.as_object())
+            .and_then(|o| Some(o.keys()))
+            .and_then(|k| Some(k.cloned()))
+            .and_then(|k| Some(k.collect()))
+            .unwrap();
+
+        // We use column_order to explicitly indicate the order in which the columns should appear
+        // in the table, for later reference. The default is to preserve the order from the actual
+        // table file. If that does not exist, we use the ordering in defined_columns.
+        let mut column_order = vec![];
+        if let Some(path) = path {
+            // Get the actual columns from the data itself. Note that we set has_headers to
+            // false(even though the files have header rows) in order to explicitly read the
+            // header row.
+            let mut rdr = csv::ReaderBuilder::new()
+                .has_headers(false)
+                .delimiter(b'\t')
+                .from_reader(File::open(path.clone()).unwrap_or_else(|err| {
+                    panic!("Unable to open '{}': {}", path.clone(), err);
+                }));
+            let mut iter = rdr.records();
+            if let Some(result) = iter.next() {
+                let actual_columns = result
+                    .unwrap()
+                    .iter()
+                    .map(|c| c.to_string())
+                    .collect::<Vec<_>>();
+                // Make sure that the actual columns found in the table file, and the columns
+                // defined in the column config, exactly match in terms of their content:
+                for column_name in &actual_columns {
+                    column_order.push(json!(column_name));
+                    if !defined_columns.contains(&column_name.to_string()) {
+                        panic!(
+                            "Column '{}.{}' not in column config",
+                            table_name, column_name
+                        );
+                    }
+                }
+                for column_name in &defined_columns {
+                    if !actual_columns.contains(&column_name.to_string()) {
+                        panic!(
+                            "Defined column '{}.{}' not found in table",
+                            table_name, column_name
+                        );
+                    }
+                }
+            } else {
+                panic!("'{}' is empty", path);
+            }
+        }
+
+        if column_order.is_empty() {
+            column_order = defined_columns.iter().map(|c| json!(c)).collect::<Vec<_>>();
+        }
+        tables_config
+            .get_mut(&table_name)
+            .and_then(|t| t.as_object_mut())
+            .and_then(|o| {
+                o.insert(
+                    String::from("column_order"),
+                    SerdeValue::Array(column_order),
+                )
+            });
+
+        // Populate the constraints config:
+        let table_constraints = get_table_constraints(
+            &mut tables_config,
+            &mut datatypes_config,
+            parser,
+            &table_name,
+            &pool,
+        );
+        for constraint_type in vec!["foreign", "unique", "primary", "tree", "under"] {
+            let table_constraints = table_constraints.get(constraint_type).unwrap().clone();
+            constraints_config
+                .get_mut(constraint_type)
+                .and_then(|o| o.as_object_mut())
+                .and_then(|o| o.insert(table_name.to_string(), table_constraints));
+        }
+    }
+
     // Manually add the messsage table config:
     tables_config.insert(
         "message".to_string(),
@@ -927,12 +1034,25 @@ pub fn read_config_files(
         }),
     );
 
+    // Sort the tables (aside from the message and history tables) according to their foreign key
+    // dependencies so that tables are always loaded after the tables they depend on.
+    let sorted_tables = verify_table_deps_and_sort(
+        &tables_config
+            .keys()
+            .cloned()
+            .filter(|m| m != "history" && m != "message")
+            .collect(),
+        &constraints_config,
+    );
+
     // Finally, return all the configs:
     (
         specials_config,
         tables_config,
         datatypes_config,
         rules_config,
+        constraints_config,
+        sorted_tables,
     )
 }
 
@@ -1307,6 +1427,7 @@ fn get_sql_for_text_view(
     (drop_view_sql, create_view_sql)
 }
 
+// TODO: Remove this function once it has been factored.
 /// Given config maps for tables and datatypes, a database connection pool, and a StartParser,
 /// read in the TSV files corresponding to the tables defined in the tables config, and use that
 /// information to fill in constraints information into a new config map that is then returned along
@@ -1597,11 +1718,6 @@ pub async fn valve(
     initial_load: bool,
     config_table: &str,
 ) -> Result<String, sqlx::Error> {
-    let parser = StartParser::new();
-
-    let (specials_config, mut tables_config, mut datatypes_config, rules_config) =
-        read_config_files(&table_table.to_string(), config_table);
-
     // To connect to a postgresql database listening to a unix domain socket:
     // ----------------------------------------------------------------------
     // let connection_options =
@@ -1628,6 +1744,12 @@ pub async fn valve(
         .max_connections(5)
         .connect_with(connection_options)
         .await?;
+
+    let parser = StartParser::new();
+
+    let (specials_config, mut tables_config, mut datatypes_config, rules_config, _, _) =
+        read_config_files(&table_table.to_string(), config_table, &parser, &pool);
+
     if *command == ValveCommand::Load && pool.any_kind() == AnyKind::Sqlite {
         sqlx_query("PRAGMA foreign_keys = ON")
             .execute(&pool)
@@ -3883,6 +4005,7 @@ fn verify_table_deps_and_sort(table_list: &Vec<String>, constraints: &SerdeMap) 
     };
 }
 
+// TODO: Remove this function once it has been refactored
 /// Given the config maps for tables and datatypes, and a table name, generate a SQL schema string,
 /// including each column C and its matching C_meta column, then return the schema string as well as
 /// a list of the table's constraints.
@@ -4190,6 +4313,191 @@ fn create_table_statement(
     ));
 
     return (statements, table_constraints);
+}
+
+/// TODO: Add doc string here.
+fn get_table_constraints(
+    tables_config: &mut SerdeMap,
+    datatypes_config: &mut SerdeMap,
+    parser: &StartParser,
+    table_name: &str,
+    pool: &AnyPool,
+) -> SerdeValue {
+    let column_names = tables_config
+        .get(table_name)
+        .and_then(|t| t.get("column_order"))
+        .and_then(|c| c.as_array())
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+
+    let columns = tables_config
+        .get(table_name)
+        .and_then(|c| c.as_object())
+        .and_then(|o| o.get("column"))
+        .and_then(|c| c.as_object())
+        .unwrap();
+
+    let mut table_constraints = json!({
+        "foreign": [],
+        "unique": [],
+        "primary": [],
+        "tree": [],
+        "under": [],
+    });
+
+    let mut colvals: Vec<SerdeMap> = vec![];
+    for column_name in &column_names {
+        let column = columns
+            .get(column_name)
+            .and_then(|c| c.as_object())
+            .unwrap();
+        colvals.push(column.clone());
+    }
+
+    for row in colvals {
+        let sql_type = get_sql_type(
+            datatypes_config,
+            &row.get("datatype")
+                .and_then(|d| d.as_str())
+                .and_then(|s| Some(s.to_string()))
+                .unwrap(),
+            pool,
+        )
+        .unwrap();
+        let column_name = row.get("column").and_then(|s| s.as_str()).unwrap();
+        let structure = row.get("structure").and_then(|s| s.as_str());
+        if let Some(structure) = structure {
+            if structure != "" {
+                let parsed_structure = parser.parse(structure).unwrap();
+                for expression in parsed_structure {
+                    match *expression {
+                        Expression::Label(value) if value == "primary" => {
+                            let primary_keys = table_constraints
+                                .get_mut("primary")
+                                .and_then(|v| v.as_array_mut())
+                                .unwrap();
+                            primary_keys.push(SerdeValue::String(column_name.to_string()));
+                        }
+                        Expression::Label(value) if value == "unique" => {
+                            let unique_constraints = table_constraints
+                                .get_mut("unique")
+                                .and_then(|v| v.as_array_mut())
+                                .unwrap();
+                            unique_constraints.push(SerdeValue::String(column_name.to_string()));
+                        }
+                        Expression::Function(name, args) if name == "from" => {
+                            if args.len() != 1 {
+                                panic!("Invalid foreign key: {} for: {}", structure, table_name);
+                            }
+                            match &*args[0] {
+                                Expression::Field(ftable, fcolumn) => {
+                                    let foreign_keys = table_constraints
+                                        .get_mut("foreign")
+                                        .and_then(|v| v.as_array_mut())
+                                        .unwrap();
+                                    let foreign_key = json!({
+                                        "column": column_name,
+                                        "ftable": ftable,
+                                        "fcolumn": fcolumn,
+                                    });
+                                    foreign_keys.push(foreign_key);
+                                }
+                                _ => {
+                                    panic!("Invalid foreign key: {} for: {}", structure, table_name)
+                                }
+                            };
+                        }
+                        Expression::Function(name, args) if name == "tree" => {
+                            if args.len() != 1 {
+                                panic!(
+                                    "Invalid 'tree' constraint: {} for: {}",
+                                    structure, table_name
+                                );
+                            }
+                            match &*args[0] {
+                                Expression::Label(child) => {
+                                    let child_datatype = columns
+                                        .get(child)
+                                        .and_then(|c| c.get("datatype"))
+                                        .and_then(|d| d.as_str());
+                                    if let None = child_datatype {
+                                        panic!(
+                                            "Could not determine datatype for {} of tree({})",
+                                            child, child
+                                        );
+                                    }
+                                    let child_datatype = child_datatype.unwrap();
+                                    let parent = column_name;
+                                    let child_sql_type = get_sql_type(
+                                        datatypes_config,
+                                        &child_datatype.to_string(),
+                                        pool,
+                                    )
+                                    .unwrap();
+                                    if sql_type != child_sql_type {
+                                        panic!(
+                                            "SQL type '{}' of '{}' in 'tree({})' for table \
+                                             '{}' doe snot match SQL type: '{}' of parent: '{}'.",
+                                            child_sql_type,
+                                            child,
+                                            child,
+                                            table_name,
+                                            sql_type,
+                                            parent
+                                        );
+                                    }
+                                    let tree_constraints = table_constraints
+                                        .get_mut("tree")
+                                        .and_then(|t| t.as_array_mut())
+                                        .unwrap();
+                                    let entry = json!({"parent": column_name,
+                                                       "child": child});
+                                    tree_constraints.push(entry);
+                                }
+                                _ => {
+                                    panic!(
+                                        "Invalid 'tree' constraint: {} for: {}",
+                                        structure, table_name
+                                    );
+                                }
+                            };
+                        }
+                        Expression::Function(name, args) if name == "under" => {
+                            let generic_error = format!(
+                                "Invalid 'under' constraint: {} for: {}",
+                                structure, table_name
+                            );
+                            if args.len() != 2 {
+                                panic!("{}", generic_error);
+                            }
+                            match (&*args[0], &*args[1]) {
+                                (Expression::Field(ttable, tcolumn), Expression::Label(value)) => {
+                                    let under_constraints = table_constraints
+                                        .get_mut("under")
+                                        .and_then(|u| u.as_array_mut())
+                                        .unwrap();
+                                    let entry = json!({"column": column_name,
+                                                       "ttable": ttable,
+                                                       "tcolumn": tcolumn,
+                                                       "value": value});
+                                    under_constraints.push(entry);
+                                }
+                                (_, _) => panic!("{}", generic_error),
+                            };
+                        }
+                        _ => panic!(
+                            "Unrecognized structure: {} for {}.{}",
+                            structure, table_name, column_name
+                        ),
+                    };
+                }
+            }
+        }
+    }
+
+    return table_constraints;
 }
 
 /// Given a list of messages and a HashMap, messages_stats, with which to collect counts of
