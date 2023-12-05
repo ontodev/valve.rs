@@ -82,6 +82,9 @@ sqlite_api_test: valve test/src/table.tsv build/valve.db test/insert_update.sh |
 	diff --strip-trailing-cr -q test/expected/messages_after_api_test.tsv test/output/messages.tsv
 	echo "select \"history_id\", \"table\", \"row\", \"from\", \"to\", \"summary\", \"user\", \"undone_by\" from history where history_id < 15 order by history_id" | sqlite3 -header -tabs build/valve.db > test/output/history.tsv
 	diff --strip-trailing-cr -q test/expected/history.tsv test/output/history.tsv
+	# We drop all of the db tables because the schema for the next test (random test) is different
+	# from the schema used for this test.
+	./$< --drop_all $(word 2,$^) $(word 3,$^)
 	@echo "Test succeeded!"
 
 pg_api_test: valve test/src/table.tsv test/insert_update.sh | test/output
@@ -93,6 +96,9 @@ pg_api_test: valve test/src/table.tsv test/insert_update.sh | test/output
 	diff --strip-trailing-cr -q test/expected/messages_after_api_test.tsv test/output/messages.tsv
 	psql postgresql:///valve_postgres -c "COPY (select \"history_id\", \"table\", \"row\", \"from\", \"to\", \"summary\", \"user\", \"undone_by\" from history where history_id < 15 order by history_id) TO STDOUT WITH NULL AS ''" > test/output/history.tsv
 	tail -n +2 test/expected/history.tsv | diff --strip-trailing-cr -q test/output/history.tsv -
+	# We drop all of the db tables because the schema for the next test (random test) is different
+	# from the schema used for this test.
+	./$< --drop_all $(word 2,$^) postgresql:///valve_postgres
 	@echo "Test succeeded!"
 
 sqlite_random_db = build/valve_random.db

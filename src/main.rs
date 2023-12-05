@@ -6,8 +6,7 @@ use argparse::{ArgumentParser, Store, StoreTrue};
 
 use ontodev_valve::{
     get_compiled_datatype_conditions, get_compiled_rule_conditions,
-    get_parsed_structure_conditions, valve, valve_grammar::StartParser, ValveCommand,
-    Valve
+    get_parsed_structure_conditions, valve, valve_grammar::StartParser, Valve, ValveCommand,
 };
 use serde_json::{from_str, Value as SerdeValue};
 use std::{env, process};
@@ -20,6 +19,7 @@ fn cli_args_valid(source: &str, destination: &str, dump_config: bool) -> bool {
 async fn main() -> Result<(), sqlx::Error> {
     let mut api_test = false;
     let mut dump_config = false;
+    let mut drop_all = false;
     let mut create_only = false;
     let mut config_table = String::new();
     let mut verbose = false;
@@ -48,6 +48,11 @@ async fn main() -> Result<(), sqlx::Error> {
             StoreTrue,
             r#"Read the configuration referred to by SOURCE and send it to stdout as a
                JSON-formatted string."#,
+        );
+        ap.refer(&mut drop_all).add_option(
+            &["--drop_all"],
+            StoreTrue,
+            r#"Drop all tables in the database."#,
         );
         ap.refer(&mut create_only).add_option(
             &["--create_only"],
@@ -146,6 +151,10 @@ async fn main() -> Result<(), sqlx::Error> {
 
         let config = serde_json::to_string(config).unwrap();
         println!("{}", config);
+    } else if drop_all {
+        let valve =
+            Valve::build(&source, &config_table, &destination, verbose, initial_load).await?;
+        valve.drop_all_tables().await?;
     } else if create_only {
         valve(
             &source,
@@ -157,9 +166,10 @@ async fn main() -> Result<(), sqlx::Error> {
         )
         .await?;
     } else {
-        let mut valve = Valve::build(&source, &config_table, &destination, verbose,
-                                     initial_load).await?;
+        let mut valve =
+            Valve::build(&source, &config_table, &destination, verbose, initial_load).await?;
         valve.load_all_tables(true).await?;
+
         // valve(
         //     &source,
         //     &destination,

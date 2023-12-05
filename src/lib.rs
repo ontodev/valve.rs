@@ -177,6 +177,14 @@ impl Valve {
         Ok(self)
     }
 
+    pub async fn execute_sql(&self, sql: &str) -> Result<(), sqlx::Error> {
+        sqlx_query(&sql)
+            .execute(self.pool.as_ref().unwrap())
+            .await
+            .expect(format!("The SQL statement: {} returned an error", sql).as_str());
+        Ok(())
+    }
+
     /// Create all configured database tables and views
     /// if they do not already exist as configured.
     /// Return an error on database problems.
@@ -218,10 +226,7 @@ impl Valve {
         for table in &tables_to_create {
             let table_statements = setup_statements.get(table).unwrap();
             for stmt in table_statements {
-                sqlx_query(stmt)
-                    .execute(pool)
-                    .await
-                    .expect(format!("The SQL statement: {} returned an error", stmt).as_str());
+                self.execute_sql(stmt).await?;
             }
             if self.verbose {
                 let output = String::from(table_statements.join("\n"));
@@ -234,10 +239,38 @@ impl Valve {
 
     /// Drop all configured tables, in reverse dependency order.
     /// Return an error on database problem.
-    pub fn drop_all_tables(&self) -> Result<&Self, sqlx::Error> {
+    pub async fn drop_all_tables(&self) -> Result<&Self, sqlx::Error> {
         // DatabaseError
 
-        // TODO NEXT
+        // Drop all of the database tables in the reverse of their sorted order:
+        let sorted_tables = {
+            let mut sorted_tables = vec!["message", "history"];
+            sorted_tables.append(
+                &mut self
+                    .global_config
+                    .get("sorted_table_list")
+                    .and_then(|l| l.as_array())
+                    .and_then(|l| Some(l.iter().map(|i| i.as_str().unwrap())))
+                    .and_then(|l| Some(l.collect::<Vec<_>>()))
+                    .unwrap(),
+            );
+            sorted_tables.reverse();
+            sorted_tables
+        };
+
+        for table in sorted_tables {
+            if table != "message" && table != "history" {
+                let sql = format!(r#"DROP VIEW IF EXISTS "{}_text_view""#, table);
+                self.execute_sql(&sql).await?;
+                let sql = format!(r#"DROP VIEW IF EXISTS "{}_view""#, table);
+                self.execute_sql(&sql).await?;
+                let sql = format!(r#"DROP TABLE IF EXISTS "{}_conflict""#, table);
+                self.execute_sql(&sql).await?;
+            }
+            let sql = format!(r#"DROP TABLE IF EXISTS "{}""#, table);
+            self.execute_sql(&sql).await?;
+        }
+
         Ok(self)
     }
 
@@ -252,9 +285,45 @@ impl Valve {
 
     /// Truncate all configured tables, in reverse dependency order.
     /// Return an error on database problem.
-    pub fn truncate_all_tables(&self) -> Result<&Self, sqlx::Error> {
+    pub async fn truncate_all_tables(&self) -> Result<&Self, sqlx::Error> {
         // DatabaseError
-        // TODO
+        let sorted_tables = {
+            let mut sorted_tables = vec!["message", "history"];
+            sorted_tables.append(
+                &mut self
+                    .global_config
+                    .get("sorted_table_list")
+                    .and_then(|l| l.as_array())
+                    .and_then(|l| Some(l.iter().map(|i| i.as_str().unwrap())))
+                    .and_then(|l| Some(l.collect::<Vec<_>>()))
+                    .unwrap(),
+            );
+            sorted_tables.reverse();
+            sorted_tables
+        };
+
+        let is_postgres = self.pool.as_ref().unwrap().any_kind() == AnyKind::Postgres;
+        for table in sorted_tables {
+            let sql = format!(r#"DELETE FROM "{}""#, table);
+            self.execute_sql(&sql).await?;
+            if table != "message" && table != "history" {
+                let sql = format!(r#"DELETE FROM "{}_conflict""#, table);
+                self.execute_sql(&sql).await?;
+            } else if table == "message" && is_postgres {
+                let sql = format!(
+                    r#"ALTER SEQUENCE "{}_message_id_seq" RESTART WITH 1"#,
+                    table
+                );
+                self.execute_sql(&sql).await?;
+            } else if table == "history" && is_postgres {
+                let sql = format!(
+                    r#"ALTER SEQUENCE "{}_history_id_seq" RESTART WITH 1"#,
+                    table
+                );
+                self.execute_sql(&sql).await?;
+            }
+        }
+
         Ok(self)
     }
 
@@ -276,7 +345,8 @@ impl Valve {
         // DatabaseError
 
         self.create_missing_tables().await?;
-        //self.truncate_all_tables();
+        self.truncate_all_tables().await?;
+
         if let Some(pool) = &self.pool {
             if pool.any_kind() == AnyKind::Sqlite {
                 sqlx_query("PRAGMA foreign_keys = ON").execute(pool).await?;
@@ -1232,6 +1302,8 @@ pub fn get_parsed_structure_conditions(
     parsed_structure_conditions
 }
 
+// TODO: Modify this function so that it no longer returns the DROP statement, once you have
+// removed the old valve functions that require it.
 /// Given the name of a table and a database connection pool, generate SQL for creating a view
 /// based on the table that provides a unified representation of the normal and conflict versions
 /// of the table, plus columns summarising the information associated with the given table that is
@@ -1352,6 +1424,8 @@ fn get_sql_for_standard_view(table: &str, pool: &AnyPool) -> (String, String) {
     (drop_view_sql, create_view_sql)
 }
 
+// TODO: Modify this function so that it no longer returns the DROP statement, once you have
+// removed the old valve functions that require it.
 /// Given the tables configuration map, the name of a table and a database connection pool,
 /// generate SQL for creating a more user-friendly version of the view than the one generated by
 /// [get_sql_for_standard_view()]. Unlike the standard view generated by that function, the view
@@ -1484,11 +1558,8 @@ pub async fn get_setup_statements(
             table_statements.append(&mut statements);
         }
 
-        let (drop_view_sql, create_view_sql) = get_sql_for_standard_view(&table_name, pool);
-        let (drop_text_view_sql, create_text_view_sql) =
-            get_sql_for_text_view(tables_config, &table_name, pool);
-        table_statements.push(drop_text_view_sql);
-        table_statements.push(drop_view_sql);
+        let (_, create_view_sql) = get_sql_for_standard_view(&table_name, pool);
+        let (_, create_text_view_sql) = get_sql_for_text_view(tables_config, &table_name, pool);
         table_statements.push(create_view_sql);
         table_statements.push(create_text_view_sql);
 
@@ -1497,14 +1568,6 @@ pub async fn get_setup_statements(
 
     // Generate DDL for the history table:
     let mut history_statements = vec![];
-    history_statements.push({
-        let mut sql = r#"DROP TABLE IF EXISTS "history""#.to_string();
-        if pool.any_kind() == AnyKind::Postgres {
-            sql.push_str(" CASCADE");
-        }
-        sql.push_str(";");
-        sql
-    });
     history_statements.push(format!(
         indoc! {r#"
                 CREATE TABLE IF NOT EXISTS "history" (
@@ -1541,14 +1604,6 @@ pub async fn get_setup_statements(
 
     // Generate DDL for the message table:
     let mut message_statements = vec![];
-    message_statements.push({
-        let mut sql = r#"DROP TABLE IF EXISTS "message""#.to_string();
-        if pool.any_kind() == AnyKind::Postgres {
-            sql.push_str(" CASCADE");
-        }
-        sql.push_str(";");
-        sql
-    });
     message_statements.push(format!(
         indoc! {r#"
                 CREATE TABLE IF NOT EXISTS "message" (
@@ -4660,14 +4715,7 @@ fn get_table_ddl(
     table_name: &String,
     pool: &AnyPool,
 ) -> Vec<String> {
-    // TODO: Don't generate "drop" statements in this function. It will be done elsewhere. This
-    // function should only generate creation statements.
-    let mut drop_table_sql = format!(r#"DROP TABLE IF EXISTS "{}""#, table_name);
-    if pool.any_kind() == AnyKind::Postgres {
-        drop_table_sql.push_str(" CASCADE");
-    }
-    drop_table_sql.push_str(";");
-    let mut statements = vec![drop_table_sql];
+    let mut statements = vec![];
     let mut create_lines = vec![
         format!(r#"CREATE TABLE IF NOT EXISTS "{}" ("#, table_name),
         String::from(r#"  "row_number" BIGINT,"#),
