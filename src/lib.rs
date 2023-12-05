@@ -183,33 +183,66 @@ impl Valve {
     pub async fn create_missing_tables(&mut self) -> Result<&mut Self, sqlx::Error> {
         // DatabaseError
 
-        // TODO: Revisit the implementation of this once te configure_db() function has been
-        // refactored. Currently it implicitly drops and recreates _all_ tables but eventually this
-        // function needs to do this only for _missing_ tables.
         let mut tables_config = self
             .global_config
             .get_mut("table")
             .and_then(|t| t.as_object_mut())
-            .unwrap();
-        let mut tables_config = tables_config.clone();
+            .unwrap()
+            .clone();
         let mut datatypes_config = self
             .global_config
             .get_mut("datatype")
             .and_then(|d| d.as_object_mut())
+            .unwrap()
+            .clone();
+        let mut constraints_config = self
+            .global_config
+            .get_mut("constraints")
+            .and_then(|t| t.as_object_mut())
+            .unwrap()
+            .clone();
+        let sorted_tables = self
+            .global_config
+            .get("sorted_table_list")
+            .and_then(|l| l.as_array())
+            .and_then(|l| Some(l.iter().map(|i| i.as_str().unwrap().to_string())))
+            .and_then(|l| Some(l.collect::<Vec<_>>()))
             .unwrap();
-        let mut datatypes_config = datatypes_config.clone();
+
         let pool = self.pool.as_ref().unwrap();
         let parser = StartParser::new();
 
-        let (_, _) = configure_db(
+        let setup_statements = get_setup_statements(
             &mut tables_config,
             &mut datatypes_config,
+            &constraints_config,
             &pool,
             &parser,
             self.verbose,
             &ValveCommand::Create,
         )
         .await?;
+
+        // Add the message and history tables to the beginning of the list of tables to create
+        // (the message table in particular needs to be at the beginning since the table views all
+        // reference it).
+        let mut tables_to_create = vec!["message".to_string(), "history".to_string()];
+        tables_to_create.append(&mut sorted_tables.clone());
+
+        for table in &tables_to_create {
+            let table_statements = setup_statements.get(table).unwrap();
+            for stmt in table_statements {
+                sqlx_query(stmt)
+                    .execute(pool)
+                    .await
+                    .expect(format!("The SQL statement: {} returned an error", stmt).as_str());
+            }
+            if self.verbose {
+                let output = String::from(table_statements.join("\n"));
+                println!("{}\n", output);
+            }
+        }
+
         Ok(self)
     }
 
@@ -252,10 +285,7 @@ impl Valve {
     /// If `validate` is false, just try to insert all rows.
     /// Return an error on database problem,
     /// including database conflicts that prevent rows being inserted.
-    pub async fn load_all_tables(
-        &mut self,
-        validate: bool,
-    ) -> Result<&mut Self, sqlx::Error> {
+    pub async fn load_all_tables(&mut self, validate: bool) -> Result<&mut Self, sqlx::Error> {
         // DatabaseError
 
         self.create_missing_tables().await?;
@@ -1302,9 +1332,16 @@ fn get_sql_for_standard_view(table: &str, pool: &AnyPool) -> (String, String) {
         );
     }
 
+    let create_or_replace_view = {
+        if pool.any_kind() == AnyKind::Postgres {
+            "CREATE OR REPLACE VIEW"
+        } else {
+            "CREATE VIEW IF NOT EXISTS"
+        }
+    };
     let create_view_sql = format!(
         indoc! {r#"
-          CREATE VIEW "{t}_view" AS
+          {create_or_replace_view} "{t}_view" AS
             SELECT
               union_t.*,
               {message_t} AS "message",
@@ -1315,6 +1352,7 @@ fn get_sql_for_standard_view(table: &str, pool: &AnyPool) -> (String, String) {
               SELECT * FROM "{t}_conflict"
             ) as union_t;
         "#},
+        create_or_replace_view = create_or_replace_view,
         t = table,
         message_t = message_t,
         history_t = history_t,
@@ -1412,19 +1450,145 @@ fn get_sql_for_text_view(
         v
     };
 
+    let create_or_replace_view = {
+        if pool.any_kind() == AnyKind::Postgres {
+            "CREATE OR REPLACE VIEW"
+        } else {
+            "CREATE VIEW IF NOT EXISTS"
+        }
+    };
     let create_view_sql = format!(
-        r#"CREATE VIEW "{table}_text_view" AS
+        r#"{create_or_replace_view} "{table}_text_view" AS
            SELECT {outer_columns}
            FROM (
                SELECT {inner_columns}
                FROM "{table}_view"
            ) t"#,
+        create_or_replace_view = create_or_replace_view,
         outer_columns = outer_columns.join(", "),
         inner_columns = inner_columns.join(", "),
         table = table,
     );
 
     (drop_view_sql, create_view_sql)
+}
+
+/// TODO: Add docstring here
+pub async fn get_setup_statements(
+    tables_config: &mut SerdeMap,
+    datatypes_config: &mut SerdeMap,
+    constraints_config: &SerdeMap,
+    pool: &AnyPool,
+    parser: &StartParser,
+    verbose: bool,
+    command: &ValveCommand,
+) -> Result<HashMap<String, Vec<String>>, sqlx::Error> {
+    // Begin by reading in the TSV files corresponding to the tables defined in tables_config, and
+    // use that information to create the associated database tables, while saving constraint
+    // information to constrains_config.
+    let mut setup_statements = HashMap::new();
+    for table_name in tables_config.keys().cloned().collect::<Vec<_>>() {
+        // Generate the statements for creating the table and its corresponding conflict table:
+        let mut table_statements = vec![];
+        for table in vec![table_name.to_string(), format!("{}_conflict", table_name)] {
+            let mut statements =
+                get_table_ddl(tables_config, datatypes_config, parser, &table, &pool);
+            table_statements.append(&mut statements);
+        }
+
+        let (drop_view_sql, create_view_sql) = get_sql_for_standard_view(&table_name, pool);
+        let (drop_text_view_sql, create_text_view_sql) =
+            get_sql_for_text_view(tables_config, &table_name, pool);
+        table_statements.push(drop_text_view_sql);
+        table_statements.push(drop_view_sql);
+        table_statements.push(create_view_sql);
+        table_statements.push(create_text_view_sql);
+
+        setup_statements.insert(table_name.to_string(), table_statements);
+    }
+
+    // Generate DDL for the history table:
+    let mut history_statements = vec![];
+    history_statements.push({
+        let mut sql = r#"DROP TABLE IF EXISTS "history""#.to_string();
+        if pool.any_kind() == AnyKind::Postgres {
+            sql.push_str(" CASCADE");
+        }
+        sql.push_str(";");
+        sql
+    });
+    history_statements.push(format!(
+        indoc! {r#"
+                CREATE TABLE IF NOT EXISTS "history" (
+                  {row_number}
+                  "table" TEXT,
+                  "row" BIGINT,
+                  "from" TEXT,
+                  "to" TEXT,
+                  "summary" TEXT,
+                  "user" TEXT,
+                  "undone_by" TEXT,
+                  {timestamp}
+                );
+              "#},
+        row_number = {
+            if pool.any_kind() == AnyKind::Sqlite {
+                "\"history_id\" INTEGER PRIMARY KEY,"
+            } else {
+                "\"history_id\" SERIAL PRIMARY KEY,"
+            }
+        },
+        timestamp = {
+            if pool.any_kind() == AnyKind::Sqlite {
+                "\"timestamp\" TIMESTAMP DEFAULT(STRFTIME('%Y-%m-%d %H:%M:%f', 'NOW'))"
+            } else {
+                "\"timestamp\" TIMESTAMP DEFAULT CURRENT_TIMESTAMP"
+            }
+        },
+    ));
+    history_statements.push(
+        r#"CREATE INDEX IF NOT EXISTS "history_tr_idx" ON "history"("table", "row");"#.to_string(),
+    );
+    setup_statements.insert("history".to_string(), history_statements);
+
+    // Generate DDL for the message table:
+    let mut message_statements = vec![];
+    message_statements.push({
+        let mut sql = r#"DROP TABLE IF EXISTS "message""#.to_string();
+        if pool.any_kind() == AnyKind::Postgres {
+            sql.push_str(" CASCADE");
+        }
+        sql.push_str(";");
+        sql
+    });
+    message_statements.push(format!(
+        indoc! {r#"
+                CREATE TABLE IF NOT EXISTS "message" (
+                  {}
+                  "table" TEXT,
+                  "row" BIGINT,
+                  "column" TEXT,
+                  "value" TEXT,
+                  "level" TEXT,
+                  "rule" TEXT,
+                  "message" TEXT
+                );
+              "#},
+        {
+            if pool.any_kind() == AnyKind::Sqlite {
+                "\"message_id\" INTEGER PRIMARY KEY,"
+            } else {
+                "\"message_id\" SERIAL PRIMARY KEY,"
+            }
+        },
+    ));
+    message_statements.push(
+        r#"CREATE INDEX IF NOT EXISTS "message_trc_idx" ON "message"("table", "row", "column");"#
+            .to_string(),
+    );
+    setup_statements.insert("message".to_string(), message_statements);
+
+    return Ok(setup_statements);
 }
 
 // TODO: Remove this function once it has been factored.
@@ -4317,12 +4481,20 @@ fn create_table_statement(
 
 /// TODO: Add doc string here.
 fn get_table_constraints(
-    tables_config: &mut SerdeMap,
-    datatypes_config: &mut SerdeMap,
+    tables_config: &SerdeMap,
+    datatypes_config: &SerdeMap,
     parser: &StartParser,
     table_name: &str,
     pool: &AnyPool,
 ) -> SerdeValue {
+    let mut table_constraints = json!({
+        "foreign": [],
+        "unique": [],
+        "primary": [],
+        "tree": [],
+        "under": [],
+    });
+
     let column_names = tables_config
         .get(table_name)
         .and_then(|t| t.get("column_order"))
@@ -4338,14 +4510,6 @@ fn get_table_constraints(
         .and_then(|o| o.get("column"))
         .and_then(|c| c.as_object())
         .unwrap();
-
-    let mut table_constraints = json!({
-        "foreign": [],
-        "unique": [],
-        "primary": [],
-        "tree": [],
-        "under": [],
-    });
 
     let mut colvals: Vec<SerdeMap> = vec![];
     for column_name in &column_names {
@@ -4498,6 +4662,203 @@ fn get_table_constraints(
     }
 
     return table_constraints;
+}
+
+// TODO: Add docstring here
+fn get_table_ddl(
+    tables_config: &mut SerdeMap,
+    datatypes_config: &mut SerdeMap,
+    parser: &StartParser,
+    table_name: &String,
+    pool: &AnyPool,
+) -> Vec<String> {
+    // TODO: Don't generate "drop" statements in this function. It will be done elsewhere. This
+    // function should only generate creation statements.
+    let mut drop_table_sql = format!(r#"DROP TABLE IF EXISTS "{}""#, table_name);
+    if pool.any_kind() == AnyKind::Postgres {
+        drop_table_sql.push_str(" CASCADE");
+    }
+    drop_table_sql.push_str(";");
+    let mut statements = vec![drop_table_sql];
+    let mut create_lines = vec![
+        format!(r#"CREATE TABLE IF NOT EXISTS "{}" ("#, table_name),
+        String::from(r#"  "row_number" BIGINT,"#),
+    ];
+
+    let colvals = {
+        let normal_table_name;
+        if let Some(s) = table_name.strip_suffix("_conflict") {
+            normal_table_name = String::from(s);
+        } else {
+            normal_table_name = table_name.to_string();
+        }
+        let column_order = tables_config
+            .get(&normal_table_name)
+            .and_then(|t| t.get("column_order"))
+            .and_then(|c| c.as_array())
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        let columns = tables_config
+            .get(&normal_table_name)
+            .and_then(|c| c.as_object())
+            .and_then(|o| o.get("column"))
+            .and_then(|c| c.as_object())
+            .unwrap();
+
+        column_order
+            .iter()
+            .map(|column_name| {
+                columns
+                    .get(column_name)
+                    .and_then(|c| c.as_object())
+                    .unwrap()
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let table_constraints = {
+        // Conflict tables have no database constraints:
+        if table_name.ends_with("_conflict") {
+            json!({"foreign": [], "unique": [], "primary": [], "tree": [], "under": [],})
+        } else {
+            get_table_constraints(tables_config, datatypes_config, parser, &table_name, &pool)
+        }
+    };
+
+    let c = colvals.len();
+    let mut r = 0;
+    for row in colvals {
+        r += 1;
+        let sql_type = get_sql_type(
+            datatypes_config,
+            &row.get("datatype")
+                .and_then(|d| d.as_str())
+                .and_then(|s| Some(s.to_string()))
+                .unwrap(),
+            pool,
+        )
+        .unwrap();
+
+        let short_sql_type = {
+            if sql_type.to_lowercase().as_str().starts_with("varchar(") {
+                "VARCHAR"
+            } else {
+                &sql_type
+            }
+        };
+
+        if pool.any_kind() == AnyKind::Postgres {
+            if !PG_SQL_TYPES.contains(&short_sql_type.to_lowercase().as_str()) {
+                panic!(
+                    "Unrecognized PostgreSQL SQL type '{}' for datatype: '{}'. \
+                     Accepted SQL types for PostgreSQL are: {}",
+                    sql_type,
+                    row.get("datatype").and_then(|d| d.as_str()).unwrap(),
+                    PG_SQL_TYPES.join(", ")
+                );
+            }
+        } else {
+            if !SL_SQL_TYPES.contains(&short_sql_type.to_lowercase().as_str()) {
+                panic!(
+                    "Unrecognized SQLite SQL type '{}' for datatype '{}'. \
+                     Accepted SQL datatypes for SQLite are: {}",
+                    sql_type,
+                    row.get("datatype").and_then(|d| d.as_str()).unwrap(),
+                    SL_SQL_TYPES.join(", ")
+                );
+            }
+        }
+
+        let column_name = row.get("column").and_then(|s| s.as_str()).unwrap();
+        let mut line = format!(r#"  "{}" {}"#, column_name, sql_type);
+
+        // Check if the column is a primary key and indicate this in the DDL if so:
+        let primary_constraints = table_constraints
+            .get("primary")
+            .and_then(|v| v.as_array())
+            .unwrap();
+        if primary_constraints.contains(&json!(column_name)) {
+            line.push_str(" PRIMARY KEY");
+        }
+
+        // Check if the column has a unique constraint and indicate this in the DDL if so:
+        let unique_constraints = table_constraints
+            .get("unique")
+            .and_then(|v| v.as_array())
+            .unwrap();
+        if unique_constraints.contains(&json!(column_name)) {
+            line.push_str(" UNIQUE");
+        }
+
+        // If there are foreign constraints add a column to the end of the statement which we will
+        // finish after this for loop is done:
+        if !(r >= c
+            && table_constraints
+                .get("foreign")
+                .and_then(|v| v.as_array())
+                .and_then(|v| Some(v.is_empty()))
+                .unwrap())
+        {
+            line.push_str(",");
+        }
+        create_lines.push(line);
+    }
+
+    // Add the SQL to indicate any foreign constraints:
+    let foreign_keys = table_constraints
+        .get("foreign")
+        .and_then(|v| v.as_array())
+        .unwrap();
+    let num_fkeys = foreign_keys.len();
+    for (i, fkey) in foreign_keys.iter().enumerate() {
+        create_lines.push(format!(
+            r#"  FOREIGN KEY ("{}") REFERENCES "{}"("{}"){}"#,
+            fkey.get("column").and_then(|s| s.as_str()).unwrap(),
+            fkey.get("ftable").and_then(|s| s.as_str()).unwrap(),
+            fkey.get("fcolumn").and_then(|s| s.as_str()).unwrap(),
+            if i < (num_fkeys - 1) { "," } else { "" }
+        ));
+    }
+    create_lines.push(String::from(");"));
+    // We are done generating the lines for the 'create table' statement. Join them and add the
+    // result to the statements to return:
+    statements.push(String::from(create_lines.join("\n")));
+
+    // Loop through the tree constraints and if any of their associated child columns do not already
+    // have an associated unique or primary index, create one implicitly here:
+    let tree_constraints = table_constraints
+        .get("tree")
+        .and_then(|v| v.as_array())
+        .unwrap();
+    for tree in tree_constraints {
+        let unique_keys = table_constraints
+            .get("unique")
+            .and_then(|v| v.as_array())
+            .unwrap();
+        let primary_keys = table_constraints
+            .get("primary")
+            .and_then(|v| v.as_array())
+            .unwrap();
+        let tree_child = tree.get("child").and_then(|c| c.as_str()).unwrap();
+        if !unique_keys.contains(&SerdeValue::String(tree_child.to_string()))
+            && !primary_keys.contains(&SerdeValue::String(tree_child.to_string()))
+        {
+            statements.push(format!(
+                r#"CREATE UNIQUE INDEX IF NOT EXISTS "{}_{}_idx" ON "{}"("{}");"#,
+                table_name, tree_child, table_name, tree_child
+            ));
+        }
+    }
+
+    // Finally, create a further unique index on row_number:
+    statements.push(format!(
+        r#"CREATE UNIQUE INDEX IF NOT EXISTS "{}_row_number_idx" ON "{}"("row_number");"#,
+        table_name, table_name
+    ));
+
+    return statements;
 }
 
 /// Given a list of messages and a HashMap, messages_stats, with which to collect counts of
