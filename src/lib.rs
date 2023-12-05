@@ -195,12 +195,6 @@ impl Valve {
             .and_then(|d| d.as_object_mut())
             .unwrap()
             .clone();
-        let mut constraints_config = self
-            .global_config
-            .get_mut("constraints")
-            .and_then(|t| t.as_object_mut())
-            .unwrap()
-            .clone();
         let sorted_tables = self
             .global_config
             .get("sorted_table_list")
@@ -212,16 +206,8 @@ impl Valve {
         let pool = self.pool.as_ref().unwrap();
         let parser = StartParser::new();
 
-        let setup_statements = get_setup_statements(
-            &mut tables_config,
-            &mut datatypes_config,
-            &constraints_config,
-            &pool,
-            &parser,
-            self.verbose,
-            &ValveCommand::Create,
-        )
-        .await?;
+        let setup_statements =
+            get_setup_statements(&mut tables_config, &mut datatypes_config, &pool, &parser).await?;
 
         // Add the message and history tables to the beginning of the list of tables to create
         // (the message table in particular needs to be at the beginning since the table views all
@@ -250,16 +236,17 @@ impl Valve {
     /// Return an error on database problem.
     pub fn drop_all_tables(&self) -> Result<&Self, sqlx::Error> {
         // DatabaseError
-        todo!();
+
+        // TODO NEXT
         Ok(self)
     }
 
     /// Given a vector of table names,
     /// drop those tables, in the given order.
     /// Return an error on invalid table name or database problem.
-    pub fn drop_tables(&self, tables: Vec<&str>) -> Result<&Self, sqlx::Error> {
+    pub fn drop_tables(&self, _tables: Vec<&str>) -> Result<&Self, sqlx::Error> {
         // DatabaseError
-        todo!();
+        // TODO
         Ok(self)
     }
 
@@ -267,17 +254,17 @@ impl Valve {
     /// Return an error on database problem.
     pub fn truncate_all_tables(&self) -> Result<&Self, sqlx::Error> {
         // DatabaseError
-        todo!();
+        // TODO
         Ok(self)
     }
 
     /// Given a vector of table names,
     /// truncate those tables, in the given order.
     /// Return an error on invalid table name or database problem.
-    pub fn truncate_tables(&self, tables: Vec<&str>) -> Result<&Self, sqlx::Error> {
+    pub fn truncate_tables(&self, _tables: Vec<&str>) -> Result<&Self, sqlx::Error> {
         // ConfigOrDatabaseError
         //self.create_missing_tables();
-        todo!();
+        // TODO
         Ok(self)
     }
 
@@ -285,7 +272,7 @@ impl Valve {
     /// If `validate` is false, just try to insert all rows.
     /// Return an error on database problem,
     /// including database conflicts that prevent rows being inserted.
-    pub async fn load_all_tables(&mut self, validate: bool) -> Result<&mut Self, sqlx::Error> {
+    pub async fn load_all_tables(&mut self, _validate: bool) -> Result<&mut Self, sqlx::Error> {
         // DatabaseError
 
         self.create_missing_tables().await?;
@@ -339,11 +326,11 @@ impl Valve {
     /// load those tables in the given order.
     /// If `validate` is false, just try to insert all rows.
     /// Return an error on invalid table name or database problem.
-    pub fn load_tables(&self, tables: Vec<&str>, validate: bool) -> Result<&Self, sqlx::Error> {
+    pub fn load_tables(&self, _tables: Vec<&str>, _validate: bool) -> Result<&Self, sqlx::Error> {
         // ConfigOrDatabaseError
         //self.create_missing_tables();
         //self.truncate_tables(tables);
-        todo!();
+        // TODO
         Ok(self)
     }
 
@@ -351,23 +338,27 @@ impl Valve {
     /// Return an error on writing or database problem.
     pub fn save_all_tables(&self) -> Result<&Self, sqlx::Error> {
         // WriteOrDatabaseError
-        todo!();
+        // TODO
         Ok(self)
     }
 
     /// Given a vector of table names,
     /// Save thosee tables to their 'path's, in the given order.
     /// Return an error on writing or database problem.
-    pub fn save_tables(&self, tables: Vec<&str>) -> Result<&Self, sqlx::Error> {
+    pub fn save_tables(&self, _tables: Vec<&str>) -> Result<&Self, sqlx::Error> {
         // WriteOrDatabaseError
-        todo!();
+        // TODO
         Ok(self)
     }
 
     /// Given a table name and a row as JSON,
     /// return the validated row.
     /// Return an error on database problem.
-    pub fn validate_row(&self, table_name: &str, row: &ValveRow) -> Result<ValveRow, sqlx::Error> {
+    pub fn validate_row(
+        &self,
+        _table_name: &str,
+        _row: &ValveRow,
+    ) -> Result<ValveRow, sqlx::Error> {
         // DatabaseError
         todo!();
     }
@@ -376,7 +367,7 @@ impl Valve {
     /// add the row to the table in the database,
     /// and return the validated row, including its new row_number.
     /// Return an error invalid table name or database problem.
-    pub fn insert_row(&self, table_name: &str, row: &ValveRow) -> Result<ValveRow, sqlx::Error> {
+    pub fn insert_row(&self, _table_name: &str, _row: &ValveRow) -> Result<ValveRow, sqlx::Error> {
         // ConfigOrDatabaseError
         todo!();
     }
@@ -387,9 +378,9 @@ impl Valve {
     /// Return an error invalid table name or row number or database problem.
     pub fn update_row(
         &self,
-        table_name: &str,
-        row_number: usize,
-        row: &ValveRow,
+        _table_name: &str,
+        _row_number: usize,
+        _row: &ValveRow,
     ) -> Result<ValveRow, sqlx::Error> {
         // ConfigOrDatabaseError
         todo!();
@@ -398,7 +389,7 @@ impl Valve {
     /// Given a table name and a row number,
     /// delete that row from the table.
     /// Return an error invalid table name or row number or database problem.
-    pub fn delete_row(&self, table_name: &str, row_number: usize) -> Result<(), sqlx::Error> {
+    pub fn delete_row(&self, _table_name: &str, _row_number: usize) -> Result<(), sqlx::Error> {
         // ConfigOrDatabaseError
         todo!();
     }
@@ -1477,11 +1468,8 @@ fn get_sql_for_text_view(
 pub async fn get_setup_statements(
     tables_config: &mut SerdeMap,
     datatypes_config: &mut SerdeMap,
-    constraints_config: &SerdeMap,
     pool: &AnyPool,
     parser: &StartParser,
-    verbose: bool,
-    command: &ValveCommand,
 ) -> Result<HashMap<String, Vec<String>>, sqlx::Error> {
     // Begin by reading in the TSV files corresponding to the tables defined in tables_config, and
     // use that information to create the associated database tables, while saving constraint
