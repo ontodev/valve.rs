@@ -177,7 +177,7 @@ impl Valve {
         Ok(self)
     }
 
-    pub async fn execute_sql(&self, sql: &str) -> Result<(), sqlx::Error> {
+    async fn execute_sql(&self, sql: &str) -> Result<(), sqlx::Error> {
         sqlx_query(&sql)
             .execute(self.pool.as_ref().unwrap())
             .await
@@ -237,28 +237,29 @@ impl Valve {
         Ok(self)
     }
 
+    pub fn order_tables_for_deletion(&self) -> Vec<&str> {
+        // Every other table depends on the message and history table so these will go last:
+        let mut sorted_tables = vec!["message", "history"];
+        sorted_tables.append(
+            &mut self
+                .global_config
+                .get("sorted_table_list")
+                .and_then(|l| l.as_array())
+                .and_then(|l| Some(l.iter().map(|i| i.as_str().unwrap())))
+                .and_then(|l| Some(l.collect::<Vec<_>>()))
+                .unwrap(),
+        );
+        sorted_tables.reverse();
+        sorted_tables
+    }
+
     /// Drop all configured tables, in reverse dependency order.
     /// Return an error on database problem.
     pub async fn drop_all_tables(&self) -> Result<&Self, sqlx::Error> {
         // DatabaseError
 
         // Drop all of the database tables in the reverse of their sorted order:
-        let sorted_tables = {
-            let mut sorted_tables = vec!["message", "history"];
-            sorted_tables.append(
-                &mut self
-                    .global_config
-                    .get("sorted_table_list")
-                    .and_then(|l| l.as_array())
-                    .and_then(|l| Some(l.iter().map(|i| i.as_str().unwrap())))
-                    .and_then(|l| Some(l.collect::<Vec<_>>()))
-                    .unwrap(),
-            );
-            sorted_tables.reverse();
-            sorted_tables
-        };
-
-        for table in sorted_tables {
+        for table in self.order_tables_for_deletion() {
             if table != "message" && table != "history" {
                 let sql = format!(r#"DROP VIEW IF EXISTS "{}_text_view""#, table);
                 self.execute_sql(&sql).await?;
@@ -287,39 +288,25 @@ impl Valve {
     /// Return an error on database problem.
     pub async fn truncate_all_tables(&self) -> Result<&Self, sqlx::Error> {
         // DatabaseError
-        let sorted_tables = {
-            let mut sorted_tables = vec!["message", "history"];
-            sorted_tables.append(
-                &mut self
-                    .global_config
-                    .get("sorted_table_list")
-                    .and_then(|l| l.as_array())
-                    .and_then(|l| Some(l.iter().map(|i| i.as_str().unwrap())))
-                    .and_then(|l| Some(l.collect::<Vec<_>>()))
-                    .unwrap(),
-            );
-            sorted_tables.reverse();
-            sorted_tables
+
+        // We must use CASCADE in the case of PostgreSQL since we cannot truncate a table, T, that
+        // depends on another table, T', even in the case where we have previously truncated T'.
+        // SQLite does not need this. However SQLite does require that the tables be truncated in
+        // deletion order (which means that it must be checking that T' is empty).
+
+        let truncate_sql = |table: &str| -> String {
+            if self.pool.as_ref().unwrap().any_kind() == AnyKind::Postgres {
+                format!(r#"TRUNCATE TABLE "{}" RESTART IDENTITY CASCADE"#, table)
+            } else {
+                format!(r#"DELETE FROM "{}""#, table)
+            }
         };
 
-        let is_postgres = self.pool.as_ref().unwrap().any_kind() == AnyKind::Postgres;
-        for table in sorted_tables {
-            let sql = format!(r#"DELETE FROM "{}""#, table);
+        for table in self.order_tables_for_deletion() {
+            let sql = truncate_sql(&table);
             self.execute_sql(&sql).await?;
             if table != "message" && table != "history" {
-                let sql = format!(r#"DELETE FROM "{}_conflict""#, table);
-                self.execute_sql(&sql).await?;
-            } else if table == "message" && is_postgres {
-                let sql = format!(
-                    r#"ALTER SEQUENCE "{}_message_id_seq" RESTART WITH 1"#,
-                    table
-                );
-                self.execute_sql(&sql).await?;
-            } else if table == "history" && is_postgres {
-                let sql = format!(
-                    r#"ALTER SEQUENCE "{}_history_id_seq" RESTART WITH 1"#,
-                    table
-                );
+                let sql = truncate_sql(&format!("{}_conflict", table));
                 self.execute_sql(&sql).await?;
             }
         }
