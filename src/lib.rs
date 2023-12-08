@@ -94,11 +94,16 @@ pub struct Valve {
     pub initial_load: bool,
 }
 
+#[derive(Debug)]
+pub struct ConfigError {
+    pub message: String,
+}
+
 impl Valve {
-    /// Given a path to a table table and its name, read the table table, configure VALVE
-    /// partially ... TODO: finish rewriting this doc string.
-    /// , and return a new Valve struct.
-    /// Return an error if reading or configuration fails.
+    /// Given a path to a table table, its name, a path to a database, a flag for verbose output,
+    /// and a flag indicating whether the Valve instance should be built for initial loading:
+    /// Set up a database connection, read the table table, configure VALVE, and return a new
+    /// Valve struct.
     pub async fn build(
         table_path: &str,
         config_table: &str,
@@ -168,20 +173,41 @@ impl Valve {
         })
     }
 
-    /// Set the user name for this instance.
-    /// The username must be a short string without newlines.
-    /// Return an error on invalid username.
-    pub fn set_user(&mut self, user: &str) -> Result<&mut Self, sqlx::Error> {
-        // ConfigError
+    /// Controls the maximum length of a username.
+    const USERNAME_MAX_LEN: usize = 20;
+
+    /// Set the user name, which must be a short, trimmed, string without newlines, for this Valve
+    /// instance.
+    pub fn set_user(&mut self, user: &str) -> Result<&mut Self, ConfigError> {
+        if user.len() > Self::USERNAME_MAX_LEN {
+            return Err(ConfigError {
+                message: format!(
+                    "Username '{}' is longer than {} characters.",
+                    user,
+                    Self::USERNAME_MAX_LEN
+                ),
+            });
+        } else {
+            let user_regex = Regex::new(r#"^\S([^\n]*\S)*$"#).unwrap();
+            if !user_regex.is_match(user) {
+                return Err(ConfigError {
+                    message: format!(
+                        "Username '{}' is not a short, trimmed, string without newlines.",
+                        user,
+                    ),
+                });
+            }
+        }
         self.user = user.to_string();
         Ok(self)
     }
 
     async fn execute_sql(&self, sql: &str) -> Result<(), sqlx::Error> {
+        // DatabaseError
+
         sqlx_query(&sql)
             .execute(self.pool.as_ref().unwrap())
-            .await
-            .expect(format!("The SQL statement: {} returned an error", sql).as_str());
+            .await?;
         Ok(())
     }
 
@@ -237,7 +263,7 @@ impl Valve {
         Ok(self)
     }
 
-    pub fn order_tables_for_deletion(&self) -> Vec<&str> {
+    pub fn get_tables_ordered_for_deletion(&self) -> Vec<&str> {
         // Every other table depends on the message and history table so these will go last:
         let mut sorted_tables = vec!["message", "history"];
         sorted_tables.append(
@@ -259,7 +285,7 @@ impl Valve {
         // DatabaseError
 
         // Drop all of the database tables in the reverse of their sorted order:
-        for table in self.order_tables_for_deletion() {
+        for table in self.get_tables_ordered_for_deletion() {
             if table != "message" && table != "history" {
                 let sql = format!(r#"DROP VIEW IF EXISTS "{}_text_view""#, table);
                 self.execute_sql(&sql).await?;
@@ -302,7 +328,7 @@ impl Valve {
             }
         };
 
-        for table in self.order_tables_for_deletion() {
+        for table in self.get_tables_ordered_for_deletion() {
             let sql = truncate_sql(&table);
             self.execute_sql(&sql).await?;
             if table != "message" && table != "history" {
