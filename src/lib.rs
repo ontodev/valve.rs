@@ -202,6 +202,7 @@ impl Valve {
         Ok(self)
     }
 
+    /// Given a SQL string, execute it using the connection pool associated with the Valve instance.
     async fn execute_sql(&self, sql: &str) -> Result<(), sqlx::Error> {
         // DatabaseError
 
@@ -211,9 +212,33 @@ impl Valve {
         Ok(())
     }
 
-    /// Create all configured database tables and views
-    /// if they do not already exist as configured.
-    /// Return an error on database problems.
+    /// Returns a list of tables, including the message and history tables, in the right order for
+    /// table creation.
+    fn get_tables_ordered_for_creation(&self) -> Vec<&str> {
+        // Every other table depends on the message and history table so these will go last:
+        let mut sorted_tables = vec!["message", "history"];
+        sorted_tables.append(
+            &mut self
+                .global_config
+                .get("sorted_table_list")
+                .and_then(|l| l.as_array())
+                .and_then(|l| Some(l.iter().map(|i| i.as_str().unwrap())))
+                .and_then(|l| Some(l.collect::<Vec<_>>()))
+                .unwrap(),
+        );
+        sorted_tables
+    }
+
+    /// Returns a list of tables, including the message and history tables, in the right order for
+    /// table deletion.
+    fn get_tables_ordered_for_deletion(&self) -> Vec<&str> {
+        // Every other table depends on the message and history table so these will go last:
+        let mut sorted_tables = self.get_tables_ordered_for_creation();
+        sorted_tables.reverse();
+        sorted_tables
+    }
+
+    /// Create all configured database tables and views if they do not already exist as configured.
     pub async fn create_missing_tables(&mut self) -> Result<&mut Self, sqlx::Error> {
         // DatabaseError
 
@@ -229,13 +254,6 @@ impl Valve {
             .and_then(|d| d.as_object_mut())
             .unwrap()
             .clone();
-        let sorted_tables = self
-            .global_config
-            .get("sorted_table_list")
-            .and_then(|l| l.as_array())
-            .and_then(|l| Some(l.iter().map(|i| i.as_str().unwrap().to_string())))
-            .and_then(|l| Some(l.collect::<Vec<_>>()))
-            .unwrap();
 
         let pool = self.pool.as_ref().unwrap();
         let parser = StartParser::new();
@@ -246,10 +264,7 @@ impl Valve {
         // Add the message and history tables to the beginning of the list of tables to create
         // (the message table in particular needs to be at the beginning since the table views all
         // reference it).
-        let mut tables_to_create = vec!["message".to_string(), "history".to_string()];
-        tables_to_create.append(&mut sorted_tables.clone());
-
-        for table in &tables_to_create {
+        for table in self.get_tables_ordered_for_creation() {
             let table_statements = setup_statements.get(table).unwrap();
             for stmt in table_statements {
                 self.execute_sql(stmt).await?;
@@ -263,24 +278,7 @@ impl Valve {
         Ok(self)
     }
 
-    pub fn get_tables_ordered_for_deletion(&self) -> Vec<&str> {
-        // Every other table depends on the message and history table so these will go last:
-        let mut sorted_tables = vec!["message", "history"];
-        sorted_tables.append(
-            &mut self
-                .global_config
-                .get("sorted_table_list")
-                .and_then(|l| l.as_array())
-                .and_then(|l| Some(l.iter().map(|i| i.as_str().unwrap())))
-                .and_then(|l| Some(l.collect::<Vec<_>>()))
-                .unwrap(),
-        );
-        sorted_tables.reverse();
-        sorted_tables
-    }
-
     /// Drop all configured tables, in reverse dependency order.
-    /// Return an error on database problem.
     pub async fn drop_all_tables(&self) -> Result<&Self, sqlx::Error> {
         // DatabaseError
 
@@ -311,7 +309,6 @@ impl Valve {
     }
 
     /// Truncate all configured tables, in reverse dependency order.
-    /// Return an error on database problem.
     pub async fn truncate_all_tables(&self) -> Result<&Self, sqlx::Error> {
         // DatabaseError
 
