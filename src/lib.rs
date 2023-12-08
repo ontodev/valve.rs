@@ -238,6 +238,40 @@ impl Valve {
         sorted_tables
     }
 
+    /// TODO: Add docstring here
+    pub async fn table_has_changed(&self, table: &str) -> Result<bool, sqlx::Error> {
+        let (_column_config, _column_order, _description, _path) = {
+            let table_config = self
+                .global_config
+                .get("table")
+                .and_then(|tc| tc.get(table))
+                .and_then(|t| t.as_object())
+                .unwrap();
+            let column_config = table_config
+                .get("column")
+                .and_then(|c| c.as_object())
+                .unwrap();
+            let column_order = table_config
+                .get("column_order")
+                .and_then(|c| c.as_array())
+                .unwrap();
+            let description = table_config
+                .get("description")
+                .and_then(|c| c.as_str())
+                .unwrap();
+            let path = table_config.get("path").and_then(|c| c.as_str()).unwrap();
+
+            (column_config, column_order, description, path)
+        };
+
+        // TODO: Look in the database, in the table table and in the column table, and check to see
+        // if the path, description, column_order, and individial column configurations match what
+        // is present in the current configuration. If anything differs, the table should be flagged
+        // as having been changed.
+
+        Ok(true)
+    }
+
     /// Create all configured database tables and views if they do not already exist as configured.
     pub async fn create_missing_tables(&mut self) -> Result<&mut Self, sqlx::Error> {
         // DatabaseError
@@ -265,6 +299,12 @@ impl Valve {
         // (the message table in particular needs to be at the beginning since the table views all
         // reference it).
         for table in self.get_tables_ordered_for_creation() {
+            // TODO: Use table_has_changed() to control whether a table is created or not, and once
+            // this is done, remove the "IF NOT EXISTS" qualifiers from all of the CREATE TABLE,
+            // CREATE VIEW, and CREATE INDEX statements.
+            if self.table_has_changed(table).await? {
+                eprintln!("{} has changed.", table);
+            }
             let table_statements = setup_statements.get(table).unwrap();
             for stmt in table_statements {
                 self.execute_sql(stmt).await?;
