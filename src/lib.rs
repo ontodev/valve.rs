@@ -83,11 +83,18 @@ lazy_static! {
 pub type SerdeMap = serde_json::Map<String, SerdeValue>;
 pub type ValveRow = serde_json::Map<String, SerdeValue>;
 
+#[macro_export]
+macro_rules! valve_log {
+    () => (eprintln!());
+    ($($arg:tt)*) => (eprintln!("{} - {}", Utc::now(), format_args!($($arg)*)));
+}
+
 #[derive(Debug)]
 pub struct Valve {
     pub global_config: SerdeMap,
     pub compiled_datatype_conditions: HashMap<String, CompiledCondition>,
     pub compiled_rule_conditions: HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    pub parsed_structure_conditions: HashMap<String, ParsedStructure>,
     pub pool: Option<AnyPool>,
     pub user: String,
     pub verbose: bool,
@@ -96,6 +103,7 @@ pub struct Valve {
 
 #[derive(Debug)]
 pub struct ConfigError {
+    // TODO: Read https://www.lpalmieri.com/posts/error-handling-rust/
     pub message: String,
 }
 
@@ -161,11 +169,13 @@ impl Valve {
             compiled_datatype_conditions.clone(),
             &parser,
         );
+        let parsed_structure_conditions = get_parsed_structure_conditions(&global_config, &parser);
 
         Ok(Self {
             global_config: global_config,
             compiled_datatype_conditions: compiled_datatype_conditions,
             compiled_rule_conditions: compiled_rule_conditions,
+            parsed_structure_conditions: parsed_structure_conditions,
             pool: Some(pool),
             user: String::from("Valve"),
             verbose: verbose,
@@ -239,42 +249,361 @@ impl Valve {
     }
 
     /// TODO: Add docstring here
+    async fn structure_has_changed(
+        &self,
+        pstruct: &Expression,
+        table: &str,
+        column: &str,
+        sqlite_pk: &u32,
+        sqlite_ctype: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let pool = self.pool.as_ref().unwrap();
+        let column_has_constraint_type = |constraint_type: &str| -> Result<bool, sqlx::Error> {
+            if pool.any_kind() == AnyKind::Postgres {
+                let sql = format!(
+                    r#"SELECT 1
+                       FROM information_schema.table_constraints tco
+                       JOIN information_schema.key_column_usage kcu
+                         ON kcu.constraint_name = tco.constraint_name
+                            AND kcu.constraint_schema = tco.constraint_schema
+                            AND kcu.table_name = '{}'
+                       WHERE tco.constraint_type = '{}'
+                         AND kcu.column_name = '{}'"#,
+                    table, constraint_type, column
+                );
+                let rows = block_on(sqlx_query(&sql).fetch_all(pool))?;
+                if rows.len() > 1 {
+                    unreachable!();
+                }
+                Ok(rows.len() == 1)
+            } else {
+                if constraint_type == "PRIMARY KEY" {
+                    return Ok(*sqlite_pk == 1);
+                } else if constraint_type == "UNIQUE" {
+                    let sql = format!(r#"PRAGMA INDEX_LIST("{}")"#, table);
+                    for row in block_on(sqlx_query(&sql).fetch_all(pool))? {
+                        let idx_name = row.get::<String, _>("name");
+                        let unique = row.get::<i16, _>("unique") as u8;
+                        if unique == 1 {
+                            let sql = format!(r#"PRAGMA INDEX_INFO("{}")"#, idx_name);
+                            let rows = block_on(sqlx_query(&sql).fetch_all(pool))?;
+                            if rows.len() == 1 {
+                                let cname = rows[0].get::<String, _>("name");
+                                if cname == column {
+                                    return Ok(true);
+                                }
+                            }
+                        }
+                    }
+                    Ok(false)
+                } else {
+                    todo!();
+                }
+            }
+        };
+
+        // Check if there is a change to whether this column is a primary key:
+        let is_primary = match pstruct {
+            Expression::Label(label) if label == "primary" => true,
+            _ => false,
+        };
+        if is_primary != column_has_constraint_type("PRIMARY KEY")? {
+            return Ok(true);
+        }
+
+        // Check if there is a change to whether this column is a unique constraint:
+        let is_unique = match pstruct {
+            Expression::Label(label) if label == "unique" => true,
+            _ => false,
+        };
+        if is_unique != column_has_constraint_type("UNIQUE")? {
+            return Ok(true);
+        }
+
+        // TODO NEXT:
+        match pstruct {
+            Expression::Function(name, _args) if name == "from" => (),
+            Expression::Function(name, _args) if name == "tree" => (),
+            _ => (),
+        };
+
+        Ok(false)
+    }
+
+    /// TODO: Add docstring here
     pub async fn table_has_changed(&self, table: &str) -> Result<bool, sqlx::Error> {
-        let (_column_config, _column_order, _description, _path) = {
+        let pool = self.pool.as_ref().unwrap();
+        let (columns_config, configured_column_order, description, table_type, path) = {
             let table_config = self
                 .global_config
                 .get("table")
                 .and_then(|tc| tc.get(table))
                 .and_then(|t| t.as_object())
                 .unwrap();
-            let column_config = table_config
+            let columns_config = table_config
                 .get("column")
                 .and_then(|c| c.as_object())
                 .unwrap();
-            let column_order = table_config
-                .get("column_order")
-                .and_then(|c| c.as_array())
-                .unwrap();
+            let configured_column_order = {
+                let mut configured_column_order = {
+                    if table == "message" {
+                        vec!["message_id".to_string()]
+                    } else if table == "history" {
+                        vec!["history_id".to_string()]
+                    } else {
+                        vec!["row_number".to_string()]
+                    }
+                };
+                configured_column_order.append(
+                    &mut table_config
+                        .get("column_order")
+                        .and_then(|c| c.as_array())
+                        .and_then(|a| Some(a.iter()))
+                        .and_then(|a| Some(a.map(|c| c.as_str().unwrap().to_string())))
+                        .and_then(|a| Some(a.collect::<Vec<_>>()))
+                        .unwrap(),
+                );
+                configured_column_order
+            };
             let description = table_config
                 .get("description")
                 .and_then(|c| c.as_str())
                 .unwrap();
-            let path = table_config.get("path").and_then(|c| c.as_str()).unwrap();
+            let table_type = {
+                if table != "message" && table != "history" {
+                    table_config.get("type").and_then(|c| c.as_str())
+                } else {
+                    None
+                }
+            };
+            let path = {
+                if table != "message" && table != "history" {
+                    table_config.get("path").and_then(|c| c.as_str())
+                } else {
+                    None
+                }
+            };
 
-            (column_config, column_order, description, path)
+            (
+                columns_config,
+                configured_column_order,
+                description,
+                table_type,
+                path,
+            )
         };
 
-        // TODO: Look in the database, in the table table and in the column table, and check to see
-        // if the path, description, column_order, and individial column configurations match what
-        // is present in the current configuration. If anything differs, the table should be flagged
-        // as having been changed.
+        let db_columns_in_order = {
+            if pool.any_kind() == AnyKind::Sqlite {
+                let sql = format!(
+                    r#"SELECT 1 FROM sqlite_master WHERE "type" = 'table' AND "name" = '{}'"#,
+                    table
+                );
+                let rows = sqlx_query(&sql).fetch_all(pool).await?;
+                if rows.len() == 0 {
+                    if self.verbose {
+                        valve_log!(
+                            "The table '{}' will be recreated as it does not exist in the database",
+                            table
+                        );
+                    }
+                    return Ok(true);
+                } else if rows.len() == 1 {
+                    // Otherwise send another query to the db to get the column info:
+                    let sql = format!(r#"PRAGMA TABLE_INFO("{}")"#, table);
+                    let rows = block_on(sqlx_query(&sql).fetch_all(pool))?;
+                    rows.iter()
+                        .map(|r| {
+                            (
+                                r.get::<String, _>("name"),
+                                r.get::<String, _>("type"),
+                                r.get::<i64, _>("pk") as u32,
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                } else {
+                    unreachable!();
+                }
+            } else {
+                let sql = format!(
+                    r#"SELECT "column_name", "data_type"
+                   FROM "information_schema"."columns"
+                   WHERE "table_name" = '{}'
+                   ORDER BY "ordinal_position""#,
+                    table,
+                );
+                let rows = sqlx_query(&sql).fetch_all(pool).await?;
+                if rows.len() == 0 {
+                    if self.verbose {
+                        valve_log!(
+                            "The table '{}' will be recreated as it does not exist in the database",
+                            table
+                        );
+                    }
+                    return Ok(true);
+                }
+                // Otherwise we get the column name:
+                rows.iter()
+                    .map(|r| {
+                        (
+                            r.get::<String, _>("column_name"),
+                            r.get::<String, _>("data_type"),
+                            // The third entry is just a dummy so that the datatypes in the two
+                            // wings of this if/else block match.
+                            0,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            }
+        };
 
-        Ok(true)
+        // Check if the order of the configured columns matches the order of the columns in the
+        // database:
+        let db_column_order = db_columns_in_order
+            .iter()
+            .map(|c| c.0.clone())
+            .collect::<Vec<_>>();
+        if db_column_order != configured_column_order {
+            if self.verbose {
+                valve_log!(
+                    "The table '{}' will be recreated since the database columns: {:?} \
+                     and/or their order does not match the configured columns: {:?}",
+                    table,
+                    db_column_order,
+                    configured_column_order
+                );
+            }
+            return Ok(true);
+        }
+
+        // Check, for tables other than "message" and "history", whether the corresponding entries
+        // for 'description', 'type', and 'path' in the configuration match the contents of the
+        // table table:
+        if table != "message" && table != "history" {
+            for table_param in vec![
+                ("description", Some(description)),
+                ("type", table_type),
+                ("path", path),
+            ] {
+                let column = table_param.0;
+                let is_clause = if self.pool.as_ref().unwrap().any_kind() == AnyKind::Sqlite {
+                    "IS"
+                } else {
+                    "IS NOT DISTINCT FROM"
+                };
+                let eq_value = match table_param.1 {
+                    Some(value) => format!("= '{}'", value),
+                    None => format!("{} NULL", is_clause),
+                };
+                let sql = format!(
+                    r#"SELECT 1 from "table" WHERE "table" = '{}' AND "{}" {}"#,
+                    table, column, eq_value,
+                );
+                let rows = sqlx_query(&sql)
+                    .fetch_all(self.pool.as_ref().unwrap())
+                    .await?;
+                if rows.len() == 0 {
+                    if self.verbose {
+                        valve_log!(
+                            "The table '{table}' will be recreated because the entries in the \
+                             table table for '{table}' have changed.",
+                            table = table
+                        );
+                    }
+                    return Ok(true);
+                } else if rows.len() > 0 {
+                    if self.verbose {
+                        valve_log!(
+                            "WARN more than one row was returned from the query '{}'",
+                            sql
+                        );
+                    }
+                }
+            }
+        }
+
+        // Check, for all tables, whether their column configuration matches the contents of the
+        // database:
+        for (cname, ctype, pk) in &db_columns_in_order {
+            // Do not consider special row/message/history identifier columns:
+            if (table == "message" && cname == "message_id")
+                || (table == "history" && cname == "history_id")
+                || cname == "row_number"
+            {
+                continue;
+            }
+            let column_config = columns_config
+                .get(cname)
+                .and_then(|c| c.as_object())
+                .unwrap();
+            let sql_type = get_sql_type_from_global_config(
+                &self.global_config,
+                table,
+                &cname,
+                self.pool.as_ref().unwrap(),
+            )
+            .unwrap();
+
+            // Check the column's SQL type:
+            if sql_type.to_lowercase() != ctype.to_lowercase() {
+                let s = sql_type.to_lowercase();
+                let c = ctype.to_lowercase();
+                // CHARACTER VARYING and VARCHAR are synonyms so we ignore this difference.
+                if !(s.starts_with("varchar") || s.starts_with("character varying"))
+                    || !(c.starts_with("varchar") || c.starts_with("character varying"))
+                {
+                    if self.verbose {
+                        valve_log!(
+                            "The table '{}' will be recreated because the SQL type of column '{}', \
+                             {}, does not match the configured value: {}",
+                            table,
+                            cname,
+                            ctype,
+                            sql_type
+                        );
+                    }
+                    return Ok(true);
+                }
+            }
+
+            // Check the column's structure:
+            let structure = column_config.get("structure").and_then(|d| d.as_str());
+            match structure {
+                Some(structure) if structure != "" => {
+                    let parsed_structure = self
+                        .parsed_structure_conditions
+                        .get(structure)
+                        .and_then(|p| Some(p.parsed.clone()))
+                        .unwrap();
+                    if self
+                        .structure_has_changed(&parsed_structure, table, &cname, &pk, &ctype)
+                        .await?
+                    {
+                        if self.verbose {
+                            valve_log!(
+                                "The table '{}' will be recreated because the database \
+                                 constraints for column '{}' do not match the configured \
+                                 structure, '{}'",
+                                table,
+                                cname,
+                                structure
+                            );
+                        }
+                        return Ok(true);
+                    }
+                }
+                _ => (),
+            };
+        }
+
+        Ok(false)
     }
 
     /// Create all configured database tables and views if they do not already exist as configured.
     pub async fn create_missing_tables(&mut self) -> Result<&mut Self, sqlx::Error> {
         // DatabaseError
+
+        // TODO: Add logging statements here.
 
         let mut tables_config = self
             .global_config
@@ -303,16 +632,18 @@ impl Valve {
             // this is done, remove the "IF NOT EXISTS" qualifiers from all of the CREATE TABLE,
             // CREATE VIEW, and CREATE INDEX statements.
             if self.table_has_changed(table).await? {
-                eprintln!("{} has changed.", table);
+                // ...
+            } else {
+                // ...
             }
             let table_statements = setup_statements.get(table).unwrap();
             for stmt in table_statements {
                 self.execute_sql(stmt).await?;
             }
-            if self.verbose {
-                let output = String::from(table_statements.join("\n"));
-                println!("{}\n", output);
-            }
+            //if self.verbose {
+            //    let output = String::from(table_statements.join("\n"));
+            //    println!("{}\n", output);
+            //}
         }
 
         Ok(self)
@@ -417,9 +748,8 @@ impl Valve {
             }
 
             if self.verbose {
-                eprintln!(
-                    "{} - Processing {} tables.",
-                    Utc::now(),
+                valve_log!(
+                    "Processing {} tables.",
                     self.global_config
                         .get("sorted_table_list")
                         .and_then(|l| l.as_array())
@@ -436,7 +766,7 @@ impl Valve {
             )
             .await?;
         } else {
-            eprintln!("WARN: Attempt to load tables but Valve is not connected to a database.");
+            valve_log!("WARN: Attempt to load tables but Valve is not connected to a database.");
         }
 
         Ok(self)
@@ -458,7 +788,7 @@ impl Valve {
     /// Return an error on writing or database problem.
     pub fn save_all_tables(&self) -> Result<&Self, sqlx::Error> {
         // WriteOrDatabaseError
-        // TODO
+        // TODO. See https://github.com/ontodev/nanobot.rs/pull/65 for hints.
         Ok(self)
     }
 
@@ -945,10 +1275,10 @@ pub fn read_config_files(
                 continue;
             }
             Some(p) if !Path::new(p).is_file() => {
-                eprintln!("WARN: File does not exist {}", p);
+                valve_log!("WARN: File does not exist {}", p);
             }
             Some(p) if Path::new(p).canonicalize().is_err() => {
-                eprintln!("WARN: File path could not be made canonical {}", p);
+                valve_log!("WARN: File path could not be made canonical {}", p);
             }
             Some(p) => path = Some(p.to_string()),
         };
@@ -1107,6 +1437,7 @@ pub fn read_config_files(
         }),
     );
 
+    // TODO: Are there some missing columns here?
     // Manually add the history table config:
     tables_config.insert(
         "history".to_string(),
@@ -1731,10 +2062,10 @@ pub async fn configure_db(
                 continue;
             }
             Some(p) if !Path::new(p).is_file() => {
-                eprintln!("WARN: File does not exist {}", p);
+                valve_log!("WARN: File does not exist {}", p);
             }
             Some(p) if Path::new(p).canonicalize().is_err() => {
-                eprintln!("WARN: File path could not be made canonical {}", p);
+                valve_log!("WARN: File path could not be made canonical {}", p);
             }
             Some(p) => path = Some(p.to_string()),
         };
@@ -2073,11 +2404,7 @@ pub async fn valve(
 
     if *command == ValveCommand::Load {
         if verbose {
-            eprintln!(
-                "{} - Processing {} tables.",
-                Utc::now(),
-                sorted_table_list.len()
-            );
+            valve_log!("Processing {} tables.", sorted_table_list.len());
         }
         load_db(
             &config,
@@ -2440,9 +2767,10 @@ pub async fn get_rows_to_update(
         let updates_before = match query_as_if.kind {
             QueryAsIfKind::Add => {
                 if let None = query_as_if.row {
-                    eprintln!(
+                    valve_log!(
                         "WARN: No row in query_as_if: {:?} for {:?}",
-                        query_as_if, query_as_if.kind
+                        query_as_if,
+                        query_as_if.kind
                     );
                 }
                 IndexMap::new()
@@ -2475,9 +2803,10 @@ pub async fn get_rows_to_update(
         let updates_after = match &query_as_if.row {
             None => {
                 if query_as_if.kind != QueryAsIfKind::Remove {
-                    eprintln!(
+                    valve_log!(
                         "WARN: No row in query_as_if: {:?} for {:?}",
-                        query_as_if, query_as_if.kind
+                        query_as_if,
+                        query_as_if.kind
                     );
                 }
                 IndexMap::new()
@@ -2550,9 +2879,10 @@ pub async fn get_rows_to_update(
         let updates = match query_as_if.kind {
             QueryAsIfKind::Add => {
                 if let None = query_as_if.row {
-                    eprintln!(
+                    valve_log!(
                         "WARN: No row in query_as_if: {:?} for {:?}",
-                        query_as_if, query_as_if.kind
+                        query_as_if,
+                        query_as_if.kind
                     );
                 }
                 IndexMap::new()
@@ -2754,12 +3084,12 @@ fn get_json_from_row(row: &AnyRow, column: &str) -> Option<SerdeMap> {
         let value: &str = row.get(column);
         match serde_json::from_str::<SerdeValue>(value) {
             Err(e) => {
-                eprintln!("WARN: {}", e);
+                valve_log!("WARN: {}", e);
                 None
             }
             Ok(SerdeValue::Object(value)) => Some(value),
             _ => {
-                eprintln!("WARN: {} is not an object.", value);
+                valve_log!("WARN: {} is not an object.", value);
                 None
             }
         }
@@ -2859,7 +3189,7 @@ pub async fn undo(
 ) -> Result<(), sqlx::Error> {
     let last_change = match get_record_to_undo(pool).await? {
         None => {
-            eprintln!("WARN: Nothing to undo.");
+            valve_log!("WARN: Nothing to undo.");
             return Ok(());
         }
         Some(r) => r,
@@ -2955,13 +3285,13 @@ pub async fn redo(
 ) -> Result<(), sqlx::Error> {
     let last_undo = match get_record_to_redo(pool).await? {
         None => {
-            eprintln!("WARN: Nothing to redo.");
+            valve_log!("WARN: Nothing to redo.");
             return Ok(());
         }
         Some(last_undo) => {
             let undone_by = last_undo.try_get_raw("undone_by")?;
             if undone_by.is_null() {
-                eprintln!("WARN: Nothing to redo.");
+                valve_log!("WARN: Nothing to redo.");
                 return Ok(());
             }
             last_undo
@@ -3742,9 +4072,13 @@ fn read_tsv_into_vector(path: &str) -> Vec<ValveRow> {
             let val = val.as_str().unwrap();
             let trimmed_val = val.trim();
             if trimmed_val != val {
-                eprintln!(
+                valve_log!(
                     "Error: Value '{}' of column '{}' in row {} of table '{}' {}",
-                    val, col, i, path, "has leading and/or trailing whitespace."
+                    val,
+                    col,
+                    i,
+                    path,
+                    "has leading and/or trailing whitespace."
                 );
                 process::exit(1);
             }
@@ -4964,7 +5298,7 @@ fn add_message_counts(messages: &Vec<SerdeValue>, messages_stats: &mut HashMap<S
             let current_infos = messages_stats.get("info").unwrap();
             messages_stats.insert("info".to_string(), current_infos + 1);
         } else {
-            eprintln!("Warning: unknown message type: {}", level);
+            valve_log!("Warning: unknown message type: {}", level);
         }
     }
 }
@@ -5536,7 +5870,7 @@ async fn load_db(
         let mut rdr = {
             match File::open(path.clone()) {
                 Err(e) => {
-                    eprintln!("WARN: Unable to open '{}': {}", path.clone(), e);
+                    valve_log!("WARN: Unable to open '{}': {}", path.clone(), e);
                     continue;
                 }
                 Ok(table_file) => csv::ReaderBuilder::new()
@@ -5546,13 +5880,7 @@ async fn load_db(
             }
         };
         if verbose {
-            eprintln!(
-                "{} - Loading table {}/{}: {}",
-                Utc::now(),
-                table_num,
-                num_tables,
-                table_name
-            );
+            valve_log!("Loading table {}/{}: {}", table_num, num_tables, table_name);
         }
         table_num += 1;
 
@@ -5651,7 +5979,7 @@ async fn load_db(
                 "{} errors, {} warnings, and {} information messages generated for {}",
                 errors, warnings, infos, table_name
             );
-            eprintln!("{} - {}", Utc::now(), status_message);
+            valve_log!("{}", status_message);
             total_errors += errors;
             total_warnings += warnings;
             total_infos += infos;
@@ -5659,9 +5987,8 @@ async fn load_db(
     }
 
     if verbose {
-        eprintln!(
-            "{} - Loading complete with {} errors, {} warnings, and {} information messages",
-            Utc::now(),
+        valve_log!(
+            "Loading complete with {} errors, {} warnings, and {} information messages",
             total_errors,
             total_warnings,
             total_infos

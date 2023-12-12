@@ -1,3 +1,4 @@
+use chrono::Utc;
 use enquote::unquote;
 use indexmap::IndexMap;
 use serde_json::{json, Value as SerdeValue};
@@ -9,7 +10,7 @@ use std::collections::HashMap;
 
 use crate::{
     ast::Expression, cast_column_sql_to_text, cast_sql_param_from_text, get_column_value,
-    get_sql_type_from_global_config, is_sql_type_error, local_sql_syntax, ColumnRule,
+    get_sql_type_from_global_config, is_sql_type_error, local_sql_syntax, valve_log, ColumnRule,
     CompiledCondition, ParsedStructure, SerdeMap, ValveRow, SQL_PARAM,
 };
 
@@ -873,7 +874,7 @@ pub fn validate_rows_intra(
     let mut result_rows = vec![];
     for row in rows {
         match row {
-            Err(err) => eprintln!("Error while processing row for '{}': {}", table_name, err),
+            Err(err) => valve_log!("ERROR while processing row for '{}': {}", table_name, err),
             Ok(row) => {
                 let mut result_row = ResultRow {
                     row_number: None,
