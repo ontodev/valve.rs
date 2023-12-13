@@ -61,7 +61,6 @@ sqlite_test: build/valve.db test/src/table.tsv | test/output
 
 pg_test: valve test/src/table.tsv | test/output
 	@echo "Testing valve on postgresql ..."
-	./$^ --drop_all postgresql:///valve_postgres
 	./$^ postgresql:///valve_postgres
 	test/round_trip.sh postgresql:///valve_postgres $(word 2,$^)
 	scripts/export.py messages postgresql:///valve_postgres $| $(tables_to_test)

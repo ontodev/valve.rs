@@ -114,6 +114,7 @@ impl Valve {
     /// Valve struct.
     pub async fn build(
         table_path: &str,
+        // TODO: Remove the config_table parameter.
         config_table: &str,
         database: &str,
         verbose: bool,
@@ -258,6 +259,8 @@ impl Valve {
         sqlite_ctype: &str,
     ) -> Result<bool, sqlx::Error> {
         let pool = self.pool.as_ref().unwrap();
+        // A clojure to determine whether the given column has the given constraint type, which
+        // can be one of 'UNIQUE', 'PRIMARY KEY', 'FOREIGN KEY':
         let column_has_constraint_type = |constraint_type: &str| -> Result<bool, sqlx::Error> {
             if pool.any_kind() == AnyKind::Postgres {
                 let sql = format!(
@@ -296,8 +299,19 @@ impl Valve {
                         }
                     }
                     Ok(false)
+                } else if constraint_type == "FOREIGN KEY" {
+                    let sql = format!(r#"PRAGMA FOREIGN_KEY_LIST("{}")"#, table);
+                    for row in block_on(sqlx_query(&sql).fetch_all(pool))? {
+                        let cname = row.get::<String, _>("from");
+                        if cname == column {
+                            return Ok(true);
+                        }
+                    }
+                    Ok(false)
                 } else {
-                    todo!();
+                    return Err(SqlxCErr(
+                        format!("Unrecognized constraint type: '{}'", constraint_type).into(),
+                    ));
                 }
             }
         };
@@ -320,10 +334,60 @@ impl Valve {
             return Ok(true);
         }
 
-        // TODO NEXT:
         match pstruct {
-            Expression::Function(name, _args) if name == "from" => (),
-            Expression::Function(name, _args) if name == "tree" => (),
+            Expression::Function(name, args) if name == "from" => {
+                match &*args[0] {
+                    Expression::Field(cfg_ftable, cfg_fcolumn) => {
+                        if pool.any_kind() == AnyKind::Sqlite {
+                            let sql = format!(r#"PRAGMA FOREIGN_KEY_LIST("{}")"#, table);
+                            for row in sqlx_query(&sql).fetch_all(pool).await? {
+                                let from = row.get::<String, _>("from");
+                                if from == column {
+                                    let db_ftable = row.get::<String, _>("table");
+                                    let db_fcolumn = row.get::<String, _>("to");
+                                    if *cfg_ftable != db_ftable || *cfg_fcolumn != db_fcolumn {
+                                        return Ok(true);
+                                    }
+                                }
+                            }
+                        } else {
+                            let sql = format!(
+                                r#"SELECT
+                                       ccu.table_name AS foreign_table_name,
+                                       ccu.column_name AS foreign_column_name
+                                   FROM information_schema.table_constraints AS tc
+                                   JOIN information_schema.key_column_usage AS kcu
+                                     ON tc.constraint_name = kcu.constraint_name
+                                        AND tc.table_schema = kcu.table_schema
+                                   JOIN information_schema.constraint_column_usage AS ccu
+                                     ON ccu.constraint_name = tc.constraint_name
+                                   WHERE tc.constraint_type = 'FOREIGN KEY'
+                                     AND tc.table_name = '{}'
+                                     AND kcu.column_name = '{}'"#,
+                                table, column
+                            );
+                            let rows = sqlx_query(&sql).fetch_all(pool).await?;
+                            if rows.len() == 0 {
+                                return Ok(true);
+                            } else if rows.len() > 1 {
+                                unreachable!();
+                            } else {
+                                let row = &rows[0];
+                                let db_ftable = row.get::<String, _>("foreign_table_name");
+                                let db_fcolumn = row.get::<String, _>("foreign_column_name");
+                                if *cfg_ftable != db_ftable || *cfg_fcolumn != db_fcolumn {
+                                    return Ok(true);
+                                }
+                            }
+                        }
+                    }
+                    _ => {
+                        return Err(SqlxCErr(
+                            format!("Unrecognized structure: {:?}", pstruct).into(),
+                        ));
+                    }
+                };
+            }
             _ => (),
         };
 
