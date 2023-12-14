@@ -829,14 +829,17 @@ impl Valve {
 
         let setup_statements = self.get_setup_statements().await?;
         let sorted_table_list = self.get_tables_ordered_for_creation();
+        let mut once_dropped = false;
         for (i, table) in sorted_table_list.iter().enumerate() {
             if self.table_has_changed(*table).await? {
-                let mut tables_to_drop = vec![""; sorted_table_list.len() - i];
-                tables_to_drop.clone_from_slice(&sorted_table_list[i..]);
-                tables_to_drop.reverse();
-                for table in tables_to_drop {
-                    valve_log!("Dropping table {}", table);
-                    self.drop_tables(vec![table]).await?;
+                if !once_dropped {
+                    let mut tables_to_drop = vec![""; sorted_table_list.len() - i];
+                    tables_to_drop.clone_from_slice(&sorted_table_list[i..]);
+                    tables_to_drop.reverse();
+                    for table in tables_to_drop {
+                        self.drop_tables(vec![table]).await?;
+                    }
+                    once_dropped = true;
                 }
 
                 let table_statements = setup_statements.get(*table).unwrap();
