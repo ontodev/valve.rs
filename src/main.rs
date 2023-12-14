@@ -166,7 +166,7 @@ async fn main() -> Result<(), sqlx::Error> {
         )
         .await?;
     } else {
-        let mut valve =
+        let valve =
             Valve::build(&source, &config_table, &destination, verbose, initial_load).await?;
         valve.load_all_tables(true).await?;
 
