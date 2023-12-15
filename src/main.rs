@@ -4,10 +4,7 @@ use crate::api_test::run_api_tests;
 
 use argparse::{ArgumentParser, Store, StoreTrue};
 
-use ontodev_valve::{
-    get_compiled_datatype_conditions, get_compiled_rule_conditions,
-    get_parsed_structure_conditions, valve, valve_grammar::StartParser, Valve, ValveCommand,
-};
+use ontodev_valve::Valve;
 use serde_json::{from_str, Value as SerdeValue};
 use std::{env, process};
 
@@ -119,66 +116,37 @@ async fn main() -> Result<(), sqlx::Error> {
     if api_test {
         run_api_tests(&source, &destination).await?;
     } else if dump_config {
-        let config = valve(
-            &source,
-            &String::from(":memory:"),
-            &ValveCommand::Config,
-            false,
-            false,
-            &config_table,
-        )
-        .await?;
-        let mut config: SerdeValue = serde_json::from_str(config.as_str()).unwrap();
-        let config = config.as_object_mut().unwrap();
-        let parser = StartParser::new();
-
-        let datatype_conditions = get_compiled_datatype_conditions(&config, &parser);
-        let structure_conditions = get_parsed_structure_conditions(&config, &parser);
-        let rule_conditions =
-            get_compiled_rule_conditions(&config, datatype_conditions.clone(), &parser);
-
-        let datatype_conditions = format!("{:?}", datatype_conditions).replace(r"\", r"\\");
+        let valve =
+            Valve::build(&source, &config_table, &destination, verbose, initial_load).await?;
+        let mut config = valve.global_config.clone();
+        let datatype_conditions =
+            format!("{:?}", valve.compiled_datatype_conditions).replace(r"\", r"\\");
         let datatype_conditions: SerdeValue = from_str(&datatype_conditions).unwrap();
         config.insert(String::from("datatype_conditions"), datatype_conditions);
 
-        let structure_conditions = format!("{:?}", structure_conditions).replace(r"\", r"\\");
+        let structure_conditions =
+            format!("{:?}", valve.parsed_structure_conditions).replace(r"\", r"\\");
         let structure_conditions: SerdeValue = from_str(&structure_conditions).unwrap();
         config.insert(String::from("structure_conditions"), structure_conditions);
 
-        let rule_conditions = format!("{:?}", rule_conditions).replace(r"\", r"\\");
+        let rule_conditions = format!("{:?}", valve.compiled_rule_conditions).replace(r"\", r"\\");
         let rule_conditions: SerdeValue = from_str(&rule_conditions).unwrap();
         config.insert(String::from("rule_conditions"), rule_conditions);
 
-        let config = serde_json::to_string(config).unwrap();
+        let config = serde_json::to_string(&config).unwrap();
         println!("{}", config);
     } else if drop_all {
         let valve =
             Valve::build(&source, &config_table, &destination, verbose, initial_load).await?;
         valve.drop_all_tables().await?;
     } else if create_only {
-        valve(
-            &source,
-            &destination,
-            &ValveCommand::Create,
-            verbose,
-            false,
-            &config_table,
-        )
-        .await?;
+        let valve =
+            Valve::build(&source, &config_table, &destination, verbose, initial_load).await?;
+        valve.create_missing_tables().await?;
     } else {
         let valve =
             Valve::build(&source, &config_table, &destination, verbose, initial_load).await?;
         valve.load_all_tables(true).await?;
-
-        // valve(
-        //     &source,
-        //     &destination,
-        //     &ValveCommand::Load,
-        //     verbose,
-        //     initial_load,
-        //     &config_table,
-        // )
-        // .await?;
     }
 
     Ok(())

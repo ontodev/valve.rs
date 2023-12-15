@@ -1,40 +1,14 @@
-use ontodev_valve::{
-    delete_row, get_compiled_datatype_conditions, get_compiled_rule_conditions,
-    get_parsed_structure_conditions, insert_new_row, redo, undo, update_row,
-    validate::{get_matching_values, validate_row},
-    valve,
-    valve_grammar::StartParser,
-    ColumnRule, CompiledCondition, ParsedStructure, SerdeMap, ValveCommand,
-};
+use ontodev_valve::{SerdeMap, Valve};
 use rand::distributions::{Alphanumeric, DistString, Distribution, Uniform};
 use rand::{random, thread_rng};
-use serde_json::{json, Value as SerdeValue};
-use sqlx::{
-    any::{AnyConnectOptions, AnyKind, AnyPool, AnyPoolOptions},
-    query as sqlx_query,
-    Error::Configuration as SqlxCErr,
-    Row, ValueRef,
-};
-use std::{collections::HashMap, str::FromStr};
+use serde_json::json;
+use sqlx::{any::AnyPool, query as sqlx_query, Error::Configuration as SqlxCErr, Row, ValueRef};
 
-async fn test_matching(
-    config: &SerdeMap,
-    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
-    parsed_structure_conditions: &HashMap<String, ParsedStructure>,
-    pool: &AnyPool,
-) -> Result<(), sqlx::Error> {
+async fn test_matching(valve: &Valve) -> Result<(), sqlx::Error> {
     eprint!("Running test_matching() ... ");
+
     // Test the get_matching_values() function:
-    let matching_values = get_matching_values(
-        &config,
-        &compiled_datatype_conditions,
-        &parsed_structure_conditions,
-        &pool,
-        "table2",
-        "child",
-        None,
-    )
-    .await?;
+    let matching_values = valve.get_matching_values("table2", "child", None).await?;
     assert_eq!(
         matching_values,
         json!([
@@ -51,16 +25,9 @@ async fn test_matching(
         ])
     );
 
-    let matching_values = get_matching_values(
-        &config,
-        &compiled_datatype_conditions,
-        &parsed_structure_conditions,
-        &pool,
-        "table6",
-        "child",
-        Some("7"),
-    )
-    .await?;
+    let matching_values = valve
+        .get_matching_values("table6", "child", Some("7"))
+        .await?;
     assert_eq!(
         matching_values,
         json!([
@@ -72,13 +39,9 @@ async fn test_matching(
     Ok(())
 }
 
-async fn test_idempotent_validate_and_update(
-    config: &SerdeMap,
-    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
-    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
-    pool: &AnyPool,
-) -> Result<(), sqlx::Error> {
+async fn test_idempotent_validate_and_update(valve: &Valve) -> Result<(), sqlx::Error> {
     eprint!("Running test_idempotent_validate_and_update() ... ");
+
     // We test that validate_row() is idempotent by running it multiple times on the same row:
     let row = json!({
         "child": {"messages": [], "valid": true, "value": "b"},
@@ -94,71 +57,28 @@ async fn test_idempotent_validate_and_update(
         },
     });
 
-    let result_row_1 = validate_row(
-        &config,
-        &compiled_datatype_conditions,
-        &compiled_rule_conditions,
-        &pool,
-        None,
-        "table2",
-        row.as_object().unwrap(),
-        Some(1),
-        None,
-    )
-    .await?;
+    let result_row_1 = valve
+        .validate_row("table2", row.as_object().unwrap())
+        .await?;
 
-    let result_row_2 = validate_row(
-        &config,
-        &compiled_datatype_conditions,
-        &compiled_rule_conditions,
-        &pool,
-        None,
-        "table2",
-        &result_row_1,
-        Some(1),
-        None,
-    )
-    .await?;
+    let result_row_2 = valve.validate_row("table2", &result_row_1).await?;
     assert_eq!(result_row_1, result_row_2);
 
-    let result_row = validate_row(
-        &config,
-        &compiled_datatype_conditions,
-        &compiled_rule_conditions,
-        &pool,
-        None,
-        "table2",
-        &result_row_2,
-        Some(1),
-        None,
-    )
-    .await?;
+    let result_row = valve.validate_row("table2", &result_row_2).await?;
     assert_eq!(result_row, result_row_2);
 
     // Update the row we constructed and validated above in the database:
-    update_row(
-        &config,
-        &compiled_datatype_conditions,
-        &compiled_rule_conditions,
-        &pool,
-        "table2",
-        &row.as_object().unwrap(),
-        &1,
-        "VALVE",
-    )
-    .await?;
+    valve
+        .update_row("table2", &1, &row.as_object().unwrap())
+        .await?;
 
     eprintln!("done.");
     Ok(())
 }
 
-async fn test_validate_and_insert_1(
-    config: &SerdeMap,
-    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
-    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
-    pool: &AnyPool,
-) -> Result<(), sqlx::Error> {
+async fn test_validate_and_insert_1(valve: &Valve) -> Result<(), sqlx::Error> {
     eprint!("Running test_validate_and_insert_1() ... ");
+
     // Validate and insert a new row:
     let row = json!({
         "id": {"messages": [], "valid": true, "value": "BFO:0000027"},
@@ -174,42 +94,19 @@ async fn test_validate_and_insert_1(
         "type": {"messages": [], "valid": true, "value": "owl:Class"},
     });
 
-    let result_row = validate_row(
-        &config,
-        &compiled_datatype_conditions,
-        &compiled_rule_conditions,
-        &pool,
-        None,
-        "table3",
-        row.as_object().unwrap(),
-        None,
-        None,
-    )
-    .await?;
+    let result_row = valve
+        .validate_row("table3", row.as_object().unwrap())
+        .await?;
 
-    let _new_row_num = insert_new_row(
-        &config,
-        &compiled_datatype_conditions,
-        &compiled_rule_conditions,
-        &pool,
-        "table3",
-        &result_row,
-        None,
-        "VALVE",
-    )
-    .await?;
+    let (_new_row_num, _new_row) = valve.insert_row("table3", &result_row).await?;
 
     eprintln!("done.");
     Ok(())
 }
 
-async fn test_validate_and_update(
-    config: &SerdeMap,
-    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
-    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
-    pool: &AnyPool,
-) -> Result<(), sqlx::Error> {
+async fn test_validate_and_update(valve: &Valve) -> Result<(), sqlx::Error> {
     eprint!("Running test_validate_and_update() ... ");
+
     // Validate and update an existing row:
     let row = json!({
         "child": {"messages": [], "valid": true, "value": 2},
@@ -225,42 +122,19 @@ async fn test_validate_and_update(
         },
     });
 
-    let result_row = validate_row(
-        &config,
-        &compiled_datatype_conditions,
-        &compiled_rule_conditions,
-        &pool,
-        None,
-        "table6",
-        row.as_object().unwrap(),
-        Some(1),
-        None,
-    )
-    .await?;
+    let result_row = valve
+        .validate_row("table6", row.as_object().unwrap())
+        .await?;
 
-    update_row(
-        &config,
-        &compiled_datatype_conditions,
-        &compiled_rule_conditions,
-        &pool,
-        "table6",
-        &result_row,
-        &1,
-        "VALVE",
-    )
-    .await?;
+    valve.update_row("table6", &1, &result_row).await?;
 
     eprintln!("done.");
     Ok(())
 }
 
-async fn test_validate_and_insert_2(
-    config: &SerdeMap,
-    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
-    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
-    pool: &AnyPool,
-) -> Result<(), sqlx::Error> {
+async fn test_validate_and_insert_2(valve: &Valve) -> Result<(), sqlx::Error> {
     eprint!("Running test_validate_and_insert_2() ... ");
+
     // Validate and insert a new row:
     let row = json!({
         "child": {"messages": [], "valid": true, "value": 2},
@@ -276,42 +150,19 @@ async fn test_validate_and_insert_2(
         },
     });
 
-    let result_row = validate_row(
-        &config,
-        &compiled_datatype_conditions,
-        &compiled_rule_conditions,
-        &pool,
-        None,
-        "table6",
-        row.as_object().unwrap(),
-        None,
-        None,
-    )
-    .await?;
+    let result_row = valve
+        .validate_row("table6", row.as_object().unwrap())
+        .await?;
 
-    let _new_row_num = insert_new_row(
-        &config,
-        &compiled_datatype_conditions,
-        &compiled_rule_conditions,
-        &pool,
-        "table6",
-        &result_row,
-        None,
-        "VALVE",
-    )
-    .await?;
+    let (_new_row_num, _new_row) = valve.insert_row("table6", &result_row).await?;
 
     eprintln!("done.");
     Ok(())
 }
 
-async fn test_dependencies(
-    config: &SerdeMap,
-    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
-    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
-    pool: &AnyPool,
-) -> Result<(), sqlx::Error> {
+async fn test_dependencies(valve: &Valve) -> Result<(), sqlx::Error> {
     eprint!("Running test_dependencies() ... ");
+
     // Test cases for updates/inserts/deletes with dependencies.
     let row = json!({
         "foreign_column": {"messages": [], "valid": true, "value": "w"},
@@ -319,17 +170,9 @@ async fn test_dependencies(
         "numeric_foreign_column": {"messages": [], "valid": true, "value": ""},
     });
 
-    update_row(
-        &config,
-        &compiled_datatype_conditions,
-        &compiled_rule_conditions,
-        &pool,
-        "table10",
-        &row.as_object().unwrap(),
-        &1,
-        "VALVE",
-    )
-    .await?;
+    valve
+        .update_row("table10", &1, &row.as_object().unwrap())
+        .await?;
 
     let row = json!({
         "child": {"messages": [], "valid": true, "value": "b"},
@@ -339,28 +182,11 @@ async fn test_dependencies(
         "bar": {"messages": [], "valid": true, "value": "f"},
     });
 
-    update_row(
-        &config,
-        &compiled_datatype_conditions,
-        &compiled_rule_conditions,
-        &pool,
-        "table11",
-        &row.as_object().unwrap(),
-        &2,
-        "VALVE",
-    )
-    .await?;
+    valve
+        .update_row("table11", &2, &row.as_object().unwrap())
+        .await?;
 
-    delete_row(
-        &config,
-        &compiled_datatype_conditions,
-        &compiled_rule_conditions,
-        &pool,
-        "table11",
-        &4,
-        "VALVE",
-    )
-    .await?;
+    valve.delete_row("table11", &4).await?;
 
     let row = json!({
         "foreign_column": {"messages": [], "valid": true, "value": "i"},
@@ -368,24 +194,16 @@ async fn test_dependencies(
         "numeric_foreign_column": {"messages": [], "valid": true, "value": "9"},
     });
 
-    let _new_row_num = insert_new_row(
-        &config,
-        &compiled_datatype_conditions,
-        &compiled_rule_conditions,
-        &pool,
-        "table10",
-        &row.as_object().unwrap(),
-        None,
-        "VALVE",
-    )
-    .await?;
+    let (_new_row_num, _new_row) = valve
+        .insert_row("table10", &row.as_object().unwrap())
+        .await?;
 
     eprintln!("done.");
     Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum DbOperation {
+enum DbOperation {
     Insert,
     Delete,
     Update,
@@ -490,15 +308,11 @@ async fn generate_operation_sequence(pool: &AnyPool) -> Result<Vec<DbOperation>,
     Ok(operations)
 }
 
-async fn test_randomized_api_test_with_undo_redo(
-    config: &SerdeMap,
-    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
-    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
-    pool: &AnyPool,
-) -> Result<(), sqlx::Error> {
+async fn test_randomized_api_test_with_undo_redo(valve: &Valve) -> Result<(), sqlx::Error> {
     // Randomly generate a number of insert/update/delete operations, possibly followed by undos
     // and/or redos.
     eprint!("Running test_randomized_api_test_with_undo_redo() ... ");
+
     fn generate_value() -> String {
         let mut value = Alphanumeric.sample_string(&mut rand::thread_rng(), 10);
         while random::<bool>() && random::<bool>() {
@@ -532,33 +346,24 @@ async fn test_randomized_api_test_with_undo_redo(
         row
     }
 
-    let operations_list = generate_operation_sequence(pool).await?;
+    let operations_list = generate_operation_sequence(&valve.pool).await?;
     for operation in operations_list {
         match operation {
             DbOperation::Delete => {
                 let query = sqlx_query("SELECT MAX(row_number) AS row_number FROM table1_view");
-                let sql_row = query.fetch_one(pool).await?;
+                let sql_row = query.fetch_one(&valve.pool).await?;
                 let raw_row_number = sql_row.try_get_raw("row_number")?;
                 if raw_row_number.is_null() {
                     return Err(SqlxCErr("No rows in table1_view".into()));
                 } else {
                     let row_number: i64 = sql_row.get("row_number");
                     let row_number = row_number as u32;
-                    delete_row(
-                        &config,
-                        &compiled_datatype_conditions,
-                        &compiled_rule_conditions,
-                        &pool,
-                        "table1",
-                        &row_number,
-                        "VALVE",
-                    )
-                    .await?;
+                    valve.delete_row("table1", &row_number).await?;
                 }
             }
             DbOperation::Update => {
                 let query = sqlx_query("SELECT MAX(row_number) AS row_number FROM table1_view");
-                let sql_row = query.fetch_one(pool).await?;
+                let sql_row = query.fetch_one(&valve.pool).await?;
                 let raw_row_number = sql_row.try_get_raw("row_number")?;
                 if raw_row_number.is_null() {
                     return Err(SqlxCErr("No rows in table1_view".into()));
@@ -566,52 +371,18 @@ async fn test_randomized_api_test_with_undo_redo(
                     let row_number: i64 = sql_row.get("row_number");
                     let row_number = row_number as u32;
                     let row = generate_row();
-                    update_row(
-                        &config,
-                        &compiled_datatype_conditions,
-                        &compiled_rule_conditions,
-                        &pool,
-                        "table1",
-                        &row,
-                        &row_number,
-                        "VALVE",
-                    )
-                    .await?;
+                    valve.update_row("table1", &row_number, &row).await?;
                 }
             }
             DbOperation::Insert => {
                 let row = generate_row();
-                let _rn = insert_new_row(
-                    &config,
-                    &compiled_datatype_conditions,
-                    &compiled_rule_conditions,
-                    &pool,
-                    "table1",
-                    &row,
-                    None,
-                    "VALVE",
-                )
-                .await?;
+                let (_rn, _r) = valve.insert_row("table1", &row).await?;
             }
             DbOperation::Undo => {
-                undo(
-                    &config,
-                    &compiled_datatype_conditions,
-                    &compiled_rule_conditions,
-                    &pool,
-                    "VALVE",
-                )
-                .await?;
+                valve.undo().await?;
             }
             DbOperation::Redo => {
-                redo(
-                    &config,
-                    &compiled_datatype_conditions,
-                    &compiled_rule_conditions,
-                    &pool,
-                    "VALVE",
-                )
-                .await?;
+                valve.redo().await?;
             }
         };
     }
@@ -620,13 +391,9 @@ async fn test_randomized_api_test_with_undo_redo(
     Ok(())
 }
 
-async fn test_undo_redo(
-    config: &SerdeMap,
-    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
-    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
-    pool: &AnyPool,
-) -> Result<(), sqlx::Error> {
+async fn test_undo_redo(valve: &Valve) -> Result<(), sqlx::Error> {
     eprint!("Running test_undo_redo() ... ");
+
     // Undo/redo tests
     let row_1 = json!({
         "foreign_column": {"messages": [], "valid": true, "value": "j"},
@@ -640,324 +407,78 @@ async fn test_undo_redo(
     });
 
     // Undo/redo test 1:
-    let _rn = insert_new_row(
-        &config,
-        &compiled_datatype_conditions,
-        &compiled_rule_conditions,
-        &pool,
-        "table10",
-        &row_1.as_object().unwrap(),
-        None,
-        "VALVE",
-    )
-    .await?;
+    let (_rn, _r) = valve
+        .insert_row("table10", &row_1.as_object().unwrap())
+        .await?;
 
-    undo(
-        &config,
-        &compiled_datatype_conditions,
-        &compiled_rule_conditions,
-        &pool,
-        "VALVE",
-    )
-    .await?;
+    valve.undo().await?;
 
-    redo(
-        &config,
-        &compiled_datatype_conditions,
-        &compiled_rule_conditions,
-        &pool,
-        "VALVE",
-    )
-    .await?;
+    valve.redo().await?;
 
-    undo(
-        &config,
-        &compiled_datatype_conditions,
-        &compiled_rule_conditions,
-        &pool,
-        "VALVE",
-    )
-    .await?;
+    valve.undo().await?;
 
     // Undo/redo test 2:
-    update_row(
-        &config,
-        &compiled_datatype_conditions,
-        &compiled_rule_conditions,
-        &pool,
-        "table10",
-        &row_2.as_object().unwrap(),
-        &8,
-        "VALVE",
-    )
-    .await?;
+    valve
+        .update_row("table10", &8, &row_2.as_object().unwrap())
+        .await?;
 
-    undo(
-        &config,
-        &compiled_datatype_conditions,
-        &compiled_rule_conditions,
-        &pool,
-        "VALVE",
-    )
-    .await?;
+    valve.undo().await?;
 
-    redo(
-        &config,
-        &compiled_datatype_conditions,
-        &compiled_rule_conditions,
-        &pool,
-        "VALVE",
-    )
-    .await?;
+    valve.redo().await?;
 
-    undo(
-        &config,
-        &compiled_datatype_conditions,
-        &compiled_rule_conditions,
-        &pool,
-        "VALVE",
-    )
-    .await?;
+    valve.undo().await?;
 
     // Undo/redo test 3:
-    delete_row(
-        &config,
-        &compiled_datatype_conditions,
-        &compiled_rule_conditions,
-        &pool,
-        "table10",
-        &8,
-        "VALVE",
-    )
-    .await?;
+    valve.delete_row("table10", &8).await?;
 
-    undo(
-        &config,
-        &compiled_datatype_conditions,
-        &compiled_rule_conditions,
-        &pool,
-        "VALVE",
-    )
-    .await?;
+    valve.undo().await?;
 
-    redo(
-        &config,
-        &compiled_datatype_conditions,
-        &compiled_rule_conditions,
-        &pool,
-        "VALVE",
-    )
-    .await?;
+    valve.redo().await?;
 
-    undo(
-        &config,
-        &compiled_datatype_conditions,
-        &compiled_rule_conditions,
-        &pool,
-        "VALVE",
-    )
-    .await?;
+    valve.undo().await?;
 
     // Undo/redo test 4:
-    let rn = insert_new_row(
-        &config,
-        &compiled_datatype_conditions,
-        &compiled_rule_conditions,
-        &pool,
-        "table10",
-        &row_1.as_object().unwrap(),
-        None,
-        "VALVE",
-    )
-    .await?;
+    let (rn, _row) = valve
+        .insert_row("table10", &row_1.as_object().unwrap())
+        .await?;
 
-    update_row(
-        &config,
-        &compiled_datatype_conditions,
-        &compiled_rule_conditions,
-        &pool,
-        "table10",
-        &row_2.as_object().unwrap(),
-        &rn,
-        "VALVE",
-    )
-    .await?;
+    valve
+        .update_row("table10", &rn, &row_2.as_object().unwrap())
+        .await?;
 
     // Undo update:
-    undo(
-        &config,
-        &compiled_datatype_conditions,
-        &compiled_rule_conditions,
-        &pool,
-        "VALVE",
-    )
-    .await?;
+    valve.undo().await?;
 
     // Redo update:
-    redo(
-        &config,
-        &compiled_datatype_conditions,
-        &compiled_rule_conditions,
-        &pool,
-        "VALVE",
-    )
-    .await?;
+    valve.redo().await?;
 
-    delete_row(
-        &config,
-        &compiled_datatype_conditions,
-        &compiled_rule_conditions,
-        &pool,
-        "table10",
-        &rn,
-        "VALVE",
-    )
-    .await?;
+    valve.delete_row("table10", &rn).await?;
 
     // Undo delete:
-    undo(
-        &config,
-        &compiled_datatype_conditions,
-        &compiled_rule_conditions,
-        &pool,
-        "VALVE",
-    )
-    .await?;
+    valve.undo().await?;
 
     // Undo update:
-    undo(
-        &config,
-        &compiled_datatype_conditions,
-        &compiled_rule_conditions,
-        &pool,
-        "VALVE",
-    )
-    .await?;
+    valve.undo().await?;
 
     // Undo insert:
-    undo(
-        &config,
-        &compiled_datatype_conditions,
-        &compiled_rule_conditions,
-        &pool,
-        "VALVE",
-    )
-    .await?;
+    valve.undo().await?;
 
     eprintln!("done.");
     Ok(())
 }
 
 pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Error> {
-    let config = valve(
-        table,
-        database,
-        &ValveCommand::Config,
-        false,
-        false,
-        "table",
-    )
-    .await?;
-    let config: SerdeValue = serde_json::from_str(config.as_str()).unwrap();
-    let config = config.as_object().unwrap();
-
-    // To connect to a postgresql database listening to a unix domain socket:
-    // ----------------------------------------------------------------------
-    // let connection_options =
-    //     AnyConnectOptions::from_str("postgres:///testdb?host=/var/run/postgresql")?;
-    //
-    // To query the connection type at runtime via the pool:
-    // -----------------------------------------------------
-    // let db_type = pool.any_kind();
-
-    let connection_options;
-    if database.starts_with("postgresql://") {
-        connection_options = AnyConnectOptions::from_str(database)?;
-    } else {
-        let connection_string;
-        if !database.starts_with("sqlite://") {
-            connection_string = format!("sqlite://{}?mode=rwc", database);
-        } else {
-            connection_string = database.to_string();
-        }
-        connection_options = AnyConnectOptions::from_str(connection_string.as_str()).unwrap();
-    }
-
-    let pool = AnyPoolOptions::new()
-        .max_connections(5)
-        .connect_with(connection_options)
-        .await?;
-    if pool.any_kind() == AnyKind::Sqlite {
-        sqlx_query("PRAGMA foreign_keys = ON")
-            .execute(&pool)
-            .await?;
-    }
-
-    let parser = StartParser::new();
-    let compiled_datatype_conditions = get_compiled_datatype_conditions(&config, &parser);
-    let parsed_structure_conditions = get_parsed_structure_conditions(&config, &parser);
-    let compiled_rule_conditions =
-        get_compiled_rule_conditions(&config, compiled_datatype_conditions.clone(), &parser);
-
+    let valve = Valve::build(table, "table", database, false, false).await?;
     // NOTE that you must use an external script to fetch the data from the database and run a diff
     // against a known good sample to verify that these tests yield the expected results:
-    test_matching(
-        &config,
-        &compiled_datatype_conditions,
-        &parsed_structure_conditions,
-        &pool,
-    )
-    .await?;
-    test_idempotent_validate_and_update(
-        &config,
-        &compiled_datatype_conditions,
-        &compiled_rule_conditions,
-        &pool,
-    )
-    .await?;
-    test_validate_and_insert_1(
-        &config,
-        &compiled_datatype_conditions,
-        &compiled_rule_conditions,
-        &pool,
-    )
-    .await?;
-    test_validate_and_update(
-        &config,
-        &compiled_datatype_conditions,
-        &compiled_rule_conditions,
-        &pool,
-    )
-    .await?;
-    test_validate_and_insert_2(
-        &config,
-        &compiled_datatype_conditions,
-        &compiled_rule_conditions,
-        &pool,
-    )
-    .await?;
-    test_dependencies(
-        &config,
-        &compiled_datatype_conditions,
-        &compiled_rule_conditions,
-        &pool,
-    )
-    .await?;
-    test_undo_redo(
-        &config,
-        &compiled_datatype_conditions,
-        &compiled_rule_conditions,
-        &pool,
-    )
-    .await?;
-
-    test_randomized_api_test_with_undo_redo(
-        &config,
-        &compiled_datatype_conditions,
-        &compiled_rule_conditions,
-        &pool,
-    )
-    .await?;
+    test_matching(&valve).await?;
+    test_idempotent_validate_and_update(&valve).await?;
+    test_validate_and_insert_1(&valve).await?;
+    test_validate_and_update(&valve).await?;
+    test_validate_and_insert_2(&valve).await?;
+    test_dependencies(&valve).await?;
+    test_undo_redo(&valve).await?;
+    test_randomized_api_test_with_undo_redo(&valve).await?;
 
     Ok(())
 }

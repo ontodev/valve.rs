@@ -24,13 +24,14 @@ pub mod validate;
 lalrpop_mod!(pub valve_grammar);
 
 use crate::validate::{
-    validate_row, validate_rows_constraints, validate_rows_intra, validate_rows_trees,
-    validate_tree_foreign_keys, validate_under, QueryAsIf, QueryAsIfKind, ResultRow,
+    validate_row_tx, validate_rows_constraints, validate_rows_intra, validate_rows_trees,
+    validate_tree_foreign_keys, validate_under, with_tree_sql, QueryAsIf, QueryAsIfKind, ResultRow,
 };
 use crate::{ast::Expression, valve_grammar::StartParser};
 use async_recursion::async_recursion;
 use chrono::Utc;
 use crossbeam;
+use enquote::unquote;
 use futures::executor::block_on;
 use indexmap::IndexMap;
 use indoc::indoc;
@@ -89,13 +90,76 @@ macro_rules! valve_log {
     ($($arg:tt)*) => (eprintln!("{} - {}", Utc::now(), format_args!($($arg)*)));
 }
 
+/// Represents a structure such as those found in the `structure` column of the `column` table in
+/// both its parsed format (i.e., as an [Expression](ast/enum.Expression.html)) as well as in its
+/// original format (i.e., as a plain String).
+#[derive(Clone)]
+pub struct ParsedStructure {
+    pub original: String,
+    pub parsed: Expression,
+}
+
+// We use Debug here instead of Display because we have only implemented Debug for Expressions.
+// See the comment about this in ast.rs.
+impl std::fmt::Debug for ParsedStructure {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(
+            f,
+            "{{\"parsed_structure\": {{\"original\": \"{}\", \"parsed\": {:?}}}}}",
+            &self.original, &self.parsed
+        )
+    }
+}
+
+/// Represents a condition in three different ways: (i) in String format, (ii) as a parsed
+/// [Expression](ast/enum.Expression.html), and (iii) as a pre-compiled regular expression.
+#[derive(Clone)]
+pub struct CompiledCondition {
+    pub original: String,
+    pub parsed: Expression,
+    pub compiled: Arc<dyn Fn(&str) -> bool + Sync + Send>,
+}
+
+// We use Debug here instead of Display because we have only implemented Debug for Expressions.
+// See the comment about this in ast.rs.
+impl std::fmt::Debug for CompiledCondition {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(
+            f,
+            "{{\"compiled_condition\": {{\"original\": \"{}\", \"parsed\": {:?}}}}}",
+            &self.original, &self.parsed
+        )
+    }
+}
+
+/// Represents a 'when-then' condition, as found in the `rule` table, as two
+/// [CompiledCondition](struct.CompiledCondition.html) structs corresponding to the when and then
+/// parts of the given rule.
+#[derive(Clone)]
+pub struct ColumnRule {
+    pub when: CompiledCondition,
+    pub then: CompiledCondition,
+}
+
+// We use Debug here instead of Display because we have only implemented Debug for Expressions.
+// See the comment about this in ast.rs.
+impl std::fmt::Debug for ColumnRule {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(
+            f,
+            "{{\"column_rule\": {{\"when\": {:?}, \"then\": {:?}}}}}",
+            &self.when, &self.then
+        )
+    }
+}
+
 #[derive(Debug)]
 pub struct Valve {
     pub global_config: SerdeMap,
     pub compiled_datatype_conditions: HashMap<String, CompiledCondition>,
     pub compiled_rule_conditions: HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     pub parsed_structure_conditions: HashMap<String, ParsedStructure>,
-    pub pool: Option<AnyPool>,
+    pub pool: AnyPool,
     pub user: String,
     pub verbose: bool,
     pub initial_load: bool,
@@ -177,8 +241,8 @@ impl Valve {
             compiled_datatype_conditions: compiled_datatype_conditions,
             compiled_rule_conditions: compiled_rule_conditions,
             parsed_structure_conditions: parsed_structure_conditions,
-            pool: Some(pool),
-            user: String::from("Valve"),
+            pool: pool,
+            user: String::from("VALVE"),
             verbose: verbose,
             initial_load: initial_load,
         })
@@ -217,9 +281,7 @@ impl Valve {
     async fn execute_sql(&self, sql: &str) -> Result<(), sqlx::Error> {
         // DatabaseError
 
-        sqlx_query(&sql)
-            .execute(self.pool.as_ref().unwrap())
-            .await?;
+        sqlx_query(&sql).execute(&self.pool).await?;
         Ok(())
     }
 
@@ -249,7 +311,12 @@ impl Valve {
         sorted_tables
     }
 
-    /// TODO: Add docstring here
+    /// Given a parsed structure condition, a table and column name, and an unsigned integer
+    /// representing whether the given column, in the case of a SQLite database, is a primary key
+    /// (in the case of PostgreSQL, the sqlite_pk parameter is ignored): determine whether the
+    /// structure of the column is properly reflected in the db. E.g., a `from(table.column)`
+    /// struct should be associated with a foreign key, `primary` with a primary key, `unique`
+    /// with a unique constraint.
     async fn structure_has_changed(
         &self,
         pstruct: &Expression,
@@ -257,11 +324,10 @@ impl Valve {
         column: &str,
         sqlite_pk: &u32,
     ) -> Result<bool, sqlx::Error> {
-        let pool = self.pool.as_ref().unwrap();
         // A clojure to determine whether the given column has the given constraint type, which
         // can be one of 'UNIQUE', 'PRIMARY KEY', 'FOREIGN KEY':
         let column_has_constraint_type = |constraint_type: &str| -> Result<bool, sqlx::Error> {
-            if pool.any_kind() == AnyKind::Postgres {
+            if self.pool.any_kind() == AnyKind::Postgres {
                 let sql = format!(
                     r#"SELECT 1
                        FROM information_schema.table_constraints tco
@@ -273,7 +339,7 @@ impl Valve {
                          AND kcu.column_name = '{}'"#,
                     table, constraint_type, column
                 );
-                let rows = block_on(sqlx_query(&sql).fetch_all(pool))?;
+                let rows = block_on(sqlx_query(&sql).fetch_all(&self.pool))?;
                 if rows.len() > 1 {
                     unreachable!();
                 }
@@ -283,12 +349,12 @@ impl Valve {
                     return Ok(*sqlite_pk == 1);
                 } else if constraint_type == "UNIQUE" {
                     let sql = format!(r#"PRAGMA INDEX_LIST("{}")"#, table);
-                    for row in block_on(sqlx_query(&sql).fetch_all(pool))? {
+                    for row in block_on(sqlx_query(&sql).fetch_all(&self.pool))? {
                         let idx_name = row.get::<String, _>("name");
                         let unique = row.get::<i16, _>("unique") as u8;
                         if unique == 1 {
                             let sql = format!(r#"PRAGMA INDEX_INFO("{}")"#, idx_name);
-                            let rows = block_on(sqlx_query(&sql).fetch_all(pool))?;
+                            let rows = block_on(sqlx_query(&sql).fetch_all(&self.pool))?;
                             if rows.len() == 1 {
                                 let cname = rows[0].get::<String, _>("name");
                                 if cname == column {
@@ -300,7 +366,7 @@ impl Valve {
                     Ok(false)
                 } else if constraint_type == "FOREIGN KEY" {
                     let sql = format!(r#"PRAGMA FOREIGN_KEY_LIST("{}")"#, table);
-                    for row in block_on(sqlx_query(&sql).fetch_all(pool))? {
+                    for row in block_on(sqlx_query(&sql).fetch_all(&self.pool))? {
                         let cname = row.get::<String, _>("from");
                         if cname == column {
                             return Ok(true);
@@ -362,9 +428,9 @@ impl Valve {
             Expression::Function(name, args) if name == "from" => {
                 match &*args[0] {
                     Expression::Field(cfg_ftable, cfg_fcolumn) => {
-                        if pool.any_kind() == AnyKind::Sqlite {
+                        if self.pool.any_kind() == AnyKind::Sqlite {
                             let sql = format!(r#"PRAGMA FOREIGN_KEY_LIST("{}")"#, table);
-                            for row in sqlx_query(&sql).fetch_all(pool).await? {
+                            for row in sqlx_query(&sql).fetch_all(&self.pool).await? {
                                 let from = row.get::<String, _>("from");
                                 if from == column {
                                     let db_ftable = row.get::<String, _>("table");
@@ -390,7 +456,7 @@ impl Valve {
                                      AND kcu.column_name = '{}'"#,
                                 table, column
                             );
-                            let rows = sqlx_query(&sql).fetch_all(pool).await?;
+                            let rows = sqlx_query(&sql).fetch_all(&self.pool).await?;
                             if rows.len() == 0 {
                                 // If the table doesn't even exist return true.
                                 return Ok(true);
@@ -429,8 +495,7 @@ impl Valve {
     /// 'primary', or 'from(table, column)' in their column configuration are associated, in the
     /// database, with a unique constraint, primary key, and foreign key, respectively, and vice
     /// versa.
-    pub async fn table_has_changed(&self, table: &str) -> Result<bool, sqlx::Error> {
-        let pool = self.pool.as_ref().unwrap();
+    async fn table_has_changed(&self, table: &str) -> Result<bool, sqlx::Error> {
         let (columns_config, configured_column_order, description, table_type, path) = {
             let table_config = self
                 .global_config
@@ -492,12 +557,12 @@ impl Valve {
         };
 
         let db_columns_in_order = {
-            if pool.any_kind() == AnyKind::Sqlite {
+            if self.pool.any_kind() == AnyKind::Sqlite {
                 let sql = format!(
                     r#"SELECT 1 FROM sqlite_master WHERE "type" = 'table' AND "name" = '{}'"#,
                     table
                 );
-                let rows = sqlx_query(&sql).fetch_all(pool).await?;
+                let rows = sqlx_query(&sql).fetch_all(&self.pool).await?;
                 if rows.len() == 0 {
                     if self.verbose {
                         valve_log!(
@@ -509,7 +574,7 @@ impl Valve {
                 } else if rows.len() == 1 {
                     // Otherwise send another query to the db to get the column info:
                     let sql = format!(r#"PRAGMA TABLE_INFO("{}")"#, table);
-                    let rows = block_on(sqlx_query(&sql).fetch_all(pool))?;
+                    let rows = block_on(sqlx_query(&sql).fetch_all(&self.pool))?;
                     rows.iter()
                         .map(|r| {
                             (
@@ -530,7 +595,7 @@ impl Valve {
                    ORDER BY "ordinal_position""#,
                     table,
                 );
-                let rows = sqlx_query(&sql).fetch_all(pool).await?;
+                let rows = sqlx_query(&sql).fetch_all(&self.pool).await?;
                 if rows.len() == 0 {
                     if self.verbose {
                         valve_log!(
@@ -584,7 +649,7 @@ impl Valve {
                 ("path", path),
             ] {
                 let column = table_param.0;
-                let is_clause = if self.pool.as_ref().unwrap().any_kind() == AnyKind::Sqlite {
+                let is_clause = if self.pool.any_kind() == AnyKind::Sqlite {
                     "IS"
                 } else {
                     "IS NOT DISTINCT FROM"
@@ -597,9 +662,7 @@ impl Valve {
                     r#"SELECT 1 from "table" WHERE "table" = '{}' AND "{}" {}"#,
                     table, column, eq_value,
                 );
-                let rows = sqlx_query(&sql)
-                    .fetch_all(self.pool.as_ref().unwrap())
-                    .await?;
+                let rows = sqlx_query(&sql).fetch_all(&self.pool).await?;
                 if rows.len() == 0 {
                     if self.verbose {
                         valve_log!(
@@ -637,13 +700,9 @@ impl Valve {
                 .get(cname)
                 .and_then(|c| c.as_object())
                 .unwrap();
-            let sql_type = get_sql_type_from_global_config(
-                &self.global_config,
-                table,
-                &cname,
-                self.pool.as_ref().unwrap(),
-            )
-            .unwrap();
+            let sql_type =
+                get_sql_type_from_global_config(&self.global_config, table, &cname, &self.pool)
+                    .unwrap();
 
             // Check the column's SQL type:
             if sql_type.to_lowercase() != ctype.to_lowercase() {
@@ -701,7 +760,7 @@ impl Valve {
     }
 
     /// TODO: Add docstring here
-    pub async fn get_setup_statements(&self) -> Result<HashMap<String, Vec<String>>, sqlx::Error> {
+    async fn get_setup_statements(&self) -> Result<HashMap<String, Vec<String>>, sqlx::Error> {
         let tables_config = self
             .global_config
             .get("table")
@@ -715,32 +774,36 @@ impl Valve {
             .unwrap()
             .clone();
 
-        let pool = self.pool.as_ref().unwrap();
         let parser = StartParser::new();
 
-        // Begin by reading in the TSV files corresponding to the tables defined in tables_config, and
-        // use that information to create the associated database tables, while saving constraint
-        // information to constrains_config.
+        // Begin by reading in the TSV files corresponding to the tables defined in tables_config,
+        // and use that information to create the associated database tables, while saving
+        // constraint information to constrains_config.
         let mut setup_statements = HashMap::new();
         for table_name in tables_config.keys().cloned().collect::<Vec<_>>() {
             // Generate the statements for creating the table and its corresponding conflict table:
             let mut table_statements = vec![];
             for table in vec![table_name.to_string(), format!("{}_conflict", table_name)] {
-                let mut statements =
-                    get_table_ddl(&tables_config, &datatypes_config, &parser, &table, &pool);
+                let mut statements = get_table_ddl(
+                    &tables_config,
+                    &datatypes_config,
+                    &parser,
+                    &table,
+                    &self.pool,
+                );
                 table_statements.append(&mut statements);
             }
 
-            let (_, create_view_sql) = get_sql_for_standard_view(&table_name, pool);
-            let (_, create_text_view_sql) =
-                get_sql_for_text_view(&tables_config, &table_name, pool);
+            let create_view_sql = get_sql_for_standard_view(&table_name, &self.pool);
+            let create_text_view_sql =
+                get_sql_for_text_view(&tables_config, &table_name, &self.pool);
             table_statements.push(create_view_sql);
             table_statements.push(create_text_view_sql);
 
             setup_statements.insert(table_name.to_string(), table_statements);
         }
 
-        let text_type = get_sql_type(&datatypes_config, &"text".to_string(), pool).unwrap();
+        let text_type = get_sql_type(&datatypes_config, &"text".to_string(), &self.pool).unwrap();
 
         // Generate DDL for the history table:
         let mut history_statements = vec![];
@@ -759,7 +822,7 @@ impl Valve {
                 );
               "#},
             history_id = {
-                if pool.any_kind() == AnyKind::Sqlite {
+                if self.pool.any_kind() == AnyKind::Sqlite {
                     "\"history_id\" INTEGER PRIMARY KEY,"
                 } else {
                     "\"history_id\" SERIAL PRIMARY KEY,"
@@ -767,7 +830,7 @@ impl Valve {
             },
             text_type = text_type,
             timestamp = {
-                if pool.any_kind() == AnyKind::Sqlite {
+                if self.pool.any_kind() == AnyKind::Sqlite {
                     "\"timestamp\" TIMESTAMP DEFAULT(STRFTIME('%Y-%m-%d %H:%M:%f', 'NOW'))"
                 } else {
                     "\"timestamp\" TIMESTAMP DEFAULT CURRENT_TIMESTAMP"
@@ -794,7 +857,7 @@ impl Valve {
                 );
               "#},
             message_id = {
-                if pool.any_kind() == AnyKind::Sqlite {
+                if self.pool.any_kind() == AnyKind::Sqlite {
                     "\"message_id\" INTEGER PRIMARY KEY,"
                 } else {
                     "\"message_id\" SERIAL PRIMARY KEY,"
@@ -888,20 +951,32 @@ impl Valve {
     pub async fn truncate_all_tables(&self) -> Result<&Self, sqlx::Error> {
         // DatabaseError
 
+        self.truncate_tables(self.get_tables_ordered_for_deletion())
+            .await?;
+        Ok(self)
+    }
+
+    /// Given a vector of table names,
+    /// truncate those tables, in the given order.
+    /// Return an error on invalid table name or database problem.
+    pub async fn truncate_tables(&self, tables: Vec<&str>) -> Result<&Self, sqlx::Error> {
+        // ConfigOrDatabaseError
+
+        self.create_missing_tables().await?;
+
         // We must use CASCADE in the case of PostgreSQL since we cannot truncate a table, T, that
         // depends on another table, T', even in the case where we have previously truncated T'.
         // SQLite does not need this. However SQLite does require that the tables be truncated in
         // deletion order (which means that it must be checking that T' is empty).
-
         let truncate_sql = |table: &str| -> String {
-            if self.pool.as_ref().unwrap().any_kind() == AnyKind::Postgres {
+            if self.pool.any_kind() == AnyKind::Postgres {
                 format!(r#"TRUNCATE TABLE "{}" RESTART IDENTITY CASCADE"#, table)
             } else {
                 format!(r#"DELETE FROM "{}""#, table)
             }
         };
 
-        for table in self.get_tables_ordered_for_deletion() {
+        for table in tables {
             let sql = truncate_sql(&table);
             self.execute_sql(&sql).await?;
             if table != "message" && table != "history" {
@@ -910,16 +985,6 @@ impl Valve {
             }
         }
 
-        Ok(self)
-    }
-
-    /// Given a vector of table names,
-    /// truncate those tables, in the given order.
-    /// Return an error on invalid table name or database problem.
-    pub fn truncate_tables(&self, _tables: Vec<&str>) -> Result<&Self, sqlx::Error> {
-        // ConfigOrDatabaseError
-        //self.create_missing_tables();
-        // TODO
         Ok(self)
     }
 
@@ -933,46 +998,46 @@ impl Valve {
         self.create_missing_tables().await?;
         self.truncate_all_tables().await?;
 
-        if let Some(pool) = &self.pool {
-            if pool.any_kind() == AnyKind::Sqlite {
-                sqlx_query("PRAGMA foreign_keys = ON").execute(pool).await?;
-                if self.initial_load {
-                    // These pragmas are unsafe but they are used during initial loading since data
-                    // integrity is not a priority in this case.
-                    sqlx_query("PRAGMA journal_mode = OFF")
-                        .execute(pool)
-                        .await?;
-                    sqlx_query("PRAGMA synchronous = 0").execute(pool).await?;
-                    sqlx_query("PRAGMA cache_size = 1000000")
-                        .execute(pool)
-                        .await?;
-                    sqlx_query("PRAGMA temp_store = MEMORY")
-                        .execute(pool)
-                        .await?;
-                }
+        if self.pool.any_kind() == AnyKind::Sqlite {
+            sqlx_query("PRAGMA foreign_keys = ON")
+                .execute(&self.pool)
+                .await?;
+            if self.initial_load {
+                // These pragmas are unsafe but they are used during initial loading since data
+                // integrity is not a priority in this case.
+                sqlx_query("PRAGMA journal_mode = OFF")
+                    .execute(&self.pool)
+                    .await?;
+                sqlx_query("PRAGMA synchronous = 0")
+                    .execute(&self.pool)
+                    .await?;
+                sqlx_query("PRAGMA cache_size = 1000000")
+                    .execute(&self.pool)
+                    .await?;
+                sqlx_query("PRAGMA temp_store = MEMORY")
+                    .execute(&self.pool)
+                    .await?;
             }
-
-            if self.verbose {
-                valve_log!(
-                    "Processing {} tables.",
-                    self.global_config
-                        .get("sorted_table_list")
-                        .and_then(|l| l.as_array())
-                        .unwrap()
-                        .len()
-                );
-            }
-            load_db(
-                &self.global_config,
-                &pool,
-                &self.compiled_datatype_conditions,
-                &self.compiled_rule_conditions,
-                self.verbose,
-            )
-            .await?;
-        } else {
-            valve_log!("WARN: Attempt to load tables but Valve is not connected to a database.");
         }
+
+        if self.verbose {
+            valve_log!(
+                "Processing {} tables.",
+                self.global_config
+                    .get("sorted_table_list")
+                    .and_then(|l| l.as_array())
+                    .unwrap()
+                    .len()
+            );
+        }
+        load_db(
+            &self.global_config,
+            &self.pool,
+            &self.compiled_datatype_conditions,
+            &self.compiled_rule_conditions,
+            self.verbose,
+        )
+        .await?;
 
         Ok(self)
     }
@@ -981,11 +1046,17 @@ impl Valve {
     /// load those tables in the given order.
     /// If `validate` is false, just try to insert all rows.
     /// Return an error on invalid table name or database problem.
-    pub fn load_tables(&self, _tables: Vec<&str>, _validate: bool) -> Result<&Self, sqlx::Error> {
+    pub async fn load_tables(
+        &self,
+        tables: Vec<&str>,
+        _validate: bool,
+    ) -> Result<&Self, sqlx::Error> {
         // ConfigOrDatabaseError
-        //self.create_missing_tables();
-        //self.truncate_tables(tables);
-        // TODO
+        self.create_missing_tables().await?;
+        self.truncate_tables(tables).await?;
+        if 1 == 1 {
+            todo!();
+        }
         Ok(self)
     }
 
@@ -1009,142 +1080,614 @@ impl Valve {
     /// Given a table name and a row as JSON,
     /// return the validated row.
     /// Return an error on database problem.
-    pub fn validate_row(
+    pub async fn validate_row(
         &self,
-        _table_name: &str,
-        _row: &ValveRow,
+        table_name: &str,
+        row: &ValveRow,
     ) -> Result<ValveRow, sqlx::Error> {
         // DatabaseError
-        todo!();
+
+        validate_row_tx(
+            &self.global_config,
+            &self.compiled_datatype_conditions,
+            &self.compiled_rule_conditions,
+            &self.pool,
+            None,
+            table_name,
+            row,
+            None,
+            None,
+        )
+        .await
     }
 
     /// Given a table name and a row as JSON,
     /// add the row to the table in the database,
     /// and return the validated row, including its new row_number.
     /// Return an error invalid table name or database problem.
-    pub fn insert_row(&self, _table_name: &str, _row: &ValveRow) -> Result<ValveRow, sqlx::Error> {
+    /// A wrapper around [insert_new_row_tx()] in which the following steps are also performed:
+    /// - A database transaction is created and then committed once the given new row has been
+    ///   inserted.
+    /// - The row is validated before insertion and the update to the database is recorded to the
+    ///   history table indicating that the given user is responsible for the change.
+    pub async fn insert_row(
+        &self,
+        table_name: &str,
+        row: &ValveRow,
+    ) -> Result<(u32, ValveRow), sqlx::Error> {
         // ConfigOrDatabaseError
-        todo!();
+
+        let mut tx = self.pool.begin().await?;
+
+        let row = validate_row_tx(
+            &self.global_config,
+            &self.compiled_datatype_conditions,
+            &self.compiled_rule_conditions,
+            &self.pool,
+            Some(&mut tx),
+            table_name,
+            row,
+            None,
+            None,
+        )
+        .await?;
+
+        let rn = insert_new_row_tx(
+            &self.global_config,
+            &self.compiled_datatype_conditions,
+            &self.compiled_rule_conditions,
+            &self.pool,
+            &mut tx,
+            table_name,
+            &row,
+            None,
+            true,
+        )
+        .await?;
+
+        record_row_change(&mut tx, table_name, &rn, None, Some(&row), &self.user).await?;
+        tx.commit().await?;
+        Ok((rn, row))
     }
 
     /// Given a table name, a row number, and a row as JSON,
     /// update the row in the database,
     /// and return the validated row.
     /// Return an error invalid table name or row number or database problem.
-    pub fn update_row(
+    pub async fn update_row(
         &self,
-        _table_name: &str,
-        _row_number: usize,
-        _row: &ValveRow,
+        table_name: &str,
+        row_number: &u32,
+        row: &ValveRow,
     ) -> Result<ValveRow, sqlx::Error> {
         // ConfigOrDatabaseError
-        todo!();
+
+        let mut tx = self.pool.begin().await?;
+
+        // Get the old version of the row from the database so that we can later record it to the
+        // history table:
+        let old_row = get_row_from_db(
+            &self.global_config,
+            &self.pool,
+            &mut tx,
+            table_name,
+            &row_number,
+        )
+        .await?;
+
+        let row = validate_row_tx(
+            &self.global_config,
+            &self.compiled_datatype_conditions,
+            &self.compiled_rule_conditions,
+            &self.pool,
+            Some(&mut tx),
+            table_name,
+            row,
+            Some(*row_number),
+            None,
+        )
+        .await?;
+
+        update_row_tx(
+            &self.global_config,
+            &self.compiled_datatype_conditions,
+            &self.compiled_rule_conditions,
+            &self.pool,
+            &mut tx,
+            table_name,
+            &row,
+            row_number,
+            true,
+            false,
+        )
+        .await?;
+
+        // Record the row update in the history table:
+        record_row_change(
+            &mut tx,
+            table_name,
+            row_number,
+            Some(&old_row),
+            Some(&row),
+            &self.user,
+        )
+        .await?;
+
+        tx.commit().await?;
+        Ok(row)
     }
 
     /// Given a table name and a row number,
     /// delete that row from the table.
     /// Return an error invalid table name or row number or database problem.
-    pub fn delete_row(&self, _table_name: &str, _row_number: usize) -> Result<(), sqlx::Error> {
+    pub async fn delete_row(&self, table_name: &str, row_number: &u32) -> Result<(), sqlx::Error> {
         // ConfigOrDatabaseError
-        todo!();
+        let mut tx = self.pool.begin().await?;
+
+        let row = get_row_from_db(
+            &self.global_config,
+            &self.pool,
+            &mut tx,
+            &table_name,
+            row_number,
+        )
+        .await?;
+
+        record_row_change(
+            &mut tx,
+            &table_name,
+            row_number,
+            Some(&row),
+            None,
+            &self.user,
+        )
+        .await?;
+
+        delete_row_tx(
+            &self.global_config,
+            &self.compiled_datatype_conditions,
+            &self.compiled_rule_conditions,
+            &self.pool,
+            &mut tx,
+            table_name,
+            row_number,
+        )
+        .await?;
+
+        tx.commit().await?;
+        Ok(())
     }
 
     /// Return the next change to undo, or None.
     /// Return an error on database problem.
-    pub fn get_record_to_undo(&self) -> Result<Option<AnyRow>, sqlx::Error> {
+    pub async fn get_record_to_undo(&self) -> Result<Option<AnyRow>, sqlx::Error> {
         // DatabaseError
-        todo!();
+        // Look in the history table, get the row with the greatest ID, get the row number,
+        // from, and to, and determine whether the last operation was a delete, insert, or update.
+        let is_clause = if self.pool.any_kind() == AnyKind::Sqlite {
+            "IS"
+        } else {
+            "IS NOT DISTINCT FROM"
+        };
+        let sql = format!(
+            r#"SELECT * FROM "history"
+               WHERE "undone_by" {} NULL
+               ORDER BY "history_id" DESC LIMIT 1"#,
+            is_clause
+        );
+        let query = sqlx_query(&sql);
+        let result_row = query.fetch_optional(&self.pool).await?;
+        Ok(result_row)
     }
 
     /// Return the next change to redo, or None.
     /// Return an error on database problem.
-    pub fn get_record_to_redo(&self) -> Result<Option<AnyRow>, sqlx::Error> {
+    pub async fn get_record_to_redo(&self) -> Result<Option<AnyRow>, sqlx::Error> {
         // DatabaseError
-        todo!();
+        // Look in the history table, get the row with the greatest ID, get the row number,
+        // from, and to, and determine whether the last operation was a delete, insert, or update.
+        let is_not_clause = if self.pool.any_kind() == AnyKind::Sqlite {
+            "IS NOT"
+        } else {
+            "IS DISTINCT FROM"
+        };
+        let sql = format!(
+            r#"SELECT * FROM "history"
+           WHERE "undone_by" {} NULL
+           ORDER BY "timestamp" DESC LIMIT 1"#,
+            is_not_clause
+        );
+        let query = sqlx_query(&sql);
+        let result_row = query.fetch_optional(&self.pool).await?;
+        Ok(result_row)
     }
 
     /// Undo one change and return the change record
     /// or None if there was no change to undo.
     /// Return an error on database problem.
-    pub fn undo(&self) -> Result<Option<ValveRow>, sqlx::Error> {
+    pub async fn undo(&self) -> Result<Option<ValveRow>, sqlx::Error> {
         // DatabaseError
-        todo!();
+        let last_change = match self.get_record_to_undo().await? {
+            None => {
+                valve_log!("WARN: Nothing to undo.");
+                return Ok(None);
+            }
+            Some(r) => r,
+        };
+        let history_id: i32 = last_change.get("history_id");
+        let history_id = history_id as u16;
+        let table: &str = last_change.get("table");
+        let row_number: i64 = last_change.get("row");
+        let row_number = row_number as u32;
+        let from = get_json_from_row(&last_change, "from");
+        let to = get_json_from_row(&last_change, "to");
+
+        match (from, to) {
+            (None, None) => {
+                return Err(SqlxCErr(
+                    "Cannot redo unknown operation from None to None".into(),
+                ))
+            }
+            (None, Some(_)) => {
+                // Undo an insert:
+                let mut tx = self.pool.begin().await?;
+
+                delete_row_tx(
+                    &self.global_config,
+                    &self.compiled_datatype_conditions,
+                    &self.compiled_rule_conditions,
+                    &self.pool,
+                    &mut tx,
+                    table,
+                    &row_number,
+                )
+                .await?;
+
+                switch_undone_state(&self.user, history_id, true, &mut tx, &self.pool).await?;
+                tx.commit().await?;
+                Ok(None)
+            }
+            (Some(from), None) => {
+                // Undo a delete:
+                let mut tx = self.pool.begin().await?;
+
+                insert_new_row_tx(
+                    &self.global_config,
+                    &self.compiled_datatype_conditions,
+                    &self.compiled_rule_conditions,
+                    &self.pool,
+                    &mut tx,
+                    table,
+                    &from,
+                    Some(row_number),
+                    false,
+                )
+                .await?;
+
+                switch_undone_state(&self.user, history_id, true, &mut tx, &self.pool).await?;
+                tx.commit().await?;
+                Ok(Some(from))
+            }
+            (Some(from), Some(_)) => {
+                // Undo an an update:
+                let mut tx = self.pool.begin().await?;
+
+                update_row_tx(
+                    &self.global_config,
+                    &self.compiled_datatype_conditions,
+                    &self.compiled_rule_conditions,
+                    &self.pool,
+                    &mut tx,
+                    table,
+                    &from,
+                    &row_number,
+                    false,
+                    false,
+                )
+                .await?;
+
+                switch_undone_state(&self.user, history_id, true, &mut tx, &self.pool).await?;
+                tx.commit().await?;
+                Ok(Some(from))
+            }
+        }
     }
 
     /// Redo one change and return the change record
     /// or None if there was no change to redo.
     /// Return an error on database problem.
-    pub fn redo(&self) -> Result<Option<ValveRow>, sqlx::Error> {
+    pub async fn redo(&self) -> Result<Option<ValveRow>, sqlx::Error> {
         // DatabaseError
-        todo!();
+        let last_undo = match self.get_record_to_redo().await? {
+            None => {
+                valve_log!("WARN: Nothing to redo.");
+                return Ok(None);
+            }
+            Some(last_undo) => {
+                let undone_by = last_undo.try_get_raw("undone_by")?;
+                if undone_by.is_null() {
+                    valve_log!("WARN: Nothing to redo.");
+                    return Ok(None);
+                }
+                last_undo
+            }
+        };
+        let history_id: i32 = last_undo.get("history_id");
+        let history_id = history_id as u16;
+        let table: &str = last_undo.get("table");
+        let row_number: i64 = last_undo.get("row");
+        let row_number = row_number as u32;
+        let from = get_json_from_row(&last_undo, "from");
+        let to = get_json_from_row(&last_undo, "to");
+
+        match (from, to) {
+            (None, None) => {
+                return Err(SqlxCErr(
+                    "Cannot redo unknown operation from None to None".into(),
+                ))
+            }
+            (None, Some(to)) => {
+                // Redo an insert:
+                let mut tx = self.pool.begin().await?;
+
+                insert_new_row_tx(
+                    &self.global_config,
+                    &self.compiled_datatype_conditions,
+                    &self.compiled_rule_conditions,
+                    &self.pool,
+                    &mut tx,
+                    table,
+                    &to,
+                    Some(row_number),
+                    false,
+                )
+                .await?;
+
+                switch_undone_state(&self.user, history_id, false, &mut tx, &self.pool).await?;
+                tx.commit().await?;
+                Ok(Some(to))
+            }
+            (Some(_), None) => {
+                // Redo a delete:
+                let mut tx = self.pool.begin().await?;
+
+                delete_row_tx(
+                    &self.global_config,
+                    &self.compiled_datatype_conditions,
+                    &self.compiled_rule_conditions,
+                    &self.pool,
+                    &mut tx,
+                    table,
+                    &row_number,
+                )
+                .await?;
+
+                switch_undone_state(&self.user, history_id, false, &mut tx, &self.pool).await?;
+                tx.commit().await?;
+                Ok(None)
+            }
+            (Some(_), Some(to)) => {
+                // Redo an an update:
+                let mut tx = self.pool.begin().await?;
+
+                update_row_tx(
+                    &self.global_config,
+                    &self.compiled_datatype_conditions,
+                    &self.compiled_rule_conditions,
+                    &self.pool,
+                    &mut tx,
+                    table,
+                    &to,
+                    &row_number,
+                    false,
+                    false,
+                )
+                .await?;
+
+                switch_undone_state(&self.user, history_id, false, &mut tx, &self.pool).await?;
+                tx.commit().await?;
+                Ok(Some(to))
+            }
+        }
     }
-}
 
-/// Represents a structure such as those found in the `structure` column of the `column` table in
-/// both its parsed format (i.e., as an [Expression](ast/enum.Expression.html)) as well as in its
-/// original format (i.e., as a plain String).
-#[derive(Clone)]
-pub struct ParsedStructure {
-    pub original: String,
-    pub parsed: Expression,
-}
+    /// Given a config map, a map of compiled datatype conditions, a database connection pool, a
+    /// table name, a column name, and (optionally) a string to match, return a JSON array of
+    /// possible valid values for the given column which contain the matching string as a substring
+    /// (or all of them if no matching string is given). The JSON array returned is formatted for
+    /// Typeahead, i.e., it takes the form: `[{"id": id, "label": label, "order": order}, ...]`.
+    pub async fn get_matching_values(
+        &self,
+        table_name: &str,
+        column_name: &str,
+        matching_string: Option<&str>,
+    ) -> Result<SerdeValue, sqlx::Error> {
+        let config = &self.global_config;
+        let compiled_datatype_conditions = &self.compiled_datatype_conditions;
+        let parsed_structure_conditions = &self.parsed_structure_conditions;
+        let pool = &self.pool;
+        let dt_name = config
+            .get("table")
+            .and_then(|t| t.as_object())
+            .and_then(|t| t.get(table_name))
+            .and_then(|t| t.as_object())
+            .and_then(|t| t.get("column"))
+            .and_then(|c| c.as_object())
+            .and_then(|c| c.get(column_name))
+            .and_then(|c| c.as_object())
+            .and_then(|c| c.get("datatype"))
+            .and_then(|d| d.as_str())
+            .unwrap();
 
-// We use Debug here instead of Display because we have only implemented Debug for Expressions.
-// See the comment about this in ast.rs.
-impl std::fmt::Debug for ParsedStructure {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(
-            f,
-            "{{\"parsed_structure\": {{\"original\": \"{}\", \"parsed\": {:?}}}}}",
-            &self.original, &self.parsed
-        )
-    }
-}
+        let dt_condition = compiled_datatype_conditions
+            .get(dt_name)
+            .and_then(|d| Some(d.parsed.clone()));
 
-/// Represents a condition in three different ways: (i) in String format, (ii) as a parsed
-/// [Expression](ast/enum.Expression.html), and (iii) as a pre-compiled regular expression.
-#[derive(Clone)]
-pub struct CompiledCondition {
-    pub original: String,
-    pub parsed: Expression,
-    pub compiled: Arc<dyn Fn(&str) -> bool + Sync + Send>,
-}
+        let mut values = vec![];
+        match dt_condition {
+            Some(Expression::Function(name, args)) if name == "in" => {
+                for arg in args {
+                    if let Expression::Label(arg) = *arg {
+                        // Remove the enclosing quotes from the values being returned:
+                        let label = unquote(&arg).unwrap_or_else(|_| arg);
+                        if let Some(s) = matching_string {
+                            if label.contains(s) {
+                                values.push(label);
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {
+                // If the datatype for the column does not correspond to an `in(...)` function, then
+                // we check the column's structure constraints. If they include a
+                // `from(foreign_table.foreign_column)` condition, then the values are taken from
+                // the foreign column. Otherwise if the structure includes an
+                // `under(tree_table.tree_column, value)` condition, then get the values from the
+                // tree column that are under `value`.
+                let structure = parsed_structure_conditions.get(
+                    config
+                        .get("table")
+                        .and_then(|t| t.as_object())
+                        .and_then(|t| t.get(table_name))
+                        .and_then(|t| t.as_object())
+                        .and_then(|t| t.get("column"))
+                        .and_then(|c| c.as_object())
+                        .and_then(|c| c.get(column_name))
+                        .and_then(|c| c.as_object())
+                        .and_then(|c| c.get("structure"))
+                        .and_then(|d| d.as_str())
+                        .unwrap_or_else(|| ""),
+                );
 
-// We use Debug here instead of Display because we have only implemented Debug for Expressions.
-// See the comment about this in ast.rs.
-impl std::fmt::Debug for CompiledCondition {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(
-            f,
-            "{{\"compiled_condition\": {{\"original\": \"{}\", \"parsed\": {:?}}}}}",
-            &self.original, &self.parsed
-        )
-    }
-}
+                let sql_type =
+                    get_sql_type_from_global_config(&config, table_name, &column_name, &pool)
+                        .unwrap();
 
-/// Represents a 'when-then' condition, as found in the `rule` table, as two
-/// [CompiledCondition](struct.CompiledCondition.html) structs corresponding to the when and then
-/// parts of the given rule.
-#[derive(Clone)]
-pub struct ColumnRule {
-    pub when: CompiledCondition,
-    pub then: CompiledCondition,
-}
+                match structure {
+                    Some(ParsedStructure { original, parsed }) => {
+                        let matching_string = {
+                            match matching_string {
+                                None => "%".to_string(),
+                                Some(s) => format!("%{}%", s),
+                            }
+                        };
 
-// We use Debug here instead of Display because we have only implemented Debug for Expressions.
-// See the comment about this in ast.rs.
-impl std::fmt::Debug for ColumnRule {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(
-            f,
-            "{{\"column_rule\": {{\"when\": {:?}, \"then\": {:?}}}}}",
-            &self.when, &self.then
-        )
+                        match parsed {
+                            Expression::Function(name, args) if name == "from" => {
+                                let foreign_key = &args[0];
+                                if let Expression::Field(ftable, fcolumn) = &**foreign_key {
+                                    let fcolumn_text = cast_column_sql_to_text(&fcolumn, &sql_type);
+                                    let sql = local_sql_syntax(
+                                        &pool,
+                                        &format!(
+                                            r#"SELECT "{}" FROM "{}" WHERE {} LIKE {}"#,
+                                            fcolumn, ftable, fcolumn_text, SQL_PARAM
+                                        ),
+                                    );
+                                    let rows = sqlx_query(&sql)
+                                        .bind(&matching_string)
+                                        .fetch_all(pool)
+                                        .await?;
+                                    for row in rows.iter() {
+                                        values.push(get_column_value(&row, &fcolumn, &sql_type));
+                                    }
+                                }
+                            }
+                            Expression::Function(name, args)
+                                if name == "under" || name == "tree" =>
+                            {
+                                let mut tree_col = "not set";
+                                let mut under_val = Some("not set".to_string());
+                                if name == "under" {
+                                    if let Expression::Field(_, column) = &**&args[0] {
+                                        tree_col = column;
+                                    }
+                                    if let Expression::Label(label) = &**&args[1] {
+                                        under_val = Some(label.to_string());
+                                    }
+                                } else {
+                                    let tree_key = &args[0];
+                                    if let Expression::Label(label) = &**tree_key {
+                                        tree_col = label;
+                                        under_val = None;
+                                    }
+                                }
+
+                                let tree = config
+                                    .get("constraints")
+                                    .and_then(|c| c.as_object())
+                                    .and_then(|c| c.get("tree"))
+                                    .and_then(|t| t.as_object())
+                                    .and_then(|t| t.get(table_name))
+                                    .and_then(|t| t.as_array())
+                                    .and_then(|t| {
+                                        t.iter().find(|o| o.get("child").unwrap() == tree_col)
+                                    })
+                                    .expect(
+                                        format!("No tree: '{}.{}' found", table_name, tree_col)
+                                            .as_str(),
+                                    )
+                                    .as_object()
+                                    .unwrap();
+                                let child_column =
+                                    tree.get("child").and_then(|c| c.as_str()).unwrap();
+
+                                let (tree_sql, mut params) = with_tree_sql(
+                                    &config,
+                                    tree,
+                                    &table_name.to_string(),
+                                    &table_name.to_string(),
+                                    under_val.as_ref(),
+                                    None,
+                                    &pool,
+                                );
+                                let child_column_text =
+                                    cast_column_sql_to_text(&child_column, &sql_type);
+                                let sql = local_sql_syntax(
+                                    &pool,
+                                    &format!(
+                                        r#"{} SELECT "{}" FROM "tree" WHERE {} LIKE {}"#,
+                                        tree_sql, child_column, child_column_text, SQL_PARAM
+                                    ),
+                                );
+                                params.push(matching_string);
+
+                                let mut query = sqlx_query(&sql);
+                                for param in &params {
+                                    query = query.bind(param);
+                                }
+
+                                let rows = query.fetch_all(pool).await?;
+                                for row in rows.iter() {
+                                    values.push(get_column_value(&row, &child_column, &sql_type));
+                                }
+                            }
+                            _ => panic!("Unrecognised structure: {}", original),
+                        };
+                    }
+                    None => (),
+                };
+            }
+        };
+
+        let mut typeahead_values = vec![];
+        for (i, v) in values.iter().enumerate() {
+            // enumerate() begins at 0 but we need to begin at 1:
+            let i = i + 1;
+            typeahead_values.push(json!({
+                "id": v,
+                "label": v,
+                "order": i,
+            }));
+        }
+
+        Ok(json!(typeahead_values))
     }
 }
 
 /// TODO: Add docstring here.
-pub async fn get_pool_from_connection_string(database: &str) -> Result<AnyPool, sqlx::Error> {
+async fn get_pool_from_connection_string(database: &str) -> Result<AnyPool, sqlx::Error> {
     let connection_options;
     if database.starts_with("postgresql://") {
         connection_options = AnyConnectOptions::from_str(database)?;
@@ -1170,7 +1713,7 @@ pub async fn get_pool_from_connection_string(database: &str) -> Result<AnyPool, 
 /// table named "table"), load and check the 'table', 'column', and 'datatype' tables, and return
 /// SerdeMaps corresponding to specials, tables, datatypes, rules, constraints, and a vector
 /// containing the names of the tables in the dattatabse in sorted order.
-pub fn read_config_files(
+fn read_config_files(
     path: &str,
     config_table: &str,
     parser: &StartParser,
@@ -1642,7 +2185,6 @@ pub fn read_config_files(
         }),
     );
 
-    // TODO: Are there some missing columns here?
     // Manually add the history table config:
     tables_config.insert(
         "history".to_string(),
@@ -1747,7 +2289,7 @@ pub fn read_config_files(
 /// Given the global configuration map and a parser, compile all of the datatype conditions,
 /// add them to a hash map whose keys are the text versions of the conditions and whose values
 /// are the compiled conditions, and then finally return the hash map.
-pub fn get_compiled_datatype_conditions(
+fn get_compiled_datatype_conditions(
     config: &SerdeMap,
     parser: &StartParser,
 ) -> HashMap<String, CompiledCondition> {
@@ -1779,7 +2321,7 @@ pub fn get_compiled_datatype_conditions(
 ///      ...
 /// }
 /// ```
-pub fn get_compiled_rule_conditions(
+fn get_compiled_rule_conditions(
     config: &SerdeMap,
     compiled_datatype_conditions: HashMap<String, CompiledCondition>,
     parser: &StartParser,
@@ -1857,7 +2399,7 @@ pub fn get_compiled_rule_conditions(
 /// Given the global config map and a parser, parse all of the structure conditions, add them to
 /// a hash map whose keys are given by the text versions of the conditions and whose values are
 /// given by the parsed versions, and finally return the hashmap.
-pub fn get_parsed_structure_conditions(
+fn get_parsed_structure_conditions(
     config: &SerdeMap,
     parser: &StartParser,
 ) -> HashMap<String, ParsedStructure> {
@@ -1899,7 +2441,6 @@ pub fn get_parsed_structure_conditions(
     parsed_structure_conditions
 }
 
-// TODO: Modify this function so that it no longer returns the DROP statement, once you have
 // removed the old valve functions that require it.
 /// Given the name of a table and a database connection pool, generate SQL for creating a view
 /// based on the table that provides a unified representation of the normal and conflict versions
@@ -1907,11 +2448,9 @@ pub fn get_parsed_structure_conditions(
 /// contained in the message and history tables. The SQL generated is in the form of a tuple of
 /// Strings, with the first string being a SQL statement for dropping the view, and the second
 /// string being a SQL statement for creating it.
-fn get_sql_for_standard_view(table: &str, pool: &AnyPool) -> (String, String) {
-    let mut drop_view_sql = format!(r#"DROP VIEW IF EXISTS "{}_view""#, table);
+fn get_sql_for_standard_view(table: &str, pool: &AnyPool) -> String {
     let message_t;
     if pool.any_kind() == AnyKind::Postgres {
-        drop_view_sql.push_str(" CASCADE");
         message_t = format!(
             indoc! {r#"
                 (
@@ -1951,7 +2490,6 @@ fn get_sql_for_standard_view(table: &str, pool: &AnyPool) -> (String, String) {
             t = table,
         );
     }
-    drop_view_sql.push_str(";");
 
     let history_t;
     if pool.any_kind() == AnyKind::Postgres {
@@ -2010,11 +2548,9 @@ fn get_sql_for_standard_view(table: &str, pool: &AnyPool) -> (String, String) {
         history_t = history_t,
     );
 
-    (drop_view_sql, create_view_sql)
+    create_view_sql
 }
 
-// TODO: Modify this function so that it no longer returns the DROP statement, once you have
-// removed the old valve functions that require it.
 /// Given the tables configuration map, the name of a table and a database connection pool,
 /// generate SQL for creating a more user-friendly version of the view than the one generated by
 /// [get_sql_for_standard_view()]. Unlike the standard view generated by that function, the view
@@ -2023,11 +2559,7 @@ fn get_sql_for_standard_view(table: &str, pool: &AnyPool) -> (String, String) {
 /// errors. Like the function for generating a standard view, the SQL generated by this function is
 /// returned in the form of a tuple of Strings, with the first string being a SQL statement
 /// for dropping the view, and the second string being a SQL statement for creating it.
-fn get_sql_for_text_view(
-    tables_config: &SerdeMap,
-    table: &str,
-    pool: &AnyPool,
-) -> (String, String) {
+fn get_sql_for_text_view(tables_config: &SerdeMap, table: &str, pool: &AnyPool) -> String {
     let is_clause = if pool.any_kind() == AnyKind::Sqlite {
         "IS"
     } else {
@@ -2047,11 +2579,6 @@ fn get_sql_for_text_view(
     // Add a second "text view" such that the datatypes of all values are TEXT and appear
     // directly in their corresponsing columns (rather than as NULLs) even when they have
     // SQL datatype errors.
-    let mut drop_view_sql = format!(r#"DROP VIEW IF EXISTS "{}_text_view""#, table);
-    if pool.any_kind() == AnyKind::Postgres {
-        drop_view_sql.push_str(" CASCADE");
-    }
-
     let mut inner_columns = real_columns
         .iter()
         .map(|c| {
@@ -2116,419 +2643,14 @@ fn get_sql_for_text_view(
         table = table,
     );
 
-    (drop_view_sql, create_view_sql)
-}
-
-// TODO: Remove this function once it has been factored.
-/// Given config maps for tables and datatypes, a database connection pool, and a StartParser,
-/// read in the TSV files corresponding to the tables defined in the tables config, and use that
-/// information to fill in constraints information into a new config map that is then returned along
-/// with a list of the tables in the database sorted according to their mutual dependencies. If
-/// the flag `verbose` is set to true, emit SQL to create the database schema to STDOUT.
-/// If `command` is set to [ValveCommand::Create], execute the SQL statements to create the
-/// database using the given connection pool. If it is set to [ValveCommand::Load], execute the SQL
-/// to load it as well.
-pub async fn configure_db(
-    tables_config: &mut SerdeMap,
-    datatypes_config: &mut SerdeMap,
-    pool: &AnyPool,
-    parser: &StartParser,
-    verbose: bool,
-    command: &ValveCommand,
-) -> Result<(Vec<String>, SerdeMap), sqlx::Error> {
-    // This is the SerdeMap that we will be returning:
-    let mut constraints_config = SerdeMap::new();
-    constraints_config.insert(String::from("foreign"), SerdeValue::Object(SerdeMap::new()));
-    constraints_config.insert(String::from("unique"), SerdeValue::Object(SerdeMap::new()));
-    constraints_config.insert(String::from("primary"), SerdeValue::Object(SerdeMap::new()));
-    constraints_config.insert(String::from("tree"), SerdeValue::Object(SerdeMap::new()));
-    constraints_config.insert(String::from("under"), SerdeValue::Object(SerdeMap::new()));
-
-    // Begin by reading in the TSV files corresponding to the tables defined in tables_config, and
-    // use that information to create the associated database tables, while saving constraint
-    // information to constrains_config.
-    let mut setup_statements = HashMap::new();
-    for table_name in tables_config.keys().cloned().collect::<Vec<_>>() {
-        let optional_path = tables_config
-            .get(&table_name)
-            .and_then(|r| r.get("path"))
-            .and_then(|p| p.as_str());
-
-        let mut path = None;
-        match optional_path {
-            None => {
-                // If an entry of the tables_config has no path then it is an internal table which
-                // need not be configured explicitly. Currently the only examples are the message
-                // and history tables.
-                if table_name != "message" && table_name != "history" {
-                    panic!("No path defined for table {}", table_name);
-                }
-                continue;
-            }
-            Some(p) if !Path::new(p).is_file() => {
-                valve_log!("WARN: File does not exist {}", p);
-            }
-            Some(p) if Path::new(p).canonicalize().is_err() => {
-                valve_log!("WARN: File path could not be made canonical {}", p);
-            }
-            Some(p) => path = Some(p.to_string()),
-        };
-
-        let defined_columns: Vec<String> = tables_config
-            .get(&table_name)
-            .and_then(|r| r.get("column"))
-            .and_then(|v| v.as_object())
-            .and_then(|o| Some(o.keys()))
-            .and_then(|k| Some(k.cloned()))
-            .and_then(|k| Some(k.collect()))
-            .unwrap();
-
-        // We use column_order to explicitly indicate the order in which the columns should appear
-        // in the table, for later reference. The default is to preserve the order from the actual
-        // table file. If that does not exist, we use the ordering in defined_columns.
-        let mut column_order = vec![];
-        if let Some(path) = path {
-            // Get the actual columns from the data itself. Note that we set has_headers to
-            // false(even though the files have header rows) in order to explicitly read the
-            // header row.
-            let mut rdr = csv::ReaderBuilder::new()
-                .has_headers(false)
-                .delimiter(b'\t')
-                .from_reader(File::open(path.clone()).unwrap_or_else(|err| {
-                    panic!("Unable to open '{}': {}", path.clone(), err);
-                }));
-            let mut iter = rdr.records();
-            if let Some(result) = iter.next() {
-                let actual_columns = result
-                    .unwrap()
-                    .iter()
-                    .map(|c| c.to_string())
-                    .collect::<Vec<_>>();
-                // Make sure that the actual columns found in the table file, and the columns
-                // defined in the column config, exactly match in terms of their content:
-                for column_name in &actual_columns {
-                    column_order.push(json!(column_name));
-                    if !defined_columns.contains(&column_name.to_string()) {
-                        panic!(
-                            "Column '{}.{}' not in column config",
-                            table_name, column_name
-                        );
-                    }
-                }
-                for column_name in &defined_columns {
-                    if !actual_columns.contains(&column_name.to_string()) {
-                        panic!(
-                            "Defined column '{}.{}' not found in table",
-                            table_name, column_name
-                        );
-                    }
-                }
-            } else {
-                panic!("'{}' is empty", path);
-            }
-        }
-
-        if column_order.is_empty() {
-            column_order = defined_columns.iter().map(|c| json!(c)).collect::<Vec<_>>();
-        }
-        tables_config
-            .get_mut(&table_name)
-            .and_then(|t| t.as_object_mut())
-            .and_then(|o| {
-                o.insert(
-                    String::from("column_order"),
-                    SerdeValue::Array(column_order),
-                )
-            });
-
-        // Create the table and its corresponding conflict table:
-        let mut table_statements = vec![];
-        for table in vec![table_name.to_string(), format!("{}_conflict", table_name)] {
-            let (mut statements, table_constraints) =
-                create_table_statement(tables_config, datatypes_config, parser, &table, &pool);
-            table_statements.append(&mut statements);
-            if !table.ends_with("_conflict") {
-                for constraint_type in vec!["foreign", "unique", "primary", "tree", "under"] {
-                    let table_constraints = table_constraints.get(constraint_type).unwrap().clone();
-                    constraints_config
-                        .get_mut(constraint_type)
-                        .and_then(|o| o.as_object_mut())
-                        .and_then(|o| o.insert(table_name.to_string(), table_constraints));
-                }
-            }
-        }
-
-        let (drop_view_sql, create_view_sql) = get_sql_for_standard_view(&table_name, pool);
-        let (drop_text_view_sql, create_text_view_sql) =
-            get_sql_for_text_view(tables_config, &table_name, pool);
-        table_statements.push(drop_text_view_sql);
-        table_statements.push(drop_view_sql);
-        table_statements.push(create_view_sql);
-        table_statements.push(create_text_view_sql);
-
-        setup_statements.insert(table_name.to_string(), table_statements);
-    }
-
-    // Sort the tables according to their foreign key dependencies so that tables are always loaded
-    // after the tables they depend on. Ignore the internal message and history tables:
-    let sorted_tables = verify_table_deps_and_sort(
-        &setup_statements.keys().cloned().collect(),
-        &constraints_config,
-    );
-
-    if *command != ValveCommand::Config || verbose {
-        // Generate DDL for the history table:
-        let mut history_statements = vec![];
-        history_statements.push({
-            let mut sql = r#"DROP TABLE IF EXISTS "history""#.to_string();
-            if pool.any_kind() == AnyKind::Postgres {
-                sql.push_str(" CASCADE");
-            }
-            sql.push_str(";");
-            sql
-        });
-        history_statements.push(format!(
-            indoc! {r#"
-                CREATE TABLE "history" (
-                  {row_number}
-                  "table" TEXT,
-                  "row" BIGINT,
-                  "from" TEXT,
-                  "to" TEXT,
-                  "summary" TEXT,
-                  "user" TEXT,
-                  "undone_by" TEXT,
-                  {timestamp}
-                );
-              "#},
-            row_number = {
-                if pool.any_kind() == AnyKind::Sqlite {
-                    "\"history_id\" INTEGER PRIMARY KEY,"
-                } else {
-                    "\"history_id\" SERIAL PRIMARY KEY,"
-                }
-            },
-            timestamp = {
-                if pool.any_kind() == AnyKind::Sqlite {
-                    "\"timestamp\" TIMESTAMP DEFAULT(STRFTIME('%Y-%m-%d %H:%M:%f', 'NOW'))"
-                } else {
-                    "\"timestamp\" TIMESTAMP DEFAULT CURRENT_TIMESTAMP"
-                }
-            },
-        ));
-        history_statements
-            .push(r#"CREATE INDEX "history_tr_idx" ON "history"("table", "row");"#.to_string());
-        setup_statements.insert("history".to_string(), history_statements);
-
-        // Generate DDL for the message table:
-        let mut message_statements = vec![];
-        message_statements.push({
-            let mut sql = r#"DROP TABLE IF EXISTS "message""#.to_string();
-            if pool.any_kind() == AnyKind::Postgres {
-                sql.push_str(" CASCADE");
-            }
-            sql.push_str(";");
-            sql
-        });
-        message_statements.push(format!(
-            indoc! {r#"
-                CREATE TABLE "message" (
-                  {}
-                  "table" TEXT,
-                  "row" BIGINT,
-                  "column" TEXT,
-                  "value" TEXT,
-                  "level" TEXT,
-                  "rule" TEXT,
-                  "message" TEXT
-                );
-              "#},
-            {
-                if pool.any_kind() == AnyKind::Sqlite {
-                    "\"message_id\" INTEGER PRIMARY KEY,"
-                } else {
-                    "\"message_id\" SERIAL PRIMARY KEY,"
-                }
-            },
-        ));
-        message_statements.push(
-            r#"CREATE INDEX "message_trc_idx" ON "message"("table", "row", "column");"#.to_string(),
-        );
-        setup_statements.insert("message".to_string(), message_statements);
-
-        // Add the message and history tables to the beginning of the list of tables to create
-        // (the message table in particular needs to be at the beginning since the table views all
-        // reference it).
-        let mut tables_to_create = vec!["message".to_string(), "history".to_string()];
-        tables_to_create.append(&mut sorted_tables.clone());
-        for table in &tables_to_create {
-            let table_statements = setup_statements.get(table).unwrap();
-            if *command != ValveCommand::Config {
-                for stmt in table_statements {
-                    sqlx_query(stmt)
-                        .execute(pool)
-                        .await
-                        .expect(format!("The SQL statement: {} returned an error", stmt).as_str());
-                }
-            }
-            if verbose {
-                let output = String::from(table_statements.join("\n"));
-                println!("{}\n", output);
-            }
-        }
-    }
-
-    return Ok((sorted_tables, constraints_config));
-}
-
-/// Various VALVE commands, used with [valve()](valve).
-#[derive(Debug, PartialEq, Eq)]
-pub enum ValveCommand {
-    /// Configure but do not create or load.
-    Config,
-    /// Configure and create but do not load.
-    Create,
-    /// Configure, create, and load.
-    Load,
-}
-
-/// Given a path to a configuration table (either a table.tsv file or a database containing a
-/// table named "table"), and a directory in which to find/create a database: configure the
-/// database using the configuration which can be looked up using the table table, and
-/// optionally create and/or load it according to the value of `command` (see [ValveCommand]).
-/// If the `verbose` flag is set to true, output status messages while loading. If `config_table`
-/// is given and `table_table` indicates a database, query the table called `config_table` for the
-/// table table information. Returns the configuration map as a String. If `initial_load` is set to
-/// true, then (SQLite only) the database settings will be tuned for initial loading. Note that
-/// these settings are unsafe and should be used for initial loading only, as data integrity will
-/// not be guaranteed in the case of an interrupted transaction.
-pub async fn valve(
-    table_table: &str,
-    database: &str,
-    command: &ValveCommand,
-    verbose: bool,
-    initial_load: bool,
-    config_table: &str,
-) -> Result<String, sqlx::Error> {
-    // To connect to a postgresql database listening to a unix domain socket:
-    // ----------------------------------------------------------------------
-    // let connection_options =
-    //     AnyConnectOptions::from_str("postgres:///testdb?host=/var/run/postgresql")?;
-    //
-    // To query the connection type at runtime via the pool:
-    // -----------------------------------------------------
-    // let db_type = pool.any_kind();
-
-    let connection_options;
-    if database.starts_with("postgresql://") {
-        connection_options = AnyConnectOptions::from_str(database)?;
-    } else {
-        let connection_string;
-        if !database.starts_with("sqlite://") {
-            connection_string = format!("sqlite://{}?mode=rwc", database);
-        } else {
-            connection_string = database.to_string();
-        }
-        connection_options = AnyConnectOptions::from_str(connection_string.as_str()).unwrap();
-    }
-
-    let pool = AnyPoolOptions::new()
-        .max_connections(5)
-        .connect_with(connection_options)
-        .await?;
-
-    let parser = StartParser::new();
-
-    let (specials_config, mut tables_config, mut datatypes_config, rules_config, _, _) =
-        read_config_files(&table_table.to_string(), config_table, &parser, &pool);
-
-    if *command == ValveCommand::Load && pool.any_kind() == AnyKind::Sqlite {
-        sqlx_query("PRAGMA foreign_keys = ON")
-            .execute(&pool)
-            .await?;
-        if initial_load {
-            // These pragmas are unsafe but they are used during initial loading since data
-            // integrity is not a priority in this case.
-            sqlx_query("PRAGMA journal_mode = OFF")
-                .execute(&pool)
-                .await?;
-            sqlx_query("PRAGMA synchronous = 0").execute(&pool).await?;
-            sqlx_query("PRAGMA cache_size = 1000000")
-                .execute(&pool)
-                .await?;
-            sqlx_query("PRAGMA temp_store = MEMORY")
-                .execute(&pool)
-                .await?;
-        }
-    }
-
-    let (sorted_table_list, constraints_config) = configure_db(
-        &mut tables_config,
-        &mut datatypes_config,
-        &pool,
-        &parser,
-        verbose,
-        command,
-    )
-    .await?;
-
-    let mut config = SerdeMap::new();
-    config.insert(
-        String::from("special"),
-        SerdeValue::Object(specials_config.clone()),
-    );
-    config.insert(
-        String::from("table"),
-        SerdeValue::Object(tables_config.clone()),
-    );
-    config.insert(
-        String::from("datatype"),
-        SerdeValue::Object(datatypes_config.clone()),
-    );
-    config.insert(
-        String::from("rule"),
-        SerdeValue::Object(rules_config.clone()),
-    );
-    config.insert(
-        String::from("constraints"),
-        SerdeValue::Object(constraints_config.clone()),
-    );
-    let mut sorted_table_serdevalue_list: Vec<SerdeValue> = vec![];
-    for table in &sorted_table_list {
-        sorted_table_serdevalue_list.push(SerdeValue::String(table.to_string()));
-    }
-    config.insert(
-        String::from("sorted_table_list"),
-        SerdeValue::Array(sorted_table_serdevalue_list),
-    );
-
-    let compiled_datatype_conditions = get_compiled_datatype_conditions(&config, &parser);
-    let compiled_rule_conditions =
-        get_compiled_rule_conditions(&config, compiled_datatype_conditions.clone(), &parser);
-
-    if *command == ValveCommand::Load {
-        if verbose {
-            valve_log!("Processing {} tables.", sorted_table_list.len());
-        }
-        load_db(
-            &config,
-            &pool,
-            &compiled_datatype_conditions,
-            &compiled_rule_conditions,
-            verbose,
-        )
-        .await?;
-    }
-
-    let config = SerdeValue::Object(config);
-    Ok(config.to_string())
+    create_view_sql
 }
 
 /// Given a table name, a column name, and a database pool, construct an SQL string to extract the
 /// value of the column, such that when the value of a given column is null, the query attempts to
 /// extract it from the message table. Returns a String representing the SQL to retrieve the value
 /// of the column.
-pub fn query_column_with_message_value(table: &str, column: &str, pool: &AnyPool) -> String {
+fn query_column_with_message_value(table: &str, column: &str, pool: &AnyPool) -> String {
     let is_clause = if pool.any_kind() == AnyKind::Sqlite {
         "IS"
     } else {
@@ -2562,7 +2684,7 @@ pub fn query_column_with_message_value(table: &str, column: &str, pool: &AnyPool
 /// SQL query that one can use to get the logical contents of the table, such that when the value
 /// of a given column is null, the query attempts to extract it from the message table. Returns a
 /// String representing the query.
-pub fn query_with_message_values(table: &str, global_config: &SerdeMap, pool: &AnyPool) -> String {
+fn query_with_message_values(table: &str, global_config: &SerdeMap, pool: &AnyPool) -> String {
     let real_columns = global_config
         .get("table")
         .and_then(|t| t.get(table))
@@ -2612,7 +2734,7 @@ pub fn query_with_message_values(table: &str, global_config: &SerdeMap, pool: &A
 /// column name, and a value for that column: get the rows, other than the one indicated by
 /// `except`, that would need to be revalidated if the given value were to replace the actual
 /// value of the column in that row.
-pub async fn get_affected_rows(
+async fn get_affected_rows(
     table: &str,
     column: &str,
     value: &str,
@@ -2678,7 +2800,7 @@ pub async fn get_affected_rows(
 /// Given a global configuration map, a database connection pool, a database transaction, a table
 /// name and a row number, get the logical contents of that row (whether or not it is valid),
 /// including any messages, from the database.
-pub async fn get_row_from_db(
+async fn get_row_from_db(
     global_config: &SerdeMap,
     pool: &AnyPool,
     tx: &mut Transaction<'_, sqlx::Any>,
@@ -2752,7 +2874,7 @@ pub async fn get_row_from_db(
 
 /// Given a database connection pool, a database transaction, a table name, a column name, and a row
 /// number, get the current value of the given column in the database.
-pub async fn get_db_value(
+async fn get_db_value(
     table: &str,
     column: &str,
     row_number: &u32,
@@ -2811,7 +2933,7 @@ pub async fn get_db_value(
 /// and a [QueryAsIf] struct representing a custom modification to the query of the table, get
 /// the rows that will potentially be affected by the database change to the row indicated in
 /// query_as_if.
-pub async fn get_rows_to_update(
+async fn get_rows_to_update(
     global_config: &SerdeMap,
     pool: &AnyPool,
     tx: &mut Transaction<'_, sqlx::Any>,
@@ -3026,7 +3148,7 @@ pub async fn get_rows_to_update(
 /// a database transaction, a number of updates to process, a [QueryAsIf] struct indicating how
 /// we should modify 'in thought' the current state of the database, and a flag indicating whether
 /// we should allow recursive updates, validate and then update each row indicated in `updates`.
-pub async fn process_updates(
+async fn process_updates(
     global_config: &SerdeMap,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
@@ -3039,7 +3161,7 @@ pub async fn process_updates(
     for (update_table, rows_to_update) in updates {
         for (row_number, row) in rows_to_update {
             // Validate each row 'counterfactually':
-            let vrow = validate_row(
+            let vrow = validate_row_tx(
                 global_config,
                 compiled_datatype_conditions,
                 compiled_rule_conditions,
@@ -3075,7 +3197,7 @@ pub async fn process_updates(
 /// are going to change it from, optionally: the version of the row we are going to change it to,
 /// and the name of the user making the change, record the change to the history table in the
 /// database. Note that `from` and `to` cannot both be None.
-pub async fn record_row_change(
+async fn record_row_change(
     tx: &mut Transaction<'_, sqlx::Any>,
     table: &str,
     row_number: &u32,
@@ -3239,245 +3361,6 @@ async fn switch_undone_state(
     Ok(())
 }
 
-/// Given a database pool fetch the last row inserted to the history table that has not been undone.
-pub async fn get_record_to_undo(pool: &AnyPool) -> Result<Option<AnyRow>, sqlx::Error> {
-    // Look in the history table, get the row with the greatest ID, get the row number,
-    // from, and to, and determine whether the last operation was a delete, insert, or update.
-    let is_clause = if pool.any_kind() == AnyKind::Sqlite {
-        "IS"
-    } else {
-        "IS NOT DISTINCT FROM"
-    };
-    let sql = format!(
-        r#"SELECT * FROM "history"
-           WHERE "undone_by" {} NULL
-           ORDER BY "history_id" DESC LIMIT 1"#,
-        is_clause
-    );
-    let query = sqlx_query(&sql);
-    let result_row = query.fetch_optional(pool).await?;
-    Ok(result_row)
-}
-
-/// Given a database pool fetch the row in the history table that has been most recently marked as
-/// undone.
-pub async fn get_record_to_redo(pool: &AnyPool) -> Result<Option<AnyRow>, sqlx::Error> {
-    // Look in the history table, get the row with the greatest ID, get the row number,
-    // from, and to, and determine whether the last operation was a delete, insert, or update.
-    let is_not_clause = if pool.any_kind() == AnyKind::Sqlite {
-        "IS NOT"
-    } else {
-        "IS DISTINCT FROM"
-    };
-    let sql = format!(
-        r#"SELECT * FROM "history"
-           WHERE "undone_by" {} NULL
-           ORDER BY "timestamp" DESC LIMIT 1"#,
-        is_not_clause
-    );
-    let query = sqlx_query(&sql);
-    let result_row = query.fetch_optional(pool).await?;
-    Ok(result_row)
-}
-
-/// Given a global configuration map, maps of compiled datatype and ruled conditions, a database
-/// connection pool, and the user who initiated the undo, find the last recorded change to the
-/// database and undo it, indicating in the history table that undo_user is responsible.
-#[async_recursion]
-pub async fn undo(
-    global_config: &SerdeMap,
-    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
-    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
-    pool: &AnyPool,
-    undo_user: &str,
-) -> Result<(), sqlx::Error> {
-    let last_change = match get_record_to_undo(pool).await? {
-        None => {
-            valve_log!("WARN: Nothing to undo.");
-            return Ok(());
-        }
-        Some(r) => r,
-    };
-    let history_id: i32 = last_change.get("history_id");
-    let history_id = history_id as u16;
-    let table: &str = last_change.get("table");
-    let row_number: i64 = last_change.get("row");
-    let row_number = row_number as u32;
-    let from = get_json_from_row(&last_change, "from");
-    let to = get_json_from_row(&last_change, "to");
-
-    match (from, to) {
-        (None, None) => {
-            return Err(SqlxCErr(
-                "Cannot redo unknown operation from None to None".into(),
-            ))
-        }
-        (None, Some(_)) => {
-            // Undo an insert:
-            let mut tx = pool.begin().await?;
-
-            delete_row_tx(
-                global_config,
-                compiled_datatype_conditions,
-                compiled_rule_conditions,
-                pool,
-                &mut tx,
-                table,
-                &row_number,
-            )
-            .await?;
-
-            switch_undone_state(undo_user, history_id, true, &mut tx, pool).await?;
-            tx.commit().await?;
-        }
-        (Some(from), None) => {
-            // Undo a delete:
-            let mut tx = pool.begin().await?;
-
-            insert_new_row_tx(
-                global_config,
-                compiled_datatype_conditions,
-                compiled_rule_conditions,
-                pool,
-                &mut tx,
-                table,
-                &from,
-                Some(row_number),
-                false,
-            )
-            .await?;
-
-            switch_undone_state(undo_user, history_id, true, &mut tx, pool).await?;
-            tx.commit().await?;
-        }
-        (Some(from), Some(_)) => {
-            // Undo an an update:
-            let mut tx = pool.begin().await?;
-
-            update_row_tx(
-                global_config,
-                compiled_datatype_conditions,
-                compiled_rule_conditions,
-                pool,
-                &mut tx,
-                table,
-                &from,
-                &row_number,
-                false,
-                false,
-            )
-            .await?;
-
-            switch_undone_state(undo_user, history_id, true, &mut tx, pool).await?;
-            tx.commit().await?;
-        }
-    }
-    Ok(())
-}
-
-/// Given a global configuration map, maps of compiled datatype and ruled conditions, a database
-/// connection pool, and the user who initiated the redo, find the last recorded change to the
-/// database that was undone and redo it, indicating in the history table that redo_user is
-/// responsible for the redo.
-#[async_recursion]
-pub async fn redo(
-    global_config: &SerdeMap,
-    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
-    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
-    pool: &AnyPool,
-    redo_user: &str,
-) -> Result<(), sqlx::Error> {
-    let last_undo = match get_record_to_redo(pool).await? {
-        None => {
-            valve_log!("WARN: Nothing to redo.");
-            return Ok(());
-        }
-        Some(last_undo) => {
-            let undone_by = last_undo.try_get_raw("undone_by")?;
-            if undone_by.is_null() {
-                valve_log!("WARN: Nothing to redo.");
-                return Ok(());
-            }
-            last_undo
-        }
-    };
-    let history_id: i32 = last_undo.get("history_id");
-    let history_id = history_id as u16;
-    let table: &str = last_undo.get("table");
-    let row_number: i64 = last_undo.get("row");
-    let row_number = row_number as u32;
-    let from = get_json_from_row(&last_undo, "from");
-    let to = get_json_from_row(&last_undo, "to");
-
-    match (from, to) {
-        (None, None) => {
-            return Err(SqlxCErr(
-                "Cannot redo unknown operation from None to None".into(),
-            ))
-        }
-        (None, Some(to)) => {
-            // Redo an insert:
-            let mut tx = pool.begin().await?;
-
-            insert_new_row_tx(
-                global_config,
-                compiled_datatype_conditions,
-                compiled_rule_conditions,
-                pool,
-                &mut tx,
-                table,
-                &to,
-                Some(row_number),
-                false,
-            )
-            .await?;
-
-            switch_undone_state(redo_user, history_id, false, &mut tx, pool).await?;
-            tx.commit().await?;
-        }
-        (Some(_), None) => {
-            // Redo a delete:
-            let mut tx = pool.begin().await?;
-
-            delete_row_tx(
-                global_config,
-                compiled_datatype_conditions,
-                compiled_rule_conditions,
-                pool,
-                &mut tx,
-                table,
-                &row_number,
-            )
-            .await?;
-
-            switch_undone_state(redo_user, history_id, false, &mut tx, pool).await?;
-            tx.commit().await?;
-        }
-        (Some(_), Some(to)) => {
-            // Redo an an update:
-            let mut tx = pool.begin().await?;
-
-            update_row_tx(
-                global_config,
-                compiled_datatype_conditions,
-                compiled_rule_conditions,
-                pool,
-                &mut tx,
-                table,
-                &to,
-                &row_number,
-                false,
-                false,
-            )
-            .await?;
-
-            switch_undone_state(redo_user, history_id, false, &mut tx, pool).await?;
-            tx.commit().await?;
-        }
-    }
-    Ok(())
-}
-
 /// Given a global config map and a table name, return a list of the columns from the table
 /// that may potentially result in database conflicts.
 fn get_conflict_columns(global_config: &SerdeMap, table_name: &str) -> Vec<SerdeValue> {
@@ -3588,60 +3471,12 @@ fn is_sql_type_error(sql_type: &str, value: &str) -> bool {
     }
 }
 
-/// A wrapper around [insert_new_row_tx()] in which the following steps are also performed:
-/// - A database transaction is created and then committed once the given new row has been inserted.
-/// - The row is validated before insertion and the update to the database is recorded to the
-///   history table indicating that the given user is responsible for the change.
-#[async_recursion]
-pub async fn insert_new_row(
-    global_config: &SerdeMap,
-    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
-    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
-    pool: &AnyPool,
-    table: &str,
-    row: &ValveRow,
-    new_row_number: Option<u32>,
-    user: &str,
-) -> Result<u32, sqlx::Error> {
-    let mut tx = pool.begin().await?;
-
-    let row = validate_row(
-        global_config,
-        compiled_datatype_conditions,
-        compiled_rule_conditions,
-        pool,
-        Some(&mut tx),
-        table,
-        row,
-        new_row_number,
-        None,
-    )
-    .await?;
-
-    let rn = insert_new_row_tx(
-        global_config,
-        compiled_datatype_conditions,
-        compiled_rule_conditions,
-        pool,
-        &mut tx,
-        table,
-        &row,
-        new_row_number,
-        true,
-    )
-    .await?;
-
-    record_row_change(&mut tx, table, &rn, None, Some(&row), user).await?;
-    tx.commit().await?;
-    Ok(rn)
-}
-
 /// Given a global config map, compiled datatype and rule conditions, a database connection pool, a
 /// database transaction, a table name, and a row, assign the given new row number to the row and
 /// insert it to the database using the given transaction, then return the new row number.
-/// If skip_validation is set to true, omit the implicit call to [validate_row()].
+/// If skip_validation is set to true, omit the implicit call to [validate_row_tx()].
 #[async_recursion]
-pub async fn insert_new_row_tx(
+async fn insert_new_row_tx(
     global_config: &SerdeMap,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
@@ -3655,7 +3490,7 @@ pub async fn insert_new_row_tx(
     // Send the row through the row validator to determine if any fields are problematic and
     // to mark them with appropriate messages:
     let row = if !skip_validation {
-        validate_row(
+        validate_row_tx(
             global_config,
             compiled_datatype_conditions,
             compiled_rule_conditions,
@@ -3843,43 +3678,10 @@ pub async fn insert_new_row_tx(
     Ok(new_row_number)
 }
 
-/// A wrapper around [delete_row_tx()] in which the database transaction is implicitly created
-/// and then committed once the given row has been deleted, and the change to the database is
-/// recorded in the history table indicating that the given user is responsible for the change.
-#[async_recursion]
-pub async fn delete_row(
-    global_config: &SerdeMap,
-    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
-    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
-    pool: &AnyPool,
-    table: &str,
-    row_number: &u32,
-    user: &str,
-) -> Result<(), sqlx::Error> {
-    let mut tx = pool.begin().await?;
-
-    let row = get_row_from_db(global_config, pool, &mut tx, &table, row_number).await?;
-    record_row_change(&mut tx, &table, row_number, Some(&row), None, user).await?;
-
-    delete_row_tx(
-        global_config,
-        compiled_datatype_conditions,
-        compiled_rule_conditions,
-        pool,
-        &mut tx,
-        table,
-        row_number,
-    )
-    .await?;
-
-    tx.commit().await?;
-    Ok(())
-}
-
 /// Given a global config map, maps of datatype and rule conditions, a database connection pool, a
 /// database transaction, a table name, and a row number, delete the given row from the database.
 #[async_recursion]
-pub async fn delete_row_tx(
+async fn delete_row_tx(
     global_config: &SerdeMap,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
@@ -3957,76 +3759,13 @@ pub async fn delete_row_tx(
     Ok(())
 }
 
-/// A wrapper around [update_row_tx()] in which the database transaction is implicitly created
-/// and then committed once the given row has been updated, the given row is validated before
-/// the update, and the update is recorded to the history table indicating that the given user
-/// is responsible for the change.
-#[async_recursion]
-pub async fn update_row(
-    global_config: &SerdeMap,
-    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
-    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
-    pool: &AnyPool,
-    table_name: &str,
-    row: &ValveRow,
-    row_number: &u32,
-    user: &str,
-) -> Result<(), sqlx::Error> {
-    let mut tx = pool.begin().await?;
-
-    // Get the old version of the row from the database so that we can later record it to the
-    // history table:
-    let old_row = get_row_from_db(global_config, pool, &mut tx, table_name, row_number).await?;
-
-    let row = validate_row(
-        global_config,
-        compiled_datatype_conditions,
-        compiled_rule_conditions,
-        pool,
-        Some(&mut tx),
-        table_name,
-        row,
-        Some(*row_number),
-        None,
-    )
-    .await?;
-
-    update_row_tx(
-        global_config,
-        compiled_datatype_conditions,
-        compiled_rule_conditions,
-        pool,
-        &mut tx,
-        table_name,
-        &row,
-        row_number,
-        true,
-        false,
-    )
-    .await?;
-
-    // Record the row update in the history table:
-    record_row_change(
-        &mut tx,
-        table_name,
-        row_number,
-        Some(&old_row),
-        Some(&row),
-        user,
-    )
-    .await?;
-
-    tx.commit().await?;
-    Ok(())
-}
-
 /// Given global config map, maps of compiled datatype and rule conditions, a database connection
 /// pool, a database transaction, a table name, a row, and the row number to update, update the
 /// corresponding row in the database. If skip_validation is set, skip the implicit call to
-/// [validate_row()]. If do_not_recurse, is set, do not look for rows which could be affected by
+/// [validate_row_tx()]. If do_not_recurse, is set, do not look for rows which could be affected by
 /// this update.
 #[async_recursion]
-pub async fn update_row_tx(
+async fn update_row_tx(
     global_config: &SerdeMap,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
@@ -4075,7 +3814,7 @@ pub async fn update_row_tx(
     // Send the row through the row validator to determine if any fields are problematic and
     // to mark them with appropriate messages:
     let row = if !skip_validation {
-        validate_row(
+        validate_row_tx(
             global_config,
             compiled_datatype_conditions,
             compiled_rule_conditions,
@@ -4412,7 +4151,7 @@ fn get_sql_type(dt_config: &SerdeMap, datatype: &String, pool: &AnyPool) -> Opti
 
 /// Given the global config map, a table name, a column name, and a database connection pool
 /// used to determine the database type return the column's SQL type.
-pub fn get_sql_type_from_global_config(
+fn get_sql_type_from_global_config(
     global_config: &SerdeMap,
     table: &str,
     column: &str,
@@ -4698,316 +4437,6 @@ fn verify_table_deps_and_sort(table_list: &Vec<String>, constraints: &SerdeMap) 
             panic!("{}", message);
         }
     };
-}
-
-// TODO: Remove this function once it has been refactored
-/// Given the config maps for tables and datatypes, and a table name, generate a SQL schema string,
-/// including each column C and its matching C_meta column, then return the schema string as well as
-/// a list of the table's constraints.
-fn create_table_statement(
-    tables_config: &mut SerdeMap,
-    datatypes_config: &mut SerdeMap,
-    parser: &StartParser,
-    table_name: &String,
-    pool: &AnyPool,
-) -> (Vec<String>, SerdeValue) {
-    let mut drop_table_sql = format!(r#"DROP TABLE IF EXISTS "{}""#, table_name);
-    if pool.any_kind() == AnyKind::Postgres {
-        drop_table_sql.push_str(" CASCADE");
-    }
-    drop_table_sql.push_str(";");
-    let mut statements = vec![drop_table_sql];
-    let mut create_lines = vec![
-        format!(r#"CREATE TABLE "{}" ("#, table_name),
-        String::from(r#"  "row_number" BIGINT,"#),
-    ];
-
-    let normal_table_name;
-    if let Some(s) = table_name.strip_suffix("_conflict") {
-        normal_table_name = String::from(s);
-    } else {
-        normal_table_name = table_name.to_string();
-    }
-
-    let column_names = tables_config
-        .get(&normal_table_name)
-        .and_then(|t| t.get("column_order"))
-        .and_then(|c| c.as_array())
-        .unwrap()
-        .iter()
-        .map(|v| v.as_str().unwrap().to_string())
-        .collect::<Vec<_>>();
-
-    let columns = tables_config
-        .get(normal_table_name.as_str())
-        .and_then(|c| c.as_object())
-        .and_then(|o| o.get("column"))
-        .and_then(|c| c.as_object())
-        .unwrap();
-
-    let mut table_constraints = json!({
-        "foreign": [],
-        "unique": [],
-        "primary": [],
-        "tree": [],
-        "under": [],
-    });
-
-    let mut colvals: Vec<SerdeMap> = vec![];
-    for column_name in &column_names {
-        let column = columns
-            .get(column_name)
-            .and_then(|c| c.as_object())
-            .unwrap();
-        colvals.push(column.clone());
-    }
-
-    let c = colvals.len();
-    let mut r = 0;
-    for row in colvals {
-        r += 1;
-        let sql_type = get_sql_type(
-            datatypes_config,
-            &row.get("datatype")
-                .and_then(|d| d.as_str())
-                .and_then(|s| Some(s.to_string()))
-                .unwrap(),
-            pool,
-        );
-
-        if let None = sql_type {
-            panic!("Missing SQL type for {}", row.get("datatype").unwrap());
-        }
-        let sql_type = sql_type.unwrap();
-
-        let short_sql_type = {
-            if sql_type.to_lowercase().as_str().starts_with("varchar(") {
-                "VARCHAR"
-            } else {
-                &sql_type
-            }
-        };
-
-        if pool.any_kind() == AnyKind::Postgres {
-            if !PG_SQL_TYPES.contains(&short_sql_type.to_lowercase().as_str()) {
-                panic!(
-                    "Unrecognized PostgreSQL SQL type '{}' for datatype: '{}'. \
-                     Accepted SQL types for PostgreSQL are: {}",
-                    sql_type,
-                    row.get("datatype").and_then(|d| d.as_str()).unwrap(),
-                    PG_SQL_TYPES.join(", ")
-                );
-            }
-        } else {
-            if !SL_SQL_TYPES.contains(&short_sql_type.to_lowercase().as_str()) {
-                panic!(
-                    "Unrecognized SQLite SQL type '{}' for datatype '{}'. \
-                     Accepted SQL datatypes for SQLite are: {}",
-                    sql_type,
-                    row.get("datatype").and_then(|d| d.as_str()).unwrap(),
-                    SL_SQL_TYPES.join(", ")
-                );
-            }
-        }
-
-        let column_name = row.get("column").and_then(|s| s.as_str()).unwrap();
-        let mut line = format!(r#"  "{}" {}"#, column_name, sql_type);
-        let structure = row.get("structure").and_then(|s| s.as_str());
-        if let Some(structure) = structure {
-            if structure != "" && !table_name.ends_with("_conflict") {
-                let parsed_structure = parser.parse(structure).unwrap();
-                for expression in parsed_structure {
-                    match *expression {
-                        Expression::Label(value) if value == "primary" => {
-                            line.push_str(" PRIMARY KEY");
-                            let primary_keys = table_constraints
-                                .get_mut("primary")
-                                .and_then(|v| v.as_array_mut())
-                                .unwrap();
-                            primary_keys.push(SerdeValue::String(column_name.to_string()));
-                        }
-                        Expression::Label(value) if value == "unique" => {
-                            line.push_str(" UNIQUE");
-                            let unique_constraints = table_constraints
-                                .get_mut("unique")
-                                .and_then(|v| v.as_array_mut())
-                                .unwrap();
-                            unique_constraints.push(SerdeValue::String(column_name.to_string()));
-                        }
-                        Expression::Function(name, args) if name == "from" => {
-                            if args.len() != 1 {
-                                panic!("Invalid foreign key: {} for: {}", structure, table_name);
-                            }
-                            match &*args[0] {
-                                Expression::Field(ftable, fcolumn) => {
-                                    let foreign_keys = table_constraints
-                                        .get_mut("foreign")
-                                        .and_then(|v| v.as_array_mut())
-                                        .unwrap();
-                                    let foreign_key = json!({
-                                        "column": column_name,
-                                        "ftable": ftable,
-                                        "fcolumn": fcolumn,
-                                    });
-                                    foreign_keys.push(foreign_key);
-                                }
-                                _ => {
-                                    panic!("Invalid foreign key: {} for: {}", structure, table_name)
-                                }
-                            };
-                        }
-                        Expression::Function(name, args) if name == "tree" => {
-                            if args.len() != 1 {
-                                panic!(
-                                    "Invalid 'tree' constraint: {} for: {}",
-                                    structure, table_name
-                                );
-                            }
-                            match &*args[0] {
-                                Expression::Label(child) => {
-                                    let child_datatype = columns
-                                        .get(child)
-                                        .and_then(|c| c.get("datatype"))
-                                        .and_then(|d| d.as_str());
-                                    if let None = child_datatype {
-                                        panic!(
-                                            "Could not determine SQL datatype for {} of tree({})",
-                                            child, child
-                                        );
-                                    }
-                                    let child_datatype = child_datatype.unwrap();
-                                    let parent = column_name;
-                                    let child_sql_type = get_sql_type(
-                                        datatypes_config,
-                                        &child_datatype.to_string(),
-                                        pool,
-                                    )
-                                    .unwrap();
-                                    if sql_type != child_sql_type {
-                                        panic!(
-                                            "SQL type '{}' of '{}' in 'tree({})' for table \
-                                             '{}' doe snot match SQL type: '{}' of parent: '{}'.",
-                                            child_sql_type,
-                                            child,
-                                            child,
-                                            table_name,
-                                            sql_type,
-                                            parent
-                                        );
-                                    }
-                                    let tree_constraints = table_constraints
-                                        .get_mut("tree")
-                                        .and_then(|t| t.as_array_mut())
-                                        .unwrap();
-                                    let entry = json!({"parent": column_name,
-                                                       "child": child});
-                                    tree_constraints.push(entry);
-                                }
-                                _ => {
-                                    panic!(
-                                        "Invalid 'tree' constraint: {} for: {}",
-                                        structure, table_name
-                                    );
-                                }
-                            };
-                        }
-                        Expression::Function(name, args) if name == "under" => {
-                            let generic_error = format!(
-                                "Invalid 'under' constraint: {} for: {}",
-                                structure, table_name
-                            );
-                            if args.len() != 2 {
-                                panic!("{}", generic_error);
-                            }
-                            match (&*args[0], &*args[1]) {
-                                (Expression::Field(ttable, tcolumn), Expression::Label(value)) => {
-                                    let under_constraints = table_constraints
-                                        .get_mut("under")
-                                        .and_then(|u| u.as_array_mut())
-                                        .unwrap();
-                                    let entry = json!({"column": column_name,
-                                                       "ttable": ttable,
-                                                       "tcolumn": tcolumn,
-                                                       "value": value});
-                                    under_constraints.push(entry);
-                                }
-                                (_, _) => panic!("{}", generic_error),
-                            };
-                        }
-                        _ => panic!(
-                            "Unrecognized structure: {} for {}.{}",
-                            structure, table_name, column_name
-                        ),
-                    };
-                }
-            }
-        }
-        if r >= c
-            && table_constraints
-                .get("foreign")
-                .and_then(|v| v.as_array())
-                .and_then(|v| Some(v.is_empty()))
-                .unwrap()
-        {
-            line.push_str("");
-        } else {
-            line.push_str(",");
-        }
-        create_lines.push(line);
-    }
-
-    let foreign_keys = table_constraints
-        .get("foreign")
-        .and_then(|v| v.as_array())
-        .unwrap();
-    let num_fkeys = foreign_keys.len();
-    for (i, fkey) in foreign_keys.iter().enumerate() {
-        create_lines.push(format!(
-            r#"  FOREIGN KEY ("{}") REFERENCES "{}"("{}"){}"#,
-            fkey.get("column").and_then(|s| s.as_str()).unwrap(),
-            fkey.get("ftable").and_then(|s| s.as_str()).unwrap(),
-            fkey.get("fcolumn").and_then(|s| s.as_str()).unwrap(),
-            if i < (num_fkeys - 1) { "," } else { "" }
-        ));
-    }
-    create_lines.push(String::from(");"));
-    // We are done generating the lines for the 'create table' statement. Join them and add the
-    // result to the statements to return:
-    statements.push(String::from(create_lines.join("\n")));
-
-    // Loop through the tree constraints and if any of their associated child columns do not already
-    // have an associated unique or primary index, create one implicitly here:
-    let tree_constraints = table_constraints
-        .get("tree")
-        .and_then(|v| v.as_array())
-        .unwrap();
-    for tree in tree_constraints {
-        let unique_keys = table_constraints
-            .get("unique")
-            .and_then(|v| v.as_array())
-            .unwrap();
-        let primary_keys = table_constraints
-            .get("primary")
-            .and_then(|v| v.as_array())
-            .unwrap();
-        let tree_child = tree.get("child").and_then(|c| c.as_str()).unwrap();
-        if !unique_keys.contains(&SerdeValue::String(tree_child.to_string()))
-            && !primary_keys.contains(&SerdeValue::String(tree_child.to_string()))
-        {
-            statements.push(format!(
-                r#"CREATE UNIQUE INDEX "{}_{}_idx" ON "{}"("{}");"#,
-                table_name, tree_child, table_name, tree_child
-            ));
-        }
-    }
-
-    // Finally, create a further unique index on row_number:
-    statements.push(format!(
-        r#"CREATE UNIQUE INDEX "{}_row_number_idx" ON "{}"("row_number");"#,
-        table_name, table_name
-    ));
-
-    return (statements, table_constraints);
 }
 
 /// TODO: Add doc string here.
