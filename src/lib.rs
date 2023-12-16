@@ -951,12 +951,6 @@ impl Valve {
     pub async fn drop_tables(&self, tables: Vec<&str>) -> Result<&Self, sqlx::Error> {
         // DatabaseError
 
-        // TODO: This will work fine when the table list is all of the tables in the db,
-        // but in the case of a partial list, then there is a risk that some of them have
-        // dependencies on tables not in the list. What we need to do is grab the complete
-        // list of tables from self.global_config.sorted_table_list and use it as a reference
-        // for which tables need to be dropped.
-
         for table in tables {
             if table != "message" && table != "history" {
                 let sql = format!(r#"DROP VIEW IF EXISTS "{}_text_view""#, table);
@@ -987,12 +981,6 @@ impl Valve {
     /// Return an error on invalid table name or database problem.
     pub async fn truncate_tables(&self, tables: Vec<&str>) -> Result<&Self, sqlx::Error> {
         // ConfigOrDatabaseError
-
-        // TODO: This will work fine when the table list is all of the tables in the db,
-        // but in the case of a partial list, then there is a risk that some of them have
-        // dependencies on tables not in the list. What we need to do is grab the complete
-        // list of tables from self.global_config.sorted_table_list and use it as a reference
-        // for which tables need to be dropped.
 
         self.create_missing_tables().await?;
 
@@ -1049,6 +1037,12 @@ impl Valve {
         _validate: bool,
     ) -> Result<&Self, sqlx::Error> {
         // ConfigOrDatabaseError
+
+        // TODO: This will work fine when the table list is all of the tables in the db,
+        // but in the case of a partial list, then there is a risk that some of them have
+        // dependencies on tables not in the list. What we need to do is grab the complete
+        // list of tables from self.global_config.sorted_table_list and use it as a reference
+        // for which tables need to be dropped.
 
         self.create_missing_tables().await?;
         let mut list_for_deletion = table_list.clone();
