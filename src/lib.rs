@@ -909,6 +909,8 @@ impl Valve {
         let mut once_dropped = false;
         for (i, table) in sorted_table_list.iter().enumerate() {
             if self.table_has_changed(*table).await? {
+                // TODO: Prompt the user to confirm whether she wants to automatically drop any
+                // flagged tables.
                 if !once_dropped {
                     let mut tables_to_drop = vec![""; sorted_table_list.len() - i];
                     tables_to_drop.clone_from_slice(&sorted_table_list[i..]);
@@ -945,8 +947,26 @@ impl Valve {
     pub async fn drop_tables(&self, tables: Vec<&str>) -> Result<&Self, sqlx::Error> {
         // DatabaseError
 
-        for table in tables {
-            if table != "message" && table != "history" {
+        let drop_list = {
+            let mut drop_list = vec![];
+            let drop_order = self.get_tables_ordered_for_deletion();
+            for table in &tables {
+                let idx = drop_order.iter().position(|s| s == table).unwrap();
+                for i in 0..idx + 1 {
+                    let dep_table = drop_order[i];
+                    if !drop_list.contains(&dep_table) {
+                        drop_list.push(drop_order[i]);
+                    }
+                }
+            }
+            drop_list
+        };
+
+        // TODO: If the drop_list does not match tables, prompt the user to confirm whether
+        // she wants to automatically truncate those dependent tables.
+
+        for table in &drop_list {
+            if *table != "message" && *table != "history" {
                 let sql = format!(r#"DROP VIEW IF EXISTS "{}_text_view""#, table);
                 self.execute_sql(&sql).await?;
                 let sql = format!(r#"DROP VIEW IF EXISTS "{}_view""#, table);
@@ -978,6 +998,24 @@ impl Valve {
 
         self.create_all_tables().await?;
 
+        let truncate_list = {
+            let mut truncate_list = vec![];
+            let truncate_order = self.get_tables_ordered_for_deletion();
+            for table in &tables {
+                let idx = truncate_order.iter().position(|s| s == table).unwrap();
+                for i in 0..idx + 1 {
+                    let dep_table = truncate_order[i];
+                    if !truncate_list.contains(&dep_table) {
+                        truncate_list.push(truncate_order[i]);
+                    }
+                }
+            }
+            truncate_list
+        };
+
+        // TODO: If the truncate_list does not match tables, prompt the user to confirm whether
+        // she wants to automatically truncate those dependent tables.
+
         // We must use CASCADE in the case of PostgreSQL since we cannot truncate a table, T, that
         // depends on another table, T', even in the case where we have previously truncated T'.
         // SQLite does not need this. However SQLite does require that the tables be truncated in
@@ -990,10 +1028,10 @@ impl Valve {
             }
         };
 
-        for table in tables {
+        for table in &truncate_list {
             let sql = truncate_sql(&table);
             self.execute_sql(&sql).await?;
-            if table != "message" && table != "history" {
+            if *table != "message" && *table != "history" {
                 let sql = truncate_sql(&format!("{}_conflict", table));
                 self.execute_sql(&sql).await?;
             }
@@ -1031,12 +1069,6 @@ impl Valve {
         _validate: bool,
     ) -> Result<&Self, sqlx::Error> {
         // ConfigOrDatabaseError
-
-        // TODO: This will work fine when the table list is all of the tables in the db,
-        // but in the case of a partial list, then there is a risk that some of them have
-        // dependencies on tables not in the list. What we need to do is grab the complete
-        // list of tables from self.global_config.sorted_table_list and use it as a reference
-        // for which tables need to be dropped.
 
         let mut list_for_deletion = table_list.clone();
         list_for_deletion.reverse();
