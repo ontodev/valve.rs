@@ -25,6 +25,12 @@ async fn main() -> Result<(), sqlx::Error> {
     let mut destination = String::new();
 
     {
+        // TODO: Add a --yes flag, and set a flag called Valve.interactive. And then in the
+        // create_missing_tables() function, prompt the user to confirm when a table needs
+        // to be recreated automatically due to a change, unless the --yes flag is set. Note
+        // that Valve.interactive is only applicable to the command line. It should never be set
+        // when using valve as a library.
+
         // this block limits scope of borrows by ap.refer() method
         let mut ap = ArgumentParser::new();
         ap.set_description(
@@ -142,7 +148,7 @@ async fn main() -> Result<(), sqlx::Error> {
     } else if create_only {
         let valve =
             Valve::build(&source, &config_table, &destination, verbose, initial_load).await?;
-        valve.create_missing_tables().await?;
+        valve.create_all_tables().await?;
     } else {
         let valve =
             Valve::build(&source, &config_table, &destination, verbose, initial_load).await?;

@@ -331,25 +331,33 @@ impl Valve {
         sorted_tables
     }
 
-    /// Given a parsed structure condition, a table and column name, and an unsigned integer
-    /// representing whether the given column, in the case of a SQLite database, is a primary key
-    /// (in the case of PostgreSQL, the sqlite_pk parameter is ignored): determine whether the
-    /// structure of the column is properly reflected in the db. E.g., a `from(table.column)`
-    /// struct should be associated with a foreign key, `primary` with a primary key, `unique`
-    /// with a unique constraint.
-    async fn structure_has_changed(
-        &self,
-        pstruct: &Expression,
-        table: &str,
-        column: &str,
-        sqlite_pk: &u32,
-    ) -> Result<bool, sqlx::Error> {
-        // A clojure to determine whether the given column has the given constraint type, which
-        // can be one of 'UNIQUE', 'PRIMARY KEY', 'FOREIGN KEY':
-        let column_has_constraint_type = |constraint_type: &str| -> Result<bool, sqlx::Error> {
-            if self.pool.any_kind() == AnyKind::Postgres {
-                let sql = format!(
-                    r#"SELECT 1
+    /// Given the name of a table, determine whether its current instantiation in the database
+    /// differs from the way it has been configured. The answer to this question is yes whenever
+    /// (1) the number of columns or any of their names differs from their configured values, or
+    /// the order of database columns differs from the configured order; (2) The values in the
+    /// table table differ from their configured values; (3) The SQL type of one or more columns
+    /// does not match the configured SQL type for that column; (3) All columns with a 'unique',
+    /// 'primary', or 'from(table, column)' in their column configuration are associated, in the
+    /// database, with a unique constraint, primary key, and foreign key, respectively, and vice
+    /// versa.
+    async fn table_has_changed(&self, table: &str) -> Result<bool, sqlx::Error> {
+        // A clojure that, given a parsed structure condition, a table and column name, and an
+        // unsigned integer representing whether the given column, in the case of a SQLite database,
+        // is a primary key (in the case of PostgreSQL, the sqlite_pk parameter is ignored):
+        // determine whether the structure of the column is properly reflected in the db. E.g., a
+        // `from(table.column)` struct should be associated with a foreign key, `primary` with a
+        // primary key, `unique` with a unique constraint.
+        let structure_has_changed = |pstruct: &Expression,
+                                     table: &str,
+                                     column: &str,
+                                     sqlite_pk: &u32|
+         -> Result<bool, sqlx::Error> {
+            // A clojure to determine whether the given column has the given constraint type, which
+            // can be one of 'UNIQUE', 'PRIMARY KEY', 'FOREIGN KEY':
+            let column_has_constraint_type = |constraint_type: &str| -> Result<bool, sqlx::Error> {
+                if self.pool.any_kind() == AnyKind::Postgres {
+                    let sql = format!(
+                        r#"SELECT 1
                        FROM information_schema.table_constraints tco
                        JOIN information_schema.key_column_usage kcu
                          ON kcu.constraint_name = tco.constraint_name
@@ -357,112 +365,111 @@ impl Valve {
                             AND kcu.table_name = '{}'
                        WHERE tco.constraint_type = '{}'
                          AND kcu.column_name = '{}'"#,
-                    table, constraint_type, column
-                );
-                let rows = block_on(sqlx_query(&sql).fetch_all(&self.pool))?;
-                if rows.len() > 1 {
-                    unreachable!();
-                }
-                Ok(rows.len() == 1)
-            } else {
-                if constraint_type == "PRIMARY KEY" {
-                    return Ok(*sqlite_pk == 1);
-                } else if constraint_type == "UNIQUE" {
-                    let sql = format!(r#"PRAGMA INDEX_LIST("{}")"#, table);
-                    for row in block_on(sqlx_query(&sql).fetch_all(&self.pool))? {
-                        let idx_name = row.get::<String, _>("name");
-                        let unique = row.get::<i16, _>("unique") as u8;
-                        if unique == 1 {
-                            let sql = format!(r#"PRAGMA INDEX_INFO("{}")"#, idx_name);
-                            let rows = block_on(sqlx_query(&sql).fetch_all(&self.pool))?;
-                            if rows.len() == 1 {
-                                let cname = rows[0].get::<String, _>("name");
-                                if cname == column {
-                                    return Ok(true);
-                                }
-                            }
-                        }
+                        table, constraint_type, column
+                    );
+                    let rows = block_on(sqlx_query(&sql).fetch_all(&self.pool))?;
+                    if rows.len() > 1 {
+                        unreachable!();
                     }
-                    Ok(false)
-                } else if constraint_type == "FOREIGN KEY" {
-                    let sql = format!(r#"PRAGMA FOREIGN_KEY_LIST("{}")"#, table);
-                    for row in block_on(sqlx_query(&sql).fetch_all(&self.pool))? {
-                        let cname = row.get::<String, _>("from");
-                        if cname == column {
-                            return Ok(true);
-                        }
-                    }
-                    Ok(false)
+                    Ok(rows.len() == 1)
                 } else {
-                    return Err(SqlxCErr(
-                        format!("Unrecognized constraint type: '{}'", constraint_type).into(),
-                    ));
-                }
-            }
-        };
-
-        // Check if there is a change to whether this column is a primary/unique key:
-        let is_primary = match pstruct {
-            Expression::Label(label) if label == "primary" => true,
-            _ => false,
-        };
-        if is_primary != column_has_constraint_type("PRIMARY KEY")? {
-            return Ok(true);
-        } else if !is_primary {
-            let is_unique = match pstruct {
-                Expression::Label(label) if label == "unique" => true,
-                _ => false,
-            };
-            let unique_in_db = column_has_constraint_type("UNIQUE")?;
-            if is_unique != unique_in_db {
-                // A child of a tree constraint implies a unique db constraint, so if there is a
-                // unique constraint in the db that is not configured, that is the explanation,
-                // and in that case we do not count this as a change to the column.
-                if !unique_in_db {
-                    return Ok(true);
-                } else {
-                    let trees = self
-                        .global_config
-                        .get("constraints")
-                        .and_then(|c| c.as_object())
-                        .and_then(|o| o.get("tree"))
-                        .and_then(|t| t.as_object())
-                        .and_then(|o| o.get(table))
-                        .and_then(|t| t.as_array())
-                        .and_then(|a| {
-                            Some(
-                                a.iter()
-                                    .map(|o| o.as_object().and_then(|o| o.get("child")).unwrap()),
-                            )
-                        })
-                        .unwrap()
-                        .collect::<Vec<_>>();
-                    if !trees.contains(&&SerdeValue::String(column.to_string())) {
-                        return Ok(true);
-                    }
-                }
-            }
-        }
-
-        match pstruct {
-            Expression::Function(name, args) if name == "from" => {
-                match &*args[0] {
-                    Expression::Field(cfg_ftable, cfg_fcolumn) => {
-                        if self.pool.any_kind() == AnyKind::Sqlite {
-                            let sql = format!(r#"PRAGMA FOREIGN_KEY_LIST("{}")"#, table);
-                            for row in sqlx_query(&sql).fetch_all(&self.pool).await? {
-                                let from = row.get::<String, _>("from");
-                                if from == column {
-                                    let db_ftable = row.get::<String, _>("table");
-                                    let db_fcolumn = row.get::<String, _>("to");
-                                    if *cfg_ftable != db_ftable || *cfg_fcolumn != db_fcolumn {
+                    if constraint_type == "PRIMARY KEY" {
+                        return Ok(*sqlite_pk == 1);
+                    } else if constraint_type == "UNIQUE" {
+                        let sql = format!(r#"PRAGMA INDEX_LIST("{}")"#, table);
+                        for row in block_on(sqlx_query(&sql).fetch_all(&self.pool))? {
+                            let idx_name = row.get::<String, _>("name");
+                            let unique = row.get::<i16, _>("unique") as u8;
+                            if unique == 1 {
+                                let sql = format!(r#"PRAGMA INDEX_INFO("{}")"#, idx_name);
+                                let rows = block_on(sqlx_query(&sql).fetch_all(&self.pool))?;
+                                if rows.len() == 1 {
+                                    let cname = rows[0].get::<String, _>("name");
+                                    if cname == column {
                                         return Ok(true);
                                     }
                                 }
                             }
-                        } else {
-                            let sql = format!(
-                                r#"SELECT
+                        }
+                        Ok(false)
+                    } else if constraint_type == "FOREIGN KEY" {
+                        let sql = format!(r#"PRAGMA FOREIGN_KEY_LIST("{}")"#, table);
+                        for row in block_on(sqlx_query(&sql).fetch_all(&self.pool))? {
+                            let cname = row.get::<String, _>("from");
+                            if cname == column {
+                                return Ok(true);
+                            }
+                        }
+                        Ok(false)
+                    } else {
+                        return Err(SqlxCErr(
+                            format!("Unrecognized constraint type: '{}'", constraint_type).into(),
+                        ));
+                    }
+                }
+            };
+
+            // Check if there is a change to whether this column is a primary/unique key:
+            let is_primary = match pstruct {
+                Expression::Label(label) if label == "primary" => true,
+                _ => false,
+            };
+            if is_primary != column_has_constraint_type("PRIMARY KEY")? {
+                return Ok(true);
+            } else if !is_primary {
+                let is_unique = match pstruct {
+                    Expression::Label(label) if label == "unique" => true,
+                    _ => false,
+                };
+                let unique_in_db = column_has_constraint_type("UNIQUE")?;
+                if is_unique != unique_in_db {
+                    // A child of a tree constraint implies a unique db constraint, so if there is a
+                    // unique constraint in the db that is not configured, that is the explanation,
+                    // and in that case we do not count this as a change to the column.
+                    if !unique_in_db {
+                        return Ok(true);
+                    } else {
+                        let trees =
+                            self.global_config
+                                .get("constraints")
+                                .and_then(|c| c.as_object())
+                                .and_then(|o| o.get("tree"))
+                                .and_then(|t| t.as_object())
+                                .and_then(|o| o.get(table))
+                                .and_then(|t| t.as_array())
+                                .and_then(|a| {
+                                    Some(a.iter().map(|o| {
+                                        o.as_object().and_then(|o| o.get("child")).unwrap()
+                                    }))
+                                })
+                                .unwrap()
+                                .collect::<Vec<_>>();
+                        if !trees.contains(&&SerdeValue::String(column.to_string())) {
+                            return Ok(true);
+                        }
+                    }
+                }
+            }
+
+            match pstruct {
+                Expression::Function(name, args) if name == "from" => {
+                    match &*args[0] {
+                        Expression::Field(cfg_ftable, cfg_fcolumn) => {
+                            if self.pool.any_kind() == AnyKind::Sqlite {
+                                let sql = format!(r#"PRAGMA FOREIGN_KEY_LIST("{}")"#, table);
+                                for row in block_on(sqlx_query(&sql).fetch_all(&self.pool))? {
+                                    let from = row.get::<String, _>("from");
+                                    if from == column {
+                                        let db_ftable = row.get::<String, _>("table");
+                                        let db_fcolumn = row.get::<String, _>("to");
+                                        if *cfg_ftable != db_ftable || *cfg_fcolumn != db_fcolumn {
+                                            return Ok(true);
+                                        }
+                                    }
+                                }
+                            } else {
+                                let sql = format!(
+                                    r#"SELECT
                                        ccu.table_name AS foreign_table_name,
                                        ccu.column_name AS foreign_column_name
                                    FROM information_schema.table_constraints AS tc
@@ -474,48 +481,38 @@ impl Valve {
                                    WHERE tc.constraint_type = 'FOREIGN KEY'
                                      AND tc.table_name = '{}'
                                      AND kcu.column_name = '{}'"#,
-                                table, column
-                            );
-                            let rows = sqlx_query(&sql).fetch_all(&self.pool).await?;
-                            if rows.len() == 0 {
-                                // If the table doesn't even exist return true.
-                                return Ok(true);
-                            } else if rows.len() > 1 {
-                                // This seems impossible given how PostgreSQL works:
-                                unreachable!();
-                            } else {
-                                let row = &rows[0];
-                                let db_ftable = row.get::<String, _>("foreign_table_name");
-                                let db_fcolumn = row.get::<String, _>("foreign_column_name");
-                                if *cfg_ftable != db_ftable || *cfg_fcolumn != db_fcolumn {
+                                    table, column
+                                );
+                                let rows = block_on(sqlx_query(&sql).fetch_all(&self.pool))?;
+                                if rows.len() == 0 {
+                                    // If the table doesn't even exist return true.
                                     return Ok(true);
+                                } else if rows.len() > 1 {
+                                    // This seems impossible given how PostgreSQL works:
+                                    unreachable!();
+                                } else {
+                                    let row = &rows[0];
+                                    let db_ftable = row.get::<String, _>("foreign_table_name");
+                                    let db_fcolumn = row.get::<String, _>("foreign_column_name");
+                                    if *cfg_ftable != db_ftable || *cfg_fcolumn != db_fcolumn {
+                                        return Ok(true);
+                                    }
                                 }
                             }
                         }
-                    }
-                    _ => {
-                        return Err(SqlxCErr(
-                            format!("Unrecognized structure: {:?}", pstruct).into(),
-                        ));
-                    }
-                };
-            }
-            _ => (),
+                        _ => {
+                            return Err(SqlxCErr(
+                                format!("Unrecognized structure: {:?}", pstruct).into(),
+                            ));
+                        }
+                    };
+                }
+                _ => (),
+            };
+
+            Ok(false)
         };
 
-        Ok(false)
-    }
-
-    /// Given the name of a table, determine whether its current instantiation in the database
-    /// differs from the way it has been configured. The answer to this question is yes whenever
-    /// (1) the number of columns or any of their names differs from their configured values, or
-    /// the order of database columns differs from the configured order; (2) The values in the
-    /// table table differ from their configured values; (3) The SQL type of one or more columns
-    /// does not match the configured SQL type for that column; (3) All columns with a 'unique',
-    /// 'primary', or 'from(table, column)' in their column configuration are associated, in the
-    /// database, with a unique constraint, primary key, and foreign key, respectively, and vice
-    /// versa.
-    async fn table_has_changed(&self, table: &str) -> Result<bool, sqlx::Error> {
         let (columns_config, configured_column_order, description, table_type, path) = {
             let table_config = self
                 .global_config
@@ -755,10 +752,7 @@ impl Valve {
                         .get(structure)
                         .and_then(|p| Some(p.parsed.clone()))
                         .unwrap();
-                    if self
-                        .structure_has_changed(&parsed_structure, table, &cname, &pk)
-                        .await?
-                    {
+                    if structure_has_changed(&parsed_structure, table, &cname, &pk)? {
                         if self.verbose {
                             valve_log!(
                                 "The table '{}' will be recreated because the database \
@@ -905,7 +899,7 @@ impl Valve {
     }
 
     /// Create all configured database tables and views if they do not already exist as configured.
-    pub async fn create_missing_tables(&self) -> Result<&Self, sqlx::Error> {
+    pub async fn create_all_tables(&self) -> Result<&Self, sqlx::Error> {
         // DatabaseError
 
         // TODO: Add logging statements here.
@@ -982,7 +976,7 @@ impl Valve {
     pub async fn truncate_tables(&self, tables: Vec<&str>) -> Result<&Self, sqlx::Error> {
         // ConfigOrDatabaseError
 
-        self.create_missing_tables().await?;
+        self.create_all_tables().await?;
 
         // We must use CASCADE in the case of PostgreSQL since we cannot truncate a table, T, that
         // depends on another table, T', even in the case where we have previously truncated T'.
@@ -1044,7 +1038,6 @@ impl Valve {
         // list of tables from self.global_config.sorted_table_list and use it as a reference
         // for which tables need to be dropped.
 
-        self.create_missing_tables().await?;
         let mut list_for_deletion = table_list.clone();
         list_for_deletion.reverse();
         self.truncate_tables(list_for_deletion).await?;
