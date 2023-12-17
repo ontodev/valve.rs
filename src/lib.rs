@@ -155,13 +155,23 @@ impl std::fmt::Debug for ColumnRule {
 
 #[derive(Debug)]
 pub struct Valve {
+    /// TODO: Add docstring here.
     pub global_config: SerdeMap,
+    /// TODO: Add docstring here.
     pub compiled_datatype_conditions: HashMap<String, CompiledCondition>,
+    /// TODO: Add docstring here.
     pub compiled_rule_conditions: HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    /// TODO: Add docstring here.
     pub parsed_structure_conditions: HashMap<String, ParsedStructure>,
+    /// TODO: Add docstring here.
     pub pool: AnyPool,
+    /// TODO: Add docstring here.
     pub user: String,
+    /// TODO: Add docstring here.
     pub verbose: bool,
+    /// TODO: Add docstring here. Note that this field is CLI only.
+    pub interactive: bool,
+    /// TODO: Add docstring here.
     pub initial_load: bool,
 }
 
@@ -182,6 +192,7 @@ impl Valve {
         config_table: &str,
         database: &str,
         verbose: bool,
+        interactive: bool,
         initial_load: bool,
     ) -> Result<Self, sqlx::Error> {
         // TODO: Error type should be ConfigError
@@ -264,6 +275,7 @@ impl Valve {
             pool: pool,
             user: String::from("VALVE"),
             verbose: verbose,
+            interactive: interactive,
             initial_load: initial_load,
         })
     }
@@ -909,8 +921,10 @@ impl Valve {
         let mut once_dropped = false;
         for (i, table) in sorted_table_list.iter().enumerate() {
             if self.table_has_changed(*table).await? {
-                // TODO: Prompt the user to confirm whether she wants to automatically drop any
-                // flagged tables.
+                if self.verbose {
+                    // TODO: Prompt the user to confirm whether she wants to automatically drop any
+                    // flagged tables.
+                }
                 if !once_dropped {
                     let mut tables_to_drop = vec![""; sorted_table_list.len() - i];
                     tables_to_drop.clone_from_slice(&sorted_table_list[i..]);
@@ -929,6 +943,32 @@ impl Valve {
         }
 
         Ok(self)
+    }
+
+    /// TODO: Add docstring here.
+    pub async fn table_exists(&self, table: &str) -> Result<bool, sqlx::Error> {
+        let sql = {
+            if self.pool.any_kind() == AnyKind::Sqlite {
+                format!(
+                    r#"SELECT 1
+                       FROM "sqlite_master"
+                       WHERE "type" = 'table' AND name = '{}'
+                       LIMIT 1"#,
+                    table
+                )
+            } else {
+                format!(
+                    r#"SELECT 1
+                       FROM "information_schema"."tables"
+                       WHERE "table_schema" = 'public'
+                         AND "table_name" = '{}'"#,
+                    table
+                )
+            }
+        };
+        let query = sqlx_query(&sql);
+        let rows = query.fetch_all(&self.pool).await?;
+        return Ok(rows.len() > 0);
     }
 
     /// Drop all configured tables, in reverse dependency order.
@@ -962,8 +1002,16 @@ impl Valve {
             drop_list
         };
 
-        // TODO: If the drop_list does not match tables, prompt the user to confirm whether
-        // she wants to automatically truncate those dependent tables.
+        if self.verbose {
+            let auto_drops = drop_list
+                .iter()
+                .filter(|t| !tables.contains(t) && !block_on(self.table_exists(t)).unwrap())
+                .collect::<Vec<_>>();
+            if auto_drops.len() > 0 {
+                // TODO: prompt the user to confirm whether she wants to automatically drop
+                // the dependent tables.
+            }
+        }
 
         for table in &drop_list {
             if *table != "message" && *table != "history" {
@@ -1013,8 +1061,16 @@ impl Valve {
             truncate_list
         };
 
-        // TODO: If the truncate_list does not match tables, prompt the user to confirm whether
-        // she wants to automatically truncate those dependent tables.
+        if self.verbose {
+            let auto_truncates = truncate_list
+                .iter()
+                .filter(|t| !tables.contains(t) && !block_on(self.table_exists(t)).unwrap())
+                .collect::<Vec<_>>();
+            if auto_truncates.len() > 0 {
+                // TODO: prompt the user to confirm whether she wants to automatically truncate
+                // the dependent tables.
+            }
+        }
 
         // We must use CASCADE in the case of PostgreSQL since we cannot truncate a table, T, that
         // depends on another table, T', even in the case where we have previously truncated T'.

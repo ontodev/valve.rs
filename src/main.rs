@@ -14,12 +14,14 @@ fn cli_args_valid(source: &str, destination: &str, dump_config: bool) -> bool {
 
 #[async_std::main]
 async fn main() -> Result<(), sqlx::Error> {
+    let mut verbose = false;
+    let mut yes = false;
     let mut api_test = false;
     let mut dump_config = false;
+    let mut dump_schema = false;
     let mut drop_all = false;
     let mut create_only = false;
     let mut config_table = String::new();
-    let mut verbose = false;
     let mut initial_load = false;
     let mut source = String::new();
     let mut destination = String::new();
@@ -39,6 +41,16 @@ async fn main() -> Result<(), sqlx::Error> {
                to by SOURCE will be read and a new database will be created and loaded
                with the indicated data."#,
         );
+        ap.refer(&mut verbose).add_option(
+            &["--verbose"],
+            StoreTrue,
+            r#"While loading the database, write progress messages to stderr."#,
+        );
+        ap.refer(&mut yes).add_option(
+            &["--yes"],
+            StoreTrue,
+            r#"Do not prompt the user to confirm dropping/truncating tables."#,
+        );
         ap.refer(&mut api_test).add_option(
             &["--api_test"],
             StoreTrue,
@@ -52,6 +64,11 @@ async fn main() -> Result<(), sqlx::Error> {
             r#"Read the configuration referred to by SOURCE and send it to stdout as a
                JSON-formatted string."#,
         );
+        ap.refer(&mut dump_schema).add_option(
+            &["--dump_schema"],
+            StoreTrue,
+            r#"Write the SQL used to create the database to stdout."#,
+        );
         ap.refer(&mut drop_all).add_option(
             &["--drop_all"],
             StoreTrue,
@@ -63,17 +80,12 @@ async fn main() -> Result<(), sqlx::Error> {
             r#"Read the configuration referred to by SOURCE, and create a corresponding database in
                DESTINATION but do not load it."#,
         );
+        // TODO: Remove this option:
         ap.refer(&mut config_table).add_option(
             &["--config_table"],
             Store,
             r#"When reading configuration from a database, the name to use to refer to the main
                configuration table (defaults to "table")"#,
-        );
-        ap.refer(&mut verbose).add_option(
-            &["--verbose"],
-            StoreTrue,
-            r#"Write the SQL used to create the database to stdout after configuring it, and then
-               while loading the database, write progress messages to stderr."#,
         );
         ap.refer(&mut initial_load).add_option(
             &["--initial_load"],
@@ -122,8 +134,15 @@ async fn main() -> Result<(), sqlx::Error> {
     if api_test {
         run_api_tests(&source, &destination).await?;
     } else if dump_config {
-        let valve =
-            Valve::build(&source, &config_table, &destination, verbose, initial_load).await?;
+        let valve = Valve::build(
+            &source,
+            &config_table,
+            &destination,
+            verbose,
+            initial_load,
+            yes,
+        )
+        .await?;
         let mut config = valve.global_config.clone();
         let datatype_conditions =
             format!("{:?}", valve.compiled_datatype_conditions).replace(r"\", r"\\");
@@ -142,16 +161,37 @@ async fn main() -> Result<(), sqlx::Error> {
         let config = serde_json::to_string(&config).unwrap();
         println!("{}", config);
     } else if drop_all {
-        let valve =
-            Valve::build(&source, &config_table, &destination, verbose, initial_load).await?;
+        let valve = Valve::build(
+            &source,
+            &config_table,
+            &destination,
+            verbose,
+            initial_load,
+            yes,
+        )
+        .await?;
         valve.drop_all_tables().await?;
     } else if create_only {
-        let valve =
-            Valve::build(&source, &config_table, &destination, verbose, initial_load).await?;
+        let valve = Valve::build(
+            &source,
+            &config_table,
+            &destination,
+            verbose,
+            initial_load,
+            yes,
+        )
+        .await?;
         valve.create_all_tables().await?;
     } else {
-        let valve =
-            Valve::build(&source, &config_table, &destination, verbose, initial_load).await?;
+        let valve = Valve::build(
+            &source,
+            &config_table,
+            &destination,
+            verbose,
+            initial_load,
+            yes,
+        )
+        .await?;
         valve.load_all_tables(true).await?;
     }
 
