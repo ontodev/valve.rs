@@ -921,7 +921,7 @@ impl Valve {
         let mut once_dropped = false;
         for (i, table) in sorted_table_list.iter().enumerate() {
             if self.table_has_changed(*table).await? {
-                if self.verbose {
+                if self.interactive {
                     // TODO: Prompt the user to confirm whether she wants to automatically drop any
                     // flagged tables.
                 }
@@ -1002,7 +1002,7 @@ impl Valve {
             drop_list
         };
 
-        if self.verbose {
+        if self.interactive {
             let auto_drops = drop_list
                 .iter()
                 .filter(|t| !tables.contains(t) && !block_on(self.table_exists(t)).unwrap())
@@ -1061,7 +1061,7 @@ impl Valve {
             truncate_list
         };
 
-        if self.verbose {
+        if self.interactive {
             let auto_truncates = truncate_list
                 .iter()
                 .filter(|t| !tables.contains(t) && !block_on(self.table_exists(t)).unwrap())
