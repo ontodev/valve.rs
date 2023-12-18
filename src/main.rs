@@ -21,7 +21,6 @@ async fn main() -> Result<(), sqlx::Error> {
     let mut dump_schema = false;
     let mut drop_all = false;
     let mut create_only = false;
-    let mut config_table = String::new();
     let mut initial_load = false;
     let mut source = String::new();
     let mut destination = String::new();
@@ -74,13 +73,6 @@ async fn main() -> Result<(), sqlx::Error> {
             r#"Read the configuration referred to by SOURCE, and create a corresponding database in
                DESTINATION but do not load it."#,
         );
-        // TODO: Remove this option:
-        ap.refer(&mut config_table).add_option(
-            &["--config_table"],
-            Store,
-            r#"When reading configuration from a database, the name to use to refer to the main
-               configuration table (defaults to "table")"#,
-        );
         ap.refer(&mut initial_load).add_option(
             &["--initial_load"],
             StoreTrue,
@@ -121,23 +113,11 @@ async fn main() -> Result<(), sqlx::Error> {
         process::exit(1);
     }
 
-    if config_table.trim() == "" {
-        config_table = "table".to_string();
-    }
-
     let interactive = !yes;
     if api_test {
         run_api_tests(&source, &destination).await?;
     } else if dump_config {
-        let valve = Valve::build(
-            &source,
-            &config_table,
-            &destination,
-            verbose,
-            initial_load,
-            interactive,
-        )
-        .await?;
+        let valve = Valve::build(&source, &destination, verbose, initial_load, interactive).await?;
         let mut config = valve.global_config.clone();
         let datatype_conditions =
             format!("{:?}", valve.compiled_datatype_conditions).replace(r"\", r"\\");
@@ -155,38 +135,17 @@ async fn main() -> Result<(), sqlx::Error> {
 
         let config = serde_json::to_string(&config).unwrap();
         println!("{}", config);
+    } else if dump_schema {
+        let valve = Valve::build(&source, &destination, verbose, initial_load, interactive).await?;
+        valve.dump_schema().await?;
     } else if drop_all {
-        let valve = Valve::build(
-            &source,
-            &config_table,
-            &destination,
-            verbose,
-            initial_load,
-            interactive,
-        )
-        .await?;
+        let valve = Valve::build(&source, &destination, verbose, initial_load, interactive).await?;
         valve.drop_all_tables().await?;
     } else if create_only {
-        let valve = Valve::build(
-            &source,
-            &config_table,
-            &destination,
-            verbose,
-            initial_load,
-            interactive,
-        )
-        .await?;
+        let valve = Valve::build(&source, &destination, verbose, initial_load, interactive).await?;
         valve.create_all_tables().await?;
     } else {
-        let valve = Valve::build(
-            &source,
-            &config_table,
-            &destination,
-            verbose,
-            initial_load,
-            interactive,
-        )
-        .await?;
+        let valve = Valve::build(&source, &destination, verbose, initial_load, interactive).await?;
         valve.load_all_tables(true).await?;
     }
 

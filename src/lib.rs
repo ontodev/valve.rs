@@ -188,8 +188,6 @@ impl Valve {
     /// Valve struct.
     pub async fn build(
         table_path: &str,
-        // TODO: Remove the config_table parameter.
-        config_table: &str,
         database: &str,
         verbose: bool,
         interactive: bool,
@@ -226,7 +224,7 @@ impl Valve {
             rules_config,
             constraints_config,
             sorted_table_list,
-        ) = read_config_files(table_path, config_table, &parser, &pool);
+        ) = read_config_files(table_path, &parser, &pool);
 
         let mut global_config = SerdeMap::new();
         global_config.insert(
@@ -1949,7 +1947,6 @@ async fn get_pool_from_connection_string(database: &str) -> Result<AnyPool, sqlx
 /// containing the names of the tables in the dattatabse in sorted order.
 fn read_config_files(
     path: &str,
-    config_table: &str,
     parser: &StartParser,
     pool: &AnyPool,
 ) -> (
@@ -1982,7 +1979,7 @@ fn read_config_files(
         if path.to_lowercase().ends_with(".tsv") {
             read_tsv_into_vector(path)
         } else {
-            read_db_table_into_vector(path, config_table)
+            read_db_table_into_vector(path, "table")
         }
     };
 
@@ -4165,7 +4162,7 @@ fn read_tsv_into_vector(path: &str) -> Vec<ValveRow> {
     rows
 }
 
-/// Given a database at the specified location, query the "table" table and return a vector of rows
+/// Given a database at the specified location, query the given table and return a vector of rows
 /// represented as ValveRows.
 fn read_db_table_into_vector(database: &str, config_table: &str) -> Vec<ValveRow> {
     let connection_options;
