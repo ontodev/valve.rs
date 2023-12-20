@@ -154,6 +154,102 @@ impl std::fmt::Debug for ColumnRule {
 }
 
 #[derive(Debug)]
+pub struct ValveConfig {
+    pub special: ValveSpecialConfig,
+    pub table: HashMap<String, ValveTableConfig>,
+    pub datatype: HashMap<String, ValveDatatypeConfig>,
+    pub rule: HashMap<String, HashMap<String, Vec<ValveRuleConfig>>>,
+    pub table_constraints: ValveTableConstraints,
+    pub datatype_conditions: HashMap<String, CompiledCondition>,
+    pub rule_conditions: HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    pub structure_conditions: HashMap<String, ParsedStructure>,
+    pub sorted_table_list: Vec<String>,
+}
+
+#[derive(Debug)]
+pub struct ValveSpecialConfig {
+    pub column: String,
+    pub datatype: String,
+    pub rule: String,
+    pub table: String,
+}
+
+#[derive(Debug)]
+pub struct ValveTableConfig {
+    pub table: String,
+    pub column: HashMap<String, ValveColumnConfig>,
+    pub column_order: Vec<String>,
+    pub descrtiption: String,
+    pub path: String,
+}
+
+#[derive(Debug)]
+pub struct ValveColumnConfig {
+    pub table: String,
+    pub column: String,
+    pub datatype: String,
+    pub description: String,
+    pub label: String,
+    pub structure: String,
+}
+
+#[derive(Debug)]
+pub struct ValveDatatypeConfig {
+    pub html_type: String,
+    pub rdf_type: String,
+    pub condition: String,
+    pub datatype: String,
+    pub description: String,
+    pub parent: String,
+    pub structure: String,
+    pub transform: String,
+}
+
+#[derive(Debug)]
+pub struct ValveRuleConfig {
+    pub description: String,
+    pub level: String,
+    pub table: String,
+    pub then_column: String,
+    pub then_condition: String,
+    pub when_column: String,
+    pub when_condition: String,
+}
+
+#[derive(Debug)]
+pub struct ValveTableConstraints {
+    // Note that primary would be better as HashMap<String, String>, since it is not possible to
+    // have more than one primary key per table, but the below reflects the current implementation
+    // which in principle allows for more than one.
+    pub primary: HashMap<String, Vec<String>>,
+    pub unique: HashMap<String, Vec<String>>,
+    pub foreign: HashMap<String, Vec<ValveForeignConstraint>>,
+    pub tree: HashMap<String, Vec<ValveTreeConstraint>>,
+    pub under: HashMap<String, Vec<ValveUnderConstraint>>,
+}
+
+#[derive(Debug)]
+pub struct ValveTreeConstraint {
+    pub child: String,
+    pub parent: String,
+}
+
+#[derive(Debug)]
+pub struct ValveUnderConstraint {
+    pub column: String,
+    pub ttable: String,
+    pub tcolumn: String,
+    pub value: SerdeValue,
+}
+
+#[derive(Debug)]
+pub struct ValveForeignConstraint {
+    pub column: String,
+    pub ftable: String,
+    pub fcolumn: String,
+}
+
+#[derive(Debug)]
 pub struct Valve {
     /// TODO: Add docstring here.
     pub global_config: SerdeMap,
