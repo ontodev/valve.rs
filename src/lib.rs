@@ -164,6 +164,8 @@ pub struct Valve {
     /// TODO: Add docstring here.
     pub parsed_structure_conditions: HashMap<String, ParsedStructure>,
     /// TODO: Add docstring here.
+    pub table_dependencies: HashMap<String, Vec<String>>,
+    /// TODO: Add docstring here.
     pub pool: AnyPool,
     /// TODO: Add docstring here.
     pub user: String,
@@ -224,6 +226,7 @@ impl Valve {
             rules_config,
             constraints_config,
             sorted_table_list,
+            table_dependencies,
         ) = read_config_files(table_path, &parser, &pool);
 
         let mut global_config = SerdeMap::new();
@@ -270,6 +273,7 @@ impl Valve {
             compiled_datatype_conditions: compiled_datatype_conditions,
             compiled_rule_conditions: compiled_rule_conditions,
             parsed_structure_conditions: parsed_structure_conditions,
+            table_dependencies: table_dependencies,
             pool: pool,
             user: String::from("VALVE"),
             verbose: verbose,
@@ -924,6 +928,7 @@ impl Valve {
                     // flagged tables.
                 }
                 if !once_dropped {
+                    // TODO: Rethink this.
                     let mut tables_to_drop = vec![""; sorted_table_list.len() - i];
                     tables_to_drop.clone_from_slice(&sorted_table_list[i..]);
                     tables_to_drop.reverse();
@@ -985,6 +990,7 @@ impl Valve {
     pub async fn drop_tables(&self, tables: Vec<&str>) -> Result<&Self, sqlx::Error> {
         // DatabaseError
 
+        // TODO: Re-think how this is done.
         let drop_list = {
             let mut drop_list = vec![];
             let drop_order = self.get_tables_ordered_for_deletion();
@@ -1044,6 +1050,7 @@ impl Valve {
 
         self.create_all_tables().await?;
 
+        // TODO: Re-think how this is done.
         let truncate_list = {
             let mut truncate_list = vec![];
             let truncate_order = self.get_tables_ordered_for_deletion();
@@ -1956,6 +1963,7 @@ fn read_config_files(
     SerdeMap,
     SerdeMap,
     Vec<String>,
+    HashMap<String, Vec<String>>,
 ) {
     let special_table_types = json!({
         "table": {"required": true},
@@ -2497,7 +2505,7 @@ fn read_config_files(
 
     // Sort the tables (aside from the message and history tables) according to their foreign key
     // dependencies so that tables are always loaded after the tables they depend on.
-    let sorted_tables = verify_table_deps_and_sort(
+    let (sorted_tables, table_dependencies) = verify_table_deps_and_sort(
         &tables_config
             .keys()
             .cloned()
@@ -2514,6 +2522,7 @@ fn read_config_files(
         rules_config,
         constraints_config,
         sorted_tables,
+        table_dependencies,
     )
 }
 
@@ -2672,7 +2681,6 @@ fn get_parsed_structure_conditions(
     parsed_structure_conditions
 }
 
-// removed the old valve functions that require it.
 /// Given the name of a table and a database connection pool, generate SQL for creating a view
 /// based on the table that provides a unified representation of the normal and conflict versions
 /// of the table, plus columns summarising the information associated with the given table that is
@@ -4487,7 +4495,10 @@ fn local_sql_syntax(pool: &AnyPool, sql: &String) -> String {
 /// under dependencies, returns the list of tables sorted according to their foreign key
 /// dependencies, such that if table_a depends on table_b, then table_b comes before table_a in the
 /// list that is returned.
-fn verify_table_deps_and_sort(table_list: &Vec<String>, constraints: &SerdeMap) -> Vec<String> {
+fn verify_table_deps_and_sort(
+    table_list: &Vec<String>,
+    constraints: &SerdeMap,
+) -> (Vec<String>, HashMap<String, Vec<String>>) {
     fn get_cycles(g: &DiGraphMap<&str, ()>) -> Result<Vec<String>, Vec<Vec<String>>> {
         let mut cycles = vec![];
         match toposort(&g, None) {
@@ -4520,6 +4531,7 @@ fn verify_table_deps_and_sort(table_list: &Vec<String>, constraints: &SerdeMap) 
         }
     }
 
+    // Check for intra-table cycles:
     let trees = constraints.get("tree").and_then(|t| t.as_object()).unwrap();
     for table_name in table_list {
         let mut dependency_graph = DiGraphMap::<&str, ()>::new();
@@ -4564,6 +4576,7 @@ fn verify_table_deps_and_sort(table_list: &Vec<String>, constraints: &SerdeMap) 
         };
     }
 
+    // Check for inter-table cycles:
     let foreign_keys = constraints
         .get("foreign")
         .and_then(|f| f.as_object())
@@ -4614,7 +4627,15 @@ fn verify_table_deps_and_sort(table_list: &Vec<String>, constraints: &SerdeMap) 
 
     match get_cycles(&dependency_graph) {
         Ok(sorted_table_list) => {
-            return sorted_table_list;
+            let mut dependencies = HashMap::new();
+            for node in dependency_graph.nodes() {
+                let neighbors = dependency_graph
+                    .neighbors_directed(node, petgraph::Direction::Outgoing)
+                    .map(|n| n.to_string())
+                    .collect::<Vec<_>>();
+                dependencies.insert(node.to_string(), neighbors);
+            }
+            return (sorted_table_list, dependencies);
         }
         Err(cycles) => {
             let mut message = String::new();
