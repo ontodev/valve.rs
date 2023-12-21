@@ -8,8 +8,8 @@ use sqlx::{
 use std::collections::HashMap;
 
 use crate::{
-    cast_sql_param_from_text, get_column_value, get_sql_type_from_global_config, is_sql_type_error,
-    local_sql_syntax, valve_log, ColumnRule, CompiledCondition, SerdeMap, ValveRow,
+    cast_sql_param_from_text, error, get_column_value, get_sql_type_from_global_config,
+    is_sql_type_error, local_sql_syntax, ColumnRule, CompiledCondition, SerdeMap, ValveRow,
 };
 
 /// Represents a particular cell in a particular row of data with vaildation results.
@@ -683,7 +683,10 @@ pub fn validate_rows_intra(
     let mut result_rows = vec![];
     for row in rows {
         match row {
-            Err(err) => valve_log!("ERROR while processing row for '{}': {}", table_name, err),
+            Err(err) => error!(
+                "While processing row for '{}', got error '{}'",
+                table_name, err
+            ),
             Ok(row) => {
                 let mut result_row = ResultRow {
                     row_number: None,
