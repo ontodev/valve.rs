@@ -19,6 +19,7 @@ async fn main() -> Result<(), sqlx::Error> {
     let mut api_test = false;
     let mut dump_config = false;
     let mut dump_schema = false;
+    let mut table_order = false;
     let mut drop_all = false;
     let mut create_only = false;
     let mut initial_load = false;
@@ -61,6 +62,11 @@ async fn main() -> Result<(), sqlx::Error> {
             &["--dump_schema"],
             StoreTrue,
             r#"Write the SQL used to create the database to stdout."#,
+        );
+        ap.refer(&mut table_order).add_option(
+            &["--table_order"],
+            StoreTrue,
+            r#"Display the order in which tables must be created or dropped."#,
         );
         ap.refer(&mut drop_all).add_option(
             &["--drop_all"],
@@ -138,6 +144,10 @@ async fn main() -> Result<(), sqlx::Error> {
     } else if dump_schema {
         let valve = Valve::build(&source, &destination, verbose, initial_load, interactive).await?;
         valve.dump_schema().await?;
+    } else if table_order {
+        let valve = Valve::build(&source, &destination, verbose, initial_load, interactive).await?;
+        let dependency_order = valve.get_sorted_table_list(false);
+        println!("{}", dependency_order.join(", "));
     } else if drop_all {
         let valve = Valve::build(&source, &destination, verbose, initial_load, interactive).await?;
         valve.drop_all_tables().await?;

@@ -341,10 +341,9 @@ impl Valve {
         Ok(())
     }
 
-    /// Returns a list of tables, including the message and history tables, in the right order for
-    /// table creation.
-    fn get_tables_ordered_for_creation(&self) -> Vec<&str> {
-        // Every other table depends on the message and history table so these will go last:
+    /// TODO: Add docstring.
+    pub fn get_sorted_table_list(&self, reverse: bool) -> Vec<&str> {
+        // Every other table depends on the message and history table so these will go first/last:
         let mut sorted_tables = vec!["message", "history"];
         sorted_tables.append(
             &mut self
@@ -355,15 +354,9 @@ impl Valve {
                 .and_then(|l| Some(l.collect::<Vec<_>>()))
                 .unwrap(),
         );
-        sorted_tables
-    }
-
-    /// Returns a list of tables, including the message and history tables, in the right order for
-    /// table deletion.
-    fn get_tables_ordered_for_deletion(&self) -> Vec<&str> {
-        // Every other table depends on the message and history table so these will go last:
-        let mut sorted_tables = self.get_tables_ordered_for_creation();
-        sorted_tables.reverse();
+        if reverse {
+            sorted_tables.reverse();
+        }
         sorted_tables
     }
 
@@ -919,7 +912,7 @@ impl Valve {
     /// TODO: Add docstring
     pub async fn dump_schema(&self) -> Result<(), sqlx::Error> {
         let setup_statements = self.get_setup_statements().await?;
-        for table in self.get_tables_ordered_for_creation() {
+        for table in self.get_sorted_table_list(false) {
             let table_statements = setup_statements.get(table).unwrap();
             let output = String::from(table_statements.join("\n"));
             println!("{}\n", output);
@@ -930,11 +923,13 @@ impl Valve {
     /// TODO: Add docstring here.
     fn get_dependent_tables(&self, table: &str) -> Vec<String> {
         let mut dependent_tables = vec![];
-        let direct_deps = self.table_dependencies.get(table).unwrap().to_vec();
-        for direct_dep in direct_deps {
-            let mut indirect_deps = self.get_dependent_tables(&direct_dep);
-            dependent_tables.append(&mut indirect_deps);
-            dependent_tables.push(direct_dep);
+        if table != "message" && table != "history" {
+            let direct_deps = self.table_dependencies.get(table).unwrap().to_vec();
+            for direct_dep in direct_deps {
+                let mut indirect_deps = self.get_dependent_tables(&direct_dep);
+                dependent_tables.append(&mut indirect_deps);
+                dependent_tables.push(direct_dep);
+            }
         }
         dependent_tables
     }
@@ -946,7 +941,7 @@ impl Valve {
         // TODO: Add logging statements here.
 
         let setup_statements = self.get_setup_statements().await?;
-        let sorted_table_list = self.get_tables_ordered_for_creation();
+        let sorted_table_list = self.get_sorted_table_list(false);
         for table in &sorted_table_list {
             if self.table_has_changed(*table).await? {
                 self.drop_tables(&vec![table]).await?;
@@ -986,13 +981,31 @@ impl Valve {
         return Ok(rows.len() > 0);
     }
 
+    pub fn order_tables(&self, tables: &Vec<&str>, reverse: bool) -> Vec<String> {
+        let mut ordering = vec![];
+        for table in tables {
+            let dependent_tables = self.get_dependent_tables(table);
+            for dep_table in dependent_tables {
+                // TODO: Somehow we are still getting some repetition. It is harmless (I think)
+                // but look into why.
+                if !ordering.contains(&dep_table) {
+                    ordering.push(dep_table.to_string());
+                }
+            }
+            ordering.push(table.to_string());
+        }
+        if reverse {
+            ordering.reverse();
+        }
+        ordering
+    }
+
     /// Drop all configured tables, in reverse dependency order.
     pub async fn drop_all_tables(&self) -> Result<&Self, sqlx::Error> {
         // DatabaseError
 
         // Drop all of the database tables in the reverse of their sorted order:
-        self.drop_tables(&self.get_tables_ordered_for_deletion())
-            .await?;
+        self.drop_tables(&self.get_sorted_table_list(true)).await?;
         Ok(self)
     }
 
@@ -1002,20 +1015,7 @@ impl Valve {
     pub async fn drop_tables(&self, tables: &Vec<&str>) -> Result<&Self, sqlx::Error> {
         // DatabaseError
 
-        let drop_list = {
-            let mut drop_list = vec![];
-            for table in tables {
-                let dependent_tables = self.get_dependent_tables(table);
-                for dep_table in dependent_tables {
-                    if !drop_list.contains(&dep_table) {
-                        drop_list.push(dep_table.to_string());
-                    }
-                }
-                drop_list.push(table.to_string());
-            }
-            drop_list
-        };
-
+        let drop_list = self.order_tables(tables, false);
         if self.interactive {
             let auto_drops = drop_list
                 .iter()
@@ -1049,7 +1049,7 @@ impl Valve {
     pub async fn truncate_all_tables(&self) -> Result<&Self, sqlx::Error> {
         // DatabaseError
 
-        self.truncate_tables(&self.get_tables_ordered_for_deletion())
+        self.truncate_tables(&self.get_sorted_table_list(true))
             .await?;
         Ok(self)
     }
@@ -1062,20 +1062,7 @@ impl Valve {
 
         self.create_all_tables().await?;
 
-        let truncate_list = {
-            let mut truncate_list = vec![];
-            for table in tables {
-                let dependent_tables = self.get_dependent_tables(table);
-                for dep_table in dependent_tables {
-                    if !truncate_list.contains(&dep_table) {
-                        truncate_list.push(dep_table.to_string());
-                    }
-                }
-                truncate_list.push(table.to_string());
-            }
-            truncate_list
-        };
-
+        let truncate_list = self.order_tables(tables, false);
         if self.interactive {
             let auto_truncates = truncate_list
                 .iter()
@@ -1120,7 +1107,7 @@ impl Valve {
     pub async fn load_all_tables(&self, _validate: bool) -> Result<&Self, sqlx::Error> {
         // DatabaseError
 
-        let table_list = self.get_tables_ordered_for_creation();
+        let table_list = self.get_sorted_table_list(false);
         if self.verbose {
             info!("Processing {} tables.", table_list.len());
         }
@@ -1143,9 +1130,9 @@ impl Valve {
     ) -> Result<&Self, sqlx::Error> {
         // ConfigOrDatabaseError
 
-        let mut list_for_deletion = table_list.clone();
-        list_for_deletion.reverse();
-        self.truncate_tables(&list_for_deletion).await?;
+        let mut list_for_truncation = table_list.clone();
+        list_for_truncation.reverse();
+        self.truncate_tables(&list_for_truncation).await?;
 
         let num_tables = table_list.len();
         let mut total_errors = 0;
@@ -2519,10 +2506,9 @@ fn read_config_files(
         &tables_config
             .keys()
             .cloned()
-            // TODO: Should we not remove message and history to the sorted table list here? If so,
-            // then we need to check if there is anywhere in the code where we assume that they are not
-            // in the list, and change it. One place where this is definitely assumed is in
-            // get_tables_ordered_for_creation()
+            // We are filtering out history and message here because the fact that all of the table
+            // views depend on them is not reflected in the constraints configuration. Other
+            // functions, like, for instance, get_sorted_table_list() need to account for this.
             .filter(|m| m != "history" && m != "message")
             .collect(),
         &constraints_config,
@@ -4642,10 +4628,6 @@ fn verify_table_deps_and_sort(
                     .collect::<Vec<_>>();
                 table_dependencies.insert(node.to_string(), neighbors);
             }
-            // Add entries for the message and history tables:
-            table_dependencies.insert("message".to_string(), sorted_table_list.clone());
-            table_dependencies.insert("history".to_string(), sorted_table_list.clone());
-
             return (sorted_table_list, table_dependencies);
         }
         Err(cycles) => {
