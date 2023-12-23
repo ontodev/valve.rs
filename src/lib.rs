@@ -343,17 +343,13 @@ impl Valve {
 
     /// TODO: Add docstring.
     pub fn get_sorted_table_list(&self, reverse: bool) -> Vec<&str> {
-        // Every other table depends on the message and history table so these will go first/last:
-        let mut sorted_tables = vec!["message", "history"];
-        sorted_tables.append(
-            &mut self
-                .global_config
-                .get("sorted_table_list")
-                .and_then(|l| l.as_array())
-                .and_then(|l| Some(l.iter().map(|i| i.as_str().unwrap())))
-                .and_then(|l| Some(l.collect::<Vec<_>>()))
-                .unwrap(),
-        );
+        let mut sorted_tables = self
+            .global_config
+            .get("sorted_table_list")
+            .and_then(|l| l.as_array())
+            .and_then(|l| Some(l.iter().map(|i| i.as_str().unwrap())))
+            .and_then(|l| Some(l.collect::<Vec<_>>()))
+            .unwrap();
         if reverse {
             sorted_tables.reverse();
         }
@@ -981,23 +977,28 @@ impl Valve {
         return Ok(rows.len() > 0);
     }
 
-    pub fn order_tables(&self, tables: &Vec<&str>, reverse: bool) -> Vec<String> {
-        let mut ordering = vec![];
+    pub fn order_tables(&self, tables: &Vec<&str>, deletion_order: bool) -> Vec<String> {
+        let mut with_dups = vec![];
         for table in tables {
             let dependent_tables = self.get_dependent_tables(table);
             for dep_table in dependent_tables {
-                // TODO: Somehow we are still getting some repetition. It is harmless (I think)
-                // but look into why.
-                if !ordering.contains(&dep_table) {
-                    ordering.push(dep_table.to_string());
-                }
+                with_dups.push(dep_table.to_string());
             }
-            ordering.push(table.to_string());
+            with_dups.push(table.to_string());
         }
-        if reverse {
-            ordering.reverse();
+        // The algorithm above gives the tables in the order needed for deletion. But we want
+        // this function to return the creation order by default so we reverse it unless
+        // the deletion_order flag is set to true.
+        if !deletion_order {
+            with_dups.reverse();
         }
-        ordering
+
+        // Remove the duplicates from the returned table list:
+        let mut tables_in_order = vec![];
+        for table in with_dups.iter().unique() {
+            tables_in_order.push(table.to_string());
+        }
+        tables_in_order
     }
 
     /// Drop all configured tables, in reverse dependency order.
@@ -1015,7 +1016,7 @@ impl Valve {
     pub async fn drop_tables(&self, tables: &Vec<&str>) -> Result<&Self, sqlx::Error> {
         // DatabaseError
 
-        let drop_list = self.order_tables(tables, false);
+        let drop_list = self.order_tables(tables, true);
         if self.interactive {
             let auto_drops = drop_list
                 .iter()
@@ -1062,7 +1063,7 @@ impl Valve {
 
         self.create_all_tables().await?;
 
-        let truncate_list = self.order_tables(tables, false);
+        let truncate_list = self.order_tables(tables, true);
         if self.interactive {
             let auto_truncates = truncate_list
                 .iter()
@@ -2507,8 +2508,9 @@ fn read_config_files(
             .keys()
             .cloned()
             // We are filtering out history and message here because the fact that all of the table
-            // views depend on them is not reflected in the constraints configuration. Other
-            // functions, like, for instance, get_sorted_table_list() need to account for this.
+            // views depend on them is not reflected in the constraints configuration. They will be
+            // taken account of within verify_table_deps_and_sort() and manually added to the sorted
+            // table list that is returned.
             .filter(|m| m != "history" && m != "message")
             .collect(),
         &constraints_config,
@@ -4628,7 +4630,10 @@ fn verify_table_deps_and_sort(
                     .collect::<Vec<_>>();
                 table_dependencies.insert(node.to_string(), neighbors);
             }
-            return (sorted_table_list, table_dependencies);
+            let mut sorted_table_list = sorted_table_list.clone();
+            let mut with_specials = vec!["message".to_string(), "history".to_string()];
+            with_specials.append(&mut sorted_table_list);
+            return (with_specials, table_dependencies);
         }
         Err(cycles) => {
             let mut message = String::new();
