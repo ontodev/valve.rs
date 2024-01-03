@@ -20,6 +20,8 @@ async fn main() -> Result<(), sqlx::Error> {
     let mut dump_config = false;
     let mut dump_schema = false;
     let mut table_order = false;
+    let mut show_deps_in = false;
+    let mut show_deps_out = false;
     let mut drop_all = false;
     let mut create_only = false;
     let mut initial_load = false;
@@ -67,6 +69,16 @@ async fn main() -> Result<(), sqlx::Error> {
             &["--table_order"],
             StoreTrue,
             r#"Display the order in which tables must be created or dropped."#,
+        );
+        ap.refer(&mut show_deps_in).add_option(
+            &["--show_deps_in"],
+            StoreTrue,
+            r#"Display the incoming dependencies for each configured table."#,
+        );
+        ap.refer(&mut show_deps_out).add_option(
+            &["--show_deps_out"],
+            StoreTrue,
+            r#"Display the outgoing dependencies for each configured table."#,
         );
         ap.refer(&mut drop_all).add_option(
             &["--drop_all"],
@@ -146,8 +158,29 @@ async fn main() -> Result<(), sqlx::Error> {
         valve.dump_schema().await?;
     } else if table_order {
         let valve = Valve::build(&source, &destination, verbose, initial_load, interactive).await?;
-        let dependency_order = valve.get_sorted_table_list(false);
-        println!("{}", dependency_order.join(", "));
+        let sorted_table_list = valve.get_sorted_table_list(false);
+        println!("{}", sorted_table_list.join(", "));
+    } else if show_deps_in || show_deps_out {
+        let valve = Valve::build(&source, &destination, verbose, initial_load, interactive).await?;
+        let dependencies = valve.collect_dependencies(show_deps_in);
+        for (table, deps) in dependencies.iter() {
+            let deps = {
+                let deps = deps.iter().map(|s| format!("'{}'", s)).collect::<Vec<_>>();
+                if deps.is_empty() {
+                    "None".to_string()
+                } else {
+                    deps.join(", ")
+                }
+            };
+            let preamble = {
+                if show_deps_in {
+                    format!("Tables that depend on '{}'", table)
+                } else {
+                    format!("Table '{}' depends on", table)
+                }
+            };
+            println!("{}: {}", preamble, deps);
+        }
     } else if drop_all {
         let valve = Valve::build(&source, &destination, verbose, initial_load, interactive).await?;
         valve.drop_all_tables().await?;
