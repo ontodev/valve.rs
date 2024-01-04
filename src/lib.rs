@@ -152,6 +152,23 @@ impl std::fmt::Debug for ColumnRule {
         )
     }
 }
+#[derive(Debug)]
+pub struct ValveMessage {
+    pub column: String,
+    pub value: String,
+    pub rule: String,
+    pub level: String,
+    pub message: String,
+}
+
+#[derive(Debug)]
+pub struct ValveChange {
+    pub column: String,
+    pub level: String,
+    pub old_value: String,
+    pub value: String,
+    pub message: String,
+}
 
 #[derive(Debug)]
 pub struct ValveConfig {
