@@ -178,7 +178,7 @@ impl std::fmt::Debug for ColumnRule {
 #[derive(Debug)]
 pub struct Valve {
     /// TODO: Add docstring here.
-    pub global_config: SerdeMap,
+    pub config: SerdeMap,
     /// TODO: Add docstring here.
     pub compiled_datatype_conditions: HashMap<String, CompiledCondition>,
     /// TODO: Add docstring here.
@@ -254,24 +254,24 @@ impl Valve {
             table_dependencies_out,
         ) = read_config_files(table_path, &parser, &pool);
 
-        let mut global_config = SerdeMap::new();
-        global_config.insert(
+        let mut config = SerdeMap::new();
+        config.insert(
             String::from("special"),
             SerdeValue::Object(specials_config.clone()),
         );
-        global_config.insert(
+        config.insert(
             String::from("table"),
             SerdeValue::Object(tables_config.clone()),
         );
-        global_config.insert(
+        config.insert(
             String::from("datatype"),
             SerdeValue::Object(datatypes_config.clone()),
         );
-        global_config.insert(
+        config.insert(
             String::from("rule"),
             SerdeValue::Object(rules_config.clone()),
         );
-        global_config.insert(
+        config.insert(
             String::from("constraints"),
             SerdeValue::Object(constraints_config.clone()),
         );
@@ -279,22 +279,18 @@ impl Valve {
         for table in &sorted_table_list {
             sorted_table_serdevalue_list.push(SerdeValue::String(table.to_string()));
         }
-        global_config.insert(
+        config.insert(
             String::from("sorted_table_list"),
             SerdeValue::Array(sorted_table_serdevalue_list),
         );
 
-        let compiled_datatype_conditions =
-            get_compiled_datatype_conditions(&global_config, &parser);
-        let compiled_rule_conditions = get_compiled_rule_conditions(
-            &global_config,
-            compiled_datatype_conditions.clone(),
-            &parser,
-        );
-        let parsed_structure_conditions = get_parsed_structure_conditions(&global_config, &parser);
+        let compiled_datatype_conditions = get_compiled_datatype_conditions(&config, &parser);
+        let compiled_rule_conditions =
+            get_compiled_rule_conditions(&config, compiled_datatype_conditions.clone(), &parser);
+        let parsed_structure_conditions = get_parsed_structure_conditions(&config, &parser);
 
         Ok(Self {
-            global_config: global_config,
+            config: config,
             compiled_datatype_conditions: compiled_datatype_conditions,
             compiled_rule_conditions: compiled_rule_conditions,
             parsed_structure_conditions: parsed_structure_conditions,
@@ -348,7 +344,7 @@ impl Valve {
     /// TODO: Add docstring.
     pub fn get_sorted_table_list(&self, reverse: bool) -> Vec<&str> {
         let mut sorted_tables = self
-            .global_config
+            .config
             .get("sorted_table_list")
             .and_then(|l| l.as_array())
             .and_then(|l| Some(l.iter().map(|i| i.as_str().unwrap())))
@@ -459,7 +455,7 @@ impl Valve {
                         return Ok(true);
                     } else {
                         let trees =
-                            self.global_config
+                            self.config
                                 .get("constraints")
                                 .and_then(|c| c.as_object())
                                 .and_then(|o| o.get("tree"))
@@ -544,7 +540,7 @@ impl Valve {
 
         let (columns_config, configured_column_order) = {
             let table_config = self
-                .global_config
+                .config
                 .get("table")
                 .and_then(|tc| tc.get(table))
                 .and_then(|t| t.as_object())
@@ -677,8 +673,7 @@ impl Valve {
                 .and_then(|c| c.as_object())
                 .unwrap();
             let sql_type =
-                get_sql_type_from_global_config(&self.global_config, table, &cname, &self.pool)
-                    .unwrap();
+                get_sql_type_from_global_config(&self.config, table, &cname, &self.pool).unwrap();
 
             // Check the column's SQL type:
             if sql_type.to_lowercase() != ctype.to_lowercase() {
@@ -733,13 +728,13 @@ impl Valve {
     /// TODO: Add docstring here
     async fn get_setup_statements(&self) -> Result<HashMap<String, Vec<String>>, sqlx::Error> {
         let tables_config = self
-            .global_config
+            .config
             .get("table")
             .and_then(|t| t.as_object())
             .unwrap()
             .clone();
         let datatypes_config = self
-            .global_config
+            .config
             .get("datatype")
             .and_then(|d| d.as_object())
             .unwrap()
@@ -962,7 +957,7 @@ impl Valve {
         }
 
         let constraints_config = self
-            .global_config
+            .config
             .get("constraints")
             .and_then(|c| c.as_object())
             .ok_or("Unable to retrieve configured constraints.")?;
@@ -1154,7 +1149,7 @@ impl Valve {
             }
             let table_name = table_name.to_string();
             let path = String::from(
-                self.global_config
+                self.config
                     .get("table")
                     .and_then(|t| t.as_object())
                     .and_then(|o| o.get(&table_name))
@@ -1208,7 +1203,7 @@ impl Valve {
             // logic:
             let chunks = records.chunks(CHUNK_SIZE);
             validate_and_insert_chunks(
-                &self.global_config,
+                &self.config,
                 &self.pool,
                 &self.compiled_datatype_conditions,
                 &self.compiled_rule_conditions,
@@ -1225,17 +1220,11 @@ impl Valve {
             // (the tree's parent) are all contained in another column (the tree's child):
             // We also need to wait before validating a table's "under" constraints. Although the tree
             // associated with such a constraint need not be defined on the same table, it can be.
-            let mut recs_to_update = validate_tree_foreign_keys(
-                &self.global_config,
-                &self.pool,
-                None,
-                &table_name,
-                None,
-            )
-            .await?;
+            let mut recs_to_update =
+                validate_tree_foreign_keys(&self.config, &self.pool, None, &table_name, None)
+                    .await?;
             recs_to_update.append(
-                &mut validate_under(&self.global_config, &self.pool, None, &table_name, None)
-                    .await?,
+                &mut validate_under(&self.config, &self.pool, None, &table_name, None).await?,
             );
 
             for record in recs_to_update {
@@ -1333,7 +1322,7 @@ impl Valve {
         // DatabaseError
 
         validate_row_tx(
-            &self.global_config,
+            &self.config,
             &self.compiled_datatype_conditions,
             &self.compiled_rule_conditions,
             &self.pool,
@@ -1365,7 +1354,7 @@ impl Valve {
         let mut tx = self.pool.begin().await?;
 
         let row = validate_row_tx(
-            &self.global_config,
+            &self.config,
             &self.compiled_datatype_conditions,
             &self.compiled_rule_conditions,
             &self.pool,
@@ -1378,7 +1367,7 @@ impl Valve {
         .await?;
 
         let rn = insert_new_row_tx(
-            &self.global_config,
+            &self.config,
             &self.compiled_datatype_conditions,
             &self.compiled_rule_conditions,
             &self.pool,
@@ -1411,17 +1400,11 @@ impl Valve {
 
         // Get the old version of the row from the database so that we can later record it to the
         // history table:
-        let old_row = get_row_from_db(
-            &self.global_config,
-            &self.pool,
-            &mut tx,
-            table_name,
-            &row_number,
-        )
-        .await?;
+        let old_row =
+            get_row_from_db(&self.config, &self.pool, &mut tx, table_name, &row_number).await?;
 
         let row = validate_row_tx(
-            &self.global_config,
+            &self.config,
             &self.compiled_datatype_conditions,
             &self.compiled_rule_conditions,
             &self.pool,
@@ -1434,7 +1417,7 @@ impl Valve {
         .await?;
 
         update_row_tx(
-            &self.global_config,
+            &self.config,
             &self.compiled_datatype_conditions,
             &self.compiled_rule_conditions,
             &self.pool,
@@ -1469,14 +1452,8 @@ impl Valve {
         // ConfigOrDatabaseError
         let mut tx = self.pool.begin().await?;
 
-        let row = get_row_from_db(
-            &self.global_config,
-            &self.pool,
-            &mut tx,
-            &table_name,
-            row_number,
-        )
-        .await?;
+        let row =
+            get_row_from_db(&self.config, &self.pool, &mut tx, &table_name, row_number).await?;
 
         record_row_change(
             &mut tx,
@@ -1489,7 +1466,7 @@ impl Valve {
         .await?;
 
         delete_row_tx(
-            &self.global_config,
+            &self.config,
             &self.compiled_datatype_conditions,
             &self.compiled_rule_conditions,
             &self.pool,
@@ -1578,7 +1555,7 @@ impl Valve {
                 let mut tx = self.pool.begin().await?;
 
                 delete_row_tx(
-                    &self.global_config,
+                    &self.config,
                     &self.compiled_datatype_conditions,
                     &self.compiled_rule_conditions,
                     &self.pool,
@@ -1597,7 +1574,7 @@ impl Valve {
                 let mut tx = self.pool.begin().await?;
 
                 insert_new_row_tx(
-                    &self.global_config,
+                    &self.config,
                     &self.compiled_datatype_conditions,
                     &self.compiled_rule_conditions,
                     &self.pool,
@@ -1618,7 +1595,7 @@ impl Valve {
                 let mut tx = self.pool.begin().await?;
 
                 update_row_tx(
-                    &self.global_config,
+                    &self.config,
                     &self.compiled_datatype_conditions,
                     &self.compiled_rule_conditions,
                     &self.pool,
@@ -1676,7 +1653,7 @@ impl Valve {
                 let mut tx = self.pool.begin().await?;
 
                 insert_new_row_tx(
-                    &self.global_config,
+                    &self.config,
                     &self.compiled_datatype_conditions,
                     &self.compiled_rule_conditions,
                     &self.pool,
@@ -1697,7 +1674,7 @@ impl Valve {
                 let mut tx = self.pool.begin().await?;
 
                 delete_row_tx(
-                    &self.global_config,
+                    &self.config,
                     &self.compiled_datatype_conditions,
                     &self.compiled_rule_conditions,
                     &self.pool,
@@ -1716,7 +1693,7 @@ impl Valve {
                 let mut tx = self.pool.begin().await?;
 
                 update_row_tx(
-                    &self.global_config,
+                    &self.config,
                     &self.compiled_datatype_conditions,
                     &self.compiled_rule_conditions,
                     &self.pool,
@@ -1747,7 +1724,7 @@ impl Valve {
         column_name: &str,
         matching_string: Option<&str>,
     ) -> Result<SerdeValue, sqlx::Error> {
-        let config = &self.global_config;
+        let config = &self.config;
         let compiled_datatype_conditions = &self.compiled_datatype_conditions;
         let parsed_structure_conditions = &self.parsed_structure_conditions;
         let pool = &self.pool;

@@ -136,7 +136,7 @@ async fn main() -> Result<(), sqlx::Error> {
         run_api_tests(&source, &destination).await?;
     } else if dump_config {
         let valve = Valve::build(&source, &destination, verbose, initial_load, interactive).await?;
-        let mut config = valve.global_config.clone();
+        let mut config = valve.config.clone();
         let datatype_conditions =
             format!("{:?}", valve.compiled_datatype_conditions).replace(r"\", r"\\");
         let datatype_conditions: SerdeValue = from_str(&datatype_conditions).unwrap();
