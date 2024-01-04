@@ -948,27 +948,48 @@ impl Valve {
     }
 
     /// TODO: Add docstring here.
-    fn _order_tables(&self, tables: &Vec<&str>, reverse: bool) -> Vec<String> {
+    fn sort_tables(&self, table_subset: &Vec<&str>, reverse: bool) -> Result<Vec<String>, String> {
+        let full_table_list = self.get_sorted_table_list(false);
+        if !table_subset
+            .iter()
+            .all(|item| full_table_list.contains(item))
+        {
+            return Err(format!(
+                "[{}] contains tables that are not in the configured table list: [{}]",
+                table_subset.join(", "),
+                full_table_list.join(", ")
+            ));
+        }
+
         let constraints_config = self
             .global_config
             .get("constraints")
             .and_then(|c| c.as_object())
-            .unwrap();
+            .ok_or("Unable to retrieve configured constraints.")?;
 
         // Filter out message and history since they are not represented in the constraints config.
         // They will be added implicitly to the list returned by verify_table_deps_and_sort.
-        let tables = tables
+        let filtered_subset = table_subset
             .iter()
             .filter(|m| **m != "history" && **m != "message")
             .map(|s| s.to_string())
             .collect::<Vec<_>>();
 
-        let (mut sorted_table_list, _, _) =
-            verify_table_deps_and_sort(&tables, &constraints_config);
+        let (sorted_subset, _, _) =
+            verify_table_deps_and_sort(&filtered_subset, &constraints_config);
+
+        // Since the result of verify_table_deps_and_sort() will include dependencies of the tables
+        // in its input list, we filter those out here:
+        let mut sorted_subset = sorted_subset
+            .iter()
+            .filter(|m| table_subset.contains(&m.as_str()))
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>();
+
         if reverse {
-            sorted_table_list.reverse();
+            sorted_subset.reverse();
         }
-        sorted_table_list
+        Ok(sorted_subset)
     }
 
     /// TODO: Add docstring here.
@@ -1085,14 +1106,14 @@ impl Valve {
     /// If `validate` is false, just try to insert all rows.
     /// Return an error on database problem,
     /// including database conflicts that prevent rows being inserted.
-    pub async fn load_all_tables(&self, _validate: bool) -> Result<&Self, sqlx::Error> {
+    pub async fn load_all_tables(&self, validate: bool) -> Result<&Self, sqlx::Error> {
         // DatabaseError
 
         let table_list = self.get_sorted_table_list(false);
         if self.verbose {
             info!("Processing {} tables.", table_list.len());
         }
-        self.load_tables(&table_list, true).await
+        self.load_tables(&table_list, validate).await
     }
 
     /// Given a vector of table names,
@@ -1107,13 +1128,20 @@ impl Valve {
     pub async fn load_tables(
         &self,
         table_list: &Vec<&str>,
-        _validate: bool,
+        validate: bool,
     ) -> Result<&Self, sqlx::Error> {
         // ConfigOrDatabaseError
 
-        let mut list_for_truncation = table_list.clone();
-        list_for_truncation.reverse();
-        self.truncate_tables(&list_for_truncation).await?;
+        let list_for_truncation = self
+            .sort_tables(table_list, true)
+            .map_err(|e| SqlxCErr(e.into()))?;
+        self.truncate_tables(
+            &list_for_truncation
+                .iter()
+                .map(|i| i.as_str())
+                .collect::<Vec<_>>(),
+        )
+        .await?;
 
         let num_tables = table_list.len();
         let mut total_errors = 0;
