@@ -670,8 +670,8 @@ pub async fn validate_rows_constraints(
 }
 
 /// Given a config map, compiled datatype and rule conditions, a table name, the headers for the
-/// table, and a number of rows to validate, validate all of the rows and return the validated
-/// versions.
+/// table, and a number of rows to validate, run intra-row validatation on all of the rows and
+/// return the validated versions.
 pub fn validate_rows_intra(
     config: &SerdeMap,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
@@ -679,6 +679,7 @@ pub fn validate_rows_intra(
     table_name: &String,
     headers: &csv::StringRecord,
     rows: &Vec<Result<csv::StringRecord, csv::Error>>,
+    only_nulltype: bool,
 ) -> Vec<ResultRow> {
     let mut result_rows = vec![];
     for row in rows {
@@ -726,26 +727,28 @@ pub fn validate_rows_intra(
                     );
                 }
 
-                for column_name in &column_names {
-                    let context = result_row.clone();
-                    let cell = result_row.contents.get_mut(column_name).unwrap();
-                    validate_cell_rules(
-                        config,
-                        compiled_rule_conditions,
-                        table_name,
-                        &column_name,
-                        &context,
-                        cell,
-                    );
-
-                    if cell.nulltype == None {
-                        validate_cell_datatype(
+                if !only_nulltype {
+                    for column_name in &column_names {
+                        let context = result_row.clone();
+                        let cell = result_row.contents.get_mut(column_name).unwrap();
+                        validate_cell_rules(
                             config,
-                            compiled_datatype_conditions,
+                            compiled_rule_conditions,
                             table_name,
                             &column_name,
+                            &context,
                             cell,
                         );
+
+                        if cell.nulltype == None {
+                            validate_cell_datatype(
+                                config,
+                                compiled_datatype_conditions,
+                                table_name,
+                                &column_name,
+                                cell,
+                            );
+                        }
                     }
                 }
                 result_rows.push(result_row);
