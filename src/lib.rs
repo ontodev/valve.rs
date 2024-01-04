@@ -196,7 +196,7 @@ pub struct ValveColumnConfig {
 #[derive(Debug)]
 pub struct ValveDatatypeConfig {
     pub html_type: String,
-    pub rdf_type: String,
+    pub sql_type: String,
     pub condition: String,
     pub datatype: String,
     pub description: String,
