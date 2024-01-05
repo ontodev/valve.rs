@@ -16,8 +16,7 @@ datatype	transform		empty	word
 datatype	condition		empty	datatype_condition		
 datatype	structure		empty	trimmed_line		
 datatype	description		empty	trimmed_text		
-datatype	SQLite type		empty	trimmed_line		
-datatype	PostgreSQL type		empty	trimmed_line		
+datatype	SQL type		empty	trimmed_line		
 datatype	RDF type		empty	trimmed_line		
 datatype	HTML type		empty	datatype_name		
 rule	table			table_name		

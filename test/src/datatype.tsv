@@ -1,24 +1,24 @@
-datatype	parent	transform	condition	structure	description	SQLite type	PostgreSQL type	RDF type	HTML type
-CURIE	nonspace		match(/\S+:\S+/)	concat(prefix, ":", suffix)	a Compact URI			CURIE	
-IRI	nonspace		exclude(/\s/)		an Internationalized Resource Identifier			IRI	
-column_name	trimmed_line		match(/\S([^\n]*\S)*/)		a column name				
-datatype_condition	line		exclude(/\n/)		a datatype condition specification				
-datatype_name	word		exclude(/\W/)		a datatype name				
-description	trimmed_text		match(/\S(.*\S)*/)		a brief description				
-empty	text		equals('')		the empty string	NULL	NULL	null	
-integer	nonspace		match(/-?\d+/)		a positive or negative integer	INTEGER	INTEGER		
-label	trimmed_line		match(/\S([^\n]*\S)*/)						
-line	text		exclude(/\n/)		a line of text				input
-natural_number	integer		match(/\d+/)		a natural number, including zero	INTEGER	INTEGER		
-nonspace	trimmed_line		exclude(/\s/)		text without whitespace				
-numeric	nonspace		match(/-?\d+(\.\d+)?/)		a positive or negative number	NUMERIC	NUMERIC		
-path	line		exclude(/\n/)		a path to a file				
-prefix	word		exclude(/\W/)		a prefix for a CURIE				
-real	nonspace		match(/-?\d+(\.\d+)?/)		a positive or negative real number	REAL	REAL		
-suffix	word		exclude(/\W/)		a suffix for a CURIE				
-table_name	word		exclude(/\W/)		a table name				
-table_type	word	lowercase	in('table', 'column', 'datatype')		a table type				
-text					any text	TEXT	TEXT	xsd:string	textarea
-trimmed_line	line		match(/\S([^\n]*\S)*/)		a line of text that does not begin or end with whitespace				
-trimmed_text	text		exclude(/^\s+|\s+$/)		text that does not begin or end with whitespace				
-word	nonspace		exclude(/\W/)		a single word: letters, numbers, underscore				
+datatype	parent	transform	condition	structure	description	SQL type	RDF type	HTML type
+CURIE	nonspace		match(/\S+:\S+/)	concat(prefix, ":", suffix)	a Compact URI		CURIE	
+IRI	nonspace		exclude(/\s/)		an Internationalized Resource Identifier		IRI	
+column_name	trimmed_line		match(/\S([^\n]*\S)*/)		a column name			
+datatype_condition	line		exclude(/\n/)		a datatype condition specification			
+datatype_name	word		exclude(/\W/)		a datatype name			
+description	trimmed_text		match(/\S(.*\S)*/)		a brief description			
+empty	text		equals('')		the empty string	NULL	null	
+integer	nonspace		match(/-?\d+/)		a positive or negative integer	INTEGER		
+label	trimmed_line		match(/\S([^\n]*\S)*/)					
+line	text		exclude(/\n/)		a line of text			input
+natural_number	integer		match(/\d+/)		a natural number, including zero	INTEGER		
+nonspace	trimmed_line		exclude(/\s/)		text without whitespace			
+numeric	nonspace		match(/-?\d+(\.\d+)?/)		a positive or negative number	NUMERIC		
+path	line		exclude(/\n/)		a path to a file			
+prefix	word		exclude(/\W/)		a prefix for a CURIE			
+real	nonspace		match(/-?\d+(\.\d+)?/)		a positive or negative real number	REAL		
+suffix	word		exclude(/\W/)		a suffix for a CURIE			
+table_name	word		exclude(/\W/)		a table name			
+table_type	word	lowercase	in('table', 'column', 'datatype')		a table type			
+text					any text	TEXT	xsd:string	textarea
+trimmed_line	line		match(/\S([^\n]*\S)*/)		a line of text that does not begin or end with whitespace			
+trimmed_text	text		exclude(/^\s+|\s+$/)		text that does not begin or end with whitespace			
+word	nonspace		exclude(/\W/)		a single word: letters, numbers, underscore			

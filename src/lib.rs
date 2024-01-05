@@ -74,9 +74,7 @@ static MULTI_THREADED: bool = true;
 static SQL_PARAM: &str = "VALVEPARAM";
 
 lazy_static! {
-    static ref PG_SQL_TYPES: Vec<&'static str> =
-        vec!["text", "varchar", "numeric", "integer", "real"];
-    static ref SL_SQL_TYPES: Vec<&'static str> = vec!["text", "numeric", "integer", "real"];
+    static ref SQL_TYPES: Vec<&'static str> = vec!["text", "varchar", "numeric", "integer", "real"];
 }
 
 /// Aliases for [serde_json::Map](..//serde_json/struct.Map.html)<String, [serde_json::Value](../serde_json/enum.Value.html)>.
@@ -2098,8 +2096,7 @@ fn read_config_files(
             "datatype",
             "parent",
             "condition",
-            "SQLite type",
-            "PostgreSQL type",
+            "SQL type",
         ] {
             if !row.contains_key(column) || row.get(column) == None {
                 panic!("Missing required column '{}' reading '{}'", column, path);
@@ -2112,7 +2109,7 @@ fn read_config_files(
             }
         }
 
-        for column in vec!["parent", "condition", "SQLite type", "PostgreSQL type"] {
+        for column in vec!["parent", "condition", "SQL type"] {
             if row.get(column).and_then(|c| c.as_str()).unwrap() == "" {
                 row.remove(&column.to_string());
             }
@@ -4354,15 +4351,7 @@ fn get_sql_type(dt_config: &SerdeMap, datatype: &String, pool: &AnyPool) -> Opti
         return None;
     }
 
-    let sql_type_column = {
-        if pool.any_kind() == AnyKind::Sqlite {
-            "SQLite type"
-        } else {
-            "PostgreSQL type"
-        }
-    };
-
-    if let Some(sql_type) = dt_config.get(datatype).and_then(|d| d.get(sql_type_column)) {
+    if let Some(sql_type) = dt_config.get(datatype).and_then(|d| d.get("SQL type")) {
         return Some(sql_type.as_str().and_then(|s| Some(s.to_string())).unwrap());
     }
 
@@ -4956,26 +4945,13 @@ fn get_table_ddl(
             }
         };
 
-        if pool.any_kind() == AnyKind::Postgres {
-            if !PG_SQL_TYPES.contains(&short_sql_type.to_lowercase().as_str()) {
-                panic!(
-                    "Unrecognized PostgreSQL SQL type '{}' for datatype: '{}'. \
-                     Accepted SQL types for PostgreSQL are: {}",
-                    sql_type,
-                    row.get("datatype").and_then(|d| d.as_str()).unwrap(),
-                    PG_SQL_TYPES.join(", ")
-                );
-            }
-        } else {
-            if !SL_SQL_TYPES.contains(&short_sql_type.to_lowercase().as_str()) {
-                panic!(
-                    "Unrecognized SQLite SQL type '{}' for datatype '{}'. \
-                     Accepted SQL datatypes for SQLite are: {}",
-                    sql_type,
-                    row.get("datatype").and_then(|d| d.as_str()).unwrap(),
-                    SL_SQL_TYPES.join(", ")
-                );
-            }
+        if !SQL_TYPES.contains(&short_sql_type.to_lowercase().as_str()) {
+            panic!(
+                "Unrecognized SQL type '{}' for datatype: '{}'. Accepted SQL types are: {}",
+                sql_type,
+                row.get("datatype").and_then(|d| d.as_str()).unwrap(),
+                SQL_TYPES.join(", ")
+            );
         }
 
         let column_name = row.get("column").and_then(|s| s.as_str()).unwrap();
