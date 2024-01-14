@@ -15,8 +15,11 @@ then
 fi
 
 pwd=$(dirname $(readlink -f $0))
-export_script=$pwd/../scripts/export.py
 output_dir=$pwd/output
+valve="./valve"
+
+# Use valve to save all of th configured tables:
+${valve} --save_all --save_dir ${output_dir} ${table_defs} $db
 
 num_tables=$(expr $(cat $table_defs | wc -l) - 1)
 table_paths=$(tail -$num_tables $table_defs | cut -f 2)
@@ -28,7 +31,6 @@ do
     table_path=$pwd/$table_path
     table_file=$(basename $table_path)
     table=${table_file%.*}
-    ${export_script} data $db $output_dir $table
     diff --strip-trailing-cr -q ${table_path} $output_dir/${table}.tsv
     ret_value=$(expr $ret_value + $?)
 done

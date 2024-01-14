@@ -1,15 +1,13 @@
 use chrono::Utc;
 use indexmap::IndexMap;
 use serde_json::{json, Value as SerdeValue};
-use sqlx::{
-    any::AnyPool, query as sqlx_query, Acquire, Error::Configuration as SqlxCErr, Row, Transaction,
-    ValueRef,
-};
+use sqlx::{any::AnyPool, query as sqlx_query, Acquire, Row, Transaction, ValueRef};
 use std::collections::HashMap;
 
 use crate::{
     cast_sql_param_from_text, error, get_column_value, get_sql_type_from_global_config,
-    is_sql_type_error, local_sql_syntax, ColumnRule, CompiledCondition, SerdeMap, ValveRow,
+    is_sql_type_error, local_sql_syntax, ColumnRule, CompiledCondition, SerdeMap, ValveError,
+    ValveRow,
 };
 
 /// Represents a particular cell in a particular row of data with vaildation results.
@@ -64,7 +62,7 @@ pub async fn validate_row_tx(
     row: &ValveRow,
     row_number: Option<u32>,
     query_as_if: Option<&QueryAsIf>,
-) -> Result<ValveRow, sqlx::Error> {
+) -> Result<ValveRow, ValveError> {
     // Fallback to a default transaction if it is not given. Since we do not commit before it falls
     // out of scope the transaction will be rolled back at the end of this function. And since this
     // function is read-only the rollback is trivial and therefore inconsequential.
@@ -85,7 +83,7 @@ pub async fn validate_row_tx(
             None => None,
             Some(SerdeValue::String(s)) => Some(s.to_string()),
             _ => {
-                return Err(SqlxCErr(
+                return Err(ValveError::DataError(
                     format!("No string 'nulltype' in cell: {:?}.", cell).into(),
                 ))
             }
@@ -94,7 +92,7 @@ pub async fn validate_row_tx(
             Some(SerdeValue::String(s)) => s.to_string(),
             Some(SerdeValue::Number(n)) => format!("{}", n),
             _ => {
-                return Err(SqlxCErr(
+                return Err(ValveError::DataError(
                     format!("No string/number 'value' in cell: {:#?}.", cell).into(),
                 ))
             }
@@ -102,7 +100,7 @@ pub async fn validate_row_tx(
         let valid = match cell.get("valid").and_then(|v| v.as_bool()) {
             Some(b) => b,
             None => {
-                return Err(SqlxCErr(
+                return Err(ValveError::DataError(
                     format!("No bool 'valid' in cell: {:?}.", cell).into(),
                 ))
             }
@@ -110,7 +108,7 @@ pub async fn validate_row_tx(
         let messages = match cell.get("messages").and_then(|m| m.as_array()) {
             Some(a) => a.to_vec(),
             None => {
-                return Err(SqlxCErr(
+                return Err(ValveError::DataError(
                     format!("No array 'messages' in cell: {:?}.", cell).into(),
                 ))
             }
@@ -252,7 +250,7 @@ pub async fn validate_under(
     mut tx: Option<&mut Transaction<'_, sqlx::Any>>,
     table_name: &String,
     extra_row: Option<&ResultRow>,
-) -> Result<Vec<SerdeValue>, sqlx::Error> {
+) -> Result<Vec<SerdeValue>, ValveError> {
     let mut results = vec![];
     let ukeys = config
         .get("constraints")
@@ -444,7 +442,7 @@ pub async fn validate_tree_foreign_keys(
     mut tx: Option<&mut Transaction<'_, sqlx::Any>>,
     table_name: &String,
     extra_row: Option<&ResultRow>,
-) -> Result<Vec<SerdeValue>, sqlx::Error> {
+) -> Result<Vec<SerdeValue>, ValveError> {
     let tkeys = config
         .get("constraints")
         .and_then(|c| c.as_object())
@@ -547,7 +545,7 @@ pub async fn validate_rows_trees(
     pool: &AnyPool,
     table_name: &String,
     rows: &mut Vec<ResultRow>,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), ValveError> {
     let column_names = config
         .get("table")
         .and_then(|t| t.get(table_name))
@@ -607,7 +605,7 @@ pub async fn validate_rows_constraints(
     pool: &AnyPool,
     table_name: &String,
     rows: &mut Vec<ResultRow>,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), ValveError> {
     let column_names = config
         .get("table")
         .and_then(|t| t.get(table_name))
@@ -762,7 +760,7 @@ pub fn validate_rows_intra(
 
 /// Given a row represented as a ValveRow, remove any duplicate messages from the row's cells, so
 /// that no cell has messages with the same level, rule, and message text.
-fn remove_duplicate_messages(row: &ValveRow) -> Result<ValveRow, sqlx::Error> {
+fn remove_duplicate_messages(row: &ValveRow) -> Result<ValveRow, ValveError> {
     let mut deduped_row = ValveRow::new();
     for (column_name, cell) in row.iter() {
         let mut messages = cell
@@ -1288,7 +1286,7 @@ async fn validate_cell_foreign_constraints(
     column_name: &String,
     cell: &mut ResultCell,
     query_as_if: Option<&QueryAsIf>,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), ValveError> {
     let fkeys = config
         .get("constraints")
         .and_then(|c| c.as_object())
@@ -1427,7 +1425,7 @@ async fn validate_cell_trees(
     cell: &mut ResultCell,
     context: &ResultRow,
     prev_results: &Vec<ResultRow>,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), ValveError> {
     // If the current column is the parent column of a tree, validate that adding the current value
     // will not result in a cycle between this and the parent column:
     let tkeys = config
@@ -1609,7 +1607,7 @@ async fn validate_cell_unique_constraints(
     cell: &mut ResultCell,
     prev_results: &Vec<ResultRow>,
     row_number: Option<u32>,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), ValveError> {
     // If the column has a primary or unique key constraint, or if it is the child associated with
     // a tree, then if the value of the cell is a duplicate either of one of the previously
     // validated rows in the batch, or a duplicate of a validated row that has already been inserted

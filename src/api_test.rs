@@ -1,10 +1,10 @@
-use ontodev_valve::{SerdeMap, Valve};
+use ontodev_valve::{SerdeMap, Valve, ValveError};
 use rand::distributions::{Alphanumeric, DistString, Distribution, Uniform};
 use rand::{random, thread_rng};
 use serde_json::json;
-use sqlx::{any::AnyPool, query as sqlx_query, Error::Configuration as SqlxCErr, Row, ValueRef};
+use sqlx::{any::AnyPool, query as sqlx_query, Row, ValueRef};
 
-async fn test_matching(valve: &Valve) -> Result<(), sqlx::Error> {
+async fn test_matching(valve: &Valve) -> Result<(), ValveError> {
     eprint!("Running test_matching() ... ");
 
     // Test the get_matching_values() function:
@@ -39,7 +39,7 @@ async fn test_matching(valve: &Valve) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
-async fn test_idempotent_validate_and_update(valve: &Valve) -> Result<(), sqlx::Error> {
+async fn test_idempotent_validate_and_update(valve: &Valve) -> Result<(), ValveError> {
     eprint!("Running test_idempotent_validate_and_update() ... ");
 
     // We test that validate_row() is idempotent by running it multiple times on the same row:
@@ -76,7 +76,7 @@ async fn test_idempotent_validate_and_update(valve: &Valve) -> Result<(), sqlx::
     Ok(())
 }
 
-async fn test_validate_and_insert_1(valve: &Valve) -> Result<(), sqlx::Error> {
+async fn test_validate_and_insert_1(valve: &Valve) -> Result<(), ValveError> {
     eprint!("Running test_validate_and_insert_1() ... ");
 
     // Validate and insert a new row:
@@ -104,7 +104,7 @@ async fn test_validate_and_insert_1(valve: &Valve) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
-async fn test_validate_and_update(valve: &Valve) -> Result<(), sqlx::Error> {
+async fn test_validate_and_update(valve: &Valve) -> Result<(), ValveError> {
     eprint!("Running test_validate_and_update() ... ");
 
     // Validate and update an existing row:
@@ -132,7 +132,7 @@ async fn test_validate_and_update(valve: &Valve) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
-async fn test_validate_and_insert_2(valve: &Valve) -> Result<(), sqlx::Error> {
+async fn test_validate_and_insert_2(valve: &Valve) -> Result<(), ValveError> {
     eprint!("Running test_validate_and_insert_2() ... ");
 
     // Validate and insert a new row:
@@ -160,7 +160,7 @@ async fn test_validate_and_insert_2(valve: &Valve) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
-async fn test_dependencies(valve: &Valve) -> Result<(), sqlx::Error> {
+async fn test_dependencies(valve: &Valve) -> Result<(), ValveError> {
     eprint!("Running test_dependencies() ... ");
 
     // Test cases for updates/inserts/deletes with dependencies.
@@ -211,7 +211,7 @@ enum DbOperation {
     Redo,
 }
 
-async fn generate_operation_sequence(pool: &AnyPool) -> Result<Vec<DbOperation>, sqlx::Error> {
+async fn generate_operation_sequence(pool: &AnyPool) -> Result<Vec<DbOperation>, ValveError> {
     /*
     Algorithm:
     ----------
@@ -308,7 +308,7 @@ async fn generate_operation_sequence(pool: &AnyPool) -> Result<Vec<DbOperation>,
     Ok(operations)
 }
 
-async fn test_randomized_api_test_with_undo_redo(valve: &Valve) -> Result<(), sqlx::Error> {
+async fn test_randomized_api_test_with_undo_redo(valve: &Valve) -> Result<(), ValveError> {
     // Randomly generate a number of insert/update/delete operations, possibly followed by undos
     // and/or redos.
     eprint!("Running test_randomized_api_test_with_undo_redo() ... ");
@@ -354,7 +354,7 @@ async fn test_randomized_api_test_with_undo_redo(valve: &Valve) -> Result<(), sq
                 let sql_row = query.fetch_one(&valve.pool).await?;
                 let raw_row_number = sql_row.try_get_raw("row_number")?;
                 if raw_row_number.is_null() {
-                    return Err(SqlxCErr("No rows in table1_view".into()));
+                    return Err(ValveError::DataError("No rows in table1_view".into()));
                 } else {
                     let row_number: i64 = sql_row.get("row_number");
                     let row_number = row_number as u32;
@@ -366,7 +366,7 @@ async fn test_randomized_api_test_with_undo_redo(valve: &Valve) -> Result<(), sq
                 let sql_row = query.fetch_one(&valve.pool).await?;
                 let raw_row_number = sql_row.try_get_raw("row_number")?;
                 if raw_row_number.is_null() {
-                    return Err(SqlxCErr("No rows in table1_view".into()));
+                    return Err(ValveError::DataError("No rows in table1_view".into()));
                 } else {
                     let row_number: i64 = sql_row.get("row_number");
                     let row_number = row_number as u32;
@@ -391,7 +391,7 @@ async fn test_randomized_api_test_with_undo_redo(valve: &Valve) -> Result<(), sq
     Ok(())
 }
 
-async fn test_undo_redo(valve: &Valve) -> Result<(), sqlx::Error> {
+async fn test_undo_redo(valve: &Valve) -> Result<(), ValveError> {
     eprint!("Running test_undo_redo() ... ");
 
     // Undo/redo tests
@@ -467,8 +467,8 @@ async fn test_undo_redo(valve: &Valve) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
-pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Error> {
-    let valve = Valve::build(table, database, false, false, false).await?;
+pub async fn run_api_tests(table: &str, database: &str) -> Result<(), ValveError> {
+    let valve = Valve::build(table, database, false, false).await?;
     // NOTE that you must use an external script to fetch the data from the database and run a diff
     // against a known good sample to verify that these tests yield the expected results:
     test_matching(&valve).await?;
@@ -479,6 +479,8 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), sqlx::Erro
     test_dependencies(&valve).await?;
     test_undo_redo(&valve).await?;
     test_randomized_api_test_with_undo_redo(&valve).await?;
+
+    // TODO: Add some tests for the new API functions like save.
 
     Ok(())
 }
