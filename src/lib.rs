@@ -387,7 +387,7 @@ impl Valve {
     /// 'unique', 'primary', or 'from(table, column)' in its column configuration fails to be
     /// associated, in the database, with a unique constraint, primary key, or foreign key,
     /// respectively; or vice versa; (4) The table does not exist in the database.
-    async fn table_has_changed(&self, table: &str) -> Result<bool, ValveError> {
+    pub async fn table_has_changed(&self, table: &str) -> Result<bool, ValveError> {
         // A clojure that, given a parsed structure condition, a table and column name, and an
         // unsigned integer representing whether the given column, in the case of a SQLite database,
         // is a primary key (in the case of PostgreSQL, the sqlite_pk parameter is ignored):
@@ -748,7 +748,7 @@ impl Valve {
     }
 
     /// Generates and returns the DDL required to setup the database.
-    async fn get_setup_statements(&self) -> Result<HashMap<String, Vec<String>>, ValveError> {
+    pub async fn get_setup_statements(&self) -> Result<HashMap<String, Vec<String>>, ValveError> {
         let tables_config = self
             .config
             .get("table")
@@ -917,7 +917,7 @@ impl Valve {
 
     /// Get all the incoming (tables that depend on it) or outgoing (tables it depends on)
     /// dependencies of the given table.
-    fn get_dependencies(&self, table: &str, incoming: bool) -> Vec<String> {
+    pub fn get_dependencies(&self, table: &str, incoming: bool) -> Vec<String> {
         let mut dependent_tables = vec![];
         if table != "message" && table != "history" {
             let direct_deps = {
@@ -939,7 +939,7 @@ impl Valve {
     /// Given a list of tables, fill it in with any further tables that are dependent upon tables
     /// in the given list. If deletion_order is true, the tables are sorted as required for
     /// deleting them all sequentially, otherwise they are ordered in reverse.
-    fn add_dependencies(&self, tables: &Vec<&str>, deletion_order: bool) -> Vec<String> {
+    pub fn add_dependencies(&self, tables: &Vec<&str>, deletion_order: bool) -> Vec<String> {
         let mut with_dups = vec![];
         for table in tables {
             let dependent_tables = self.get_dependencies(table, true);
@@ -965,7 +965,7 @@ impl Valve {
 
     /// Given a subset of the configured tables, return them in sorted dependency order, or in
     /// reverse if `reverse` is set to true.
-    fn sort_tables(
+    pub fn sort_tables(
         &self,
         table_subset: &Vec<&str>,
         reverse: bool,
@@ -1957,7 +1957,7 @@ impl Valve {
 }
 
 /// Given a string representing the location of a database, return a database connection pool.
-async fn get_pool_from_connection_string(database: &str) -> Result<AnyPool, ValveError> {
+pub async fn get_pool_from_connection_string(database: &str) -> Result<AnyPool, ValveError> {
     let connection_options;
     if database.starts_with("postgresql://") {
         connection_options = AnyConnectOptions::from_str(database)?;
@@ -1983,7 +1983,7 @@ async fn get_pool_from_connection_string(database: &str) -> Result<AnyPool, Valv
 /// table named "table"), load and check the 'table', 'column', and 'datatype' tables, and return
 /// SerdeMaps corresponding to specials, tables, datatypes, rules, constraints, and a vector
 /// containing the names of the tables in the dattatabse in sorted order.
-fn read_config_files(
+pub fn read_config_files(
     path: &str,
     parser: &StartParser,
     pool: &AnyPool,
@@ -2560,7 +2560,7 @@ fn read_config_files(
 /// Given the global configuration map and a parser, compile all of the datatype conditions,
 /// add them to a hash map whose keys are the text versions of the conditions and whose values
 /// are the compiled conditions, and then finally return the hash map.
-fn get_compiled_datatype_conditions(
+pub fn get_compiled_datatype_conditions(
     config: &SerdeMap,
     parser: &StartParser,
 ) -> HashMap<String, CompiledCondition> {
@@ -2592,7 +2592,7 @@ fn get_compiled_datatype_conditions(
 ///      ...
 /// }
 /// ```
-fn get_compiled_rule_conditions(
+pub fn get_compiled_rule_conditions(
     config: &SerdeMap,
     compiled_datatype_conditions: HashMap<String, CompiledCondition>,
     parser: &StartParser,
@@ -2670,7 +2670,7 @@ fn get_compiled_rule_conditions(
 /// Given the global config map and a parser, parse all of the structure conditions, add them to
 /// a hash map whose keys are given by the text versions of the conditions and whose values are
 /// given by the parsed versions, and finally return the hashmap.
-fn get_parsed_structure_conditions(
+pub fn get_parsed_structure_conditions(
     config: &SerdeMap,
     parser: &StartParser,
 ) -> HashMap<String, ParsedStructure> {
@@ -2718,7 +2718,7 @@ fn get_parsed_structure_conditions(
 /// contained in the message and history tables. The SQL generated is in the form of a tuple of
 /// Strings, with the first string being a SQL statement for dropping the view, and the second
 /// string being a SQL statement for creating it.
-fn get_sql_for_standard_view(table: &str, pool: &AnyPool) -> String {
+pub fn get_sql_for_standard_view(table: &str, pool: &AnyPool) -> String {
     let message_t;
     if pool.any_kind() == AnyKind::Postgres {
         message_t = format!(
@@ -2829,7 +2829,7 @@ fn get_sql_for_standard_view(table: &str, pool: &AnyPool) -> String {
 /// errors. Like the function for generating a standard view, the SQL generated by this function is
 /// returned in the form of a tuple of Strings, with the first string being a SQL statement
 /// for dropping the view, and the second string being a SQL statement for creating it.
-fn get_sql_for_text_view(tables_config: &SerdeMap, table: &str, pool: &AnyPool) -> String {
+pub fn get_sql_for_text_view(tables_config: &SerdeMap, table: &str, pool: &AnyPool) -> String {
     let is_clause = if pool.any_kind() == AnyKind::Sqlite {
         "IS"
     } else {
@@ -2920,7 +2920,7 @@ fn get_sql_for_text_view(tables_config: &SerdeMap, table: &str, pool: &AnyPool) 
 /// value of the column, such that when the value of a given column is null, the query attempts to
 /// extract it from the message table. Returns a String representing the SQL to retrieve the value
 /// of the column.
-fn query_column_with_message_value(table: &str, column: &str, pool: &AnyPool) -> String {
+pub fn query_column_with_message_value(table: &str, column: &str, pool: &AnyPool) -> String {
     let is_clause = if pool.any_kind() == AnyKind::Sqlite {
         "IS"
     } else {
@@ -2954,7 +2954,7 @@ fn query_column_with_message_value(table: &str, column: &str, pool: &AnyPool) ->
 /// SQL query that one can use to get the logical contents of the table, such that when the value
 /// of a given column is null, the query attempts to extract it from the message table. Returns a
 /// String representing the query.
-fn query_with_message_values(table: &str, global_config: &SerdeMap, pool: &AnyPool) -> String {
+pub fn query_with_message_values(table: &str, global_config: &SerdeMap, pool: &AnyPool) -> String {
     let real_columns = global_config
         .get("table")
         .and_then(|t| t.get(table))
@@ -3004,7 +3004,7 @@ fn query_with_message_values(table: &str, global_config: &SerdeMap, pool: &AnyPo
 /// column name, and a value for that column: get the rows, other than the one indicated by
 /// `except`, that would need to be revalidated if the given value were to replace the actual
 /// value of the column in that row.
-async fn get_affected_rows(
+pub async fn get_affected_rows(
     table: &str,
     column: &str,
     value: &str,
@@ -3067,7 +3067,7 @@ async fn get_affected_rows(
 /// Given a global configuration map, a database connection pool, a database transaction, a table
 /// name and a row number, get the logical contents of that row (whether or not it is valid),
 /// including any messages, from the database.
-async fn get_row_from_db(
+pub async fn get_row_from_db(
     global_config: &SerdeMap,
     pool: &AnyPool,
     tx: &mut Transaction<'_, sqlx::Any>,
@@ -3145,7 +3145,7 @@ async fn get_row_from_db(
 
 /// Given a database connection pool, a database transaction, a table name, a column name, and a row
 /// number, get the current value of the given column in the database.
-async fn get_db_value(
+pub async fn get_db_value(
     table: &str,
     column: &str,
     row_number: &u32,
@@ -3204,7 +3204,7 @@ async fn get_db_value(
 /// and a [QueryAsIf] struct representing a custom modification to the query of the table, get
 /// the rows that will potentially be affected by the database change to the row indicated in
 /// query_as_if.
-async fn get_rows_to_update(
+pub async fn get_rows_to_update(
     global_config: &SerdeMap,
     pool: &AnyPool,
     tx: &mut Transaction<'_, sqlx::Any>,
@@ -3419,7 +3419,7 @@ async fn get_rows_to_update(
 /// a database transaction, a number of updates to process, a [QueryAsIf] struct indicating how
 /// we should modify 'in thought' the current state of the database, and a flag indicating whether
 /// we should allow recursive updates, validate and then update each row indicated in `updates`.
-async fn process_updates(
+pub async fn process_updates(
     global_config: &SerdeMap,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
@@ -3468,7 +3468,7 @@ async fn process_updates(
 /// are going to change it from, optionally: the version of the row we are going to change it to,
 /// and the name of the user making the change, record the change to the history table in the
 /// database. Note that `from` and `to` cannot both be None.
-async fn record_row_change(
+pub async fn record_row_change(
     tx: &mut Transaction<'_, sqlx::Any>,
     table: &str,
     row_number: &u32,
@@ -3579,7 +3579,7 @@ async fn record_row_change(
 }
 
 /// Given a row and a column name, extract the contents of the row as a JSON object and return it.
-fn get_json_from_row(row: &AnyRow, column: &str) -> Option<SerdeMap> {
+pub fn get_json_from_row(row: &AnyRow, column: &str) -> Option<SerdeMap> {
     let raw_value = row.try_get_raw(column).unwrap();
     if !raw_value.is_null() {
         let value: &str = row.get(column);
@@ -3604,7 +3604,7 @@ fn get_json_from_row(row: &AnyRow, column: &str) -> Option<SerdeMap> {
 /// (otherwise). When setting the record to undone, user is used for the 'undone_by' field of the
 /// history table, otherwise undone_by is set to NULL and the user is indicated as the one
 /// responsible for the change (instead of whoever made the change originally).
-async fn switch_undone_state(
+pub async fn switch_undone_state(
     user: &str,
     history_id: u16,
     undone_state: bool,
@@ -3638,7 +3638,7 @@ async fn switch_undone_state(
 
 /// Given a global config map and a table name, return a list of the columns from the table
 /// that may potentially result in database conflicts.
-fn get_conflict_columns(global_config: &SerdeMap, table_name: &str) -> Vec<SerdeValue> {
+pub fn get_conflict_columns(global_config: &SerdeMap, table_name: &str) -> Vec<SerdeValue> {
     let mut conflict_columns = vec![];
     let primaries = global_config
         .get("constraints")
@@ -3718,7 +3718,7 @@ fn get_conflict_columns(global_config: &SerdeMap, table_name: &str) -> Vec<Serde
 }
 
 /// Given a SQL type and a value, return true if the value does not conform to the SQL type.
-fn is_sql_type_error(sql_type: &str, value: &str) -> bool {
+pub fn is_sql_type_error(sql_type: &str, value: &str) -> bool {
     let sql_type = sql_type.to_lowercase();
     if sql_type == "numeric" {
         // f64
@@ -3751,7 +3751,7 @@ fn is_sql_type_error(sql_type: &str, value: &str) -> bool {
 /// insert it to the database using the given transaction, then return the new row number.
 /// If skip_validation is set to true, omit the implicit call to [validate_row_tx()].
 #[async_recursion]
-async fn insert_new_row_tx(
+pub async fn insert_new_row_tx(
     global_config: &SerdeMap,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
@@ -3963,7 +3963,7 @@ async fn insert_new_row_tx(
 /// Given a global config map, maps of datatype and rule conditions, a database connection pool, a
 /// database transaction, a table name, and a row number, delete the given row from the database.
 #[async_recursion]
-async fn delete_row_tx(
+pub async fn delete_row_tx(
     global_config: &SerdeMap,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
@@ -4045,7 +4045,7 @@ async fn delete_row_tx(
 /// [validate_row_tx()]. If do_not_recurse, is set, do not look for rows which could be affected by
 /// this update.
 #[async_recursion]
-async fn update_row_tx(
+pub async fn update_row_tx(
     global_config: &SerdeMap,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
@@ -4166,7 +4166,7 @@ async fn update_row_tx(
 /// Given a path, read a TSV file and return a vector of rows represented as ValveRows.
 /// Note: Use this function to read "small" TSVs only. In particular, use this for the special
 /// configuration tables.
-fn read_tsv_into_vector(path: &str) -> Vec<ValveRow> {
+pub fn read_tsv_into_vector(path: &str) -> Vec<ValveRow> {
     let mut rdr =
         ReaderBuilder::new()
             .delimiter(b'\t')
@@ -4207,7 +4207,7 @@ fn read_tsv_into_vector(path: &str) -> Vec<ValveRow> {
 
 /// Given a database at the specified location, query the given table and return a vector of rows
 /// represented as ValveRows.
-fn read_db_table_into_vector(database: &str, config_table: &str) -> Vec<ValveRow> {
+pub fn read_db_table_into_vector(database: &str, config_table: &str) -> Vec<ValveRow> {
     let connection_options;
     if database.starts_with("postgresql://") {
         connection_options = AnyConnectOptions::from_str(database).unwrap();
@@ -4254,7 +4254,7 @@ fn read_db_table_into_vector(database: &str, config_table: &str) -> Vec<ValveRow
 /// StartParser, create a corresponding CompiledCondition, and return it. If the condition is a
 /// Label, then look for the CompiledCondition corresponding to it in compiled_datatype_conditions
 /// and return it.
-fn compile_condition(
+pub fn compile_condition(
     condition_option: Option<&str>,
     parser: &StartParser,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
@@ -4397,7 +4397,7 @@ fn compile_condition(
 
 /// Given the config map, the name of a datatype, and a database connection pool used to determine
 /// the database type, climb the datatype tree (as required), and return the first 'SQL type' found.
-fn get_sql_type(dt_config: &SerdeMap, datatype: &String, pool: &AnyPool) -> Option<String> {
+pub fn get_sql_type(dt_config: &SerdeMap, datatype: &String, pool: &AnyPool) -> Option<String> {
     if !dt_config.contains_key(datatype) {
         return None;
     }
@@ -4417,7 +4417,7 @@ fn get_sql_type(dt_config: &SerdeMap, datatype: &String, pool: &AnyPool) -> Opti
 
 /// Given the global config map, a table name, a column name, and a database connection pool
 /// used to determine the database type return the column's SQL type.
-fn get_sql_type_from_global_config(
+pub fn get_sql_type_from_global_config(
     global_config: &SerdeMap,
     table: &str,
     column: &str,
@@ -4441,7 +4441,7 @@ fn get_sql_type_from_global_config(
 
 /// Given a SQL type, return the appropriate CAST(...) statement for casting the SQL_PARAM
 /// from a TEXT column.
-fn cast_sql_param_from_text(sql_type: &str) -> String {
+pub fn cast_sql_param_from_text(sql_type: &str) -> String {
     let s = sql_type.to_lowercase();
     if s == "numeric" {
         format!("CAST(NULLIF({}, '') AS NUMERIC)", SQL_PARAM)
@@ -4456,7 +4456,7 @@ fn cast_sql_param_from_text(sql_type: &str) -> String {
 
 /// Given a SQL type, return the appropriate CAST(...) statement for casting the SQL_PARAM
 /// to a TEXT column.
-fn cast_column_sql_to_text(column: &str, sql_type: &str) -> String {
+pub fn cast_column_sql_to_text(column: &str, sql_type: &str) -> String {
     if sql_type.to_lowercase() == "text" {
         format!(r#""{}""#, column)
     } else {
@@ -4466,7 +4466,7 @@ fn cast_column_sql_to_text(column: &str, sql_type: &str) -> String {
 
 /// Given a database row, the name of a column, and it's SQL type, return the value of that column
 /// from the given row as a String.
-fn get_column_value(row: &AnyRow, column: &str, sql_type: &str) -> String {
+pub fn get_column_value(row: &AnyRow, column: &str, sql_type: &str) -> String {
     let s = sql_type.to_lowercase();
     if s == "numeric" {
         let value: f64 = row.get(format!(r#"{}"#, column).as_str());
@@ -4487,7 +4487,7 @@ fn get_column_value(row: &AnyRow, column: &str, sql_type: &str) -> String {
 /// SQL_PARAM, and given a database pool, if the pool is of type Sqlite, then change the syntax used
 /// for unbound parameters to Sqlite syntax, which uses "?", otherwise use Postgres syntax, which
 /// uses numbered parameters, i.e., $1, $2, ...
-fn local_sql_syntax(pool: &AnyPool, sql: &String) -> String {
+pub fn local_sql_syntax(pool: &AnyPool, sql: &String) -> String {
     // Do not replace instances of SQL_PARAM if they are within quotation marks.
     let rx = Regex::new(&format!(
         r#"('[^'\\]*(?:\\.[^'\\]*)*'|"[^"\\]*(?:\\.[^"\\]*)*")|\b{}\b"#,
@@ -4522,7 +4522,7 @@ fn local_sql_syntax(pool: &AnyPool, sql: &String) -> String {
 /// under dependencies, returns the list of tables sorted according to their foreign key
 /// dependencies, such that if table_a depends on table_b, then table_b comes before table_a in the
 /// list that is returned.
-fn verify_table_deps_and_sort(
+pub fn verify_table_deps_and_sort(
     table_list: &Vec<String>,
     constraints: &SerdeMap,
 ) -> (
@@ -4735,7 +4735,7 @@ fn verify_table_deps_and_sort(
 
 /// Given table configuration map and a datatype configuration map, a parser, a table name, and a
 /// database connection pool, return a configuration map representing all of the table constraints.
-fn get_table_constraints(
+pub fn get_table_constraints(
     tables_config: &SerdeMap,
     datatypes_config: &SerdeMap,
     parser: &StartParser,
@@ -4922,7 +4922,7 @@ fn get_table_constraints(
 /// Given table configuration map and a datatype configuration map, a parser, a table name, and a
 /// database connection pool, return a list of DDL statements that can be used to create the
 /// database tables.
-fn get_table_ddl(
+pub fn get_table_ddl(
     tables_config: &SerdeMap,
     datatypes_config: &SerdeMap,
     parser: &StartParser,
@@ -5101,7 +5101,7 @@ fn get_table_ddl(
 /// Given a list of messages and a HashMap, messages_stats, with which to collect counts of
 /// message types, count the various message types encountered in the list and increment the counts
 /// in messages_stats accordingly.
-fn add_message_counts(messages: &Vec<SerdeValue>, messages_stats: &mut HashMap<String, usize>) {
+pub fn add_message_counts(messages: &Vec<SerdeValue>, messages_stats: &mut HashMap<String, usize>) {
     for message in messages {
         let message = message.as_object().unwrap();
         let level = message.get("level").unwrap();
@@ -5122,7 +5122,7 @@ fn add_message_counts(messages: &Vec<SerdeValue>, messages_stats: &mut HashMap<S
 
 /// Given a global config map, return a list of defined datatype names sorted from the most generic
 /// to the most specific. This function will panic if circular dependencies are encountered.
-fn get_sorted_datatypes(global_config: &SerdeMap) -> Vec<&str> {
+pub fn get_sorted_datatypes(global_config: &SerdeMap) -> Vec<&str> {
     let mut graph = DiGraphMap::<&str, ()>::new();
     let dt_config = global_config
         .get("datatype")
@@ -5172,7 +5172,10 @@ fn get_sorted_datatypes(global_config: &SerdeMap) -> Vec<&str> {
 ///    `sorted_datatypes`, followed by:
 /// 2. Messages pertaining to violations of one of the rules in the rule table, followed by:
 /// 3. Messages pertaining to structure violations.
-fn sort_messages(sorted_datatypes: &Vec<&str>, cell_messages: &Vec<SerdeValue>) -> Vec<SerdeValue> {
+pub fn sort_messages(
+    sorted_datatypes: &Vec<&str>,
+    cell_messages: &Vec<SerdeValue>,
+) -> Vec<SerdeValue> {
     let mut datatype_messages = vec![];
     let mut structure_messages = vec![];
     let mut rule_messages = vec![];
@@ -5222,7 +5225,7 @@ fn sort_messages(sorted_datatypes: &Vec<&str>, cell_messages: &Vec<SerdeValue>) 
 /// to bind to that SQL statement. If the verbose flag is set, the number of errors, warnings,
 /// and information messages generated are added to messages_stats, the contents of which will
 /// later be written to stderr.
-async fn make_inserts(
+pub async fn make_inserts(
     config: &SerdeMap,
     table_name: &String,
     rows: &mut Vec<ResultRow>,
@@ -5435,7 +5438,7 @@ async fn make_inserts(
 /// and the chunk number corresponding to the rows, do inter-row validation on the rows and insert
 /// them to the table. If the verbose flag is set to true, error/warning/info stats will be
 /// collected in messages_stats and later written to stderr.
-async fn insert_chunk(
+pub async fn insert_chunk(
     config: &SerdeMap,
     pool: &AnyPool,
     table_name: &String,
@@ -5571,7 +5574,7 @@ async fn insert_chunk(
 /// and the headers of the rows to be inserted, validate each chunk and insert the validated rows
 /// to the table. If the verbose flag is set to true, error/warning/info stats will be collected in
 /// messages_stats and later written to stderr.
-async fn insert_chunks(
+pub async fn insert_chunks(
     config: &SerdeMap,
     pool: &AnyPool,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,

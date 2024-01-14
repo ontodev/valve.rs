@@ -760,7 +760,7 @@ pub fn validate_rows_intra(
 
 /// Given a row represented as a ValveRow, remove any duplicate messages from the row's cells, so
 /// that no cell has messages with the same level, rule, and message text.
-fn remove_duplicate_messages(row: &ValveRow) -> Result<ValveRow, ValveError> {
+pub fn remove_duplicate_messages(row: &ValveRow) -> Result<ValveRow, ValveError> {
     let mut deduped_row = ValveRow::new();
     for (column_name, cell) in row.iter() {
         let mut messages = cell
@@ -797,7 +797,7 @@ fn remove_duplicate_messages(row: &ValveRow) -> Result<ValveRow, ValveError> {
 
 /// Given a result row, convert it to a ValveRow and return it.
 /// Note that if the incoming result row has an associated row_number, this is ignored.
-fn result_row_to_config_map(incoming: &ResultRow) -> ValveRow {
+pub fn result_row_to_config_map(incoming: &ResultRow) -> ValveRow {
     let mut outgoing = ValveRow::new();
     for (column, cell) in incoming.contents.iter() {
         let mut cell_map = ValveRow::new();
@@ -823,7 +823,7 @@ fn result_row_to_config_map(incoming: &ResultRow) -> ValveRow {
 
 /// Generate a SQL Select clause that is a union of: (a) the literal values of the given extra row,
 /// and (b) a Select statement over `table_name` of all the fields in the extra row.
-fn select_with_extra_row(
+pub fn select_with_extra_row(
     config: &SerdeMap,
     extra_row: &ResultRow,
     table: &str,
@@ -925,7 +925,7 @@ pub fn with_tree_sql(
 /// validate, validate the cell's nulltype condition. If the cell's value is one of the allowable
 /// nulltype values for this column, then fill in the cell's nulltype value before returning the
 /// cell.
-fn validate_cell_nulltype(
+pub fn validate_cell_nulltype(
     config: &SerdeMap,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     table_name: &String,
@@ -952,7 +952,7 @@ fn validate_cell_nulltype(
 
 /// Given a config map, compiled datatype conditions, a table name, a column name, and a cell to
 /// validate, validate the cell's datatype and return the validated cell.
-fn validate_cell_datatype(
+pub fn validate_cell_datatype(
     config: &SerdeMap,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     table_name: &String,
@@ -1068,7 +1068,7 @@ fn validate_cell_datatype(
 /// Given a config map, compiled rule conditions, a table name, a column name, the row context,
 /// and the cell to validate, look in the rule table (if it exists) and validate the cell according
 /// to any applicable rules.
-fn validate_cell_rules(
+pub fn validate_cell_rules(
     config: &SerdeMap,
     compiled_rules: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     table_name: &String,
@@ -1159,7 +1159,7 @@ fn validate_cell_rules(
 
 /// Generates an SQL fragment representing the "as if" portion of a query that will be used for
 /// counterfactual validation.
-fn as_if_to_sql(
+pub fn as_if_to_sql(
     global_config: &SerdeMap,
     pool: &AnyPool,
     as_if: &QueryAsIf,
@@ -1278,7 +1278,7 @@ fn as_if_to_sql(
 /// check the cell value against any foreign keys that have been defined for the column. If there is
 /// a violation, indicate it with an error message attached to the cell. Optionally, if a
 /// transaction is given, use that instead of the pool for database access.
-async fn validate_cell_foreign_constraints(
+pub async fn validate_cell_foreign_constraints(
     config: &SerdeMap,
     pool: &AnyPool,
     mut tx: Option<&mut Transaction<'_, sqlx::Any>>,
@@ -1416,7 +1416,7 @@ async fn validate_cell_foreign_constraints(
 /// validate that none of the "tree" constraints on the column are violated, and indicate any
 /// violations by attaching error messages to the cell. Optionally, if a transaction is
 /// given, use that instead of the pool for database access.
-async fn validate_cell_trees(
+pub async fn validate_cell_trees(
     config: &SerdeMap,
     pool: &AnyPool,
     mut tx: Option<&mut Transaction<'_, sqlx::Any>>,
@@ -1598,7 +1598,7 @@ async fn validate_cell_trees(
 /// `row_number` is set to None, then no row corresponding to the given cell is assumed to exist
 /// in the table. Optionally, if a transaction is given, use that instead of the pool for database
 /// access.
-async fn validate_cell_unique_constraints(
+pub async fn validate_cell_unique_constraints(
     config: &SerdeMap,
     pool: &AnyPool,
     mut tx: Option<&mut Transaction<'_, sqlx::Any>>,
