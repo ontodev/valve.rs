@@ -177,7 +177,7 @@ impl std::fmt::Debug for ColumnRule {
 }
 
 /// Main entrypoint for the Valve API.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Valve {
     /// The valve configuration map.
     pub config: SerdeMap,
