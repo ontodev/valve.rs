@@ -335,6 +335,20 @@ impl Valve {
         })
     }
 
+    /// Convenience function to retrieve the path to Valve's "table table", the main entrypoint
+    /// to Valve's configuration.
+    pub fn get_path(&self) -> String {
+        self.config
+            .get("table")
+            .and_then(|t| t.as_object())
+            .and_then(|t| t.get("table"))
+            .and_then(|t| t.as_object())
+            .and_then(|t| t.get("path"))
+            .and_then(|p| p.as_str())
+            .unwrap()
+            .to_string()
+    }
+
     /// Controls the maximum length of a username.
     const USERNAME_MAX_LEN: usize = 20;
 
