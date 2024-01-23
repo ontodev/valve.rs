@@ -1411,6 +1411,7 @@ impl Valve {
         &self,
         table_name: &str,
         row: &ValveRow,
+        row_number: Option<u32>,
     ) -> Result<ValveRow, ValveError> {
         validate_row_tx(
             &self.config,
@@ -1420,7 +1421,7 @@ impl Valve {
             None,
             table_name,
             row,
-            None,
+            row_number,
             None,
         )
         .await

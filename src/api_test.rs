@@ -58,13 +58,13 @@ async fn test_idempotent_validate_and_update(valve: &Valve) -> Result<(), ValveE
     });
 
     let result_row_1 = valve
-        .validate_row("table2", row.as_object().unwrap())
+        .validate_row("table2", row.as_object().unwrap(), None)
         .await?;
 
-    let result_row_2 = valve.validate_row("table2", &result_row_1).await?;
+    let result_row_2 = valve.validate_row("table2", &result_row_1, None).await?;
     assert_eq!(result_row_1, result_row_2);
 
-    let result_row = valve.validate_row("table2", &result_row_2).await?;
+    let result_row = valve.validate_row("table2", &result_row_2, None).await?;
     assert_eq!(result_row, result_row_2);
 
     // Update the row we constructed and validated above in the database:
@@ -95,7 +95,7 @@ async fn test_validate_and_insert_1(valve: &Valve) -> Result<(), ValveError> {
     });
 
     let result_row = valve
-        .validate_row("table3", row.as_object().unwrap())
+        .validate_row("table3", row.as_object().unwrap(), None)
         .await?;
 
     let (_new_row_num, _new_row) = valve.insert_row("table3", &result_row).await?;
@@ -123,7 +123,7 @@ async fn test_validate_and_update(valve: &Valve) -> Result<(), ValveError> {
     });
 
     let result_row = valve
-        .validate_row("table6", row.as_object().unwrap())
+        .validate_row("table6", row.as_object().unwrap(), None)
         .await?;
 
     valve.update_row("table6", &1, &result_row).await?;
@@ -151,7 +151,7 @@ async fn test_validate_and_insert_2(valve: &Valve) -> Result<(), ValveError> {
     });
 
     let result_row = valve
-        .validate_row("table6", row.as_object().unwrap())
+        .validate_row("table6", row.as_object().unwrap(), None)
         .await?;
 
     let (_new_row_num, _new_row) = valve.insert_row("table6", &result_row).await?;
