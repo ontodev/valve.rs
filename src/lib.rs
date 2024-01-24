@@ -197,8 +197,6 @@ pub struct Valve {
     pub user: String,
     /// Produce more logging output.
     pub verbose: bool,
-    /// Tune the database for initial loading.
-    pub initial_load: bool,
 }
 
 #[derive(Debug)]
@@ -331,7 +329,6 @@ impl Valve {
             pool: pool,
             user: String::from("VALVE"),
             verbose: verbose,
-            initial_load: initial_load,
         })
     }
 
