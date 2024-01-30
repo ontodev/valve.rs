@@ -1,4 +1,7 @@
-use ontodev_valve::{SerdeMap, Valve, ValveError};
+use ontodev_valve::{
+    valve::{Valve, ValveError},
+    SerdeMap,
+};
 use rand::distributions::{Alphanumeric, DistString, Distribution, Uniform};
 use rand::{random, thread_rng};
 use serde_json::json;

@@ -1,10 +1,8 @@
 mod api_test;
 
 use crate::api_test::run_api_tests;
-
 use argparse::{ArgumentParser, Store, StoreTrue};
-
-use ontodev_valve::{Valve, ValveError};
+use ontodev_valve::{valve::Valve, valve::ValveError};
 use serde_json::{from_str, Value as SerdeValue};
 use std::{env, process};
 
