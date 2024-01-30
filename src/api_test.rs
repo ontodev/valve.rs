@@ -1,3 +1,5 @@
+//! API tests
+
 use ontodev_valve::{
     valve::{Valve, ValveError},
     SerdeMap,

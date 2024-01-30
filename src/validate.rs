@@ -1,3 +1,5 @@
+//! Low-level validation functions
+
 use crate::{
     cast_sql_param_from_text, error, get_column_value, get_sql_type_from_global_config,
     is_sql_type_error, local_sql_syntax,
