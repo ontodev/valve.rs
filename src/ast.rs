@@ -1,3 +1,5 @@
+//! Valve expressions
+
 use std::fmt;
 
 /// Represents an expression as parsed using [Valve's grammar](../valve_grammar/index.html).

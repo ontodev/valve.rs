@@ -13,7 +13,7 @@
 //! to see command line options.
 //!
 //! ## API
-//! See [Valve]
+//! See [valve]
 //!
 //! ## Python bindings
 //! See [valve.py](https://github.com/ontodev/valve.py)
@@ -33,8 +33,7 @@ use crate::{
         validate_row_tx, validate_rows_constraints, validate_rows_intra, validate_rows_trees,
         QueryAsIf, QueryAsIfKind, ResultRow,
     },
-    valve::ValveError,
-    valve::ValveRow,
+    valve::{ValveError, ValveRow, ValveSpecialConfig},
     valve_grammar::StartParser,
 };
 use async_recursion::async_recursion;
@@ -212,7 +211,7 @@ pub fn read_config_files(
     parser: &StartParser,
     pool: &AnyPool,
 ) -> (
-    SerdeMap,
+    ValveSpecialConfig,
     SerdeMap,
     SerdeMap,
     SerdeMap,
@@ -221,19 +220,9 @@ pub fn read_config_files(
     HashMap<String, Vec<String>>,
     HashMap<String, Vec<String>>,
 ) {
-    let special_table_types = json!({
-        "table": {"required": true},
-        "column": {"required": true},
-        "datatype": {"required": true},
-        "rule": {"required": false},
-    });
-    let special_table_types = special_table_types.as_object().unwrap();
-
     // Initialize the special table entries in the specials config map:
-    let mut specials_config = SerdeMap::new();
-    for t in special_table_types.keys() {
-        specials_config.insert(t.to_string(), SerdeValue::Null);
-    }
+    let specials_config_old = SerdeMap::new();
+    let mut specials_config = ValveSpecialConfig::default();
 
     // Load the table table from the given path:
     let mut tables_config = SerdeMap::new();
@@ -277,22 +266,38 @@ pub fn read_config_files(
                 }
             }
 
-            if special_table_types.contains_key(row_type) {
-                match specials_config.get(row_type) {
-                    Some(SerdeValue::Null) => (),
-                    _ => panic!(
-                        "Multiple tables with type '{}' declared in '{}'",
-                        row_type, path
-                    ),
+            let row_table = row.get("table").and_then(|t| t.as_str()).unwrap();
+            let duplicate_err = format!(
+                "Multiple tables with type '{}' declared in '{}'",
+                row_type, path
+            );
+            match row_type.as_str() {
+                "column" => {
+                    if specials_config.column != "" {
+                        panic!("{}", duplicate_err);
+                    }
+                    specials_config.column = row_table.to_string();
                 }
-                let row_table = row.get("table").and_then(|t| t.as_str()).unwrap();
-                specials_config.insert(
-                    row_type.to_string(),
-                    SerdeValue::String(row_table.to_string()),
-                );
-            } else {
-                panic!("Unrecognized table type '{}' in '{}'", row_type, path);
-            }
+                "datatype" => {
+                    if specials_config.datatype != "" {
+                        panic!("{}", duplicate_err);
+                    }
+                    specials_config.datatype = row_table.to_string();
+                }
+                "rule" => {
+                    if let Some(_) = &specials_config.rule {
+                        panic!("{}", duplicate_err);
+                    }
+                    specials_config.rule = Some(row_table.to_string());
+                }
+                "table" => {
+                    if specials_config.table != "" {
+                        panic!("{}", duplicate_err);
+                    }
+                    specials_config.table = row_table.to_string();
+                }
+                _ => panic!("Unrecognized table type '{}' in '{}'", row_type, path),
+            };
         }
 
         row.insert(String::from("column"), SerdeValue::Object(SerdeMap::new()));
@@ -301,13 +306,17 @@ pub fn read_config_files(
     }
 
     // Check that all the required special tables are present
-    for (table_type, table_spec) in special_table_types.iter() {
-        if let Some(SerdeValue::Bool(true)) = table_spec.get("required") {
-            if let Some(SerdeValue::Null) = specials_config.get(table_type) {
-                panic!("Missing required '{}' table in '{}'", table_type, path);
-            }
-        }
+    if specials_config.column == "" {
+        panic!("Missing required 'column' table in '{}'", path);
     }
+    if specials_config.datatype == "" {
+        panic!("Missing required 'datatype' table in '{}'", path);
+    }
+    if specials_config.table == "" {
+        panic!("Missing required 'table' table in '{}'", path);
+    }
+
+    println!("SPECIALS CONFIG: {:#?}", specials_config);
 
     // Helper function for extracting special configuration (other than the main 'table'
     // configuration) from either a file or a table in the database, depending on the value of
@@ -317,12 +326,12 @@ pub fn read_config_files(
     // indicated by `path`, the table is read, and the rows are returned.
     fn get_special_config(
         table_type: &str,
-        specials_config: &SerdeMap,
+        specials_config_old: &SerdeMap,
         tables_config: &SerdeMap,
         path: &str,
     ) -> Vec<SerdeMap> {
         if path.to_lowercase().ends_with(".tsv") {
-            let table_name = specials_config
+            let table_name = specials_config_old
                 .get(table_type)
                 .and_then(|d| d.as_str())
                 .unwrap();
@@ -359,7 +368,7 @@ pub fn read_config_files(
 
     // Load datatype table
     let mut datatypes_config = SerdeMap::new();
-    let rows = get_special_config("datatype", &specials_config, &tables_config, path);
+    let rows = get_special_config("datatype", &specials_config_old, &tables_config, path);
     for mut row in rows {
         for column in vec!["datatype", "parent", "condition", "SQL type"] {
             if !row.contains_key(column) || row.get(column) == None {
@@ -390,7 +399,7 @@ pub fn read_config_files(
     }
 
     // Load column table
-    let rows = get_special_config("column", &specials_config, &tables_config, path);
+    let rows = get_special_config("column", &specials_config_old, &tables_config, path);
     for mut row in rows {
         for column in vec!["table", "column", "label", "nulltype", "datatype"] {
             if !row.contains_key(column) || row.get(column) == None {
@@ -439,8 +448,8 @@ pub fn read_config_files(
 
     // Load rule table if it exists
     let mut rules_config = SerdeMap::new();
-    if let Some(SerdeValue::String(table_name)) = specials_config.get("rule") {
-        let rows = get_special_config(table_name, &specials_config, &tables_config, path);
+    if let Some(SerdeValue::String(table_name)) = specials_config_old.get("rule") {
+        let rows = get_special_config(table_name, &specials_config_old, &tables_config, path);
         for row in rows {
             for column in vec![
                 "table",
@@ -1275,6 +1284,7 @@ pub async fn get_affected_rows(
                 let cell = json!({
                     "value": value,
                     "valid": true,
+                    // TODO: Here?
                     "messages": json!([]),
                 });
                 table_row.insert(cname.to_string(), json!(cell));
@@ -1321,6 +1331,7 @@ pub async fn get_row_from_db(
         if raw_messages.is_null() {
             vec![]
         } else {
+            // TODO: Here?
             let messages: &str = sql_row.get("message");
             match serde_json::from_str::<SerdeValue>(messages) {
                 Err(e) => return Err(ValveError::SerdeJsonError(e.into())),
@@ -1347,6 +1358,7 @@ pub async fn get_row_from_db(
             } else {
                 value = String::from("");
             }
+            // TODO: Here?
             let column_messages = messages
                 .iter()
                 .filter(|m| m.get("column").unwrap().as_str() == Some(cname))
@@ -2064,6 +2076,7 @@ pub async fn insert_new_row_tx(
             .ok_or(ValveError::InputError(
                 format!("No string named 'value' in {:?}", cell).into(),
             ))?;
+        // TODO: Here?
         let messages = sort_messages(
             &sorted_datatypes,
             cell.get("messages")
@@ -2150,6 +2163,7 @@ pub async fn insert_new_row_tx(
     }
     query.execute(tx.acquire().await?).await?;
 
+    // TODO: Here?
     // Next add any validation messages to the message table:
     for m in all_messages {
         let column = m.get("column").and_then(|c| c.as_str()).unwrap();
@@ -3326,6 +3340,7 @@ pub fn get_table_ddl(
 /// message types, count the various message types encountered in the list and increment the counts
 /// in messages_stats accordingly.
 pub fn add_message_counts(messages: &Vec<SerdeValue>, messages_stats: &mut HashMap<String, usize>) {
+    // TODO: Here.
     for message in messages {
         let message = message.as_object().unwrap();
         let level = message.get("level").unwrap();
@@ -3403,6 +3418,7 @@ pub fn sort_messages(
     let mut datatype_messages = vec![];
     let mut structure_messages = vec![];
     let mut rule_messages = vec![];
+    // TODO: Here.
     for message in cell_messages {
         let rule = message
             .get("rule")
@@ -3528,6 +3544,7 @@ pub async fn make_inserts(
                     add_message_counts(&cell.messages, messages_stats);
                 }
 
+                // TODO: Here.
                 for message in sort_messages(&sorted_datatypes, &cell.messages) {
                     let row = row.row_number.unwrap().to_string();
                     let message_values = vec![
