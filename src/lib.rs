@@ -33,7 +33,7 @@ use crate::{
         validate_row_tx, validate_rows_constraints, validate_rows_intra, validate_rows_trees,
         QueryAsIf, QueryAsIfKind, ResultRow,
     },
-    valve::{ValveError, ValveRow, ValveSpecialConfig},
+    valve::{ValveColumnConfig, ValveError, ValveRow, ValveSpecialConfig, ValveTableConfig},
     valve_grammar::StartParser,
 };
 use async_recursion::async_recursion;
@@ -212,7 +212,7 @@ pub fn read_config_files(
     pool: &AnyPool,
 ) -> (
     ValveSpecialConfig,
-    SerdeMap,
+    HashMap<String, ValveTableConfig>,
     SerdeMap,
     SerdeMap,
     SerdeMap,
@@ -220,11 +220,10 @@ pub fn read_config_files(
     HashMap<String, Vec<String>>,
     HashMap<String, Vec<String>>,
 ) {
-    // Initialize the special table entries in the specials config map:
     let mut specials_config = ValveSpecialConfig::default();
+    let mut tables_config = HashMap::new();
 
     // Load the table table from the given path:
-    let mut tables_config = SerdeMap::new();
     let rows = {
         // Read in the configuration entry point (the "table table") from either a file or a
         // database table.
@@ -298,10 +297,20 @@ pub fn read_config_files(
                 _ => panic!("Unrecognized table type '{}' in '{}'", row_type, path),
             };
         }
-
-        row.insert(String::from("column"), SerdeValue::Object(SerdeMap::new()));
         let row_table = row.get("table").and_then(|t| t.as_str()).unwrap();
-        tables_config.insert(row_table.to_string(), SerdeValue::Object(row));
+        let row_desc = row.get("description").and_then(|t| t.as_str()).unwrap();
+        let row_path = row.get("path").and_then(|t| t.as_str()).unwrap();
+        let row_type = row.get("type").and_then(|t| t.as_str()).unwrap_or_default();
+        tables_config.insert(
+            row_table.to_string(),
+            ValveTableConfig {
+                table: row_table.to_string(),
+                table_type: row_type.to_string(),
+                description: row_desc.to_string(),
+                path: row_path.to_string(),
+                ..Default::default()
+            },
+        );
     }
 
     // Check that all the required special tables are present
@@ -324,7 +333,7 @@ pub fn read_config_files(
     fn get_special_config(
         table_type: &str,
         specials_config: &ValveSpecialConfig,
-        tables_config: &SerdeMap,
+        tables_config: &HashMap<String, ValveTableConfig>,
         path: &str,
     ) -> Vec<SerdeMap> {
         if path.to_lowercase().ends_with(".tsv") {
@@ -336,37 +345,32 @@ pub fn read_config_files(
                     None => panic!("Tried to retrieve rule configuration but it is undefined."),
                 },
                 _ => panic!(
-                    "In get_special_config(): Table type '{}' not supported",
+                    "In get_special_config(): Table type '{}' not supported for this function.",
                     table_type
                 ),
             };
             let path = String::from(
                 tables_config
                     .get(table_name)
-                    .and_then(|t| t.get("path"))
-                    .and_then(|p| p.as_str())
+                    .and_then(|t| Some(t.path.to_string()))
                     .unwrap(),
             );
-            return read_tsv_into_vector(&path.to_string());
+            return read_tsv_into_vector(&path);
         } else {
             let mut db_table = None;
             for (table_name, table_config) in tables_config {
-                let this_type = table_config.get("type");
-                if let Some(this_type) = this_type {
-                    let this_type = this_type.as_str().unwrap();
-                    if this_type == table_type {
-                        db_table = Some(table_name);
-                        break;
-                    }
+                if table_config.table_type == table_type {
+                    db_table = Some(table_name);
+                    break;
                 }
             }
-            if db_table == None {
-                panic!(
+            let db_table = match db_table {
+                None => panic!(
                     "Could not determine special table name for type '{}'.",
                     table_type
-                );
-            }
-            let db_table = db_table.unwrap();
+                ),
+                Some(table) => table,
+            };
             read_db_table_into_vector(path, db_table)
         }
     }
@@ -442,13 +446,24 @@ pub fn read_config_files(
 
         let row_table = row.get("table").and_then(|t| t.as_str()).unwrap();
         let column_name = row.get("column").and_then(|c| c.as_str()).unwrap();
+        let datatype = row.get("datatype").and_then(|c| c.as_str()).unwrap();
+        let description = row.get("description").and_then(|c| c.as_str()).unwrap();
+        let label = row.get("label").and_then(|c| c.as_str()).unwrap();
+        let structure = row.get("structure").and_then(|c| c.as_str()).unwrap();
 
-        let columns_config = tables_config
-            .get_mut(row_table)
-            .and_then(|t| t.get_mut("column"))
-            .and_then(|c| c.as_object_mut())
-            .unwrap();
-        columns_config.insert(column_name.to_string(), SerdeValue::Object(row));
+        tables_config.get_mut(row_table).and_then(|t| {
+            Some(t.column.insert(
+                column_name.to_string(),
+                ValveColumnConfig {
+                    table: row_table.to_string(),
+                    column: column_name.to_string(),
+                    datatype: datatype.to_string(),
+                    description: description.to_string(),
+                    label: label.to_string(),
+                    structure: structure.to_string(),
+                },
+            ))
+        });
     }
 
     // Load rule table if it exists
@@ -511,13 +526,12 @@ pub fn read_config_files(
     for table_name in tables_config.keys().cloned().collect::<Vec<_>>() {
         let optional_path = tables_config
             .get(&table_name)
-            .and_then(|r| r.get("path"))
-            .and_then(|p| p.as_str());
+            .and_then(|r| Some(r.path.to_string()));
 
         let mut path = None;
         match optional_path {
             None => {
-                // If an entry of the tables_config has no path then it is an internal table which
+                // If an entry of the tables_config_old has no path then it is an internal table which
                 // need not be configured explicitly. Currently the only examples are the message
                 // and history tables.
                 if table_name != "message" && table_name != "history" {
@@ -525,23 +539,20 @@ pub fn read_config_files(
                 }
                 continue;
             }
-            Some(p) if !Path::new(p).is_file() => {
+            Some(p) if !Path::new(&p).is_file() => {
                 warn!("File does not exist {}", p);
             }
-            Some(p) if Path::new(p).canonicalize().is_err() => {
+            Some(p) if Path::new(&p).canonicalize().is_err() => {
                 warn!("File path could not be made canonical {}", p);
             }
-            Some(p) => path = Some(p.to_string()),
+            Some(p) => path = Some(p),
         };
 
-        let defined_columns: Vec<String> = tables_config
+        let this_column_config = tables_config
             .get(&table_name)
-            .and_then(|r| r.get("column"))
-            .and_then(|v| v.as_object())
-            .and_then(|o| Some(o.keys()))
-            .and_then(|k| Some(k.cloned()))
-            .and_then(|k| Some(k.collect()))
+            .and_then(|t| Some(t.column.clone()))
             .unwrap();
+        let defined_columns: Vec<String> = this_column_config.keys().cloned().collect::<Vec<_>>();
 
         // We use column_order to explicitly indicate the order in which the columns should appear
         // in the table, for later reference. The default is to preserve the order from the actual
@@ -567,8 +578,8 @@ pub fn read_config_files(
                 // Make sure that the actual columns found in the table file, and the columns
                 // defined in the column config, exactly match in terms of their content:
                 for column_name in &actual_columns {
-                    column_order.push(json!(column_name));
-                    if !defined_columns.contains(&column_name.to_string()) {
+                    column_order.push(column_name.to_string());
+                    if !defined_columns.contains(&&column_name.to_string()) {
                         panic!(
                             "Column '{}.{}' not in column config",
                             table_name, column_name
@@ -589,26 +600,21 @@ pub fn read_config_files(
         }
 
         if column_order.is_empty() {
-            column_order = defined_columns.iter().map(|c| json!(c)).collect::<Vec<_>>();
+            column_order = defined_columns.clone();
         }
         tables_config
             .get_mut(&table_name)
-            .and_then(|t| t.as_object_mut())
-            .and_then(|o| {
-                o.insert(
-                    String::from("column_order"),
-                    SerdeValue::Array(column_order),
-                )
-            });
+            .and_then(|t| Some(t.column_order = column_order));
 
         // Populate the constraints config:
         let table_constraints = get_table_constraints(
-            &mut tables_config,
-            &mut datatypes_config,
+            &tables_config,
+            &datatypes_config,
             parser,
             &table_name,
             &pool,
         );
+
         for constraint_type in vec!["foreign", "unique", "primary", "tree", "under"] {
             let table_constraints = table_constraints.get(constraint_type).unwrap().clone();
             constraints_config
@@ -621,150 +627,205 @@ pub fn read_config_files(
     // Manually add the messsage table config:
     tables_config.insert(
         "message".to_string(),
-        json!({
-            "table": "message",
-            "description": "Validation messages for all of the tables and columns",
-            "type": "message",
-            "column_order": [
-                "table",
-                "row",
-                "column",
-                "value",
-                "level",
-                "rule",
-                "message",
+        ValveTableConfig {
+            table: "message".to_string(),
+            table_type: "message".to_string(),
+            description: "Validation messages for all of the tables and columns".to_string(),
+            path: "".to_string(),
+            column_order: vec![
+                "table".to_string(),
+                "row".to_string(),
+                "column".to_string(),
+                "value".to_string(),
+                "level".to_string(),
+                "rule".to_string(),
+                "message".to_string(),
             ],
-            "column": {
-                "table": {
-                    "table": "message",
-                    "column": "table",
-                    "description": "The table referred to by the message",
-                    "datatype": "table_name",
-                    "structure": ""
-                },
-                "row": {
-                    "table": "message",
-                    "column": "row",
-                    "description": "The row number of the table referred to by the message",
-                    "datatype": "natural_number",
-                    "structure": ""
-                },
-                "column": {
-                    "table": "message",
-                    "column": "column",
-                    "description": "The column of the table referred to by the message",
-                    "datatype": "column_name",
-                    "structure": ""
-                },
-                "value": {
-                    "table": "message",
-                    "column": "value",
-                    "description": "The value that is the reason for the message",
-                    "datatype": "text",
-                    "structure": ""
-                },
-                "level": {
-                    "table": "message",
-                    "column": "level",
-                    "description": "The severity of the violation",
-                    "datatype": "word",
-                    "structure": ""
-                },
-                "rule": {
-                    "table": "message",
-                    "column": "rule",
-                    "description": "The rule violated by the value",
-                    "datatype": "CURIE",
-                    "structure": ""
-                },
-                "message": {
-                    "table": "message",
-                    "column": "message",
-                    "description": "The message",
-                    "datatype": "line",
-                    "structure": ""
-                }
-            }
-        }),
+            column: {
+                let mut column_configs = HashMap::new();
+                column_configs.insert(
+                    "table".to_string(),
+                    ValveColumnConfig {
+                        table: "message".to_string(),
+                        column: "table".to_string(),
+                        description: "The table referred to by the message".to_string(),
+                        datatype: "table_name".to_string(),
+                        ..Default::default()
+                    },
+                );
+                column_configs.insert(
+                    "row".to_string(),
+                    ValveColumnConfig {
+                        table: "message".to_string(),
+                        column: "row".to_string(),
+                        description: "The row number of the table referred to by the message"
+                            .to_string(),
+                        datatype: "natural_number".to_string(),
+                        ..Default::default()
+                    },
+                );
+                column_configs.insert(
+                    "column".to_string(),
+                    ValveColumnConfig {
+                        table: "message".to_string(),
+                        column: "column".to_string(),
+                        description: "The column of the table referred to by the message"
+                            .to_string(),
+                        datatype: "column_name".to_string(),
+                        ..Default::default()
+                    },
+                );
+                column_configs.insert(
+                    "value".to_string(),
+                    ValveColumnConfig {
+                        table: "message".to_string(),
+                        column: "value".to_string(),
+                        description: "The value that is the reason for the message".to_string(),
+                        datatype: "text".to_string(),
+                        ..Default::default()
+                    },
+                );
+                column_configs.insert(
+                    "level".to_string(),
+                    ValveColumnConfig {
+                        table: "message".to_string(),
+                        column: "level".to_string(),
+                        description: "The severity of the violation".to_string(),
+                        datatype: "word".to_string(),
+                        ..Default::default()
+                    },
+                );
+                column_configs.insert(
+                    "rule".to_string(),
+                    ValveColumnConfig {
+                        table: "message".to_string(),
+                        column: "rule".to_string(),
+                        description: "The rule violated by the value".to_string(),
+                        datatype: "CURIE".to_string(),
+                        ..Default::default()
+                    },
+                );
+                column_configs.insert(
+                    "message".to_string(),
+                    ValveColumnConfig {
+                        table: "message".to_string(),
+                        column: "message".to_string(),
+                        description: "The message".to_string(),
+                        datatype: "line".to_string(),
+                        ..Default::default()
+                    },
+                );
+                column_configs
+            },
+        },
     );
 
     // Manually add the history table config:
     tables_config.insert(
         "history".to_string(),
-        json!({
-            "table": "history",
-            "description": "History of changes to the VALVE database",
-            "type": "history",
-            "column_order": [
-                "table",
-                "row",
-                "from",
-                "to",
-                "summary",
-                "user",
-                "undone_by",
-                "timestamp",
+        ValveTableConfig {
+            table: "history".to_string(),
+            table_type: "history".to_string(),
+            description: "History of changes to the VALVE database".to_string(),
+            path: "".to_string(),
+            column_order: vec![
+                "table".to_string(),
+                "row".to_string(),
+                "from".to_string(),
+                "to".to_string(),
+                "summary".to_string(),
+                "user".to_string(),
+                "undone_by".to_string(),
+                "timestamp".to_string(),
             ],
-            "column": {
-                "table": {
-                    "table": "history",
-                    "column": "table",
-                    "description": "The table referred to by the history entry",
-                    "datatype": "table_name",
-                    "structure": "",
-                },
-                "row": {
-                    "table": "history",
-                    "column": "row",
-                    "description": "The row number of the table referred to by the history entry",
-                    "datatype": "natural_number",
-                    "structure": "",
-                },
-                "from": {
-                    "table": "history",
-                    "column": "from",
-                    "description": "The initial value of the row",
-                    "datatype": "text",
-                    "structure": "",
-                },
-                "to": {
-                    "table": "history",
-                    "column": "to",
-                    "description": "The final value of the row",
-                    "datatype": "text",
-                    "structure": "",
-                },
-                "summary": {
-                    "table": "history",
-                    "column": "summary",
-                    "description": "Summarizes the changes to each column of the row",
-                    "datatype": "text",
-                    "structure": "",
-                },
-                "user": {
-                    "table": "history",
-                    "column": "user",
-                    "description": "User responsible for the change",
-                    "datatype": "line",
-                    "structure": "",
-                },
-                "undone_by": {
-                    "table": "history",
-                    "column": "undone_by",
-                    "description": "User who has undone the change. Null if it has not been undone",
-                    "datatype": "line",
-                    "structure": "",
-                },
-                "timestamp": {
-                    "table": "history",
-                    "column": "timestamp",
-                    "description": "The time of the change, or of the undo.",
-                    "datatype": "line",
-                    "structure": "",
-                },
-
-            }
-        }),
+            column: {
+                let mut column_configs = HashMap::new();
+                column_configs.insert(
+                    "table".to_string(),
+                    ValveColumnConfig {
+                        table: "history".to_string(),
+                        column: "table".to_string(),
+                        description: "The table referred to by the history entry".to_string(),
+                        datatype: "table_name".to_string(),
+                        ..Default::default()
+                    },
+                );
+                column_configs.insert(
+                    "row".to_string(),
+                    ValveColumnConfig {
+                        table: "history".to_string(),
+                        column: "row".to_string(),
+                        description: "The row number of the table referred to by the history entry"
+                            .to_string(),
+                        datatype: "natural_number".to_string(),
+                        ..Default::default()
+                    },
+                );
+                column_configs.insert(
+                    "from".to_string(),
+                    ValveColumnConfig {
+                        table: "history".to_string(),
+                        column: "from".to_string(),
+                        description: "The initial value of the row".to_string(),
+                        datatype: "text".to_string(),
+                        ..Default::default()
+                    },
+                );
+                column_configs.insert(
+                    "to".to_string(),
+                    ValveColumnConfig {
+                        table: "history".to_string(),
+                        column: "to".to_string(),
+                        description: "The final value of the row".to_string(),
+                        datatype: "text".to_string(),
+                        ..Default::default()
+                    },
+                );
+                column_configs.insert(
+                    "summary".to_string(),
+                    ValveColumnConfig {
+                        table: "history".to_string(),
+                        column: "summary".to_string(),
+                        description: "Summarizes the changes to each column of the row".to_string(),
+                        datatype: "text".to_string(),
+                        ..Default::default()
+                    },
+                );
+                column_configs.insert(
+                    "user".to_string(),
+                    ValveColumnConfig {
+                        table: "history".to_string(),
+                        column: "user".to_string(),
+                        description: "User responsible for the change".to_string(),
+                        datatype: "line".to_string(),
+                        ..Default::default()
+                    },
+                );
+                column_configs.insert(
+                    "undone_by".to_string(),
+                    ValveColumnConfig {
+                        table: "history".to_string(),
+                        column: "undone_by".to_string(),
+                        description:
+                            "User who has undone the change. Null if it has not been undone"
+                                .to_string(),
+                        datatype: "line".to_string(),
+                        ..Default::default()
+                    },
+                );
+                column_configs.insert(
+                    "timestamp".to_string(),
+                    ValveColumnConfig {
+                        table: "history".to_string(),
+                        column: "timestamp".to_string(),
+                        description: "The time of the change, or of the undo".to_string(),
+                        datatype: "line".to_string(),
+                        ..Default::default()
+                    },
+                );
+                column_configs
+            },
+        },
     );
 
     // Sort the tables (aside from the message and history tables) according to their foreign key
@@ -2979,7 +3040,7 @@ pub fn verify_table_deps_and_sort(
 /// Given table configuration map and a datatype configuration map, a parser, a table name, and a
 /// database connection pool, return a configuration map representing all of the table constraints.
 pub fn get_table_constraints(
-    tables_config: &SerdeMap,
+    tables_config: &HashMap<String, ValveTableConfig>,
     datatypes_config: &SerdeMap,
     parser: &StartParser,
     table_name: &str,
@@ -2995,166 +3056,140 @@ pub fn get_table_constraints(
 
     let column_names = tables_config
         .get(table_name)
-        .and_then(|t| t.get("column_order"))
-        .and_then(|c| c.as_array())
-        .unwrap()
-        .iter()
-        .map(|v| v.as_str().unwrap().to_string())
-        .collect::<Vec<_>>();
-
+        .and_then(|t| Some(t.column_order.clone()))
+        .unwrap();
     let columns = tables_config
         .get(table_name)
-        .and_then(|c| c.as_object())
-        .and_then(|o| o.get("column"))
-        .and_then(|c| c.as_object())
+        .and_then(|t| Some(t.column.clone()))
         .unwrap();
 
-    let mut colvals: Vec<SerdeMap> = vec![];
+    let mut colvals: Vec<ValveColumnConfig> = vec![];
     for column_name in &column_names {
-        let column = columns
-            .get(column_name)
-            .and_then(|c| c.as_object())
-            .unwrap();
+        let column = columns.get(column_name).unwrap();
         colvals.push(column.clone());
     }
 
     for row in colvals {
-        let sql_type = get_sql_type(
-            datatypes_config,
-            &row.get("datatype")
-                .and_then(|d| d.as_str())
-                .and_then(|s| Some(s.to_string()))
-                .unwrap(),
-            pool,
-        )
-        .unwrap();
-        let column_name = row.get("column").and_then(|s| s.as_str()).unwrap();
-        let structure = row.get("structure").and_then(|s| s.as_str());
-        if let Some(structure) = structure {
-            if structure != "" {
-                let parsed_structure = parser.parse(structure).unwrap();
-                for expression in parsed_structure {
-                    match *expression {
-                        Expression::Label(value) if value == "primary" => {
-                            let primary_keys = table_constraints
-                                .get_mut("primary")
-                                .and_then(|v| v.as_array_mut())
-                                .unwrap();
-                            primary_keys.push(SerdeValue::String(column_name.to_string()));
+        let sql_type = get_sql_type(datatypes_config, &row.datatype, pool).unwrap();
+        let column_name = &row.column;
+        let structure = &row.structure;
+        if structure != "" {
+            let parsed_structure = parser.parse(&structure).unwrap();
+            for expression in parsed_structure {
+                match *expression {
+                    Expression::Label(value) if value == "primary" => {
+                        let primary_keys = table_constraints
+                            .get_mut("primary")
+                            .and_then(|v| v.as_array_mut())
+                            .unwrap();
+                        primary_keys.push(SerdeValue::String(column_name.to_string()));
+                    }
+                    Expression::Label(value) if value == "unique" => {
+                        let unique_constraints = table_constraints
+                            .get_mut("unique")
+                            .and_then(|v| v.as_array_mut())
+                            .unwrap();
+                        unique_constraints.push(SerdeValue::String(column_name.to_string()));
+                    }
+                    Expression::Function(name, args) if name == "from" => {
+                        if args.len() != 1 {
+                            panic!("Invalid foreign key: {} for: {}", structure, table_name);
                         }
-                        Expression::Label(value) if value == "unique" => {
-                            let unique_constraints = table_constraints
-                                .get_mut("unique")
-                                .and_then(|v| v.as_array_mut())
-                                .unwrap();
-                            unique_constraints.push(SerdeValue::String(column_name.to_string()));
-                        }
-                        Expression::Function(name, args) if name == "from" => {
-                            if args.len() != 1 {
-                                panic!("Invalid foreign key: {} for: {}", structure, table_name);
+                        match &*args[0] {
+                            Expression::Field(ftable, fcolumn) => {
+                                let foreign_keys = table_constraints
+                                    .get_mut("foreign")
+                                    .and_then(|v| v.as_array_mut())
+                                    .unwrap();
+                                let foreign_key = json!({
+                                    "column": column_name,
+                                    "ftable": ftable,
+                                    "fcolumn": fcolumn,
+                                });
+                                foreign_keys.push(foreign_key);
                             }
-                            match &*args[0] {
-                                Expression::Field(ftable, fcolumn) => {
-                                    let foreign_keys = table_constraints
-                                        .get_mut("foreign")
-                                        .and_then(|v| v.as_array_mut())
-                                        .unwrap();
-                                    let foreign_key = json!({
-                                        "column": column_name,
-                                        "ftable": ftable,
-                                        "fcolumn": fcolumn,
-                                    });
-                                    foreign_keys.push(foreign_key);
-                                }
-                                _ => {
-                                    panic!("Invalid foreign key: {} for: {}", structure, table_name)
-                                }
-                            };
+                            _ => {
+                                panic!("Invalid foreign key: {} for: {}", structure, table_name)
+                            }
+                        };
+                    }
+                    Expression::Function(name, args) if name == "tree" => {
+                        if args.len() != 1 {
+                            panic!(
+                                "Invalid 'tree' constraint: {} for: {}",
+                                structure, table_name
+                            );
                         }
-                        Expression::Function(name, args) if name == "tree" => {
-                            if args.len() != 1 {
+                        match &*args[0] {
+                            Expression::Label(child) => {
+                                let child_datatype = columns
+                                    .get(child)
+                                    .and_then(|c| Some(c.datatype.to_string()));
+                                if let None = child_datatype {
+                                    panic!(
+                                        "Could not determine datatype for {} of tree({})",
+                                        child, child
+                                    );
+                                }
+                                let child_datatype = child_datatype.unwrap();
+                                let parent = column_name;
+                                let child_sql_type = get_sql_type(
+                                    datatypes_config,
+                                    &child_datatype.to_string(),
+                                    pool,
+                                )
+                                .unwrap();
+                                if sql_type != child_sql_type {
+                                    panic!(
+                                        "SQL type '{}' of '{}' in 'tree({})' for table \
+                                         '{}' doe snot match SQL type: '{}' of parent: '{}'.",
+                                        child_sql_type, child, child, table_name, sql_type, parent
+                                    );
+                                }
+                                let tree_constraints = table_constraints
+                                    .get_mut("tree")
+                                    .and_then(|t| t.as_array_mut())
+                                    .unwrap();
+                                let entry = json!({"parent": column_name,
+                                                   "child": child});
+                                tree_constraints.push(entry);
+                            }
+                            _ => {
                                 panic!(
                                     "Invalid 'tree' constraint: {} for: {}",
                                     structure, table_name
                                 );
                             }
-                            match &*args[0] {
-                                Expression::Label(child) => {
-                                    let child_datatype = columns
-                                        .get(child)
-                                        .and_then(|c| c.get("datatype"))
-                                        .and_then(|d| d.as_str());
-                                    if let None = child_datatype {
-                                        panic!(
-                                            "Could not determine datatype for {} of tree({})",
-                                            child, child
-                                        );
-                                    }
-                                    let child_datatype = child_datatype.unwrap();
-                                    let parent = column_name;
-                                    let child_sql_type = get_sql_type(
-                                        datatypes_config,
-                                        &child_datatype.to_string(),
-                                        pool,
-                                    )
+                        };
+                    }
+                    Expression::Function(name, args) if name == "under" => {
+                        let generic_error = format!(
+                            "Invalid 'under' constraint: {} for: {}",
+                            structure, table_name
+                        );
+                        if args.len() != 2 {
+                            panic!("{}", generic_error);
+                        }
+                        match (&*args[0], &*args[1]) {
+                            (Expression::Field(ttable, tcolumn), Expression::Label(value)) => {
+                                let under_constraints = table_constraints
+                                    .get_mut("under")
+                                    .and_then(|u| u.as_array_mut())
                                     .unwrap();
-                                    if sql_type != child_sql_type {
-                                        panic!(
-                                            "SQL type '{}' of '{}' in 'tree({})' for table \
-                                             '{}' doe snot match SQL type: '{}' of parent: '{}'.",
-                                            child_sql_type,
-                                            child,
-                                            child,
-                                            table_name,
-                                            sql_type,
-                                            parent
-                                        );
-                                    }
-                                    let tree_constraints = table_constraints
-                                        .get_mut("tree")
-                                        .and_then(|t| t.as_array_mut())
-                                        .unwrap();
-                                    let entry = json!({"parent": column_name,
-                                                       "child": child});
-                                    tree_constraints.push(entry);
-                                }
-                                _ => {
-                                    panic!(
-                                        "Invalid 'tree' constraint: {} for: {}",
-                                        structure, table_name
-                                    );
-                                }
-                            };
-                        }
-                        Expression::Function(name, args) if name == "under" => {
-                            let generic_error = format!(
-                                "Invalid 'under' constraint: {} for: {}",
-                                structure, table_name
-                            );
-                            if args.len() != 2 {
-                                panic!("{}", generic_error);
+                                let entry = json!({"column": column_name,
+                                                   "ttable": ttable,
+                                                   "tcolumn": tcolumn,
+                                                   "value": value});
+                                under_constraints.push(entry);
                             }
-                            match (&*args[0], &*args[1]) {
-                                (Expression::Field(ttable, tcolumn), Expression::Label(value)) => {
-                                    let under_constraints = table_constraints
-                                        .get_mut("under")
-                                        .and_then(|u| u.as_array_mut())
-                                        .unwrap();
-                                    let entry = json!({"column": column_name,
-                                                       "ttable": ttable,
-                                                       "tcolumn": tcolumn,
-                                                       "value": value});
-                                    under_constraints.push(entry);
-                                }
-                                (_, _) => panic!("{}", generic_error),
-                            };
-                        }
-                        _ => panic!(
-                            "Unrecognized structure: {} for {}.{}",
-                            structure, table_name, column_name
-                        ),
-                    };
-                }
+                            (_, _) => panic!("{}", generic_error),
+                        };
+                    }
+                    _ => panic!(
+                        "Unrecognized structure: {} for {}.{}",
+                        structure, table_name, column_name
+                    ),
+                };
             }
         }
     }
@@ -3216,7 +3251,15 @@ pub fn get_table_ddl(
         if table_name.ends_with("_conflict") {
             json!({"foreign": [], "unique": [], "primary": [], "tree": [], "under": [],})
         } else {
-            get_table_constraints(tables_config, datatypes_config, parser, &table_name, &pool)
+            // TODO: Here.
+            get_table_constraints(
+                &HashMap::new(),
+                datatypes_config,
+                parser,
+                &table_name,
+                &pool,
+            )
+            //get_table_constraints(tables_config, datatypes_config, parser, &table_name, &pool)
         }
     };
 

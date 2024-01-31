@@ -52,8 +52,8 @@ pub enum ValveError {
     SerdeJsonError(serde_json::Error),
 }
 
-// TODO: Make this struct public.
-#[derive(Debug)]
+// TODO: Make this struct public; remove unneeded derives.
+#[derive(Debug, Default)]
 struct _ValveMessage {
     pub _column: String,
     pub _value: String,
@@ -62,8 +62,8 @@ struct _ValveMessage {
     pub _message: String,
 }
 
-// TODO: Make this struct public.
-#[derive(Debug)]
+// TODO: Make this struct public; remove unneeded derives.
+#[derive(Debug, Default)]
 struct _ValveChange {
     pub _column: String,
     pub _level: String,
@@ -72,7 +72,7 @@ struct _ValveChange {
     pub _message: String,
 }
 
-// TODO: Make this struct public.
+// TODO: Make this struct public; remove unneeded derives.
 #[derive(Debug, Default)]
 pub struct ValveSpecialConfig {
     pub column: String,
@@ -81,29 +81,30 @@ pub struct ValveSpecialConfig {
     pub table: String,
 }
 
-// TODO: Make this struct public.
-#[derive(Debug)]
-struct _ValveTableConfig {
-    pub _table: String,
-    pub _column: HashMap<String, _ValveColumnConfig>,
-    pub _column_order: Vec<String>,
-    pub _descrtiption: String,
-    pub _path: String,
+// TODO: Make this struct public; remove unneeded derives.
+#[derive(Debug, Default)]
+pub struct ValveTableConfig {
+    pub table: String,
+    pub table_type: String,
+    pub description: String,
+    pub path: String,
+    pub column: HashMap<String, ValveColumnConfig>,
+    pub column_order: Vec<String>,
 }
 
-// TODO: Make this struct public.
-#[derive(Debug)]
-struct _ValveColumnConfig {
-    pub _table: String,
-    pub _column: String,
-    pub _datatype: String,
-    pub _description: String,
-    pub _label: String,
-    pub _structure: String,
+// TODO: Make this struct public; remove unneeded derives.
+#[derive(Clone, Debug, Default)]
+pub struct ValveColumnConfig {
+    pub table: String,
+    pub column: String,
+    pub datatype: String,
+    pub description: String,
+    pub label: String,
+    pub structure: String,
 }
 
-// TODO: Make this struct public.
-#[derive(Debug)]
+// TODO: Make this struct public; remove unneeded derives.
+#[derive(Debug, Default)]
 struct _ValveDatatypeConfig {
     pub _html_type: String,
     pub _sql_type: String,
@@ -115,8 +116,8 @@ struct _ValveDatatypeConfig {
     pub _transform: String,
 }
 
-// TODO: Make this struct public.
-#[derive(Debug)]
+// TODO: Make this struct public; remove unneeded derives.
+#[derive(Debug, Default)]
 struct _ValveRuleConfig {
     pub _description: String,
     pub _level: String,
@@ -127,15 +128,15 @@ struct _ValveRuleConfig {
     pub _when_condition: String,
 }
 
-// TODO: Make this struct public.
-#[derive(Debug)]
+// TODO: Make this struct public; remove unneeded derives.
+#[derive(Debug, Default)]
 struct _ValveTreeConstraint {
     pub _child: String,
     pub _parent: String,
 }
 
-// TODO: Make this struct public.
-#[derive(Debug)]
+// TODO: Make this struct public; remove unneeded derives.
+#[derive(Debug, Default)]
 struct _ValveUnderConstraint {
     pub _column: String,
     pub _ttable: String,
@@ -143,16 +144,16 @@ struct _ValveUnderConstraint {
     pub _value: SerdeValue,
 }
 
-// TODO: Make this struct public.
-#[derive(Debug)]
+// TODO: Make this struct public; remove unneeded derives.
+#[derive(Debug, Default)]
 struct _ValveForeignConstraint {
     pub _column: String,
     pub _ftable: String,
     pub _fcolumn: String,
 }
 
-// TODO: Make this struct public.
-#[derive(Debug)]
+// TODO: Make this struct public; remove unneeded derives.
+#[derive(Debug, Default)]
 struct _ValveTableConstraints {
     // Note that primary would be better as HashMap<String, String>, since it is not possible to
     // have more than one primary key per table, but the below reflects the current implementation
@@ -164,11 +165,11 @@ struct _ValveTableConstraints {
     pub _under: HashMap<String, Vec<_ValveUnderConstraint>>,
 }
 
-// TODO: Make this struct public.
-#[derive(Debug)]
+// TODO: Make this struct public; remove unneeded derives.
+#[derive(Debug, Default)]
 struct ValveConfig {
     pub special: ValveSpecialConfig,
-    //pub table: HashMap<String, ValveTableConfig>,
+    pub table: HashMap<String, ValveTableConfig>,
     //pub datatype: HashMap<String, ValveDatatypeConfig>,
     //pub rule: HashMap<String, HashMap<String, Vec<ValveRuleConfig>>>,
     //pub table_constraints: ValveTableConstraints,
@@ -259,7 +260,7 @@ impl Valve {
         let parser = StartParser::new();
         let (
             specials_config,
-            tables_config_old,
+            tables_config,
             datatypes_config_old,
             rules_config_old,
             constraints_config_old,
@@ -270,8 +271,10 @@ impl Valve {
 
         let config = ValveConfig {
             special: specials_config,
+            table: tables_config,
         };
         println!("SPECIALS CONFIG: {:#?}", config.special);
+        println!("TABLES CONFIG: {:#?}", config.table);
 
         // TODO: Obviously remove this later.
         if 1 == 1 {
@@ -283,10 +286,10 @@ impl Valve {
         //    String::from("special"),
         //    SerdeValue::Object(specials_config_old.clone()),
         //);
-        config_old.insert(
-            String::from("table"),
-            SerdeValue::Object(tables_config_old.clone()),
-        );
+        //config_old.insert(
+        //    String::from("table"),
+        //    SerdeValue::Object(tables_config_old.clone()),
+        //);
         config_old.insert(
             String::from("datatype"),
             SerdeValue::Object(datatypes_config_old.clone()),
