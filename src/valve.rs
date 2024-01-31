@@ -268,6 +268,11 @@ impl Valve {
             table_dependencies_out,
         ) = read_config_files(table_path, &parser, &pool);
 
+        let config = ValveConfig {
+            special: specials_config,
+        };
+        println!("SPECIALS CONFIG: {:#?}", config.special);
+
         // TODO: Obviously remove this later.
         if 1 == 1 {
             todo!();

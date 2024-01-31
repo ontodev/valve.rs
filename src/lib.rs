@@ -221,7 +221,6 @@ pub fn read_config_files(
     HashMap<String, Vec<String>>,
 ) {
     // Initialize the special table entries in the specials config map:
-    let specials_config_old = SerdeMap::new();
     let mut specials_config = ValveSpecialConfig::default();
 
     // Load the table table from the given path:
@@ -267,32 +266,32 @@ pub fn read_config_files(
             }
 
             let row_table = row.get("table").and_then(|t| t.as_str()).unwrap();
-            let duplicate_err = format!(
+            let duplicate_err_msg = format!(
                 "Multiple tables with type '{}' declared in '{}'",
                 row_type, path
             );
             match row_type.as_str() {
                 "column" => {
                     if specials_config.column != "" {
-                        panic!("{}", duplicate_err);
+                        panic!("{}", duplicate_err_msg);
                     }
                     specials_config.column = row_table.to_string();
                 }
                 "datatype" => {
                     if specials_config.datatype != "" {
-                        panic!("{}", duplicate_err);
+                        panic!("{}", duplicate_err_msg);
                     }
                     specials_config.datatype = row_table.to_string();
                 }
                 "rule" => {
                     if let Some(_) = &specials_config.rule {
-                        panic!("{}", duplicate_err);
+                        panic!("{}", duplicate_err_msg);
                     }
                     specials_config.rule = Some(row_table.to_string());
                 }
                 "table" => {
                     if specials_config.table != "" {
-                        panic!("{}", duplicate_err);
+                        panic!("{}", duplicate_err_msg);
                     }
                     specials_config.table = row_table.to_string();
                 }
@@ -316,8 +315,6 @@ pub fn read_config_files(
         panic!("Missing required 'table' table in '{}'", path);
     }
 
-    println!("SPECIALS CONFIG: {:#?}", specials_config);
-
     // Helper function for extracting special configuration (other than the main 'table'
     // configuration) from either a file or a table in the database, depending on the value of
     // `path`. When `path` ends in '.tsv', the path of the config table corresponding to
@@ -326,15 +323,23 @@ pub fn read_config_files(
     // indicated by `path`, the table is read, and the rows are returned.
     fn get_special_config(
         table_type: &str,
-        specials_config_old: &SerdeMap,
+        specials_config: &ValveSpecialConfig,
         tables_config: &SerdeMap,
         path: &str,
     ) -> Vec<SerdeMap> {
         if path.to_lowercase().ends_with(".tsv") {
-            let table_name = specials_config_old
-                .get(table_type)
-                .and_then(|d| d.as_str())
-                .unwrap();
+            let table_name = match table_type {
+                "column" => &specials_config.column,
+                "datatype" => &specials_config.datatype,
+                "rule" => match &specials_config.rule {
+                    Some(rule_table_name) => rule_table_name,
+                    None => panic!("Tried to retrieve rule configuration but it is undefined."),
+                },
+                _ => panic!(
+                    "In get_special_config(): Table type '{}' not supported",
+                    table_type
+                ),
+            };
             let path = String::from(
                 tables_config
                     .get(table_name)
@@ -368,7 +373,7 @@ pub fn read_config_files(
 
     // Load datatype table
     let mut datatypes_config = SerdeMap::new();
-    let rows = get_special_config("datatype", &specials_config_old, &tables_config, path);
+    let rows = get_special_config("datatype", &specials_config, &tables_config, path);
     for mut row in rows {
         for column in vec!["datatype", "parent", "condition", "SQL type"] {
             if !row.contains_key(column) || row.get(column) == None {
@@ -399,7 +404,7 @@ pub fn read_config_files(
     }
 
     // Load column table
-    let rows = get_special_config("column", &specials_config_old, &tables_config, path);
+    let rows = get_special_config("column", &specials_config, &tables_config, path);
     for mut row in rows {
         for column in vec!["table", "column", "label", "nulltype", "datatype"] {
             if !row.contains_key(column) || row.get(column) == None {
@@ -448,8 +453,8 @@ pub fn read_config_files(
 
     // Load rule table if it exists
     let mut rules_config = SerdeMap::new();
-    if let Some(SerdeValue::String(table_name)) = specials_config_old.get("rule") {
-        let rows = get_special_config(table_name, &specials_config_old, &tables_config, path);
+    if let Some(table_name) = &specials_config.rule {
+        let rows = get_special_config(table_name, &specials_config, &tables_config, path);
         for row in rows {
             for column in vec![
                 "table",
