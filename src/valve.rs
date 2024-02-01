@@ -131,53 +131,54 @@ struct _ValveRuleConfig {
 
 // TODO: Make this struct public; remove unneeded derives.
 #[derive(Debug, Default)]
-struct _ValveTreeConstraint {
-    pub _child: String,
-    pub _parent: String,
+pub struct ValveTreeConstraint {
+    pub child: String,
+    pub parent: String,
 }
 
 // TODO: Make this struct public; remove unneeded derives.
 #[derive(Debug, Default)]
-struct _ValveUnderConstraint {
-    pub _column: String,
-    pub _ttable: String,
-    pub _tcolumn: String,
-    pub _value: SerdeValue,
+pub struct ValveUnderConstraint {
+    pub column: String,
+    pub ttable: String,
+    pub tcolumn: String,
+    pub value: SerdeValue,
 }
 
 // TODO: Make this struct public; remove unneeded derives.
 #[derive(Debug, Default)]
-struct _ValveForeignConstraint {
-    pub _column: String,
-    pub _ftable: String,
-    pub _fcolumn: String,
+pub struct ValveForeignConstraint {
+    pub column: String,
+    pub ftable: String,
+    pub fcolumn: String,
 }
 
 // TODO: Make this struct public; remove unneeded derives.
 #[derive(Debug, Default)]
-struct _ValveTableConstraints {
+pub struct ValveTableConstraints {
     // Note that primary would be better as HashMap<String, String>, since it is not possible to
     // have more than one primary key per table, but the below reflects the current implementation
     // which in principle allows for more than one.
-    pub _primary: HashMap<String, Vec<String>>,
-    pub _unique: HashMap<String, Vec<String>>,
-    pub _foreign: HashMap<String, Vec<_ValveForeignConstraint>>,
-    pub _tree: HashMap<String, Vec<_ValveTreeConstraint>>,
-    pub _under: HashMap<String, Vec<_ValveUnderConstraint>>,
+    // TODO: Change it so that more than one primary key is not allowed.
+    pub primary: HashMap<String, Vec<String>>,
+    pub unique: HashMap<String, Vec<String>>,
+    pub foreign: HashMap<String, Vec<ValveForeignConstraint>>,
+    pub tree: HashMap<String, Vec<ValveTreeConstraint>>,
+    pub under: HashMap<String, Vec<ValveUnderConstraint>>,
 }
 
 // TODO: Make this struct public; remove unneeded derives.
 #[derive(Debug, Default)]
-struct ValveConfig {
+pub struct ValveConfig {
     pub special: ValveSpecialConfig,
     pub table: HashMap<String, ValveTableConfig>,
     pub datatype: HashMap<String, ValveDatatypeConfig>,
     //pub rule: HashMap<String, HashMap<String, Vec<ValveRuleConfig>>>,
-    //pub table_constraints: ValveTableConstraints,
+    pub table_constraints: ValveTableConstraints,
     //pub datatype_conditions: HashMap<String, CompiledCondition>,
     //pub rule_conditions: HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     //pub structure_conditions: HashMap<String, ParsedStructure>,
-    //pub sorted_table_list: Vec<String>,
+    pub sorted_table_list: Vec<String>,
 }
 
 /// Main entrypoint for the Valve API.
@@ -263,8 +264,8 @@ impl Valve {
             specials_config,
             tables_config,
             datatypes_config,
-            rules_config_old,
-            constraints_config_old,
+            _rules_config_old,
+            constraints_config,
             sorted_table_list,
             table_dependencies_in,
             table_dependencies_out,
@@ -274,45 +275,21 @@ impl Valve {
             special: specials_config,
             table: tables_config,
             datatype: datatypes_config,
+            table_constraints: constraints_config,
+            sorted_table_list: sorted_table_list.clone(),
         };
         println!("SPECIALS CONFIG: {:#?}", config.special);
         println!("TABLES CONFIG: {:#?}", config.table);
         println!("DATATYPES CONFIG: {:#?}", config.datatype);
+        println!("TABLE CONSTRAINTS: {:#?}", config.table_constraints);
+        println!("SORTED TABLE LIST: {:?}", config.sorted_table_list);
 
         // TODO: Obviously remove this later.
         if 1 == 1 {
             todo!();
         }
 
-        let mut config_old = SerdeMap::new();
-        //config_old.insert(
-        //    String::from("special"),
-        //    SerdeValue::Object(specials_config_old.clone()),
-        //);
-        //config_old.insert(
-        //    String::from("table"),
-        //    SerdeValue::Object(tables_config_old.clone()),
-        //);
-        //config_old.insert(
-        //    String::from("datatype"),
-        //    SerdeValue::Object(datatypes_config_old.clone()),
-        //);
-        config_old.insert(
-            String::from("rule"),
-            SerdeValue::Object(rules_config_old.clone()),
-        );
-        config_old.insert(
-            String::from("constraints"),
-            SerdeValue::Object(constraints_config_old.clone()),
-        );
-        let mut sorted_table_serdevalue_list: Vec<SerdeValue> = vec![];
-        for table in &sorted_table_list {
-            sorted_table_serdevalue_list.push(SerdeValue::String(table.to_string()));
-        }
-        config_old.insert(
-            String::from("sorted_table_list"),
-            SerdeValue::Array(sorted_table_serdevalue_list),
-        );
+        let config_old = SerdeMap::new();
 
         let compiled_datatype_conditions = get_compiled_datatype_conditions(&config_old, &parser);
         let compiled_rule_conditions = get_compiled_rule_conditions(
@@ -1005,7 +982,8 @@ impl Valve {
             )));
         }
 
-        let constraints_config = self
+        // TODO: Here.
+        let _constraints_config_old = self
             .config
             .get("constraints")
             .and_then(|c| c.as_object())
@@ -1021,8 +999,9 @@ impl Valve {
             .map(|s| s.to_string())
             .collect::<Vec<_>>();
 
+        // TODO: Here.
         let (sorted_subset, _, _) =
-            verify_table_deps_and_sort(&filtered_subset, &constraints_config);
+            verify_table_deps_and_sort(&filtered_subset, &ValveTableConstraints::default());
 
         // Since the result of verify_table_deps_and_sort() will include dependencies of the tables
         // in its input list, we filter those out here:

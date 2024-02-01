@@ -34,8 +34,9 @@ use crate::{
         QueryAsIf, QueryAsIfKind, ResultRow,
     },
     valve::{
-        ValveColumnConfig, ValveDatatypeConfig, ValveError, ValveRow, ValveSpecialConfig,
-        ValveTableConfig,
+        ValveColumnConfig, ValveDatatypeConfig, ValveError, ValveForeignConstraint, ValveRow,
+        ValveSpecialConfig, ValveTableConfig, ValveTableConstraints, ValveTreeConstraint,
+        ValveUnderConstraint,
     },
     valve_grammar::StartParser,
 };
@@ -218,7 +219,7 @@ pub fn read_config_files(
     HashMap<String, ValveTableConfig>,
     HashMap<String, ValveDatatypeConfig>,
     SerdeMap,
-    SerdeMap,
+    ValveTableConstraints,
     Vec<String>,
     HashMap<String, Vec<String>>,
     HashMap<String, Vec<String>>,
@@ -579,12 +580,7 @@ pub fn read_config_files(
     }
 
     // Initialize the constraints config:
-    let mut constraints_config = SerdeMap::new();
-    constraints_config.insert(String::from("foreign"), SerdeValue::Object(SerdeMap::new()));
-    constraints_config.insert(String::from("unique"), SerdeValue::Object(SerdeMap::new()));
-    constraints_config.insert(String::from("primary"), SerdeValue::Object(SerdeMap::new()));
-    constraints_config.insert(String::from("tree"), SerdeValue::Object(SerdeMap::new()));
-    constraints_config.insert(String::from("under"), SerdeValue::Object(SerdeMap::new()));
+    let mut table_constraints = ValveTableConstraints::default();
 
     for table_name in tables_config.keys().cloned().collect::<Vec<_>>() {
         let optional_path = tables_config
@@ -669,8 +665,8 @@ pub fn read_config_files(
             .get_mut(&table_name)
             .and_then(|t| Some(t.column_order = column_order));
 
-        // Populate the constraints config:
-        let table_constraints = get_table_constraints(
+        // Populate the table constraints for this table:
+        let (primaries, uniques, foreigns, trees, unders) = get_table_constraints(
             &tables_config,
             &datatypes_config,
             parser,
@@ -678,13 +674,19 @@ pub fn read_config_files(
             &pool,
         );
 
-        for constraint_type in vec!["foreign", "unique", "primary", "tree", "under"] {
-            let table_constraints = table_constraints.get(constraint_type).unwrap().clone();
-            constraints_config
-                .get_mut(constraint_type)
-                .and_then(|o| o.as_object_mut())
-                .and_then(|o| o.insert(table_name.to_string(), table_constraints));
-        }
+        table_constraints
+            .primary
+            .insert(table_name.to_string(), primaries);
+        table_constraints
+            .unique
+            .insert(table_name.to_string(), uniques);
+        table_constraints
+            .foreign
+            .insert(table_name.to_string(), foreigns);
+        table_constraints.tree.insert(table_name.to_string(), trees);
+        table_constraints
+            .under
+            .insert(table_name.to_string(), unders);
     }
 
     // Manually add the messsage table config:
@@ -903,7 +905,7 @@ pub fn read_config_files(
             // table list that is returned.
             .filter(|m| m != "history" && m != "message")
             .collect(),
-        &constraints_config,
+        &table_constraints,
     );
 
     // Finally, return all the configs:
@@ -912,7 +914,7 @@ pub fn read_config_files(
         tables_config,
         datatypes_config,
         rules_config,
-        constraints_config,
+        table_constraints,
         sorted_tables,
         table_dependencies_in,
         table_dependencies_out,
@@ -2895,7 +2897,7 @@ pub fn local_sql_syntax(pool: &AnyPool, sql: &String) -> String {
 /// list that is returned.
 pub fn verify_table_deps_and_sort(
     table_list: &Vec<String>,
-    constraints: &SerdeMap,
+    constraints: &ValveTableConstraints,
 ) -> (
     Vec<String>,
     HashMap<String, Vec<String>>,
@@ -2934,16 +2936,15 @@ pub fn verify_table_deps_and_sort(
     }
 
     // Check for intra-table cycles:
-    let trees = constraints.get("tree").and_then(|t| t.as_object()).unwrap();
+    let trees = &constraints.tree;
     for table_name in table_list {
         let mut dependency_graph = DiGraphMap::<&str, ()>::new();
-        let table_trees = trees.get(table_name).and_then(|t| t.as_array()).unwrap();
+        let table_trees = trees.get(table_name).unwrap();
         for tree in table_trees {
-            let tree = tree.as_object().unwrap();
-            let child = tree.get("child").and_then(|c| c.as_str()).unwrap();
-            let parent = tree.get("parent").and_then(|p| p.as_str()).unwrap();
-            let c_index = dependency_graph.add_node(child);
-            let p_index = dependency_graph.add_node(parent);
+            let child = &tree.child;
+            let parent = &tree.parent;
+            let c_index = dependency_graph.add_node(&child);
+            let p_index = dependency_graph.add_node(&parent);
             dependency_graph.add_edge(c_index, p_index, ());
         }
         match get_cycles(&dependency_graph) {
@@ -2957,12 +2958,8 @@ pub fn verify_table_deps_and_sort(
                     let end_index = cycle.len() - 1;
                     for (i, child) in cycle.iter().enumerate() {
                         if i < end_index {
-                            let dep = table_trees
-                                .iter()
-                                .find(|d| d.get("child").unwrap().as_str() == Some(child))
-                                .and_then(|d| d.as_object())
-                                .unwrap();
-                            let parent = dep.get("parent").unwrap();
+                            let dep = table_trees.iter().find(|d| d.child == *child).unwrap();
+                            let parent = &dep.parent;
                             message.push_str(
                                 format!("tree({}) references {}", child, parent).as_str(),
                             );
@@ -2979,40 +2976,28 @@ pub fn verify_table_deps_and_sort(
     }
 
     // Check for inter-table cycles:
-    let foreign_keys = constraints
-        .get("foreign")
-        .and_then(|f| f.as_object())
-        .unwrap();
-    let under_keys = constraints
-        .get("under")
-        .and_then(|u| u.as_object())
-        .unwrap();
+    let foreign_keys = &constraints.foreign;
+    let under_keys = &constraints.under;
     let mut dependency_graph = DiGraphMap::<&str, ()>::new();
     for table_name in table_list {
         let t_index = dependency_graph.add_node(table_name);
-        let fkeys = foreign_keys
-            .get(table_name)
-            .and_then(|f| f.as_array())
-            .unwrap();
+        let fkeys = foreign_keys.get(table_name).unwrap();
         for fkey in fkeys {
-            let ftable = fkey.get("ftable").and_then(|f| f.as_str()).unwrap();
-            let f_index = dependency_graph.add_node(ftable);
+            let ftable = &fkey.ftable;
+            let f_index = dependency_graph.add_node(&ftable);
             dependency_graph.add_edge(t_index, f_index, ());
         }
 
-        let ukeys = under_keys
-            .get(table_name)
-            .and_then(|u| u.as_array())
-            .unwrap();
+        let ukeys = under_keys.get(table_name).unwrap();
         for ukey in ukeys {
-            let ttable = ukey.get("ttable").and_then(|t| t.as_str()).unwrap();
-            let tcolumn = ukey.get("tcolumn").and_then(|t| t.as_str()).unwrap();
-            let value = ukey.get("value").and_then(|t| t.as_str()).unwrap();
+            let ttable = &ukey.ttable;
+            let tcolumn = &ukey.tcolumn;
+            let value = &ukey.value;
             if ttable != table_name {
-                let ttable_trees = trees.get(ttable).and_then(|t| t.as_array()).unwrap();
+                let ttable_trees = trees.get(ttable).unwrap();
                 if ttable_trees
                     .iter()
-                    .filter(|d| d.get("child").unwrap().as_str() == Some(tcolumn))
+                    .filter(|d| d.child == *tcolumn)
                     .collect::<Vec<_>>()
                     .is_empty()
                 {
@@ -3021,7 +3006,7 @@ pub fn verify_table_deps_and_sort(
                         ttable, tcolumn, value
                     );
                 }
-                let tt_index = dependency_graph.add_node(ttable);
+                let tt_index = dependency_graph.add_node(&ttable);
                 dependency_graph.add_edge(t_index, tt_index, ());
             }
         }
@@ -3060,27 +3045,19 @@ pub fn verify_table_deps_and_sort(
                 for (i, table) in cycle.iter().enumerate() {
                     if i < end_index {
                         let dep_name = cycle.get(i + 1).unwrap().as_str();
-                        let fkeys = foreign_keys.get(table).and_then(|f| f.as_array()).unwrap();
-                        let ukeys = under_keys.get(table).and_then(|u| u.as_array()).unwrap();
+                        let fkeys = foreign_keys.get(table).unwrap();
+                        let ukeys = under_keys.get(table).unwrap();
                         let column;
                         let ref_table;
                         let ref_column;
-                        if let Some(dep) = fkeys
-                            .iter()
-                            .find(|d| d.get("ftable").unwrap().as_str() == Some(dep_name))
-                            .and_then(|d| d.as_object())
-                        {
-                            column = dep.get("column").unwrap();
-                            ref_table = dep.get("ftable").unwrap();
-                            ref_column = dep.get("fcolumn").unwrap();
-                        } else if let Some(dep) = ukeys
-                            .iter()
-                            .find(|d| d.get("ttable").unwrap().as_str() == Some(dep_name))
-                            .and_then(|d| d.as_object())
-                        {
-                            column = dep.get("column").unwrap();
-                            ref_table = dep.get("ttable").unwrap();
-                            ref_column = dep.get("tcolumn").unwrap();
+                        if let Some(dep) = fkeys.iter().find(|d| d.ftable == *dep_name) {
+                            column = &dep.column;
+                            ref_table = &dep.ftable;
+                            ref_column = &dep.fcolumn;
+                        } else if let Some(dep) = ukeys.iter().find(|d| d.ttable == *dep_name) {
+                            column = &dep.column;
+                            ref_table = &dep.ttable;
+                            ref_column = &dep.tcolumn;
                         } else {
                             panic!("{}. Unable to retrieve the details.", message);
                         }
@@ -3112,14 +3089,18 @@ pub fn get_table_constraints(
     parser: &StartParser,
     table_name: &str,
     pool: &AnyPool,
-) -> SerdeValue {
-    let mut table_constraints = json!({
-        "foreign": [],
-        "unique": [],
-        "primary": [],
-        "tree": [],
-        "under": [],
-    });
+) -> (
+    Vec<String>,
+    Vec<String>,
+    Vec<ValveForeignConstraint>,
+    Vec<ValveTreeConstraint>,
+    Vec<ValveUnderConstraint>,
+) {
+    let mut primaries = vec![];
+    let mut uniques = vec![];
+    let mut foreigns = vec![];
+    let mut trees = vec![];
+    let mut unders = vec![];
 
     let column_names = tables_config
         .get(table_name)
@@ -3146,18 +3127,10 @@ pub fn get_table_constraints(
             for expression in parsed_structure {
                 match *expression {
                     Expression::Label(value) if value == "primary" => {
-                        let primary_keys = table_constraints
-                            .get_mut("primary")
-                            .and_then(|v| v.as_array_mut())
-                            .unwrap();
-                        primary_keys.push(SerdeValue::String(column_name.to_string()));
+                        primaries.push(column_name.to_string());
                     }
                     Expression::Label(value) if value == "unique" => {
-                        let unique_constraints = table_constraints
-                            .get_mut("unique")
-                            .and_then(|v| v.as_array_mut())
-                            .unwrap();
-                        unique_constraints.push(SerdeValue::String(column_name.to_string()));
+                        uniques.push(column_name.to_string());
                     }
                     Expression::Function(name, args) if name == "from" => {
                         if args.len() != 1 {
@@ -3165,16 +3138,11 @@ pub fn get_table_constraints(
                         }
                         match &*args[0] {
                             Expression::Field(ftable, fcolumn) => {
-                                let foreign_keys = table_constraints
-                                    .get_mut("foreign")
-                                    .and_then(|v| v.as_array_mut())
-                                    .unwrap();
-                                let foreign_key = json!({
-                                    "column": column_name,
-                                    "ftable": ftable,
-                                    "fcolumn": fcolumn,
+                                foreigns.push(ValveForeignConstraint {
+                                    column: column_name.to_string(),
+                                    ftable: ftable.to_string(),
+                                    fcolumn: fcolumn.to_string(),
                                 });
-                                foreign_keys.push(foreign_key);
                             }
                             _ => {
                                 panic!("Invalid foreign key: {} for: {}", structure, table_name)
@@ -3215,13 +3183,10 @@ pub fn get_table_constraints(
                                         child_sql_type, child, child, table_name, sql_type, parent
                                     );
                                 }
-                                let tree_constraints = table_constraints
-                                    .get_mut("tree")
-                                    .and_then(|t| t.as_array_mut())
-                                    .unwrap();
-                                let entry = json!({"parent": column_name,
-                                                   "child": child});
-                                tree_constraints.push(entry);
+                                trees.push(ValveTreeConstraint {
+                                    child: child.to_string(),
+                                    parent: column_name.to_string(),
+                                });
                             }
                             _ => {
                                 panic!(
@@ -3241,15 +3206,12 @@ pub fn get_table_constraints(
                         }
                         match (&*args[0], &*args[1]) {
                             (Expression::Field(ttable, tcolumn), Expression::Label(value)) => {
-                                let under_constraints = table_constraints
-                                    .get_mut("under")
-                                    .and_then(|u| u.as_array_mut())
-                                    .unwrap();
-                                let entry = json!({"column": column_name,
-                                                   "ttable": ttable,
-                                                   "tcolumn": tcolumn,
-                                                   "value": value});
-                                under_constraints.push(entry);
+                                unders.push(ValveUnderConstraint {
+                                    column: column_name.to_string(),
+                                    ttable: ttable.to_string(),
+                                    tcolumn: tcolumn.to_string(),
+                                    value: json!(value),
+                                });
                             }
                             (_, _) => panic!("{}", generic_error),
                         };
@@ -3263,7 +3225,7 @@ pub fn get_table_constraints(
         }
     }
 
-    return table_constraints;
+    return (primaries, uniques, foreigns, trees, unders);
 }
 
 /// Given table configuration map and a datatype configuration map, a parser, a table name, and a
@@ -3321,7 +3283,8 @@ pub fn get_table_ddl(
             json!({"foreign": [], "unique": [], "primary": [], "tree": [], "under": [],})
         } else {
             // TODO: Here.
-            get_table_constraints(&HashMap::new(), &HashMap::new(), parser, &table_name, &pool)
+            serde_json::Value::Object(SerdeMap::new())
+            //get_table_constraints(&HashMap::new(), &HashMap::new(), parser, &table_name, &pool)
             //get_table_constraints(tables_config, datatypes_config_old, parser, &table_name, &pool)
         }
     };
