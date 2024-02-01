@@ -119,14 +119,14 @@ pub struct ValveDatatypeConfig {
 
 // TODO: Make this struct public; remove unneeded derives.
 #[derive(Debug, Default)]
-struct _ValveRuleConfig {
-    pub _description: String,
-    pub _level: String,
-    pub _table: String,
-    pub _then_column: String,
-    pub _then_condition: String,
-    pub _when_column: String,
-    pub _when_condition: String,
+pub struct ValveRuleConfig {
+    pub description: String,
+    pub level: String,
+    pub table: String,
+    pub then_column: String,
+    pub then_condition: String,
+    pub when_column: String,
+    pub when_condition: String,
 }
 
 // TODO: Make this struct public; remove unneeded derives.
@@ -173,7 +173,7 @@ pub struct ValveConfig {
     pub special: ValveSpecialConfig,
     pub table: HashMap<String, ValveTableConfig>,
     pub datatype: HashMap<String, ValveDatatypeConfig>,
-    //pub rule: HashMap<String, HashMap<String, Vec<ValveRuleConfig>>>,
+    pub rule: HashMap<String, HashMap<String, Vec<ValveRuleConfig>>>,
     pub table_constraints: ValveTableConstraints,
     //pub datatype_conditions: HashMap<String, CompiledCondition>,
     //pub rule_conditions: HashMap<String, HashMap<String, Vec<ColumnRule>>>,
@@ -264,7 +264,7 @@ impl Valve {
             specials_config,
             tables_config,
             datatypes_config,
-            _rules_config_old,
+            rules_config,
             constraints_config,
             sorted_table_list,
             table_dependencies_in,
@@ -275,6 +275,7 @@ impl Valve {
             special: specials_config,
             table: tables_config,
             datatype: datatypes_config,
+            rule: rules_config,
             table_constraints: constraints_config,
             sorted_table_list: sorted_table_list.clone(),
         };
@@ -282,6 +283,7 @@ impl Valve {
         println!("TABLES CONFIG: {:#?}", config.table);
         println!("DATATYPES CONFIG: {:#?}", config.datatype);
         println!("TABLE CONSTRAINTS: {:#?}", config.table_constraints);
+        println!("RULES CONFIG: {:#?}", config.rule);
         println!("SORTED TABLE LIST: {:?}", config.sorted_table_list);
 
         // TODO: Obviously remove this later.

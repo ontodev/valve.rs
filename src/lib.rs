@@ -35,8 +35,8 @@ use crate::{
     },
     valve::{
         ValveColumnConfig, ValveDatatypeConfig, ValveError, ValveForeignConstraint, ValveRow,
-        ValveSpecialConfig, ValveTableConfig, ValveTableConstraints, ValveTreeConstraint,
-        ValveUnderConstraint,
+        ValveRuleConfig, ValveSpecialConfig, ValveTableConfig, ValveTableConstraints,
+        ValveTreeConstraint, ValveUnderConstraint,
     },
     valve_grammar::StartParser,
 };
@@ -218,7 +218,7 @@ pub fn read_config_files(
     ValveSpecialConfig,
     HashMap<String, ValveTableConfig>,
     HashMap<String, ValveDatatypeConfig>,
-    SerdeMap,
+    HashMap<String, HashMap<String, Vec<ValveRuleConfig>>>,
     ValveTableConstraints,
     Vec<String>,
     HashMap<String, Vec<String>>,
@@ -408,42 +408,33 @@ pub fn read_config_files(
         }
 
         let dt_name = row.get("datatype").and_then(|d| d.as_str()).unwrap();
+        let html_type = row.get("HTML type").and_then(|s| s.as_str()).unwrap();
+        let sql_type = row
+            .get("SQL type")
+            .and_then(|s| s.as_str())
+            .and_then(|s| Some(s.to_string()));
+        let condition = row
+            .get("condition")
+            .and_then(|s| s.as_str())
+            .and_then(|s| Some(s.to_string()));
+        let description = row.get("description").and_then(|s| s.as_str()).unwrap();
+        let parent = row
+            .get("parent")
+            .and_then(|s| s.as_str())
+            .and_then(|s| Some(s.to_string()));
+        let structure = row.get("structure").and_then(|s| s.as_str()).unwrap();
+        let transform = row.get("transform").and_then(|s| s.as_str()).unwrap();
         datatypes_config.insert(
             dt_name.to_string(),
             ValveDatatypeConfig {
-                html_type: row
-                    .get("HTML type")
-                    .and_then(|s| s.as_str())
-                    .unwrap()
-                    .to_string(),
-                sql_type: row
-                    .get("SQL type")
-                    .and_then(|s| s.as_str())
-                    .and_then(|s| Some(s.to_string())),
-                condition: row
-                    .get("condition")
-                    .and_then(|s| s.as_str())
-                    .and_then(|s| Some(s.to_string())),
+                html_type: html_type.to_string(),
+                sql_type: sql_type,
+                condition: condition,
                 datatype: dt_name.to_string(),
-                description: row
-                    .get("description")
-                    .and_then(|s| s.as_str())
-                    .unwrap()
-                    .to_string(),
-                parent: row
-                    .get("parent")
-                    .and_then(|s| s.as_str())
-                    .and_then(|s| Some(s.to_string())),
-                structure: row
-                    .get("structure")
-                    .and_then(|s| s.as_str())
-                    .unwrap()
-                    .to_string(),
-                transform: row
-                    .get("transform")
-                    .and_then(|s| s.as_str())
-                    .unwrap()
-                    .to_string(),
+                description: description.to_string(),
+                parent: parent,
+                structure: structure.to_string(),
+                transform: transform.to_string(),
             },
         );
     }
@@ -531,7 +522,7 @@ pub fn read_config_files(
     }
 
     // Load rule table if it exists
-    let mut rules_config = SerdeMap::new();
+    let mut rules_config = HashMap::new();
     if let Some(table_name) = &specials_config.rule {
         let rows = get_special_config(table_name, &specials_config, &tables_config, path);
         for row in rows {
@@ -559,23 +550,32 @@ pub fn read_config_files(
 
             // Add the rule specified in the given row to the list of rules associated with the
             // value of the when column:
-            let row_when_column = row.get("when column").and_then(|c| c.as_str()).unwrap();
             if !rules_config.contains_key(row_table) {
-                rules_config.insert(String::from(row_table), SerdeValue::Object(SerdeMap::new()));
+                rules_config.insert(String::from(row_table), HashMap::new());
             }
 
-            let table_rule_config = rules_config
-                .get_mut(row_table)
-                .and_then(|t| t.as_object_mut())
-                .unwrap();
-            if !table_rule_config.contains_key(row_when_column) {
-                table_rule_config.insert(String::from(row_when_column), SerdeValue::Array(vec![]));
+            let table_rule_config = rules_config.get_mut(row_table).unwrap();
+
+            let when_col = row.get("when column").and_then(|c| c.as_str()).unwrap();
+            if !table_rule_config.contains_key(when_col) {
+                table_rule_config.insert(String::from(when_col), vec![]);
             }
-            let column_rule_config = table_rule_config
-                .get_mut(&row_when_column.to_string())
-                .and_then(|w| w.as_array_mut())
-                .unwrap();
-            column_rule_config.push(SerdeValue::Object(row));
+
+            let column_rule_config = table_rule_config.get_mut(&when_col.to_string()).unwrap();
+            let desc = row.get("description").and_then(|c| c.as_str()).unwrap();
+            let level = row.get("level").and_then(|c| c.as_str()).unwrap();
+            let when_con = row.get("when condition").and_then(|c| c.as_str()).unwrap();
+            let then_col = row.get("then column").and_then(|c| c.as_str()).unwrap();
+            let then_con = row.get("then condition").and_then(|c| c.as_str()).unwrap();
+            column_rule_config.push(ValveRuleConfig {
+                description: desc.to_string(),
+                level: level.to_string(),
+                table: row_table.to_string(),
+                then_column: then_col.to_string(),
+                then_condition: then_con.to_string(),
+                when_column: when_col.to_string(),
+                when_condition: when_con.to_string(),
+            });
         }
     }
 
