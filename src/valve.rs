@@ -85,7 +85,7 @@ pub struct ValveSpecialConfig {
 #[derive(Debug, Default)]
 pub struct ValveTableConfig {
     pub table: String,
-    pub table_type: String,
+    pub table_type: Option<String>,
     pub description: String,
     pub path: String,
     pub column: HashMap<String, ValveColumnConfig>,
@@ -101,17 +101,18 @@ pub struct ValveColumnConfig {
     pub description: String,
     pub label: String,
     pub structure: String,
+    pub nulltype: Option<String>,
 }
 
 // TODO: Make this struct public; remove unneeded derives.
 #[derive(Debug, Default)]
 pub struct ValveDatatypeConfig {
     pub html_type: String,
-    pub sql_type: String,
-    pub condition: String,
+    pub sql_type: Option<String>,
+    pub condition: Option<String>,
     pub datatype: String,
     pub description: String,
-    pub parent: String,
+    pub parent: Option<String>,
     pub structure: String,
     pub transform: String,
 }

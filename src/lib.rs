@@ -250,7 +250,6 @@ pub fn read_config_files(
             }
         }
 
-        // TODO: Make this field optional in the struct instead of using unwrap_or_default() below.
         for column in vec!["type"] {
             if row.get(column).and_then(|c| c.as_str()).unwrap() == "" {
                 row.remove(&column.to_string());
@@ -304,12 +303,15 @@ pub fn read_config_files(
         let row_table = row.get("table").and_then(|t| t.as_str()).unwrap();
         let row_desc = row.get("description").and_then(|t| t.as_str()).unwrap();
         let row_path = row.get("path").and_then(|t| t.as_str()).unwrap();
-        let row_type = row.get("type").and_then(|t| t.as_str()).unwrap_or_default();
+        let row_type = row
+            .get("type")
+            .and_then(|t| t.as_str())
+            .and_then(|t| Some(t.to_string()));
         tables_config.insert(
             row_table.to_string(),
             ValveTableConfig {
                 table: row_table.to_string(),
-                table_type: row_type.to_string(),
+                table_type: row_type,
                 description: row_desc.to_string(),
                 path: row_path.to_string(),
                 ..Default::default()
@@ -363,9 +365,12 @@ pub fn read_config_files(
         } else {
             let mut db_table = None;
             for (table_name, table_config) in tables_config {
-                if table_config.table_type == table_type {
-                    db_table = Some(table_name);
-                    break;
+                if let Some(this_type) = &table_config.table_type {
+                    let this_type = this_type.as_str();
+                    if this_type == table_type {
+                        db_table = Some(table_name);
+                        break;
+                    }
                 }
             }
             let db_table = match db_table {
@@ -395,7 +400,6 @@ pub fn read_config_files(
             }
         }
 
-        // TODO: Make these field optional in the struct instead of using unwrap_or_default() below.
         for column in vec!["parent", "condition", "SQL type"] {
             if row.get(column).and_then(|c| c.as_str()).unwrap() == "" {
                 row.remove(&column.to_string());
@@ -408,38 +412,35 @@ pub fn read_config_files(
             ValveDatatypeConfig {
                 html_type: row
                     .get("HTML type")
-                    .and_then(|d| d.as_str())
+                    .and_then(|s| s.as_str())
                     .unwrap()
                     .to_string(),
                 sql_type: row
                     .get("SQL type")
-                    .and_then(|d| d.as_str())
-                    .unwrap_or_default()
-                    .to_string(),
+                    .and_then(|s| s.as_str())
+                    .and_then(|s| Some(s.to_string())),
                 condition: row
                     .get("condition")
-                    .and_then(|d| d.as_str())
-                    .unwrap_or_default()
-                    .to_string(),
+                    .and_then(|s| s.as_str())
+                    .and_then(|s| Some(s.to_string())),
                 datatype: dt_name.to_string(),
                 description: row
                     .get("description")
-                    .and_then(|d| d.as_str())
+                    .and_then(|s| s.as_str())
                     .unwrap()
                     .to_string(),
                 parent: row
                     .get("parent")
-                    .and_then(|d| d.as_str())
-                    .unwrap_or_default()
-                    .to_string(),
+                    .and_then(|s| s.as_str())
+                    .and_then(|s| Some(s.to_string())),
                 structure: row
                     .get("structure")
-                    .and_then(|d| d.as_str())
+                    .and_then(|s| s.as_str())
                     .unwrap()
                     .to_string(),
                 transform: row
                     .get("transform")
-                    .and_then(|d| d.as_str())
+                    .and_then(|s| s.as_str())
                     .unwrap()
                     .to_string(),
             },
@@ -467,7 +468,6 @@ pub fn read_config_files(
             }
         }
 
-        // TODO: Make this field optional in the struct instead of using unwrap_or_default() below.
         for column in vec!["nulltype"] {
             if row.get(column).and_then(|c| c.as_str()).unwrap() == "" {
                 row.remove(&column.to_string());
@@ -519,6 +519,10 @@ pub fn read_config_files(
                             .and_then(|c| c.as_str())
                             .unwrap()
                             .to_string(),
+                        nulltype: row
+                            .get("nulltype")
+                            .and_then(|c| c.as_str())
+                            .and_then(|s| Some(s.to_string())),
                     },
                 ),
             )
@@ -688,7 +692,7 @@ pub fn read_config_files(
         "message".to_string(),
         ValveTableConfig {
             table: "message".to_string(),
-            table_type: "message".to_string(),
+            table_type: Some("message".to_string()),
             description: "Validation messages for all of the tables and columns".to_string(),
             column_order: vec![
                 "table".to_string(),
@@ -784,7 +788,7 @@ pub fn read_config_files(
         "history".to_string(),
         ValveTableConfig {
             table: "history".to_string(),
-            table_type: "history".to_string(),
+            table_type: Some("history".to_string()),
             description: "History of changes to the VALVE database".to_string(),
             column_order: vec![
                 "table".to_string(),
@@ -2770,17 +2774,13 @@ pub fn get_sql_type(
         return None;
     }
 
-    // TODO: This can likely be simplified a bit. See TODO above about making this field optional.
-    if let Some(sql_type) = dt_config
-        .get(datatype)
-        .and_then(|d| Some(d.sql_type.to_string()))
-    {
+    if let Some(sql_type) = dt_config.get(datatype).and_then(|d| d.sql_type.clone()) {
         return Some(sql_type);
     }
 
     let parent_datatype = dt_config
         .get(datatype)
-        .and_then(|d| Some(d.parent.to_string()))
+        .and_then(|d| d.parent.clone())
         .unwrap();
 
     return get_sql_type(dt_config, dt_config_old, &parent_datatype.to_string(), pool);
