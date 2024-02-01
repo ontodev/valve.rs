@@ -105,15 +105,15 @@ pub struct ValveColumnConfig {
 
 // TODO: Make this struct public; remove unneeded derives.
 #[derive(Debug, Default)]
-struct _ValveDatatypeConfig {
-    pub _html_type: String,
-    pub _sql_type: String,
-    pub _condition: String,
-    pub _datatype: String,
-    pub _description: String,
-    pub _parent: String,
-    pub _structure: String,
-    pub _transform: String,
+pub struct ValveDatatypeConfig {
+    pub html_type: String,
+    pub sql_type: String,
+    pub condition: String,
+    pub datatype: String,
+    pub description: String,
+    pub parent: String,
+    pub structure: String,
+    pub transform: String,
 }
 
 // TODO: Make this struct public; remove unneeded derives.
@@ -170,7 +170,7 @@ struct _ValveTableConstraints {
 struct ValveConfig {
     pub special: ValveSpecialConfig,
     pub table: HashMap<String, ValveTableConfig>,
-    //pub datatype: HashMap<String, ValveDatatypeConfig>,
+    pub datatype: HashMap<String, ValveDatatypeConfig>,
     //pub rule: HashMap<String, HashMap<String, Vec<ValveRuleConfig>>>,
     //pub table_constraints: ValveTableConstraints,
     //pub datatype_conditions: HashMap<String, CompiledCondition>,
@@ -261,7 +261,7 @@ impl Valve {
         let (
             specials_config,
             tables_config,
-            datatypes_config_old,
+            datatypes_config,
             rules_config_old,
             constraints_config_old,
             sorted_table_list,
@@ -272,9 +272,11 @@ impl Valve {
         let config = ValveConfig {
             special: specials_config,
             table: tables_config,
+            datatype: datatypes_config,
         };
         println!("SPECIALS CONFIG: {:#?}", config.special);
         println!("TABLES CONFIG: {:#?}", config.table);
+        println!("DATATYPES CONFIG: {:#?}", config.datatype);
 
         // TODO: Obviously remove this later.
         if 1 == 1 {
@@ -290,10 +292,10 @@ impl Valve {
         //    String::from("table"),
         //    SerdeValue::Object(tables_config_old.clone()),
         //);
-        config_old.insert(
-            String::from("datatype"),
-            SerdeValue::Object(datatypes_config_old.clone()),
-        );
+        //config_old.insert(
+        //    String::from("datatype"),
+        //    SerdeValue::Object(datatypes_config_old.clone()),
+        //);
         config_old.insert(
             String::from("rule"),
             SerdeValue::Object(rules_config_old.clone()),
@@ -805,7 +807,13 @@ impl Valve {
             setup_statements.insert(table_name.to_string(), table_statements);
         }
 
-        let text_type = get_sql_type(&datatypes_config, &"text".to_string(), &self.pool).unwrap();
+        let text_type = get_sql_type(
+            &HashMap::new(),
+            &datatypes_config,
+            &"text".to_string(),
+            &self.pool,
+        )
+        .unwrap();
 
         // Generate DDL for the history table:
         let mut history_statements = vec![];

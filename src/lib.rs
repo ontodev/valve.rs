@@ -33,7 +33,10 @@ use crate::{
         validate_row_tx, validate_rows_constraints, validate_rows_intra, validate_rows_trees,
         QueryAsIf, QueryAsIfKind, ResultRow,
     },
-    valve::{ValveColumnConfig, ValveError, ValveRow, ValveSpecialConfig, ValveTableConfig},
+    valve::{
+        ValveColumnConfig, ValveDatatypeConfig, ValveError, ValveRow, ValveSpecialConfig,
+        ValveTableConfig,
+    },
     valve_grammar::StartParser,
 };
 use async_recursion::async_recursion;
@@ -213,17 +216,17 @@ pub fn read_config_files(
 ) -> (
     ValveSpecialConfig,
     HashMap<String, ValveTableConfig>,
-    SerdeMap,
+    HashMap<String, ValveDatatypeConfig>,
     SerdeMap,
     SerdeMap,
     Vec<String>,
     HashMap<String, Vec<String>>,
     HashMap<String, Vec<String>>,
 ) {
+    // Load the table config for the 'table' table from the given path, and determine the
+    // table names to use for the other special config types: 'column', 'datatype', and 'rule':
     let mut specials_config = ValveSpecialConfig::default();
     let mut tables_config = HashMap::new();
-
-    // Load the table table from the given path:
     let rows = {
         // Read in the configuration entry point (the "table table") from either a file or a
         // database table.
@@ -247,6 +250,7 @@ pub fn read_config_files(
             }
         }
 
+        // TODO: Make this field optional in the struct instead of using unwrap_or_default() below.
         for column in vec!["type"] {
             if row.get(column).and_then(|c| c.as_str()).unwrap() == "" {
                 row.remove(&column.to_string());
@@ -376,7 +380,7 @@ pub fn read_config_files(
     }
 
     // Load datatype table
-    let mut datatypes_config = SerdeMap::new();
+    let mut datatypes_config = HashMap::new();
     let rows = get_special_config("datatype", &specials_config, &tables_config, path);
     for mut row in rows {
         for column in vec!["datatype", "parent", "condition", "SQL type"] {
@@ -391,6 +395,7 @@ pub fn read_config_files(
             }
         }
 
+        // TODO: Make these field optional in the struct instead of using unwrap_or_default() below.
         for column in vec!["parent", "condition", "SQL type"] {
             if row.get(column).and_then(|c| c.as_str()).unwrap() == "" {
                 row.remove(&column.to_string());
@@ -398,7 +403,47 @@ pub fn read_config_files(
         }
 
         let dt_name = row.get("datatype").and_then(|d| d.as_str()).unwrap();
-        datatypes_config.insert(dt_name.to_string(), SerdeValue::Object(row));
+        datatypes_config.insert(
+            dt_name.to_string(),
+            ValveDatatypeConfig {
+                html_type: row
+                    .get("HTML type")
+                    .and_then(|d| d.as_str())
+                    .unwrap()
+                    .to_string(),
+                sql_type: row
+                    .get("SQL type")
+                    .and_then(|d| d.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                condition: row
+                    .get("condition")
+                    .and_then(|d| d.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                datatype: dt_name.to_string(),
+                description: row
+                    .get("description")
+                    .and_then(|d| d.as_str())
+                    .unwrap()
+                    .to_string(),
+                parent: row
+                    .get("parent")
+                    .and_then(|d| d.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                structure: row
+                    .get("structure")
+                    .and_then(|d| d.as_str())
+                    .unwrap()
+                    .to_string(),
+                transform: row
+                    .get("transform")
+                    .and_then(|d| d.as_str())
+                    .unwrap()
+                    .to_string(),
+            },
+        );
     }
 
     for dt in vec!["text", "empty", "line", "word"] {
@@ -422,6 +467,7 @@ pub fn read_config_files(
             }
         }
 
+        // TODO: Make this field optional in the struct instead of using unwrap_or_default() below.
         for column in vec!["nulltype"] {
             if row.get(column).and_then(|c| c.as_str()).unwrap() == "" {
                 row.remove(&column.to_string());
@@ -446,23 +492,36 @@ pub fn read_config_files(
 
         let row_table = row.get("table").and_then(|t| t.as_str()).unwrap();
         let column_name = row.get("column").and_then(|c| c.as_str()).unwrap();
-        let datatype = row.get("datatype").and_then(|c| c.as_str()).unwrap();
-        let description = row.get("description").and_then(|c| c.as_str()).unwrap();
-        let label = row.get("label").and_then(|c| c.as_str()).unwrap();
-        let structure = row.get("structure").and_then(|c| c.as_str()).unwrap();
-
         tables_config.get_mut(row_table).and_then(|t| {
-            Some(t.column.insert(
-                column_name.to_string(),
-                ValveColumnConfig {
-                    table: row_table.to_string(),
-                    column: column_name.to_string(),
-                    datatype: datatype.to_string(),
-                    description: description.to_string(),
-                    label: label.to_string(),
-                    structure: structure.to_string(),
-                },
-            ))
+            Some(
+                t.column.insert(
+                    column_name.to_string(),
+                    ValveColumnConfig {
+                        table: row_table.to_string(),
+                        column: column_name.to_string(),
+                        datatype: row
+                            .get("datatype")
+                            .and_then(|c| c.as_str())
+                            .unwrap()
+                            .to_string(),
+                        description: row
+                            .get("description")
+                            .and_then(|c| c.as_str())
+                            .unwrap()
+                            .to_string(),
+                        label: row
+                            .get("label")
+                            .and_then(|c| c.as_str())
+                            .unwrap()
+                            .to_string(),
+                        structure: row
+                            .get("structure")
+                            .and_then(|c| c.as_str())
+                            .unwrap()
+                            .to_string(),
+                    },
+                ),
+            )
         });
     }
 
@@ -531,7 +590,7 @@ pub fn read_config_files(
         let mut path = None;
         match optional_path {
             None => {
-                // If an entry of the tables_config_old has no path then it is an internal table which
+                // If an entry of the tables_config has no path then it is an internal table which
                 // need not be configured explicitly. Currently the only examples are the message
                 // and history tables.
                 if table_name != "message" && table_name != "history" {
@@ -631,7 +690,6 @@ pub fn read_config_files(
             table: "message".to_string(),
             table_type: "message".to_string(),
             description: "Validation messages for all of the tables and columns".to_string(),
-            path: "".to_string(),
             column_order: vec![
                 "table".to_string(),
                 "row".to_string(),
@@ -717,6 +775,7 @@ pub fn read_config_files(
                 );
                 column_configs
             },
+            ..Default::default()
         },
     );
 
@@ -727,7 +786,6 @@ pub fn read_config_files(
             table: "history".to_string(),
             table_type: "history".to_string(),
             description: "History of changes to the VALVE database".to_string(),
-            path: "".to_string(),
             column_order: vec![
                 "table".to_string(),
                 "row".to_string(),
@@ -825,6 +883,7 @@ pub fn read_config_files(
                 );
                 column_configs
             },
+            ..Default::default()
         },
     );
 
@@ -2701,22 +2760,30 @@ pub fn compile_condition(
 
 /// Given the config map, the name of a datatype, and a database connection pool used to determine
 /// the database type, climb the datatype tree (as required), and return the first 'SQL type' found.
-pub fn get_sql_type(dt_config: &SerdeMap, datatype: &String, pool: &AnyPool) -> Option<String> {
+pub fn get_sql_type(
+    dt_config: &HashMap<String, ValveDatatypeConfig>,
+    dt_config_old: &SerdeMap,
+    datatype: &String,
+    pool: &AnyPool,
+) -> Option<String> {
     if !dt_config.contains_key(datatype) {
         return None;
     }
 
-    if let Some(sql_type) = dt_config.get(datatype).and_then(|d| d.get("SQL type")) {
-        return Some(sql_type.as_str().and_then(|s| Some(s.to_string())).unwrap());
+    // TODO: This can likely be simplified a bit. See TODO above about making this field optional.
+    if let Some(sql_type) = dt_config
+        .get(datatype)
+        .and_then(|d| Some(d.sql_type.to_string()))
+    {
+        return Some(sql_type);
     }
 
     let parent_datatype = dt_config
         .get(datatype)
-        .and_then(|d| d.get("parent"))
-        .and_then(|p| p.as_str())
+        .and_then(|d| Some(d.parent.to_string()))
         .unwrap();
 
-    return get_sql_type(dt_config, &parent_datatype.to_string(), pool);
+    return get_sql_type(dt_config, dt_config_old, &parent_datatype.to_string(), pool);
 }
 
 /// Given the global config map, a table name, a column name, and a database connection pool
@@ -2727,7 +2794,7 @@ pub fn get_sql_type_from_global_config(
     column: &str,
     pool: &AnyPool,
 ) -> Option<String> {
-    let dt_config = global_config
+    let dt_config_old = global_config
         .get("datatype")
         .and_then(|d| d.as_object())
         .unwrap();
@@ -2740,7 +2807,7 @@ pub fn get_sql_type_from_global_config(
         .and_then(|d| d.as_str())
         .and_then(|d| Some(d.to_string()))
         .expect(&format!("Could not get datatype for {}.{}", table, column));
-    get_sql_type(&dt_config, &dt, pool)
+    get_sql_type(&HashMap::new(), &dt_config_old, &dt, pool)
 }
 
 /// Given a SQL type, return the appropriate CAST(...) statement for casting the SQL_PARAM
@@ -3041,7 +3108,7 @@ pub fn verify_table_deps_and_sort(
 /// database connection pool, return a configuration map representing all of the table constraints.
 pub fn get_table_constraints(
     tables_config: &HashMap<String, ValveTableConfig>,
-    datatypes_config: &SerdeMap,
+    datatypes_config: &HashMap<String, ValveDatatypeConfig>,
     parser: &StartParser,
     table_name: &str,
     pool: &AnyPool,
@@ -3070,7 +3137,8 @@ pub fn get_table_constraints(
     }
 
     for row in colvals {
-        let sql_type = get_sql_type(datatypes_config, &row.datatype, pool).unwrap();
+        let sql_type =
+            get_sql_type(datatypes_config, &SerdeMap::new(), &row.datatype, pool).unwrap();
         let column_name = &row.column;
         let structure = &row.structure;
         if structure != "" {
@@ -3135,6 +3203,7 @@ pub fn get_table_constraints(
                                 let parent = column_name;
                                 let child_sql_type = get_sql_type(
                                     datatypes_config,
+                                    &SerdeMap::new(),
                                     &child_datatype.to_string(),
                                     pool,
                                 )
@@ -3202,7 +3271,7 @@ pub fn get_table_constraints(
 /// database tables.
 pub fn get_table_ddl(
     tables_config: &SerdeMap,
-    datatypes_config: &SerdeMap,
+    datatypes_config_old: &SerdeMap,
     parser: &StartParser,
     table_name: &String,
     pool: &AnyPool,
@@ -3252,14 +3321,8 @@ pub fn get_table_ddl(
             json!({"foreign": [], "unique": [], "primary": [], "tree": [], "under": [],})
         } else {
             // TODO: Here.
-            get_table_constraints(
-                &HashMap::new(),
-                datatypes_config,
-                parser,
-                &table_name,
-                &pool,
-            )
-            //get_table_constraints(tables_config, datatypes_config, parser, &table_name, &pool)
+            get_table_constraints(&HashMap::new(), &HashMap::new(), parser, &table_name, &pool)
+            //get_table_constraints(tables_config, datatypes_config_old, parser, &table_name, &pool)
         }
     };
 
@@ -3268,7 +3331,8 @@ pub fn get_table_ddl(
     for row in colvals {
         r += 1;
         let sql_type = get_sql_type(
-            datatypes_config,
+            &HashMap::new(),
+            datatypes_config_old,
             &row.get("datatype")
                 .and_then(|d| d.as_str())
                 .and_then(|s| Some(s.to_string()))
