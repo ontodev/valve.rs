@@ -2773,7 +2773,7 @@ pub fn get_sql_type(
     pool: &AnyPool,
 ) -> Option<String> {
     if !dt_config.contains_key(datatype) {
-        return None;
+        return Some("TEXT".to_string());
     }
 
     if let Some(sql_type) = dt_config.get(datatype).and_then(|d| d.sql_type.clone()) {
