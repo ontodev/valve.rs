@@ -14,6 +14,9 @@ valve --help
 ```
 to see command line options.
 
+### API
+See [Valve]
+
 ### Python bindings
 See [valve.py](https://github.com/ontodev/valve.py)
 

@@ -12,6 +12,9 @@
 //! ```
 //! to see command line options.
 //!
+//! ## API
+//! See [Valve]
+//!
 //! ## Python bindings
 //! See [valve.py](https://github.com/ontodev/valve.py)
 
@@ -20,17 +23,24 @@ extern crate lalrpop_util;
 
 pub mod ast;
 pub mod validate;
+pub mod valve;
 
 lalrpop_mod!(pub valve_grammar);
 
-use crate::validate::{
-    validate_row, validate_rows_constraints, validate_rows_intra, validate_rows_trees,
-    validate_tree_foreign_keys, validate_under, QueryAsIf, QueryAsIfKind, ResultRow,
+use crate::{
+    ast::Expression,
+    validate::{
+        validate_row_tx, validate_rows_constraints, validate_rows_intra, validate_rows_trees,
+        QueryAsIf, QueryAsIfKind, ResultRow,
+    },
+    valve::ValveError,
+    valve::ValveRow,
+    valve_grammar::StartParser,
 };
-use crate::{ast::Expression, valve_grammar::StartParser};
 use async_recursion::async_recursion;
 use chrono::Utc;
 use crossbeam;
+use csv::{ReaderBuilder, StringRecord, StringRecordsIter};
 use futures::executor::block_on;
 use indexmap::IndexMap;
 use indoc::indoc;
@@ -45,9 +55,7 @@ use regex::Regex;
 use serde_json::{json, Value as SerdeValue};
 use sqlx::{
     any::{AnyConnectOptions, AnyKind, AnyPool, AnyPoolOptions, AnyRow},
-    query as sqlx_query, Acquire, Column,
-    Error::Configuration as SqlxCErr,
-    Row, Transaction, ValueRef,
+    query as sqlx_query, Acquire, Column, Row, Transaction, ValueRef,
 };
 use std::{
     collections::{BTreeMap, HashMap},
@@ -72,15 +80,42 @@ static MULTI_THREADED: bool = true;
 static SQL_PARAM: &str = "VALVEPARAM";
 
 lazy_static! {
-    static ref PG_SQL_TYPES: Vec<&'static str> =
-        vec!["text", "varchar", "numeric", "integer", "real"];
-    static ref SL_SQL_TYPES: Vec<&'static str> = vec!["text", "numeric", "integer", "real"];
+    static ref SQL_TYPES: Vec<&'static str> = vec!["text", "varchar", "numeric", "integer", "real"];
 }
 
-/// An alias for [serde_json::Map](..//serde_json/struct.Map.html)<String, [serde_json::Value](../serde_json/enum.Value.html)>.
+/// Alias for [serde_json::Map](..//serde_json/struct.Map.html)<String, [serde_json::Value](../serde_json/enum.Value.html)>.
 // Note: serde_json::Map is
 // [backed by a BTreeMap by default](https://docs.serde.rs/serde_json/map/index.html)
 pub type SerdeMap = serde_json::Map<String, SerdeValue>;
+
+// TODO: Possibly replace these with the tracing library (see nanobot.rs).
+/// Write a debugging message to STDERR.
+#[macro_export]
+macro_rules! debug {
+    () => (eprintln!());
+    ($($arg:tt)*) => (eprintln!("{} - DEBUG {}", Utc::now(), format_args!($($arg)*)));
+}
+
+/// Write an information message to STDERR.
+#[macro_export]
+macro_rules! info {
+    () => (eprintln!());
+    ($($arg:tt)*) => (eprintln!("{} - INFO {}", Utc::now(), format_args!($($arg)*)));
+}
+
+/// Write a warning message to STDERR.
+#[macro_export]
+macro_rules! warn {
+    () => (eprintln!());
+    ($($arg:tt)*) => (eprintln!("{} - WARN {}", Utc::now(), format_args!($($arg)*)));
+}
+
+/// Write an error message to STDERR.
+#[macro_export]
+macro_rules! error {
+    () => (eprintln!());
+    ($($arg:tt)*) => (eprintln!("{} - ERROR {}", Utc::now(), format_args!($($arg)*)));
+}
 
 /// Represents a structure such as those found in the `structure` column of the `column` table in
 /// both its parsed format (i.e., as an [Expression](ast/enum.Expression.html)) as well as in its
@@ -145,13 +180,47 @@ impl std::fmt::Debug for ColumnRule {
     }
 }
 
+/// Given a string representing the location of a database, return a database connection pool.
+pub async fn get_pool_from_connection_string(database: &str) -> Result<AnyPool, ValveError> {
+    let connection_options;
+    if database.starts_with("postgresql://") {
+        connection_options = AnyConnectOptions::from_str(database)?;
+    } else {
+        let connection_string;
+        if !database.starts_with("sqlite://") {
+            connection_string = format!("sqlite://{}?mode=rwc", database);
+        } else {
+            connection_string = database.to_string();
+        }
+        connection_options = AnyConnectOptions::from_str(connection_string.as_str())?;
+    }
+
+    let pool = AnyPoolOptions::new()
+        // TODO: Make max_connections configurable.
+        .max_connections(5)
+        .connect_with(connection_options)
+        .await?;
+    Ok(pool)
+}
+
 /// Given the path to a configuration table (either a table.tsv file or a database containing a
 /// table named "table"), load and check the 'table', 'column', and 'datatype' tables, and return
-/// SerdeMaps corresponding to specials, tables, datatypes, and rules.
+/// SerdeMaps corresponding to specials, tables, datatypes, rules, constraints, and a vector
+/// containing the names of the tables in the dattatabse in sorted order.
 pub fn read_config_files(
     path: &str,
-    config_table: &str,
-) -> (SerdeMap, SerdeMap, SerdeMap, SerdeMap) {
+    parser: &StartParser,
+    pool: &AnyPool,
+) -> (
+    SerdeMap,
+    SerdeMap,
+    SerdeMap,
+    SerdeMap,
+    SerdeMap,
+    Vec<String>,
+    HashMap<String, Vec<String>>,
+    HashMap<String, Vec<String>>,
+) {
     let special_table_types = json!({
         "table": {"required": true},
         "column": {"required": true},
@@ -174,7 +243,7 @@ pub fn read_config_files(
         if path.to_lowercase().ends_with(".tsv") {
             read_tsv_into_vector(path)
         } else {
-            read_db_table_into_vector(path, config_table)
+            read_db_table_into_vector(path, "table")
         }
     };
 
@@ -292,13 +361,7 @@ pub fn read_config_files(
     let mut datatypes_config = SerdeMap::new();
     let rows = get_special_config("datatype", &specials_config, &tables_config, path);
     for mut row in rows {
-        for column in vec![
-            "datatype",
-            "parent",
-            "condition",
-            "SQLite type",
-            "PostgreSQL type",
-        ] {
+        for column in vec!["datatype", "parent", "condition", "SQL type"] {
             if !row.contains_key(column) || row.get(column) == None {
                 panic!("Missing required column '{}' reading '{}'", column, path);
             }
@@ -310,7 +373,7 @@ pub fn read_config_files(
             }
         }
 
-        for column in vec!["parent", "condition", "SQLite type", "PostgreSQL type"] {
+        for column in vec!["parent", "condition", "SQL type"] {
             if row.get(column).and_then(|c| c.as_str()).unwrap() == "" {
                 row.remove(&column.to_string());
             }
@@ -423,6 +486,124 @@ pub fn read_config_files(
         }
     }
 
+    // Initialize the constraints config:
+    let mut constraints_config = SerdeMap::new();
+    constraints_config.insert(String::from("foreign"), SerdeValue::Object(SerdeMap::new()));
+    constraints_config.insert(String::from("unique"), SerdeValue::Object(SerdeMap::new()));
+    constraints_config.insert(String::from("primary"), SerdeValue::Object(SerdeMap::new()));
+    constraints_config.insert(String::from("tree"), SerdeValue::Object(SerdeMap::new()));
+    constraints_config.insert(String::from("under"), SerdeValue::Object(SerdeMap::new()));
+
+    for table_name in tables_config.keys().cloned().collect::<Vec<_>>() {
+        let optional_path = tables_config
+            .get(&table_name)
+            .and_then(|r| r.get("path"))
+            .and_then(|p| p.as_str());
+
+        let mut path = None;
+        match optional_path {
+            None => {
+                // If an entry of the tables_config has no path then it is an internal table which
+                // need not be configured explicitly. Currently the only examples are the message
+                // and history tables.
+                if table_name != "message" && table_name != "history" {
+                    panic!("No path defined for table {}", table_name);
+                }
+                continue;
+            }
+            Some(p) if !Path::new(p).is_file() => {
+                warn!("File does not exist {}", p);
+            }
+            Some(p) if Path::new(p).canonicalize().is_err() => {
+                warn!("File path could not be made canonical {}", p);
+            }
+            Some(p) => path = Some(p.to_string()),
+        };
+
+        let defined_columns: Vec<String> = tables_config
+            .get(&table_name)
+            .and_then(|r| r.get("column"))
+            .and_then(|v| v.as_object())
+            .and_then(|o| Some(o.keys()))
+            .and_then(|k| Some(k.cloned()))
+            .and_then(|k| Some(k.collect()))
+            .unwrap();
+
+        // We use column_order to explicitly indicate the order in which the columns should appear
+        // in the table, for later reference. The default is to preserve the order from the actual
+        // table file. If that does not exist, we use the ordering in defined_columns.
+        let mut column_order = vec![];
+        if let Some(path) = path {
+            // Get the actual columns from the data itself. Note that we set has_headers to
+            // false(even though the files have header rows) in order to explicitly read the
+            // header row.
+            let mut rdr = ReaderBuilder::new()
+                .has_headers(false)
+                .delimiter(b'\t')
+                .from_reader(File::open(path.clone()).unwrap_or_else(|err| {
+                    panic!("Unable to open '{}': {}", path.clone(), err);
+                }));
+            let mut iter = rdr.records();
+            if let Some(result) = iter.next() {
+                let actual_columns = result
+                    .unwrap()
+                    .iter()
+                    .map(|c| c.to_string())
+                    .collect::<Vec<_>>();
+                // Make sure that the actual columns found in the table file, and the columns
+                // defined in the column config, exactly match in terms of their content:
+                for column_name in &actual_columns {
+                    column_order.push(json!(column_name));
+                    if !defined_columns.contains(&column_name.to_string()) {
+                        panic!(
+                            "Column '{}.{}' not in column config",
+                            table_name, column_name
+                        );
+                    }
+                }
+                for column_name in &defined_columns {
+                    if !actual_columns.contains(&column_name.to_string()) {
+                        panic!(
+                            "Defined column '{}.{}' not found in table",
+                            table_name, column_name
+                        );
+                    }
+                }
+            } else {
+                panic!("'{}' is empty", path);
+            }
+        }
+
+        if column_order.is_empty() {
+            column_order = defined_columns.iter().map(|c| json!(c)).collect::<Vec<_>>();
+        }
+        tables_config
+            .get_mut(&table_name)
+            .and_then(|t| t.as_object_mut())
+            .and_then(|o| {
+                o.insert(
+                    String::from("column_order"),
+                    SerdeValue::Array(column_order),
+                )
+            });
+
+        // Populate the constraints config:
+        let table_constraints = get_table_constraints(
+            &mut tables_config,
+            &mut datatypes_config,
+            parser,
+            &table_name,
+            &pool,
+        );
+        for constraint_type in vec!["foreign", "unique", "primary", "tree", "under"] {
+            let table_constraints = table_constraints.get(constraint_type).unwrap().clone();
+            constraints_config
+                .get_mut(constraint_type)
+                .and_then(|o| o.as_object_mut())
+                .and_then(|o| o.insert(table_name.to_string(), table_constraints));
+        }
+    }
+
     // Manually add the messsage table config:
     tables_config.insert(
         "message".to_string(),
@@ -505,7 +686,10 @@ pub fn read_config_files(
                 "row",
                 "from",
                 "to",
+                "summary",
                 "user",
+                "undone_by",
+                "timestamp",
             ],
             "column": {
                 "table": {
@@ -557,8 +741,31 @@ pub fn read_config_files(
                     "datatype": "line",
                     "structure": "",
                 },
+                "timestamp": {
+                    "table": "history",
+                    "column": "timestamp",
+                    "description": "The time of the change, or of the undo.",
+                    "datatype": "line",
+                    "structure": "",
+                },
+
             }
         }),
+    );
+
+    // Sort the tables (aside from the message and history tables) according to their foreign key
+    // dependencies so that tables are always loaded after the tables they depend on.
+    let (sorted_tables, table_dependencies_in, table_dependencies_out) = verify_table_deps_and_sort(
+        &tables_config
+            .keys()
+            .cloned()
+            // We are filtering out history and message here because the fact that all of the table
+            // views depend on them is not reflected in the constraints configuration. They will be
+            // taken account of within verify_table_deps_and_sort() and manually added to the sorted
+            // table list that is returned.
+            .filter(|m| m != "history" && m != "message")
+            .collect(),
+        &constraints_config,
     );
 
     // Finally, return all the configs:
@@ -567,6 +774,10 @@ pub fn read_config_files(
         tables_config,
         datatypes_config,
         rules_config,
+        constraints_config,
+        sorted_tables,
+        table_dependencies_in,
+        table_dependencies_out,
     )
 }
 
@@ -731,11 +942,9 @@ pub fn get_parsed_structure_conditions(
 /// contained in the message and history tables. The SQL generated is in the form of a tuple of
 /// Strings, with the first string being a SQL statement for dropping the view, and the second
 /// string being a SQL statement for creating it.
-fn get_sql_for_standard_view(table: &str, pool: &AnyPool) -> (String, String) {
-    let mut drop_view_sql = format!(r#"DROP VIEW IF EXISTS "{}_view""#, table);
+pub fn get_sql_for_standard_view(table: &str, pool: &AnyPool) -> String {
     let message_t;
     if pool.any_kind() == AnyKind::Postgres {
-        drop_view_sql.push_str(" CASCADE");
         message_t = format!(
             indoc! {r#"
                 (
@@ -775,7 +984,6 @@ fn get_sql_for_standard_view(table: &str, pool: &AnyPool) -> (String, String) {
             t = table,
         );
     }
-    drop_view_sql.push_str(";");
 
     let history_t;
     if pool.any_kind() == AnyKind::Postgres {
@@ -834,7 +1042,7 @@ fn get_sql_for_standard_view(table: &str, pool: &AnyPool) -> (String, String) {
         history_t = history_t,
     );
 
-    (drop_view_sql, create_view_sql)
+    create_view_sql
 }
 
 /// Given the tables configuration map, the name of a table and a database connection pool,
@@ -845,11 +1053,7 @@ fn get_sql_for_standard_view(table: &str, pool: &AnyPool) -> (String, String) {
 /// errors. Like the function for generating a standard view, the SQL generated by this function is
 /// returned in the form of a tuple of Strings, with the first string being a SQL statement
 /// for dropping the view, and the second string being a SQL statement for creating it.
-fn get_sql_for_text_view(
-    tables_config: &mut SerdeMap,
-    table: &str,
-    pool: &AnyPool,
-) -> (String, String) {
+pub fn get_sql_for_text_view(tables_config: &SerdeMap, table: &str, pool: &AnyPool) -> String {
     let is_clause = if pool.any_kind() == AnyKind::Sqlite {
         "IS"
     } else {
@@ -869,11 +1073,6 @@ fn get_sql_for_text_view(
     // Add a second "text view" such that the datatypes of all values are TEXT and appear
     // directly in their corresponsing columns (rather than as NULLs) even when they have
     // SQL datatype errors.
-    let mut drop_view_sql = format!(r#"DROP VIEW IF EXISTS "{}_text_view""#, table);
-    if pool.any_kind() == AnyKind::Postgres {
-        drop_view_sql.push_str(" CASCADE");
-    }
-
     let mut inner_columns = real_columns
         .iter()
         .map(|c| {
@@ -938,414 +1137,7 @@ fn get_sql_for_text_view(
         table = table,
     );
 
-    (drop_view_sql, create_view_sql)
-}
-
-/// Given config maps for tables and datatypes, a database connection pool, and a StartParser,
-/// read in the TSV files corresponding to the tables defined in the tables config, and use that
-/// information to fill in constraints information into a new config map that is then returned along
-/// with a list of the tables in the database sorted according to their mutual dependencies. If
-/// the flag `verbose` is set to true, emit SQL to create the database schema to STDOUT.
-/// If `command` is set to [ValveCommand::Create], execute the SQL statements to create the
-/// database using the given connection pool. If it is set to [ValveCommand::Load], execute the SQL
-/// to load it as well.
-pub async fn configure_db(
-    tables_config: &mut SerdeMap,
-    datatypes_config: &mut SerdeMap,
-    pool: &AnyPool,
-    parser: &StartParser,
-    verbose: bool,
-    command: &ValveCommand,
-) -> Result<(Vec<String>, SerdeMap), sqlx::Error> {
-    // This is the SerdeMap that we will be returning:
-    let mut constraints_config = SerdeMap::new();
-    constraints_config.insert(String::from("foreign"), SerdeValue::Object(SerdeMap::new()));
-    constraints_config.insert(String::from("unique"), SerdeValue::Object(SerdeMap::new()));
-    constraints_config.insert(String::from("primary"), SerdeValue::Object(SerdeMap::new()));
-    constraints_config.insert(String::from("tree"), SerdeValue::Object(SerdeMap::new()));
-    constraints_config.insert(String::from("under"), SerdeValue::Object(SerdeMap::new()));
-
-    // Begin by reading in the TSV files corresponding to the tables defined in tables_config, and
-    // use that information to create the associated database tables, while saving constraint
-    // information to constrains_config.
-    let mut setup_statements = HashMap::new();
-    for table_name in tables_config.keys().cloned().collect::<Vec<_>>() {
-        let optional_path = tables_config
-            .get(&table_name)
-            .and_then(|r| r.get("path"))
-            .and_then(|p| p.as_str());
-
-        let mut path = None;
-        match optional_path {
-            None => {
-                // If an entry of the tables_config has no path then it is an internal table which
-                // need not be configured explicitly. Currently the only examples are the message
-                // and history tables.
-                if table_name != "message" && table_name != "history" {
-                    panic!("No path defined for table {}", table_name);
-                }
-                continue;
-            }
-            Some(p) if !Path::new(p).is_file() => {
-                eprintln!("WARN: File does not exist {}", p);
-            }
-            Some(p) if Path::new(p).canonicalize().is_err() => {
-                eprintln!("WARN: File path could not be made canonical {}", p);
-            }
-            Some(p) => path = Some(p.to_string()),
-        };
-
-        let defined_columns: Vec<String> = tables_config
-            .get(&table_name)
-            .and_then(|r| r.get("column"))
-            .and_then(|v| v.as_object())
-            .and_then(|o| Some(o.keys()))
-            .and_then(|k| Some(k.cloned()))
-            .and_then(|k| Some(k.collect()))
-            .unwrap();
-
-        // We use column_order to explicitly indicate the order in which the columns should appear
-        // in the table, for later reference. The default is to preserve the order from the actual
-        // table file. If that does not exist, we use the ordering in defined_columns.
-        let mut column_order = vec![];
-        if let Some(path) = path {
-            // Get the actual columns from the data itself. Note that we set has_headers to
-            // false(even though the files have header rows) in order to explicitly read the
-            // header row.
-            let mut rdr = csv::ReaderBuilder::new()
-                .has_headers(false)
-                .delimiter(b'\t')
-                .from_reader(File::open(path.clone()).unwrap_or_else(|err| {
-                    panic!("Unable to open '{}': {}", path.clone(), err);
-                }));
-            let mut iter = rdr.records();
-            if let Some(result) = iter.next() {
-                let actual_columns = result
-                    .unwrap()
-                    .iter()
-                    .map(|c| c.to_string())
-                    .collect::<Vec<_>>();
-                // Make sure that the actual columns found in the table file, and the columns
-                // defined in the column config, exactly match in terms of their content:
-                for column_name in &actual_columns {
-                    column_order.push(json!(column_name));
-                    if !defined_columns.contains(&column_name.to_string()) {
-                        panic!(
-                            "Column '{}.{}' not in column config",
-                            table_name, column_name
-                        );
-                    }
-                }
-                for column_name in &defined_columns {
-                    if !actual_columns.contains(&column_name.to_string()) {
-                        panic!(
-                            "Defined column '{}.{}' not found in table",
-                            table_name, column_name
-                        );
-                    }
-                }
-            } else {
-                panic!("'{}' is empty", path);
-            }
-        }
-
-        if column_order.is_empty() {
-            column_order = defined_columns.iter().map(|c| json!(c)).collect::<Vec<_>>();
-        }
-        tables_config
-            .get_mut(&table_name)
-            .and_then(|t| t.as_object_mut())
-            .and_then(|o| {
-                o.insert(
-                    String::from("column_order"),
-                    SerdeValue::Array(column_order),
-                )
-            });
-
-        // Create the table and its corresponding conflict table:
-        let mut table_statements = vec![];
-        for table in vec![table_name.to_string(), format!("{}_conflict", table_name)] {
-            let (mut statements, table_constraints) =
-                create_table_statement(tables_config, datatypes_config, parser, &table, &pool);
-            table_statements.append(&mut statements);
-            if !table.ends_with("_conflict") {
-                for constraint_type in vec!["foreign", "unique", "primary", "tree", "under"] {
-                    let table_constraints = table_constraints.get(constraint_type).unwrap().clone();
-                    constraints_config
-                        .get_mut(constraint_type)
-                        .and_then(|o| o.as_object_mut())
-                        .and_then(|o| o.insert(table_name.to_string(), table_constraints));
-                }
-            }
-        }
-
-        let (drop_view_sql, create_view_sql) = get_sql_for_standard_view(&table_name, pool);
-        let (drop_text_view_sql, create_text_view_sql) =
-            get_sql_for_text_view(tables_config, &table_name, pool);
-        table_statements.push(drop_text_view_sql);
-        table_statements.push(drop_view_sql);
-        table_statements.push(create_view_sql);
-        table_statements.push(create_text_view_sql);
-
-        setup_statements.insert(table_name.to_string(), table_statements);
-    }
-
-    // Sort the tables according to their foreign key dependencies so that tables are always loaded
-    // after the tables they depend on. Ignore the internal message and history tables:
-    let sorted_tables = verify_table_deps_and_sort(
-        &setup_statements.keys().cloned().collect(),
-        &constraints_config,
-    );
-
-    if *command != ValveCommand::Config || verbose {
-        // Generate DDL for the history table:
-        let mut history_statements = vec![];
-        history_statements.push({
-            let mut sql = r#"DROP TABLE IF EXISTS "history""#.to_string();
-            if pool.any_kind() == AnyKind::Postgres {
-                sql.push_str(" CASCADE");
-            }
-            sql.push_str(";");
-            sql
-        });
-        history_statements.push(format!(
-            indoc! {r#"
-                CREATE TABLE "history" (
-                  {row_number}
-                  "table" TEXT,
-                  "row" BIGINT,
-                  "from" TEXT,
-                  "to" TEXT,
-                  "summary" TEXT,
-                  "user" TEXT,
-                  "undone_by" TEXT,
-                  {timestamp}
-                );
-              "#},
-            row_number = {
-                if pool.any_kind() == AnyKind::Sqlite {
-                    "\"history_id\" INTEGER PRIMARY KEY,"
-                } else {
-                    "\"history_id\" SERIAL PRIMARY KEY,"
-                }
-            },
-            timestamp = {
-                if pool.any_kind() == AnyKind::Sqlite {
-                    "\"timestamp\" TIMESTAMP DEFAULT(STRFTIME('%Y-%m-%d %H:%M:%f', 'NOW'))"
-                } else {
-                    "\"timestamp\" TIMESTAMP DEFAULT CURRENT_TIMESTAMP"
-                }
-            },
-        ));
-        history_statements
-            .push(r#"CREATE INDEX "history_tr_idx" ON "history"("table", "row");"#.to_string());
-        setup_statements.insert("history".to_string(), history_statements);
-
-        // Generate DDL for the message table:
-        let mut message_statements = vec![];
-        message_statements.push({
-            let mut sql = r#"DROP TABLE IF EXISTS "message""#.to_string();
-            if pool.any_kind() == AnyKind::Postgres {
-                sql.push_str(" CASCADE");
-            }
-            sql.push_str(";");
-            sql
-        });
-        message_statements.push(format!(
-            indoc! {r#"
-                CREATE TABLE "message" (
-                  {}
-                  "table" TEXT,
-                  "row" BIGINT,
-                  "column" TEXT,
-                  "value" TEXT,
-                  "level" TEXT,
-                  "rule" TEXT,
-                  "message" TEXT
-                );
-              "#},
-            {
-                if pool.any_kind() == AnyKind::Sqlite {
-                    "\"message_id\" INTEGER PRIMARY KEY,"
-                } else {
-                    "\"message_id\" SERIAL PRIMARY KEY,"
-                }
-            },
-        ));
-        message_statements.push(
-            r#"CREATE INDEX "message_trc_idx" ON "message"("table", "row", "column");"#.to_string(),
-        );
-        setup_statements.insert("message".to_string(), message_statements);
-
-        // Add the message and history tables to the beginning of the list of tables to create
-        // (the message table in particular needs to be at the beginning since the table views all
-        // reference it).
-        let mut tables_to_create = vec!["message".to_string(), "history".to_string()];
-        tables_to_create.append(&mut sorted_tables.clone());
-        for table in &tables_to_create {
-            let table_statements = setup_statements.get(table).unwrap();
-            if *command != ValveCommand::Config {
-                for stmt in table_statements {
-                    sqlx_query(stmt)
-                        .execute(pool)
-                        .await
-                        .expect(format!("The SQL statement: {} returned an error", stmt).as_str());
-                }
-            }
-            if verbose {
-                let output = String::from(table_statements.join("\n"));
-                println!("{}\n", output);
-            }
-        }
-    }
-
-    return Ok((sorted_tables, constraints_config));
-}
-
-/// Various VALVE commands, used with [valve()](valve).
-#[derive(Debug, PartialEq, Eq)]
-pub enum ValveCommand {
-    /// Configure but do not create or load.
-    Config,
-    /// Configure and create but do not load.
-    Create,
-    /// Configure, create, and load.
-    Load,
-}
-
-/// Given a path to a configuration table (either a table.tsv file or a database containing a
-/// table named "table"), and a directory in which to find/create a database: configure the
-/// database using the configuration which can be looked up using the table table, and
-/// optionally create and/or load it according to the value of `command` (see [ValveCommand]).
-/// If the `verbose` flag is set to true, output status messages while loading. If `config_table`
-/// is given and `table_table` indicates a database, query the table called `config_table` for the
-/// table table information. Returns the configuration map as a String. If `initial_load` is set to
-/// true, then (SQLite only) the database settings will be tuned for initial loading. Note that
-/// these settings are unsafe and should be used for initial loading only, as data integrity will
-/// not be guaranteed in the case of an interrupted transaction.
-pub async fn valve(
-    table_table: &str,
-    database: &str,
-    command: &ValveCommand,
-    verbose: bool,
-    initial_load: bool,
-    config_table: &str,
-) -> Result<String, sqlx::Error> {
-    let parser = StartParser::new();
-
-    let (specials_config, mut tables_config, mut datatypes_config, rules_config) =
-        read_config_files(&table_table.to_string(), config_table);
-
-    // To connect to a postgresql database listening to a unix domain socket:
-    // ----------------------------------------------------------------------
-    // let connection_options =
-    //     AnyConnectOptions::from_str("postgres:///testdb?host=/var/run/postgresql")?;
-    //
-    // To query the connection type at runtime via the pool:
-    // -----------------------------------------------------
-    // let db_type = pool.any_kind();
-
-    let connection_options;
-    if database.starts_with("postgresql://") {
-        connection_options = AnyConnectOptions::from_str(database)?;
-    } else {
-        let connection_string;
-        if !database.starts_with("sqlite://") {
-            connection_string = format!("sqlite://{}?mode=rwc", database);
-        } else {
-            connection_string = database.to_string();
-        }
-        connection_options = AnyConnectOptions::from_str(connection_string.as_str()).unwrap();
-    }
-
-    let pool = AnyPoolOptions::new()
-        .max_connections(5)
-        .connect_with(connection_options)
-        .await?;
-    if *command == ValveCommand::Load && pool.any_kind() == AnyKind::Sqlite {
-        sqlx_query("PRAGMA foreign_keys = ON")
-            .execute(&pool)
-            .await?;
-        if initial_load {
-            // These pragmas are unsafe but they are used during initial loading since data
-            // integrity is not a priority in this case.
-            sqlx_query("PRAGMA journal_mode = OFF")
-                .execute(&pool)
-                .await?;
-            sqlx_query("PRAGMA synchronous = 0").execute(&pool).await?;
-            sqlx_query("PRAGMA cache_size = 1000000")
-                .execute(&pool)
-                .await?;
-            sqlx_query("PRAGMA temp_store = MEMORY")
-                .execute(&pool)
-                .await?;
-        }
-    }
-
-    let (sorted_table_list, constraints_config) = configure_db(
-        &mut tables_config,
-        &mut datatypes_config,
-        &pool,
-        &parser,
-        verbose,
-        command,
-    )
-    .await?;
-
-    let mut config = SerdeMap::new();
-    config.insert(
-        String::from("special"),
-        SerdeValue::Object(specials_config.clone()),
-    );
-    config.insert(
-        String::from("table"),
-        SerdeValue::Object(tables_config.clone()),
-    );
-    config.insert(
-        String::from("datatype"),
-        SerdeValue::Object(datatypes_config.clone()),
-    );
-    config.insert(
-        String::from("rule"),
-        SerdeValue::Object(rules_config.clone()),
-    );
-    config.insert(
-        String::from("constraints"),
-        SerdeValue::Object(constraints_config.clone()),
-    );
-    let mut sorted_table_serdevalue_list: Vec<SerdeValue> = vec![];
-    for table in &sorted_table_list {
-        sorted_table_serdevalue_list.push(SerdeValue::String(table.to_string()));
-    }
-    config.insert(
-        String::from("sorted_table_list"),
-        SerdeValue::Array(sorted_table_serdevalue_list),
-    );
-
-    let compiled_datatype_conditions = get_compiled_datatype_conditions(&config, &parser);
-    let compiled_rule_conditions =
-        get_compiled_rule_conditions(&config, compiled_datatype_conditions.clone(), &parser);
-
-    if *command == ValveCommand::Load {
-        if verbose {
-            eprintln!(
-                "{} - Processing {} tables.",
-                Utc::now(),
-                sorted_table_list.len()
-            );
-        }
-        load_db(
-            &config,
-            &pool,
-            &compiled_datatype_conditions,
-            &compiled_rule_conditions,
-            verbose,
-        )
-        .await?;
-    }
-
-    let config = SerdeValue::Object(config);
-    Ok(config.to_string())
+    create_view_sql
 }
 
 /// Given a table name, a column name, and a database pool, construct an SQL string to extract the
@@ -1444,7 +1236,7 @@ pub async fn get_affected_rows(
     global_config: &SerdeMap,
     pool: &AnyPool,
     tx: &mut Transaction<'_, sqlx::Any>,
-) -> Result<IndexMap<u32, SerdeMap>, String> {
+) -> Result<IndexMap<u32, ValveRow>, ValveError> {
     // Since the consequence of an update could involve currently invalid rows
     // (in the conflict table) becoming valid or vice versa, we need to check rows for
     // which the value of the column is the same as `value`
@@ -1465,12 +1257,8 @@ pub async fn get_affected_rows(
 
     let query = sqlx_query(&sql);
     let mut table_rows = IndexMap::new();
-    for row in query
-        .fetch_all(tx.acquire().await.map_err(|e| e.to_string())?)
-        .await
-        .map_err(|e| e.to_string())?
-    {
-        let mut table_row = SerdeMap::new();
+    for row in query.fetch_all(tx.acquire().await?).await? {
+        let mut table_row = ValveRow::new();
         let mut row_number: Option<u32> = None;
         for column in row.columns() {
             let cname = column.name();
@@ -1492,7 +1280,8 @@ pub async fn get_affected_rows(
                 table_row.insert(cname.to_string(), json!(cell));
             }
         }
-        let row_number = row_number.ok_or("Row: has no row number".to_string())?;
+        let row_number =
+            row_number.ok_or(ValveError::DataError("Row: has no row number".to_string()))?;
         table_rows.insert(row_number, table_row);
     }
 
@@ -1508,7 +1297,7 @@ pub async fn get_row_from_db(
     tx: &mut Transaction<'_, sqlx::Any>,
     table: &str,
     row_number: &u32,
-) -> Result<SerdeMap, sqlx::Error> {
+) -> Result<ValveRow, ValveError> {
     let sql = format!(
         "{} WHERE row_number = {}",
         query_with_message_values(table, global_config, pool),
@@ -1517,7 +1306,7 @@ pub async fn get_row_from_db(
     let query = sqlx_query(&sql);
     let rows = query.fetch_all(tx.acquire().await?).await?;
     if rows.len() == 0 {
-        return Err(SqlxCErr(
+        return Err(ValveError::DataError(
             format!(
                 "In get_row_from_db(). No rows found for row_number: {}",
                 row_number
@@ -1534,14 +1323,18 @@ pub async fn get_row_from_db(
         } else {
             let messages: &str = sql_row.get("message");
             match serde_json::from_str::<SerdeValue>(messages) {
-                Err(e) => return Err(SqlxCErr(e.into())),
+                Err(e) => return Err(ValveError::SerdeJsonError(e.into())),
                 Ok(SerdeValue::Array(m)) => m,
-                _ => return Err(SqlxCErr(format!("{} is not an array.", messages).into())),
+                _ => {
+                    return Err(ValveError::DataError(
+                        format!("{} is not an array.", messages).into(),
+                    ))
+                }
             }
         }
     };
 
-    let mut row = SerdeMap::new();
+    let mut row = ValveRow::new();
     for column in sql_row.columns() {
         let cname = column.name();
         if !vec!["row_number", "message"].contains(&cname) {
@@ -1582,7 +1375,7 @@ pub async fn get_db_value(
     row_number: &u32,
     pool: &AnyPool,
     tx: &mut Transaction<'_, sqlx::Any>,
-) -> Result<String, String> {
+) -> Result<String, ValveError> {
     let is_clause = if pool.any_kind() == AnyKind::Sqlite {
         "IS"
     } else {
@@ -1616,14 +1409,14 @@ pub async fn get_db_value(
     );
 
     let query = sqlx_query(&sql);
-    let rows = query
-        .fetch_all(tx.acquire().await.map_err(|e| e.to_string())?)
-        .await
-        .map_err(|e| e.to_string())?;
+    let rows = query.fetch_all(tx.acquire().await?).await?;
     if rows.len() == 0 {
-        return Err(format!(
-            "In get_db_value(). No rows found for row_number: {}",
-            row_number
+        return Err(ValveError::DataError(
+            format!(
+                "In get_db_value(). No rows found for row_number: {}",
+                row_number
+            )
+            .into(),
         ));
     }
     let result_row = &rows[0];
@@ -1647,16 +1440,19 @@ pub async fn get_rows_to_update(
         IndexMap<String, IndexMap<u32, SerdeMap>>,
         IndexMap<String, IndexMap<u32, SerdeMap>>,
     ),
-    String,
+    ValveError,
 > {
-    fn get_cell_value(row: &SerdeMap, column: &str) -> Result<String, String> {
+    fn get_cell_value(row: &ValveRow, column: &str) -> Result<String, ValveError> {
         match row.get(column).and_then(|cell| cell.get("value")) {
             Some(SerdeValue::String(s)) => Ok(format!("{}", s)),
             Some(SerdeValue::Number(n)) => Ok(format!("{}", n)),
             Some(SerdeValue::Bool(b)) => Ok(format!("{}", b)),
-            _ => Err(format!(
-                "Value missing or of unknown type in column {} of row to update: {:?}",
-                column, row
+            _ => Err(ValveError::DataError(
+                format!(
+                    "Value missing or of unknown type in column {} of row to update: {:?}",
+                    column, row
+                )
+                .into(),
             )),
         }
     }
@@ -1695,8 +1491,8 @@ pub async fn get_rows_to_update(
         let updates_before = match query_as_if.kind {
             QueryAsIfKind::Add => {
                 if let None = query_as_if.row {
-                    eprintln!(
-                        "WARN: No row in query_as_if: {:?} for {:?}",
+                    warn!(
+                        "No row in query_as_if: {:?} for {:?}",
                         query_as_if, query_as_if.kind
                     );
                 }
@@ -1730,8 +1526,8 @@ pub async fn get_rows_to_update(
         let updates_after = match &query_as_if.row {
             None => {
                 if query_as_if.kind != QueryAsIfKind::Remove {
-                    eprintln!(
-                        "WARN: No row in query_as_if: {:?} for {:?}",
+                    warn!(
+                        "No row in query_as_if: {:?} for {:?}",
                         query_as_if, query_as_if.kind
                     );
                 }
@@ -1805,8 +1601,8 @@ pub async fn get_rows_to_update(
         let updates = match query_as_if.kind {
             QueryAsIfKind::Add => {
                 if let None = query_as_if.row {
-                    eprintln!(
-                        "WARN: No row in query_as_if: {:?} for {:?}",
+                    warn!(
+                        "No row in query_as_if: {:?} for {:?}",
                         query_as_if, query_as_if.kind
                     );
                 }
@@ -1856,11 +1652,11 @@ pub async fn process_updates(
     updates: &IndexMap<String, IndexMap<u32, SerdeMap>>,
     query_as_if: &QueryAsIf,
     do_not_recurse: bool,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), ValveError> {
     for (update_table, rows_to_update) in updates {
         for (row_number, row) in rows_to_update {
             // Validate each row 'counterfactually':
-            let vrow = validate_row(
+            let vrow = validate_row_tx(
                 global_config,
                 compiled_datatype_conditions,
                 compiled_rule_conditions,
@@ -1900,18 +1696,18 @@ pub async fn record_row_change(
     tx: &mut Transaction<'_, sqlx::Any>,
     table: &str,
     row_number: &u32,
-    from: Option<&SerdeMap>,
-    to: Option<&SerdeMap>,
+    from: Option<&ValveRow>,
+    to: Option<&ValveRow>,
     user: &str,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), ValveError> {
     if let (None, None) = (from, to) {
-        return Err(SqlxCErr(
+        return Err(ValveError::InputError(
             "Arguments 'from' and 'to' to function record_row_change() cannot both be None".into(),
         ));
     }
 
-    fn to_text(smap: Option<&SerdeMap>, quoted: bool) -> String {
-        match smap {
+    fn to_text(row: Option<&ValveRow>, quoted: bool) -> String {
+        match row {
             None => "NULL".to_string(),
             Some(r) => {
                 let inner = format!("{}", json!(r)).replace("'", "''");
@@ -1932,7 +1728,7 @@ pub async fn record_row_change(
         }
     }
 
-    fn summarize(from: Option<&SerdeMap>, to: Option<&SerdeMap>) -> Result<String, String> {
+    fn summarize(from: Option<&ValveRow>, to: Option<&ValveRow>) -> Result<String, ValveError> {
         // Constructs a summary of the form:
         // {
         //   "column":"bar",
@@ -1955,7 +1751,9 @@ pub async fn record_row_change(
                             SerdeValue::Bool(b) => Some(format!("{}", b)),
                             _ => None,
                         })
-                        .ok_or(format!("No value in {}", cell))?;
+                        .ok_or(ValveError::DataError(
+                            format!("No value in {}", cell).into(),
+                        ))?;
                     let new_value = to
                         .get(column)
                         .and_then(|v| v.get("value"))
@@ -1965,7 +1763,9 @@ pub async fn record_row_change(
                             SerdeValue::Bool(b) => Some(format!("{}", b)),
                             _ => None,
                         })
-                        .ok_or(format!("No value for column: {} in {:?}", column, to))?;
+                        .ok_or(ValveError::DataError(
+                            format!("No value for column: {} in {:?}", column, to).into(),
+                        ))?;
                     if new_value != old_value {
                         let mut column_summary = SerdeMap::new();
                         column_summary.insert("column".to_string(), json!(column));
@@ -1989,7 +1789,7 @@ pub async fn record_row_change(
         }
     }
 
-    let summary = summarize(from, to).map_err(|e| SqlxCErr(e.into()))?;
+    let summary = summarize(from, to)?;
     let (from, to) = (to_text(from, true), to_text(to, true));
     let sql = format!(
         r#"INSERT INTO "history" ("table", "row", "from", "to", "summary", "user")
@@ -2003,18 +1803,18 @@ pub async fn record_row_change(
 }
 
 /// Given a row and a column name, extract the contents of the row as a JSON object and return it.
-fn get_json_from_row(row: &AnyRow, column: &str) -> Option<SerdeMap> {
+pub fn get_json_from_row(row: &AnyRow, column: &str) -> Option<SerdeMap> {
     let raw_value = row.try_get_raw(column).unwrap();
     if !raw_value.is_null() {
         let value: &str = row.get(column);
         match serde_json::from_str::<SerdeValue>(value) {
             Err(e) => {
-                eprintln!("WARN: {}", e);
+                warn!("{}", e);
                 None
             }
             Ok(SerdeValue::Object(value)) => Some(value),
             _ => {
-                eprintln!("WARN: {} is not an object.", value);
+                warn!("{} is not an object.", value);
                 None
             }
         }
@@ -2028,13 +1828,13 @@ fn get_json_from_row(row: &AnyRow, column: &str) -> Option<SerdeMap> {
 /// (otherwise). When setting the record to undone, user is used for the 'undone_by' field of the
 /// history table, otherwise undone_by is set to NULL and the user is indicated as the one
 /// responsible for the change (instead of whoever made the change originally).
-async fn switch_undone_state(
+pub async fn switch_undone_state(
     user: &str,
     history_id: u16,
     undone_state: bool,
     tx: &mut Transaction<'_, sqlx::Any>,
     pool: &AnyPool,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), ValveError> {
     // Set the history record to undone:
     let timestamp = {
         if pool.any_kind() == AnyKind::Sqlite {
@@ -2060,259 +1860,9 @@ async fn switch_undone_state(
     Ok(())
 }
 
-/// Given a database pool fetch the last row inserted to the history table that has not been undone.
-pub async fn get_record_to_undo(pool: &AnyPool) -> Result<Option<AnyRow>, sqlx::Error> {
-    // Look in the history table, get the row with the greatest ID, get the row number,
-    // from, and to, and determine whether the last operation was a delete, insert, or update.
-    let is_clause = if pool.any_kind() == AnyKind::Sqlite {
-        "IS"
-    } else {
-        "IS NOT DISTINCT FROM"
-    };
-    let sql = format!(
-        r#"SELECT * FROM "history"
-           WHERE "undone_by" {} NULL
-           ORDER BY "history_id" DESC LIMIT 1"#,
-        is_clause
-    );
-    let query = sqlx_query(&sql);
-    let result_row = query.fetch_optional(pool).await?;
-    Ok(result_row)
-}
-
-/// Given a database pool fetch the row in the history table that has been most recently marked as
-/// undone.
-pub async fn get_record_to_redo(pool: &AnyPool) -> Result<Option<AnyRow>, sqlx::Error> {
-    // Look in the history table, get the row with the greatest ID, get the row number,
-    // from, and to, and determine whether the last operation was a delete, insert, or update.
-    let is_not_clause = if pool.any_kind() == AnyKind::Sqlite {
-        "IS NOT"
-    } else {
-        "IS DISTINCT FROM"
-    };
-    let is_clause = if pool.any_kind() == AnyKind::Sqlite {
-        "IS"
-    } else {
-        "IS NOT DISTINCT FROM"
-    };
-    let sql = format!(
-        r#"SELECT * FROM "history" h1
-           WHERE "undone_by" {is_not} NULL
-             AND NOT EXISTS (
-               SELECT 1 FROM "history" h2
-               WHERE h2.history_id > h1.history_id
-                 AND "undone_by" {is} NULL
-             )
-           ORDER BY "timestamp" DESC LIMIT 1"#,
-        is_not = is_not_clause,
-        is = is_clause
-    );
-    let query = sqlx_query(&sql);
-    let result_row = query.fetch_optional(pool).await?;
-    Ok(result_row)
-}
-
-/// Given a global configuration map, maps of compiled datatype and ruled conditions, a database
-/// connection pool, and the user who initiated the undo, find the last recorded change to the
-/// database and undo it, indicating in the history table that undo_user is responsible.
-#[async_recursion]
-pub async fn undo(
-    global_config: &SerdeMap,
-    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
-    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
-    pool: &AnyPool,
-    undo_user: &str,
-) -> Result<(), sqlx::Error> {
-    let last_change = match get_record_to_undo(pool).await? {
-        None => {
-            eprintln!("WARN: Nothing to undo.");
-            return Ok(());
-        }
-        Some(r) => r,
-    };
-    let history_id: i32 = last_change.get("history_id");
-    let history_id = history_id as u16;
-    let table: &str = last_change.get("table");
-    let row_number: i64 = last_change.get("row");
-    let row_number = row_number as u32;
-    let from = get_json_from_row(&last_change, "from");
-    let to = get_json_from_row(&last_change, "to");
-
-    match (from, to) {
-        (None, None) => {
-            return Err(SqlxCErr(
-                "Cannot redo unknown operation from None to None".into(),
-            ))
-        }
-        (None, Some(_)) => {
-            // Undo an insert:
-            let mut tx = pool.begin().await?;
-
-            delete_row_tx(
-                global_config,
-                compiled_datatype_conditions,
-                compiled_rule_conditions,
-                pool,
-                &mut tx,
-                table,
-                &row_number,
-            )
-            .await?;
-
-            switch_undone_state(undo_user, history_id, true, &mut tx, pool).await?;
-            tx.commit().await?;
-        }
-        (Some(from), None) => {
-            // Undo a delete:
-            let mut tx = pool.begin().await?;
-
-            insert_new_row_tx(
-                global_config,
-                compiled_datatype_conditions,
-                compiled_rule_conditions,
-                pool,
-                &mut tx,
-                table,
-                &from,
-                Some(row_number),
-                false,
-            )
-            .await?;
-
-            switch_undone_state(undo_user, history_id, true, &mut tx, pool).await?;
-            tx.commit().await?;
-        }
-        (Some(from), Some(_)) => {
-            // Undo an an update:
-            let mut tx = pool.begin().await?;
-
-            update_row_tx(
-                global_config,
-                compiled_datatype_conditions,
-                compiled_rule_conditions,
-                pool,
-                &mut tx,
-                table,
-                &from,
-                &row_number,
-                false,
-                false,
-            )
-            .await?;
-
-            switch_undone_state(undo_user, history_id, true, &mut tx, pool).await?;
-            tx.commit().await?;
-        }
-    }
-    Ok(())
-}
-
-/// Given a global configuration map, maps of compiled datatype and ruled conditions, a database
-/// connection pool, and the user who initiated the redo, find the last recorded change to the
-/// database that was undone and redo it, indicating in the history table that redo_user is
-/// responsible for the redo.
-#[async_recursion]
-pub async fn redo(
-    global_config: &SerdeMap,
-    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
-    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
-    pool: &AnyPool,
-    redo_user: &str,
-) -> Result<(), sqlx::Error> {
-    let last_undo = match get_record_to_redo(pool).await? {
-        None => {
-            eprintln!("WARN: Nothing to redo.");
-            return Ok(());
-        }
-        Some(last_undo) => {
-            let undone_by = last_undo.try_get_raw("undone_by")?;
-            if undone_by.is_null() {
-                eprintln!("WARN: Nothing to redo.");
-                return Ok(());
-            }
-            last_undo
-        }
-    };
-    let history_id: i32 = last_undo.get("history_id");
-    let history_id = history_id as u16;
-    let table: &str = last_undo.get("table");
-    let row_number: i64 = last_undo.get("row");
-    let row_number = row_number as u32;
-    let from = get_json_from_row(&last_undo, "from");
-    let to = get_json_from_row(&last_undo, "to");
-
-    match (from, to) {
-        (None, None) => {
-            return Err(SqlxCErr(
-                "Cannot redo unknown operation from None to None".into(),
-            ))
-        }
-        (None, Some(to)) => {
-            // Redo an insert:
-            let mut tx = pool.begin().await?;
-
-            insert_new_row_tx(
-                global_config,
-                compiled_datatype_conditions,
-                compiled_rule_conditions,
-                pool,
-                &mut tx,
-                table,
-                &to,
-                Some(row_number),
-                false,
-            )
-            .await?;
-
-            switch_undone_state(redo_user, history_id, false, &mut tx, pool).await?;
-            tx.commit().await?;
-        }
-        (Some(_), None) => {
-            // Redo a delete:
-            let mut tx = pool.begin().await?;
-
-            delete_row_tx(
-                global_config,
-                compiled_datatype_conditions,
-                compiled_rule_conditions,
-                pool,
-                &mut tx,
-                table,
-                &row_number,
-            )
-            .await?;
-
-            switch_undone_state(redo_user, history_id, false, &mut tx, pool).await?;
-            tx.commit().await?;
-        }
-        (Some(_), Some(to)) => {
-            // Redo an an update:
-            let mut tx = pool.begin().await?;
-
-            update_row_tx(
-                global_config,
-                compiled_datatype_conditions,
-                compiled_rule_conditions,
-                pool,
-                &mut tx,
-                table,
-                &to,
-                &row_number,
-                false,
-                false,
-            )
-            .await?;
-
-            switch_undone_state(redo_user, history_id, false, &mut tx, pool).await?;
-            tx.commit().await?;
-        }
-    }
-    Ok(())
-}
-
 /// Given a global config map and a table name, return a list of the columns from the table
 /// that may potentially result in database conflicts.
-fn get_conflict_columns(global_config: &SerdeMap, table_name: &str) -> Vec<SerdeValue> {
+pub fn get_conflict_columns(global_config: &SerdeMap, table_name: &str) -> Vec<SerdeValue> {
     let mut conflict_columns = vec![];
     let primaries = global_config
         .get("constraints")
@@ -2392,7 +1942,7 @@ fn get_conflict_columns(global_config: &SerdeMap, table_name: &str) -> Vec<Serde
 }
 
 /// Given a SQL type and a value, return true if the value does not conform to the SQL type.
-fn is_sql_type_error(sql_type: &str, value: &str) -> bool {
+pub fn is_sql_type_error(sql_type: &str, value: &str) -> bool {
     let sql_type = sql_type.to_lowercase();
     if sql_type == "numeric" {
         // f64
@@ -2420,58 +1970,10 @@ fn is_sql_type_error(sql_type: &str, value: &str) -> bool {
     }
 }
 
-/// A wrapper around [insert_new_row_tx()] in which the following steps are also performed:
-/// - A database transaction is created and then committed once the given new row has been inserted.
-/// - The row is validated before insertion and the update to the database is recorded to the
-///   history table indicating that the given user is responsible for the change.
-#[async_recursion]
-pub async fn insert_new_row(
-    global_config: &SerdeMap,
-    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
-    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
-    pool: &AnyPool,
-    table: &str,
-    row: &SerdeMap,
-    new_row_number: Option<u32>,
-    user: &str,
-) -> Result<u32, sqlx::Error> {
-    let mut tx = pool.begin().await?;
-
-    let row = validate_row(
-        global_config,
-        compiled_datatype_conditions,
-        compiled_rule_conditions,
-        pool,
-        Some(&mut tx),
-        table,
-        row,
-        new_row_number,
-        None,
-    )
-    .await?;
-
-    let rn = insert_new_row_tx(
-        global_config,
-        compiled_datatype_conditions,
-        compiled_rule_conditions,
-        pool,
-        &mut tx,
-        table,
-        &row,
-        new_row_number,
-        true,
-    )
-    .await?;
-
-    record_row_change(&mut tx, table, &rn, None, Some(&row), user).await?;
-    tx.commit().await?;
-    Ok(rn)
-}
-
 /// Given a global config map, compiled datatype and rule conditions, a database connection pool, a
 /// database transaction, a table name, and a row, assign the given new row number to the row and
 /// insert it to the database using the given transaction, then return the new row number.
-/// If skip_validation is set to true, omit the implicit call to [validate_row()].
+/// If skip_validation is set to true, omit the implicit call to [validate_row_tx()].
 #[async_recursion]
 pub async fn insert_new_row_tx(
     global_config: &SerdeMap,
@@ -2480,14 +1982,14 @@ pub async fn insert_new_row_tx(
     pool: &AnyPool,
     tx: &mut Transaction<sqlx::Any>,
     table: &str,
-    row: &SerdeMap,
+    row: &ValveRow,
     new_row_number: Option<u32>,
     skip_validation: bool,
-) -> Result<u32, sqlx::Error> {
+) -> Result<u32, ValveError> {
     // Send the row through the row validator to determine if any fields are problematic and
     // to mark them with appropriate messages:
     let row = if !skip_validation {
-        validate_row(
+        validate_row_tx(
             global_config,
             compiled_datatype_conditions,
             compiled_rule_conditions,
@@ -2547,21 +2049,26 @@ pub async fn insert_new_row_tx(
     for (column, cell) in row.iter() {
         insert_columns.append(&mut vec![format!(r#""{}""#, column)]);
 
-        let cell = cell
-            .as_object()
-            .ok_or(SqlxCErr(format!("Cell {:?} is not an object", cell).into()))?;
-        let valid = cell.get("valid").and_then(|v| v.as_bool()).ok_or(SqlxCErr(
-            format!("No bool named 'valid' in {:?}", cell).into(),
+        let cell = cell.as_object().ok_or(ValveError::InputError(
+            format!("Cell {:?} is not an object", cell).into(),
         ))?;
-        let value = cell.get("value").and_then(|v| v.as_str()).ok_or(SqlxCErr(
-            format!("No string named 'value' in {:?}", cell).into(),
-        ))?;
-        let nulltype = cell.get("nulltype").and_then(|n| n.as_str());
+        let valid = cell
+            .get("valid")
+            .and_then(|v| v.as_bool())
+            .ok_or(ValveError::InputError(
+                format!("No bool named 'valid' in {:?}", cell).into(),
+            ))?;
+        let value = cell
+            .get("value")
+            .and_then(|v| v.as_str())
+            .ok_or(ValveError::InputError(
+                format!("No string named 'value' in {:?}", cell).into(),
+            ))?;
         let messages = sort_messages(
             &sorted_datatypes,
             cell.get("messages")
                 .and_then(|m| m.as_array())
-                .ok_or(SqlxCErr(
+                .ok_or(ValveError::InputError(
                     format!("No array named 'messages' in {:?}", cell).into(),
                 ))?,
         );
@@ -2572,36 +2079,30 @@ pub async fn insert_new_row_tx(
                 "value": value,
                 "level": message.get("level").and_then(|s| s.as_str())
                     .ok_or(
-                        SqlxCErr(format!("No 'level' in {:?}", message).into())
+                        ValveError::InputError(format!("No 'level' in {:?}", message).into())
                     )?,
                 "rule": message.get("rule").and_then(|s| s.as_str())
                     .ok_or(
-                        SqlxCErr(format!("No 'rule' in {:?}", message).into())
+                        ValveError::InputError(format!("No 'rule' in {:?}", message).into())
                     )?,
                 "message": message.get("message").and_then(|s| s.as_str())
                     .ok_or(
-                        SqlxCErr(format!("No 'message' in {:?}", message).into())
+                        ValveError::InputError(format!("No 'message' in {:?}", message).into())
                     )?,
             }));
         }
 
-        match nulltype {
-            None => {
-                let sql_type = get_sql_type_from_global_config(global_config, table, column, pool)
-                    .ok_or(SqlxCErr(
-                        format!("Could not get SQL type for {}.{}", table, column).into(),
-                    ))?;
-                if is_sql_type_error(&sql_type, value) {
-                    insert_values.push(String::from("NULL"));
-                } else {
-                    insert_values.push(cast_sql_param_from_text(&sql_type));
-                    insert_params.push(String::from(value));
-                }
-            }
-            _ => {
-                insert_values.push(String::from("NULL"));
-            }
-        };
+        let sql_type = get_sql_type_from_global_config(global_config, table, column, pool).ok_or(
+            ValveError::ConfigError(
+                format!("Could not get SQL type for {}.{}", table, column).into(),
+            ),
+        )?;
+        if is_sql_type_error(&sql_type, value) {
+            insert_values.push(String::from("NULL"));
+        } else {
+            insert_values.push(cast_sql_param_from_text(&sql_type));
+            insert_params.push(String::from(value));
+        }
 
         if !use_conflict_table && !valid && conflict_columns.contains(&json!(column)) {
             use_conflict_table = true;
@@ -2620,9 +2121,8 @@ pub async fn insert_new_row_tx(
 
     // Look through the valve config to see which tables are dependent on this table
     // and find the rows that need to be updated:
-    let (_, updates_after, _) = get_rows_to_update(global_config, pool, tx, table, &query_as_if)
-        .await
-        .map_err(|e| SqlxCErr(e.into()))?;
+    let (_, updates_after, _) =
+        get_rows_to_update(global_config, pool, tx, table, &query_as_if).await?;
 
     // Check it to see if the row should be redirected to the conflict table:
     let table_to_write = {
@@ -2684,39 +2184,6 @@ pub async fn insert_new_row_tx(
     Ok(new_row_number)
 }
 
-/// A wrapper around [delete_row_tx()] in which the database transaction is implicitly created
-/// and then committed once the given row has been deleted, and the change to the database is
-/// recorded in the history table indicating that the given user is responsible for the change.
-#[async_recursion]
-pub async fn delete_row(
-    global_config: &SerdeMap,
-    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
-    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
-    pool: &AnyPool,
-    table: &str,
-    row_number: &u32,
-    user: &str,
-) -> Result<(), sqlx::Error> {
-    let mut tx = pool.begin().await?;
-
-    let row = get_row_from_db(global_config, pool, &mut tx, &table, row_number).await?;
-    record_row_change(&mut tx, &table, row_number, Some(&row), None, user).await?;
-
-    delete_row_tx(
-        global_config,
-        compiled_datatype_conditions,
-        compiled_rule_conditions,
-        pool,
-        &mut tx,
-        table,
-        row_number,
-    )
-    .await?;
-
-    tx.commit().await?;
-    Ok(())
-}
-
 /// Given a global config map, maps of datatype and rule conditions, a database connection pool, a
 /// database transaction, a table name, and a row number, delete the given row from the database.
 #[async_recursion]
@@ -2728,7 +2195,7 @@ pub async fn delete_row_tx(
     tx: &mut Transaction<sqlx::Any>,
     table: &str,
     row_number: &u32,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), ValveError> {
     // Used to validate the given row, counterfactually, "as if" the row did not exist in the
     // database:
     let query_as_if = QueryAsIf {
@@ -2743,9 +2210,7 @@ pub async fn delete_row_tx(
     // rows that need to be updated. Since this is a delete there will only be rows to update
     // before and none after the delete:
     let (updates_before, _, updates_intra) =
-        get_rows_to_update(global_config, pool, tx, table, &query_as_if)
-            .await
-            .map_err(|e| SqlxCErr(e.into()))?;
+        get_rows_to_update(global_config, pool, tx, table, &query_as_if).await?;
 
     // Process the updates that need to be performed before the update of the target row:
     process_updates(
@@ -2798,73 +2263,10 @@ pub async fn delete_row_tx(
     Ok(())
 }
 
-/// A wrapper around [update_row_tx()] in which the database transaction is implicitly created
-/// and then committed once the given row has been updated, the given row is validated before
-/// the update, and the update is recorded to the history table indicating that the given user
-/// is responsible for the change.
-#[async_recursion]
-pub async fn update_row(
-    global_config: &SerdeMap,
-    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
-    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
-    pool: &AnyPool,
-    table_name: &str,
-    row: &SerdeMap,
-    row_number: &u32,
-    user: &str,
-) -> Result<(), sqlx::Error> {
-    let mut tx = pool.begin().await?;
-
-    // Get the old version of the row from the database so that we can later record it to the
-    // history table:
-    let old_row = get_row_from_db(global_config, pool, &mut tx, table_name, row_number).await?;
-
-    let row = validate_row(
-        global_config,
-        compiled_datatype_conditions,
-        compiled_rule_conditions,
-        pool,
-        Some(&mut tx),
-        table_name,
-        row,
-        Some(*row_number),
-        None,
-    )
-    .await?;
-
-    update_row_tx(
-        global_config,
-        compiled_datatype_conditions,
-        compiled_rule_conditions,
-        pool,
-        &mut tx,
-        table_name,
-        &row,
-        row_number,
-        true,
-        false,
-    )
-    .await?;
-
-    // Record the row update in the history table:
-    record_row_change(
-        &mut tx,
-        table_name,
-        row_number,
-        Some(&old_row),
-        Some(&row),
-        user,
-    )
-    .await?;
-
-    tx.commit().await?;
-    Ok(())
-}
-
 /// Given global config map, maps of compiled datatype and rule conditions, a database connection
 /// pool, a database transaction, a table name, a row, and the row number to update, update the
 /// corresponding row in the database. If skip_validation is set, skip the implicit call to
-/// [validate_row()]. If do_not_recurse, is set, do not look for rows which could be affected by
+/// [validate_row_tx()]. If do_not_recurse, is set, do not look for rows which could be affected by
 /// this update.
 #[async_recursion]
 pub async fn update_row_tx(
@@ -2874,11 +2276,11 @@ pub async fn update_row_tx(
     pool: &AnyPool,
     tx: &mut Transaction<sqlx::Any>,
     table: &str,
-    row: &SerdeMap,
+    row: &ValveRow,
     row_number: &u32,
     skip_validation: bool,
     do_not_recurse: bool,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), ValveError> {
     // First, look through the valve config to see which tables are dependent on this table and find
     // the rows that need to be updated. The variable query_as_if is used to validate the given row,
     // counterfactually, "as if" the version of the row in the database currently were replaced with
@@ -2894,9 +2296,7 @@ pub async fn update_row_tx(
         if do_not_recurse {
             (IndexMap::new(), IndexMap::new(), IndexMap::new())
         } else {
-            get_rows_to_update(global_config, pool, tx, table, &query_as_if)
-                .await
-                .map_err(|e| SqlxCErr(e.into()))?
+            get_rows_to_update(global_config, pool, tx, table, &query_as_if).await?
         }
     };
 
@@ -2916,7 +2316,7 @@ pub async fn update_row_tx(
     // Send the row through the row validator to determine if any fields are problematic and
     // to mark them with appropriate messages:
     let row = if !skip_validation {
-        validate_row(
+        validate_row_tx(
             global_config,
             compiled_datatype_conditions,
             compiled_rule_conditions,
@@ -2987,12 +2387,12 @@ pub async fn update_row_tx(
     Ok(())
 }
 
-/// Given a path, read a TSV file and return a vector of rows represented as SerdeMaps.
+/// Given a path, read a TSV file and return a vector of rows represented as ValveRows.
 /// Note: Use this function to read "small" TSVs only. In particular, use this for the special
 /// configuration tables.
-fn read_tsv_into_vector(path: &str) -> Vec<SerdeMap> {
+pub fn read_tsv_into_vector(path: &str) -> Vec<ValveRow> {
     let mut rdr =
-        csv::ReaderBuilder::new()
+        ReaderBuilder::new()
             .delimiter(b'\t')
             .from_reader(File::open(path).unwrap_or_else(|err| {
                 panic!("Unable to open '{}': {}", path, err);
@@ -3001,7 +2401,7 @@ fn read_tsv_into_vector(path: &str) -> Vec<SerdeMap> {
     let rows: Vec<_> = rdr
         .deserialize()
         .map(|result| {
-            let row: SerdeMap = result.expect(format!("Error reading: {}", path).as_str());
+            let row: ValveRow = result.expect(format!("Error reading: {}", path).as_str());
             row
         })
         .collect();
@@ -3017,8 +2417,8 @@ fn read_tsv_into_vector(path: &str) -> Vec<SerdeMap> {
             let val = val.as_str().unwrap();
             let trimmed_val = val.trim();
             if trimmed_val != val {
-                eprintln!(
-                    "Error: Value '{}' of column '{}' in row {} of table '{}' {}",
+                error!(
+                    "Value '{}' of column '{}' in row {} of table '{}' {}",
                     val, col, i, path, "has leading and/or trailing whitespace."
                 );
                 process::exit(1);
@@ -3029,9 +2429,9 @@ fn read_tsv_into_vector(path: &str) -> Vec<SerdeMap> {
     rows
 }
 
-/// Given a database at the specified location, query the "table" table and return a vector of rows
-/// represented as SerdeMaps.
-fn read_db_table_into_vector(database: &str, config_table: &str) -> Vec<SerdeMap> {
+/// Given a database at the specified location, query the given table and return a vector of rows
+/// represented as ValveRows.
+pub fn read_db_table_into_vector(database: &str, config_table: &str) -> Vec<ValveRow> {
     let connection_options;
     if database.starts_with("postgresql://") {
         connection_options = AnyConnectOptions::from_str(database).unwrap();
@@ -3056,7 +2456,7 @@ fn read_db_table_into_vector(database: &str, config_table: &str) -> Vec<SerdeMap
     let rows = block_on(sqlx_query(&sql).fetch_all(&pool)).unwrap();
     let mut table_rows = vec![];
     for row in rows {
-        let mut table_row = SerdeMap::new();
+        let mut table_row = ValveRow::new();
         for column in row.columns() {
             let cname = column.name();
             if cname != "row_number" {
@@ -3078,7 +2478,7 @@ fn read_db_table_into_vector(database: &str, config_table: &str) -> Vec<SerdeMap
 /// StartParser, create a corresponding CompiledCondition, and return it. If the condition is a
 /// Label, then look for the CompiledCondition corresponding to it in compiled_datatype_conditions
 /// and return it.
-fn compile_condition(
+pub fn compile_condition(
     condition_option: Option<&str>,
     parser: &StartParser,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
@@ -3221,20 +2621,12 @@ fn compile_condition(
 
 /// Given the config map, the name of a datatype, and a database connection pool used to determine
 /// the database type, climb the datatype tree (as required), and return the first 'SQL type' found.
-fn get_sql_type(dt_config: &SerdeMap, datatype: &String, pool: &AnyPool) -> Option<String> {
+pub fn get_sql_type(dt_config: &SerdeMap, datatype: &String, pool: &AnyPool) -> Option<String> {
     if !dt_config.contains_key(datatype) {
-        return None;
+        return Some("TEXT".to_string());
     }
 
-    let sql_type_column = {
-        if pool.any_kind() == AnyKind::Sqlite {
-            "SQLite type"
-        } else {
-            "PostgreSQL type"
-        }
-    };
-
-    if let Some(sql_type) = dt_config.get(datatype).and_then(|d| d.get(sql_type_column)) {
+    if let Some(sql_type) = dt_config.get(datatype).and_then(|d| d.get("SQL type")) {
         return Some(sql_type.as_str().and_then(|s| Some(s.to_string())).unwrap());
     }
 
@@ -3273,7 +2665,7 @@ pub fn get_sql_type_from_global_config(
 
 /// Given a SQL type, return the appropriate CAST(...) statement for casting the SQL_PARAM
 /// from a TEXT column.
-fn cast_sql_param_from_text(sql_type: &str) -> String {
+pub fn cast_sql_param_from_text(sql_type: &str) -> String {
     let s = sql_type.to_lowercase();
     if s == "numeric" {
         format!("CAST(NULLIF({}, '') AS NUMERIC)", SQL_PARAM)
@@ -3288,7 +2680,7 @@ fn cast_sql_param_from_text(sql_type: &str) -> String {
 
 /// Given a SQL type, return the appropriate CAST(...) statement for casting the SQL_PARAM
 /// to a TEXT column.
-fn cast_column_sql_to_text(column: &str, sql_type: &str) -> String {
+pub fn cast_column_sql_to_text(column: &str, sql_type: &str) -> String {
     if sql_type.to_lowercase() == "text" {
         format!(r#""{}""#, column)
     } else {
@@ -3319,7 +2711,7 @@ pub fn get_column_value(row: &AnyRow, column: &str, sql_type: &str) -> String {
 /// SQL_PARAM, and given a database pool, if the pool is of type Sqlite, then change the syntax used
 /// for unbound parameters to Sqlite syntax, which uses "?", otherwise use Postgres syntax, which
 /// uses numbered parameters, i.e., $1, $2, ...
-fn local_sql_syntax(pool: &AnyPool, sql: &String) -> String {
+pub fn local_sql_syntax(pool: &AnyPool, sql: &String) -> String {
     // Do not replace instances of SQL_PARAM if they are within quotation marks.
     let rx = Regex::new(&format!(
         r#"('[^'\\]*(?:\\.[^'\\]*)*'|"[^"\\]*(?:\\.[^"\\]*)*")|\b{}\b"#,
@@ -3354,7 +2746,14 @@ fn local_sql_syntax(pool: &AnyPool, sql: &String) -> String {
 /// under dependencies, returns the list of tables sorted according to their foreign key
 /// dependencies, such that if table_a depends on table_b, then table_b comes before table_a in the
 /// list that is returned.
-fn verify_table_deps_and_sort(table_list: &Vec<String>, constraints: &SerdeMap) -> Vec<String> {
+pub fn verify_table_deps_and_sort(
+    table_list: &Vec<String>,
+    constraints: &SerdeMap,
+) -> (
+    Vec<String>,
+    HashMap<String, Vec<String>>,
+    HashMap<String, Vec<String>>,
+) {
     fn get_cycles(g: &DiGraphMap<&str, ()>) -> Result<Vec<String>, Vec<Vec<String>>> {
         let mut cycles = vec![];
         match toposort(&g, None) {
@@ -3387,6 +2786,7 @@ fn verify_table_deps_and_sort(table_list: &Vec<String>, constraints: &SerdeMap) 
         }
     }
 
+    // Check for intra-table cycles:
     let trees = constraints.get("tree").and_then(|t| t.as_object()).unwrap();
     for table_name in table_list {
         let mut dependency_graph = DiGraphMap::<&str, ()>::new();
@@ -3431,6 +2831,7 @@ fn verify_table_deps_and_sort(table_list: &Vec<String>, constraints: &SerdeMap) 
         };
     }
 
+    // Check for inter-table cycles:
     let foreign_keys = constraints
         .get("foreign")
         .and_then(|f| f.as_object())
@@ -3481,7 +2882,26 @@ fn verify_table_deps_and_sort(table_list: &Vec<String>, constraints: &SerdeMap) 
 
     match get_cycles(&dependency_graph) {
         Ok(sorted_table_list) => {
-            return sorted_table_list;
+            let mut table_dependencies_in = HashMap::new();
+            for node in dependency_graph.nodes() {
+                let neighbors = dependency_graph
+                    .neighbors_directed(node, petgraph::Direction::Incoming)
+                    .map(|n| n.to_string())
+                    .collect::<Vec<_>>();
+                table_dependencies_in.insert(node.to_string(), neighbors);
+            }
+            let mut table_dependencies_out = HashMap::new();
+            for node in dependency_graph.nodes() {
+                let neighbors = dependency_graph
+                    .neighbors_directed(node, petgraph::Direction::Outgoing)
+                    .map(|n| n.to_string())
+                    .collect::<Vec<_>>();
+                table_dependencies_out.insert(node.to_string(), neighbors);
+            }
+            let mut sorted_table_list = sorted_table_list.clone();
+            let mut with_specials = vec!["message".to_string(), "history".to_string()];
+            with_specials.append(&mut sorted_table_list);
+            return (with_specials, table_dependencies_in, table_dependencies_out);
         }
         Err(cycles) => {
             let mut message = String::new();
@@ -3537,36 +2957,25 @@ fn verify_table_deps_and_sort(table_list: &Vec<String>, constraints: &SerdeMap) 
     };
 }
 
-/// Given the config maps for tables and datatypes, and a table name, generate a SQL schema string,
-/// including each column C and its matching C_meta column, then return the schema string as well as
-/// a list of the table's constraints.
-fn create_table_statement(
-    tables_config: &mut SerdeMap,
-    datatypes_config: &mut SerdeMap,
+/// Given table configuration map and a datatype configuration map, a parser, a table name, and a
+/// database connection pool, return a configuration map representing all of the table constraints.
+pub fn get_table_constraints(
+    tables_config: &SerdeMap,
+    datatypes_config: &SerdeMap,
     parser: &StartParser,
-    table_name: &String,
+    table_name: &str,
     pool: &AnyPool,
-) -> (Vec<String>, SerdeValue) {
-    let mut drop_table_sql = format!(r#"DROP TABLE IF EXISTS "{}""#, table_name);
-    if pool.any_kind() == AnyKind::Postgres {
-        drop_table_sql.push_str(" CASCADE");
-    }
-    drop_table_sql.push_str(";");
-    let mut statements = vec![drop_table_sql];
-    let mut create_lines = vec![
-        format!(r#"CREATE TABLE "{}" ("#, table_name),
-        String::from(r#"  "row_number" BIGINT,"#),
-    ];
-
-    let normal_table_name;
-    if let Some(s) = table_name.strip_suffix("_conflict") {
-        normal_table_name = String::from(s);
-    } else {
-        normal_table_name = table_name.to_string();
-    }
+) -> SerdeValue {
+    let mut table_constraints = json!({
+        "foreign": [],
+        "unique": [],
+        "primary": [],
+        "tree": [],
+        "under": [],
+    });
 
     let column_names = tables_config
-        .get(&normal_table_name)
+        .get(table_name)
         .and_then(|t| t.get("column_order"))
         .and_then(|c| c.as_array())
         .unwrap()
@@ -3575,19 +2984,11 @@ fn create_table_statement(
         .collect::<Vec<_>>();
 
     let columns = tables_config
-        .get(normal_table_name.as_str())
+        .get(table_name)
         .and_then(|c| c.as_object())
         .and_then(|o| o.get("column"))
         .and_then(|c| c.as_object())
         .unwrap();
-
-    let mut table_constraints = json!({
-        "foreign": [],
-        "unique": [],
-        "primary": [],
-        "tree": [],
-        "under": [],
-    });
 
     let mut colvals: Vec<SerdeMap> = vec![];
     for column_name in &column_names {
@@ -3598,64 +2999,22 @@ fn create_table_statement(
         colvals.push(column.clone());
     }
 
-    let c = colvals.len();
-    let mut r = 0;
     for row in colvals {
-        r += 1;
-        let sql_type = get_sql_type(
-            datatypes_config,
-            &row.get("datatype")
-                .and_then(|d| d.as_str())
-                .and_then(|s| Some(s.to_string()))
-                .unwrap(),
-            pool,
-        );
-
-        if let None = sql_type {
-            panic!("Missing SQL type for {}", row.get("datatype").unwrap());
-        }
-        let sql_type = sql_type.unwrap();
-
-        let short_sql_type = {
-            if sql_type.to_lowercase().as_str().starts_with("varchar(") {
-                "VARCHAR"
-            } else {
-                &sql_type
-            }
-        };
-
-        if pool.any_kind() == AnyKind::Postgres {
-            if !PG_SQL_TYPES.contains(&short_sql_type.to_lowercase().as_str()) {
-                panic!(
-                    "Unrecognized PostgreSQL SQL type '{}' for datatype: '{}'. \
-                     Accepted SQL types for PostgreSQL are: {}",
-                    sql_type,
-                    row.get("datatype").and_then(|d| d.as_str()).unwrap(),
-                    PG_SQL_TYPES.join(", ")
-                );
-            }
-        } else {
-            if !SL_SQL_TYPES.contains(&short_sql_type.to_lowercase().as_str()) {
-                panic!(
-                    "Unrecognized SQLite SQL type '{}' for datatype '{}'. \
-                     Accepted SQL datatypes for SQLite are: {}",
-                    sql_type,
-                    row.get("datatype").and_then(|d| d.as_str()).unwrap(),
-                    SL_SQL_TYPES.join(", ")
-                );
-            }
-        }
-
+        let datatype = row
+            .get("datatype")
+            .and_then(|d| d.as_str())
+            .and_then(|s| Some(s.to_string()))
+            .unwrap();
+        let sql_type = get_sql_type(datatypes_config, &datatype, pool)
+            .expect(&format!("Unable to determine SQL type for {}", datatype));
         let column_name = row.get("column").and_then(|s| s.as_str()).unwrap();
-        let mut line = format!(r#"  "{}" {}"#, column_name, sql_type);
         let structure = row.get("structure").and_then(|s| s.as_str());
         if let Some(structure) = structure {
-            if structure != "" && !table_name.ends_with("_conflict") {
+            if structure != "" {
                 let parsed_structure = parser.parse(structure).unwrap();
                 for expression in parsed_structure {
                     match *expression {
                         Expression::Label(value) if value == "primary" => {
-                            line.push_str(" PRIMARY KEY");
                             let primary_keys = table_constraints
                                 .get_mut("primary")
                                 .and_then(|v| v.as_array_mut())
@@ -3663,7 +3022,6 @@ fn create_table_statement(
                             primary_keys.push(SerdeValue::String(column_name.to_string()));
                         }
                         Expression::Label(value) if value == "unique" => {
-                            line.push_str(" UNIQUE");
                             let unique_constraints = table_constraints
                                 .get_mut("unique")
                                 .and_then(|v| v.as_array_mut())
@@ -3707,7 +3065,7 @@ fn create_table_statement(
                                         .and_then(|d| d.as_str());
                                     if let None = child_datatype {
                                         panic!(
-                                            "Could not determine SQL datatype for {} of tree({})",
+                                            "Could not determine datatype for {} of tree({})",
                                             child, child
                                         );
                                     }
@@ -3778,20 +3136,136 @@ fn create_table_statement(
                 }
             }
         }
-        if r >= c
+    }
+
+    return table_constraints;
+}
+
+/// Given table configuration map and a datatype configuration map, a parser, a table name, and a
+/// database connection pool, return a list of DDL statements that can be used to create the
+/// database tables.
+pub fn get_table_ddl(
+    tables_config: &SerdeMap,
+    datatypes_config: &SerdeMap,
+    parser: &StartParser,
+    table_name: &String,
+    pool: &AnyPool,
+) -> Vec<String> {
+    let mut statements = vec![];
+    let mut create_lines = vec![
+        format!(r#"CREATE TABLE "{}" ("#, table_name),
+        String::from(r#"  "row_number" BIGINT,"#),
+    ];
+
+    let colvals = {
+        let normal_table_name;
+        if let Some(s) = table_name.strip_suffix("_conflict") {
+            normal_table_name = String::from(s);
+        } else {
+            normal_table_name = table_name.to_string();
+        }
+        let column_order = tables_config
+            .get(&normal_table_name)
+            .and_then(|t| t.get("column_order"))
+            .and_then(|c| c.as_array())
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        let columns = tables_config
+            .get(&normal_table_name)
+            .and_then(|c| c.as_object())
+            .and_then(|o| o.get("column"))
+            .and_then(|c| c.as_object())
+            .unwrap();
+
+        column_order
+            .iter()
+            .map(|column_name| {
+                columns
+                    .get(column_name)
+                    .and_then(|c| c.as_object())
+                    .unwrap()
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let table_constraints = {
+        // Conflict tables have no database constraints:
+        if table_name.ends_with("_conflict") {
+            json!({"foreign": [], "unique": [], "primary": [], "tree": [], "under": [],})
+        } else {
+            get_table_constraints(tables_config, datatypes_config, parser, &table_name, &pool)
+        }
+    };
+
+    let c = colvals.len();
+    let mut r = 0;
+    for row in colvals {
+        r += 1;
+        let sql_type = get_sql_type(
+            datatypes_config,
+            &row.get("datatype")
+                .and_then(|d| d.as_str())
+                .and_then(|s| Some(s.to_string()))
+                .unwrap(),
+            pool,
+        )
+        .unwrap();
+
+        let short_sql_type = {
+            if sql_type.to_lowercase().as_str().starts_with("varchar(") {
+                "VARCHAR"
+            } else {
+                &sql_type
+            }
+        };
+
+        if !SQL_TYPES.contains(&short_sql_type.to_lowercase().as_str()) {
+            panic!(
+                "Unrecognized SQL type '{}' for datatype: '{}'. Accepted SQL types are: {}",
+                sql_type,
+                row.get("datatype").and_then(|d| d.as_str()).unwrap(),
+                SQL_TYPES.join(", ")
+            );
+        }
+
+        let column_name = row.get("column").and_then(|s| s.as_str()).unwrap();
+        let mut line = format!(r#"  "{}" {}"#, column_name, sql_type);
+
+        // Check if the column is a primary key and indicate this in the DDL if so:
+        let primary_constraints = table_constraints
+            .get("primary")
+            .and_then(|v| v.as_array())
+            .unwrap();
+        if primary_constraints.contains(&json!(column_name)) {
+            line.push_str(" PRIMARY KEY");
+        }
+
+        // Check if the column has a unique constraint and indicate this in the DDL if so:
+        let unique_constraints = table_constraints
+            .get("unique")
+            .and_then(|v| v.as_array())
+            .unwrap();
+        if unique_constraints.contains(&json!(column_name)) {
+            line.push_str(" UNIQUE");
+        }
+
+        // If there are foreign constraints add a column to the end of the statement which we will
+        // finish after this for loop is done:
+        if !(r >= c
             && table_constraints
                 .get("foreign")
                 .and_then(|v| v.as_array())
                 .and_then(|v| Some(v.is_empty()))
-                .unwrap()
+                .unwrap())
         {
-            line.push_str("");
-        } else {
             line.push_str(",");
         }
         create_lines.push(line);
     }
 
+    // Add the SQL to indicate any foreign constraints:
     let foreign_keys = table_constraints
         .get("foreign")
         .and_then(|v| v.as_array())
@@ -3843,13 +3317,13 @@ fn create_table_statement(
         table_name, table_name
     ));
 
-    return (statements, table_constraints);
+    return statements;
 }
 
 /// Given a list of messages and a HashMap, messages_stats, with which to collect counts of
 /// message types, count the various message types encountered in the list and increment the counts
 /// in messages_stats accordingly.
-fn add_message_counts(messages: &Vec<SerdeValue>, messages_stats: &mut HashMap<String, usize>) {
+pub fn add_message_counts(messages: &Vec<SerdeValue>, messages_stats: &mut HashMap<String, usize>) {
     for message in messages {
         let message = message.as_object().unwrap();
         let level = message.get("level").unwrap();
@@ -3863,14 +3337,14 @@ fn add_message_counts(messages: &Vec<SerdeValue>, messages_stats: &mut HashMap<S
             let current_infos = messages_stats.get("info").unwrap();
             messages_stats.insert("info".to_string(), current_infos + 1);
         } else {
-            eprintln!("Warning: unknown message type: {}", level);
+            warn!("Unknown message type: {}", level);
         }
     }
 }
 
 /// Given a global config map, return a list of defined datatype names sorted from the most generic
 /// to the most specific. This function will panic if circular dependencies are encountered.
-fn get_sorted_datatypes(global_config: &SerdeMap) -> Vec<&str> {
+pub fn get_sorted_datatypes(global_config: &SerdeMap) -> Vec<&str> {
     let mut graph = DiGraphMap::<&str, ()>::new();
     let dt_config = global_config
         .get("datatype")
@@ -3920,7 +3394,10 @@ fn get_sorted_datatypes(global_config: &SerdeMap) -> Vec<&str> {
 ///    `sorted_datatypes`, followed by:
 /// 2. Messages pertaining to violations of one of the rules in the rule table, followed by:
 /// 3. Messages pertaining to structure violations.
-fn sort_messages(sorted_datatypes: &Vec<&str>, cell_messages: &Vec<SerdeValue>) -> Vec<SerdeValue> {
+pub fn sort_messages(
+    sorted_datatypes: &Vec<&str>,
+    cell_messages: &Vec<SerdeValue>,
+) -> Vec<SerdeValue> {
     let mut datatype_messages = vec![];
     let mut structure_messages = vec![];
     let mut rule_messages = vec![];
@@ -3970,7 +3447,7 @@ fn sort_messages(sorted_datatypes: &Vec<&str>, cell_messages: &Vec<SerdeValue>) 
 /// to bind to that SQL statement. If the verbose flag is set, the number of errors, warnings,
 /// and information messages generated are added to messages_stats, the contents of which will
 /// later be written to stderr.
-async fn make_inserts(
+pub async fn make_inserts(
     config: &SerdeMap,
     table_name: &String,
     rows: &mut Vec<ResultRow>,
@@ -3987,7 +3464,7 @@ async fn make_inserts(
         String,
         Vec<String>,
     ),
-    sqlx::Error,
+    ValveError,
 > {
     fn is_conflict_row(row: &ResultRow, conflict_columns: &Vec<SerdeValue>) -> bool {
         for (column, cell) in &row.contents {
@@ -4183,7 +3660,7 @@ async fn make_inserts(
 /// and the chunk number corresponding to the rows, do inter-row validation on the rows and insert
 /// them to the table. If the verbose flag is set to true, error/warning/info stats will be
 /// collected in messages_stats and later written to stderr.
-async fn validate_rows_inter_and_insert(
+pub async fn insert_chunk(
     config: &SerdeMap,
     pool: &AnyPool,
     table_name: &String,
@@ -4191,9 +3668,13 @@ async fn validate_rows_inter_and_insert(
     chunk_number: usize,
     messages_stats: &mut HashMap<String, usize>,
     verbose: bool,
-) -> Result<(), sqlx::Error> {
-    // First, do the tree validation:
-    validate_rows_trees(config, pool, table_name, rows).await?;
+    validate: bool,
+) -> Result<(), ValveError> {
+    // First, do the tree validation. TODO: I don't remember why this needs to be done first, but
+    // it does. Add a comment here explaining why.
+    if validate {
+        validate_rows_trees(config, pool, table_name, rows).await?;
+    }
 
     // Try to insert the rows to the db first without validating unique and foreign constraints.
     // If there are constraint violations this will cause a database error, in which case we then
@@ -4260,10 +3741,17 @@ async fn validate_rows_inter_and_insert(
                 );
             }
         }
-        Err(_) => {
-            validate_rows_constraints(config, pool, table_name, rows).await?;
-            let (main_sql, main_params, conflict_sql, conflict_params, message_sql, message_params) =
-                make_inserts(
+        Err(e) => {
+            if validate {
+                validate_rows_constraints(config, pool, table_name, rows).await?;
+                let (
+                    main_sql,
+                    main_params,
+                    conflict_sql,
+                    conflict_params,
+                    message_sql,
+                    message_params,
+                ) = make_inserts(
                     config,
                     table_name,
                     rows,
@@ -4274,26 +3762,29 @@ async fn validate_rows_inter_and_insert(
                 )
                 .await?;
 
-            let main_sql = local_sql_syntax(&pool, &main_sql);
-            let mut main_query = sqlx_query(&main_sql);
-            for param in &main_params {
-                main_query = main_query.bind(param);
-            }
-            main_query.execute(pool).await?;
+                let main_sql = local_sql_syntax(&pool, &main_sql);
+                let mut main_query = sqlx_query(&main_sql);
+                for param in &main_params {
+                    main_query = main_query.bind(param);
+                }
+                main_query.execute(pool).await?;
 
-            let conflict_sql = local_sql_syntax(&pool, &conflict_sql);
-            let mut conflict_query = sqlx_query(&conflict_sql);
-            for param in &conflict_params {
-                conflict_query = conflict_query.bind(param);
-            }
-            conflict_query.execute(pool).await?;
+                let conflict_sql = local_sql_syntax(&pool, &conflict_sql);
+                let mut conflict_query = sqlx_query(&conflict_sql);
+                for param in &conflict_params {
+                    conflict_query = conflict_query.bind(param);
+                }
+                conflict_query.execute(pool).await?;
 
-            let message_sql = local_sql_syntax(&pool, &message_sql);
-            let mut message_query = sqlx_query(&message_sql);
-            for param in &message_params {
-                message_query = message_query.bind(param);
+                let message_sql = local_sql_syntax(&pool, &message_sql);
+                let mut message_query = sqlx_query(&message_sql);
+                for param in &message_params {
+                    message_query = message_query.bind(param);
+                }
+                message_query.execute(pool).await?;
+            } else {
+                return Err(ValveError::DatabaseError(e));
             }
-            message_query.execute(pool).await?;
         }
     };
 
@@ -4305,29 +3796,34 @@ async fn validate_rows_inter_and_insert(
 /// and the headers of the rows to be inserted, validate each chunk and insert the validated rows
 /// to the table. If the verbose flag is set to true, error/warning/info stats will be collected in
 /// messages_stats and later written to stderr.
-async fn validate_and_insert_chunks(
+pub async fn insert_chunks(
     config: &SerdeMap,
     pool: &AnyPool,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     table_name: &String,
-    chunks: &IntoChunks<csv::StringRecordsIter<'_, std::fs::File>>,
-    headers: &csv::StringRecord,
+    chunks: &IntoChunks<StringRecordsIter<'_, std::fs::File>>,
+    headers: &StringRecord,
     messages_stats: &mut HashMap<String, usize>,
     verbose: bool,
-) -> Result<(), sqlx::Error> {
+    validate: bool,
+) -> Result<(), ValveError> {
     if !MULTI_THREADED {
         for (chunk_number, chunk) in chunks.into_iter().enumerate() {
             let mut rows: Vec<_> = chunk.collect();
-            let mut intra_validated_rows = validate_rows_intra(
-                config,
-                compiled_datatype_conditions,
-                compiled_rule_conditions,
-                table_name,
-                headers,
-                &mut rows,
-            );
-            validate_rows_inter_and_insert(
+            let mut intra_validated_rows = {
+                let only_nulltype = !validate;
+                validate_rows_intra(
+                    config,
+                    compiled_datatype_conditions,
+                    compiled_rule_conditions,
+                    table_name,
+                    headers,
+                    &mut rows,
+                    only_nulltype,
+                )
+            };
+            insert_chunk(
                 config,
                 pool,
                 table_name,
@@ -4335,6 +3831,7 @@ async fn validate_and_insert_chunks(
                 chunk_number,
                 messages_stats,
                 verbose,
+                validate,
             )
             .await?;
         }
@@ -4359,6 +3856,7 @@ async fn validate_and_insert_chunks(
                 for chunk in batch.into_iter() {
                     let mut rows: Vec<_> = chunk.collect();
                     workers.push(scope.spawn(move |_| {
+                        let only_nulltype = !validate;
                         validate_rows_intra(
                             config,
                             compiled_datatype_conditions,
@@ -4366,6 +3864,7 @@ async fn validate_and_insert_chunks(
                             table_name,
                             headers,
                             &mut rows,
+                            only_nulltype,
                         )
                     }));
                 }
@@ -4379,7 +3878,7 @@ async fn validate_and_insert_chunks(
             .expect("A child thread panicked");
 
             for (chunk_number, mut intra_validated_rows) in results {
-                validate_rows_inter_and_insert(
+                insert_chunk(
                     config,
                     pool,
                     table_name,
@@ -4387,6 +3886,7 @@ async fn validate_and_insert_chunks(
                     chunk_number,
                     messages_stats,
                     verbose,
+                    validate,
                 )
                 .await?;
             }
@@ -4394,172 +3894,4 @@ async fn validate_and_insert_chunks(
 
         Ok(())
     }
-}
-
-/// Given a configuration map, a database connection pool, a parser, HashMaps representing
-/// compiled datatype and rule conditions, and a HashMap representing parsed structure conditions,
-/// read in the data TSV files corresponding to each configured table, then validate and load all of
-/// the corresponding data rows. If the verbose flag is set to true, output progress messages to
-/// stderr during load.
-async fn load_db(
-    config: &SerdeMap,
-    pool: &AnyPool,
-    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
-    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
-    verbose: bool,
-) -> Result<(), sqlx::Error> {
-    let mut table_list = vec![];
-    for table in config
-        .get("sorted_table_list")
-        .and_then(|l| l.as_array())
-        .unwrap()
-    {
-        table_list.push(table.as_str().and_then(|s| Some(s.to_string())).unwrap());
-    }
-    let table_list = table_list; // Change the table_list to read only after populating it.
-    let num_tables = table_list.len();
-    let mut total_errors = 0;
-    let mut total_warnings = 0;
-    let mut total_infos = 0;
-    let mut table_num = 1;
-    for table_name in table_list {
-        if verbose {
-            eprintln!(
-                "{} - Loading table {}/{}: {}",
-                Utc::now(),
-                table_num,
-                num_tables,
-                table_name
-            );
-        }
-        table_num += 1;
-        let path = String::from(
-            config
-                .get("table")
-                .and_then(|t| t.as_object())
-                .and_then(|o| o.get(&table_name))
-                .and_then(|n| n.get("path"))
-                .and_then(|p| p.as_str())
-                .unwrap(),
-        );
-        let mut rdr = csv::ReaderBuilder::new()
-            .has_headers(false)
-            .delimiter(b'\t')
-            .from_reader(File::open(path.clone()).unwrap_or_else(|err| {
-                panic!("Unable to open '{}': {}", path.clone(), err);
-            }));
-
-        // Extract the headers, which we will need later:
-        let mut records = rdr.records();
-        let headers;
-        if let Some(result) = records.next() {
-            headers = result.unwrap();
-        } else {
-            panic!("'{}' is empty", path);
-        }
-
-        for header in headers.iter() {
-            if header.trim().is_empty() {
-                panic!(
-                    "One or more of the header fields is empty for table '{}'",
-                    table_name
-                );
-            }
-        }
-
-        // HashMap used to report info about the number of error/warning/info messages for this
-        // table when the verbose flag is set to true:
-        let mut messages_stats = HashMap::new();
-        messages_stats.insert("error".to_string(), 0);
-        messages_stats.insert("warning".to_string(), 0);
-        messages_stats.insert("info".to_string(), 0);
-
-        // Split the data into chunks of size CHUNK_SIZE before passing them to the validation
-        // logic:
-        let chunks = records.chunks(CHUNK_SIZE);
-        validate_and_insert_chunks(
-            config,
-            pool,
-            compiled_datatype_conditions,
-            compiled_rule_conditions,
-            &table_name,
-            &chunks,
-            &headers,
-            &mut messages_stats,
-            verbose,
-        )
-        .await?;
-
-        // We need to wait until all of the rows for a table have been loaded before validating the
-        // "foreign" constraints on a table's trees, since this checks if the values of one column
-        // (the tree's parent) are all contained in another column (the tree's child):
-        // We also need to wait before validating a table's "under" constraints. Although the tree
-        // associated with such a constraint need not be defined on the same table, it can be.
-        let mut recs_to_update =
-            validate_tree_foreign_keys(config, pool, None, &table_name, None).await?;
-        recs_to_update.append(&mut validate_under(config, pool, None, &table_name, None).await?);
-
-        for record in recs_to_update {
-            let row_number = record.get("row_number").unwrap();
-            let column_name = record.get("column").and_then(|s| s.as_str()).unwrap();
-            let value = record.get("value").and_then(|s| s.as_str()).unwrap();
-            let level = record.get("level").and_then(|s| s.as_str()).unwrap();
-            let rule = record.get("rule").and_then(|s| s.as_str()).unwrap();
-            let message = record.get("message").and_then(|s| s.as_str()).unwrap();
-
-            let sql = local_sql_syntax(
-                &pool,
-                &format!(
-                    r#"INSERT INTO "message"
-                       ("table", "row", "column", "value", "level", "rule", "message")
-                       VALUES ({}, {}, {}, {}, {}, {}, {})"#,
-                    SQL_PARAM, row_number, SQL_PARAM, SQL_PARAM, SQL_PARAM, SQL_PARAM, SQL_PARAM
-                ),
-            );
-            let mut query = sqlx_query(&sql);
-            query = query.bind(&table_name);
-            query = query.bind(&column_name);
-            query = query.bind(&value);
-            query = query.bind(&level);
-            query = query.bind(&rule);
-            query = query.bind(&message);
-            query.execute(pool).await?;
-
-            if verbose {
-                // Add the generated message to messages_stats:
-                let messages = vec![json!({
-                    "message": message,
-                    "level": level,
-                })];
-                add_message_counts(&messages, &mut messages_stats);
-            }
-        }
-
-        if verbose {
-            // Output a report on the messages generated to stderr:
-            let errors = messages_stats.get("error").unwrap();
-            let warnings = messages_stats.get("warning").unwrap();
-            let infos = messages_stats.get("info").unwrap();
-            let status_message = format!(
-                "{} errors, {} warnings, and {} information messages generated for {}",
-                errors, warnings, infos, table_name
-            );
-            eprintln!("{} - {}", Utc::now(), status_message);
-            total_errors += errors;
-            total_warnings += warnings;
-            total_infos += infos;
-        }
-    }
-
-    if verbose {
-        eprintln!(
-            "{} - Loading complete with {} errors, {} warnings, and {} information messages",
-            Utc::now(),
-            total_errors,
-            total_warnings,
-            total_infos
-        );
-    }
-
-    Ok(())
 }

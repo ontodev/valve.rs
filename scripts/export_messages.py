@@ -115,52 +115,6 @@ def get_column_order_and_info_for_sqlite(cursor, table):
     }
 
 
-def export_data(cursor, is_sqlite, args):
-    """
-    Given a database cursor, a flag indicating whether this is a sqlite or postgres db, and a
-    dictionary containing: an output directory, "output", and a list of tables, "tables": export all
-    of the given database tables to .tsv files in the output directory.
-    """
-    output_dir = os.path.normpath(args["output_dir"])
-    tables = args["tables"]
-
-    for table in tables:
-        try:
-            if is_sqlite:
-                columns_info = get_column_order_and_info_for_sqlite(cursor, table)
-            else:
-                columns_info = get_column_order_and_info_for_postgres(cursor, table)
-            unsorted_columns = columns_info["unsorted_columns"]
-
-            select = [f'"{column}"' for column in unsorted_columns]
-            select = ", ".join(select)
-
-            # Fetch the rows from the table and write them to a corresponding TSV file in the
-            # output directory:
-            cursor.execute(f'SELECT {select} FROM "{table}_text_view" ORDER BY "row_number"')
-            colnames = [d[0] for d in cursor.description]
-            rows = map(lambda r: dict(zip(colnames, r)), cursor)
-            fieldnames = [c for c in colnames if c != "row_number"]
-            with open(f"{output_dir}/{table}.tsv", "w", newline="\n") as csvfile:
-                writer = csv.DictWriter(
-                    csvfile,
-                    fieldnames=fieldnames,
-                    delimiter="\t",
-                    doublequote=False,
-                    strict=True,
-                    lineterminator="\n",
-                    quoting=csv.QUOTE_NONE,
-                    escapechar=None,
-                    quotechar=None,
-                )
-                writer.writeheader()
-                for row in rows:
-                    del row["row_number"]
-                    writer.writerow(row)
-        except sqlite3.OperationalError as e:
-            print(f"ERROR while exporting {table}: {e}", file=sys.stderr)
-
-
 def export_messages(cursor, is_sqlite, args):
     """
     Given a database cursor, a flag indicating whether this is a sqlite or postgres db, and a
@@ -289,42 +243,24 @@ def export_messages(cursor, is_sqlite, args):
 
 
 if __name__ == "__main__":
-    prog_parser = ArgumentParser(description="Database table export utility")
-    sub_parsers = prog_parser.add_subparsers(help="Possible sub-commands")
+    parser = ArgumentParser(description="Export Valve messages")
+    pgroup = parser.add_mutually_exclusive_group()
+    pgroup.add_argument("--a1", action="store_true", help="Output error messages in A1 format")
+    pgroup.add_argument("--pk", action="store_true", help="Identify rows using primary keys")
 
-    sub1 = sub_parsers.add_parser(
-        "data",
-        description="Export table data",
-        help="Export table data. For command-line options, run: `%(prog)s data --help`",
+    parser.add_argument(
+        "db",
+        help="""Either a database connection URL or a path to a SQLite database file. In the
+        case of a URL, you must use one of the following schemes: potgresql://<URL>
+        (for postgreSQL), sqlite://<relative path> or file:<relative path> (for SQLite).
+        """,
+    )
+    parser.add_argument("output_dir", help="The name of the directory in which to save TSV files")
+    parser.add_argument(
+        "tables", metavar="table", nargs="+", help="The name of a table to export to TSV"
     )
 
-    sub1.set_defaults(func=export_data)
-
-    sub2 = sub_parsers.add_parser(
-        "messages",
-        description="Export error messages",
-        help="Export error messages. For command-line options, run: `%(prog)s messages --help`",
-    )
-    sub2_group = sub2.add_mutually_exclusive_group()
-    sub2_group.add_argument("--a1", action="store_true", help="Output error messages in A1 format")
-    sub2_group.add_argument("--pk", action="store_true", help="Identify rows using primary keys")
-    sub2.set_defaults(func=export_messages)
-
-    for sub in [sub1, sub2]:
-        sub.add_argument(
-            "db",
-            help="""Either a database connection URL or a path to a SQLite database file. In the
-            case of a URL, you must use one of the following schemes: potgresql://<URL>
-            (for postgreSQL), sqlite://<relative path> or file:<relative path> (for SQLite).
-            """,
-        )
-        sub.add_argument("output_dir", help="The name of the directory in which to save TSV files")
-        sub.add_argument(
-            "tables", metavar="table", nargs="+", help="The name of a table to export to TSV"
-        )
-
-    args = prog_parser.parse_args()
-    func = args.func
+    args = parser.parse_args()
     args = vars(args)
 
     if not os.path.isdir(args["output_dir"]):
@@ -336,7 +272,7 @@ if __name__ == "__main__":
     if db.startswith("postgresql://"):
         with psycopg2.connect(db) as conn:
             cursor = conn.cursor()
-            func(cursor, False, args)
+            export_messages(cursor, False, args)
     else:
         m = re.search(r"(^(file:|sqlite://))?(.+?)(\?.+)?$", db)
         if m:
@@ -348,7 +284,7 @@ if __name__ == "__main__":
             db = f"file:{path}{params}"
             with sqlite3.connect(db, uri=True) as conn:
                 cursor = conn.cursor()
-                func(cursor, True, args)
+                export_messages(cursor, True, args)
         else:
             print(f"Could not parse database specification: {db}", file=sys.stderr)
             sys.exit(1)

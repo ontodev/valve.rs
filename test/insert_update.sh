@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
 
-if [[ $# -lt 1 ]]
+if [[ $# -lt 2 ]]
 then
-    echo "Usage: $(basename $0) DATABASE"
+    echo "Usage: $(basename $0) DATABASE TABLE_CONFIG"
     exit 1
 fi
 
 db=$1
-shift
+table_defs=$2
+shift 2
 if [[ $# -gt 0 ]]
 then
     echo "Warning: Extra arguments: '$*' will be ignored"
 fi
 
 pwd=$(dirname $(readlink -f $0))
-export_script=$pwd/../scripts/export.py
 output_dir=$pwd/output
 expected_dir=$pwd/expected
 
@@ -25,7 +25,7 @@ do
     table_path=$pwd/output/$table_path
     table_file=$(basename $table_path)
     table=${table_file%.*}
-    ${export_script} data $db $output_dir $table
+    ./valve --save $table --save_dir $output_dir $table_defs $db
     diff -q $expected_dir/${table}.tsv ${table_path}
     ret_value=$(expr $ret_value + $?)
 done

@@ -155,14 +155,14 @@ def get_dt_hierarchies(config):
 
 def get_sql_type(config, datatype):
     """Given the config map and the name of a datatype, climb the datatype tree (as required),
-    and return the first 'SQLite type' found."""
+    and return the first 'SQL type' found."""
     if "datatype" not in config:
         print("Missing datatypes in config")
         sys.exit(1)
     if datatype not in config["datatype"]:
         return None
-    if config["datatype"][datatype].get("SQLite type"):
-        return config["datatype"][datatype]["SQLite type"]
+    if config["datatype"][datatype].get("SQL type"):
+        return config["datatype"][datatype]["SQL type"]
     return get_sql_type(config, config["datatype"][datatype].get("parent"))
 
 
@@ -260,9 +260,9 @@ def annotate(label, sample, config, error_rate, is_primary_candidate):
             # If the datatype has no associated condition then it matches anything:
             if not datatype.get("condition"):
                 return True
-            # If the SQLite type is NULL this datatype is ruled out:
-            sqlite_type = datatype.get("SQLite type")
-            if sqlite_type and sqlite_type.casefold() == "null":
+            # If the SQL type is NULL this datatype is ruled out:
+            sql_type = datatype.get("SQL type")
+            if sql_type and sql_type.casefold() == "null":
                 return False
 
             condition = get_compiled_condition(datatype["condition"], config["parser"])
