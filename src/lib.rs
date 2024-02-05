@@ -3000,15 +3000,13 @@ pub fn get_table_constraints(
     }
 
     for row in colvals {
-        let sql_type = get_sql_type(
-            datatypes_config,
-            &row.get("datatype")
-                .and_then(|d| d.as_str())
-                .and_then(|s| Some(s.to_string()))
-                .unwrap(),
-            pool,
-        )
-        .unwrap();
+        let datatype = row
+            .get("datatype")
+            .and_then(|d| d.as_str())
+            .and_then(|s| Some(s.to_string()))
+            .unwrap();
+        let sql_type = get_sql_type(datatypes_config, &datatype, pool)
+            .expect(&format!("Unable to determine SQL type for {}", datatype));
         let column_name = row.get("column").and_then(|s| s.as_str()).unwrap();
         let structure = row.get("structure").and_then(|s| s.as_str());
         if let Some(structure) = structure {
