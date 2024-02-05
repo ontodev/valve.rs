@@ -3118,8 +3118,9 @@ pub fn get_table_constraints(
     }
 
     for row in colvals {
-        let sql_type =
-            get_sql_type(datatypes_config, &SerdeMap::new(), &row.datatype, pool).unwrap();
+        let datatype = &row.datatype;
+        let sql_type = get_sql_type(datatypes_config, &SerdeMap::new(), datatype, pool)
+            .expect(&format!("Unable to determine SQL type for {}", datatype));
         let column_name = &row.column;
         let structure = &row.structure;
         if structure != "" {
