@@ -409,6 +409,9 @@ async fn test_undo_redo(valve: &Valve) -> Result<(), ValveError> {
         "numeric_foreign_column": {"messages": [], "valid": true, "value": "11"},
     });
 
+    // Our initial undo/redo state:
+    verify_undo_redo(pool, false, false).await?;
+
     // Undo/redo test 1:
     let (_rn, _r) = valve
         .insert_row("table10", &row_1.as_object().unwrap())
@@ -419,6 +422,8 @@ async fn test_undo_redo(valve: &Valve) -> Result<(), ValveError> {
     valve.redo().await?;
 
     valve.undo().await?;
+
+    verify_undo_redo(pool, false, true).await?;
 
     // Undo/redo test 2:
     valve
@@ -431,6 +436,8 @@ async fn test_undo_redo(valve: &Valve) -> Result<(), ValveError> {
 
     valve.undo().await?;
 
+    verify_undo_redo(pool, false, true).await?;
+
     // Undo/redo test 3:
     valve.delete_row("table10", &8).await?;
 
@@ -439,6 +446,8 @@ async fn test_undo_redo(valve: &Valve) -> Result<(), ValveError> {
     valve.redo().await?;
 
     valve.undo().await?;
+
+    verify_undo_redo(pool, false, true).await?;
 
     // Undo/redo test 4:
     let (rn, _row) = valve
@@ -449,22 +458,34 @@ async fn test_undo_redo(valve: &Valve) -> Result<(), ValveError> {
         .update_row("table10", &rn, &row_2.as_object().unwrap())
         .await?;
 
+    verify_undo_redo(pool, true, false).await?;
+
     // Undo update:
     valve.undo().await?;
+
+    verify_undo_redo(pool, true, true).await?;
 
     // Redo update:
     valve.redo().await?;
 
     valve.delete_row("table10", &rn).await?;
 
+    verify_undo_redo(pool, true, false).await?;
+
     // Undo delete:
     valve.undo().await?;
+
+    verify_undo_redo(pool, true, true).await?;
 
     // Undo update:
     valve.undo().await?;
 
+    verify_undo_redo(pool, true, true).await?;
+
     // Undo insert:
     valve.undo().await?;
+
+    verify_undo_redo(pool, false, true).await?;
 
     eprintln!("done.");
     Ok(())
