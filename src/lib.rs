@@ -2623,7 +2623,7 @@ pub fn compile_condition(
 /// the database type, climb the datatype tree (as required), and return the first 'SQL type' found.
 pub fn get_sql_type(dt_config: &SerdeMap, datatype: &String, pool: &AnyPool) -> Option<String> {
     if !dt_config.contains_key(datatype) {
-        return None;
+        return Some("TEXT".to_string());
     }
 
     if let Some(sql_type) = dt_config.get(datatype).and_then(|d| d.get("SQL type")) {
