@@ -238,7 +238,7 @@ pub fn read_config_files(
         }
     };
 
-    for mut row in rows {
+    for row in rows {
         for column in vec!["table", "path", "type"] {
             if !row.contains_key(column) || row.get(column) == None {
                 panic!("Missing required column '{}' reading '{}'", column, path);
@@ -248,12 +248,6 @@ pub fn read_config_files(
         for column in vec!["table", "path"] {
             if row.get(column).and_then(|c| c.as_str()).unwrap() == "" {
                 panic!("Missing required value for '{}' reading '{}'", column, path);
-            }
-        }
-
-        for column in vec!["type"] {
-            if row.get(column).and_then(|c| c.as_str()).unwrap() == "" {
-                row.remove(&column.to_string());
             }
         }
 
@@ -274,6 +268,7 @@ pub fn read_config_files(
                 row_type, path
             );
             match row_type.as_str() {
+                "" => (), // Tables with no type are fine and are ignored.
                 "column" => {
                     if specials_config.column != "" {
                         panic!("{}", duplicate_err_msg);
@@ -304,15 +299,12 @@ pub fn read_config_files(
         let row_table = row.get("table").and_then(|t| t.as_str()).unwrap();
         let row_desc = row.get("description").and_then(|t| t.as_str()).unwrap();
         let row_path = row.get("path").and_then(|t| t.as_str()).unwrap();
-        let row_type = row
-            .get("type")
-            .and_then(|t| t.as_str())
-            .and_then(|t| Some(t.to_string()));
+        let row_type = row.get("type").and_then(|t| t.as_str()).unwrap();
         tables_config.insert(
             row_table.to_string(),
             ValveTableConfig {
                 table: row_table.to_string(),
-                table_type: row_type,
+                table_type: row_type.to_string(),
                 description: row_desc.to_string(),
                 path: row_path.to_string(),
                 ..Default::default()
@@ -366,12 +358,10 @@ pub fn read_config_files(
         } else {
             let mut db_table = None;
             for (table_name, table_config) in tables_config {
-                if let Some(this_type) = &table_config.table_type {
-                    let this_type = this_type.as_str();
-                    if this_type == table_type {
-                        db_table = Some(table_name);
-                        break;
-                    }
+                let this_type = table_config.table_type.as_str();
+                if this_type == table_type {
+                    db_table = Some(table_name);
+                    break;
                 }
             }
             let db_table = match db_table {
@@ -388,7 +378,7 @@ pub fn read_config_files(
     // Load datatype table
     let mut datatypes_config = HashMap::new();
     let rows = get_special_config("datatype", &specials_config, &tables_config, path);
-    for mut row in rows {
+    for row in rows {
         for column in vec!["datatype", "parent", "condition", "SQL type"] {
             if !row.contains_key(column) || row.get(column) == None {
                 panic!("Missing required column '{}' reading '{}'", column, path);
@@ -401,38 +391,23 @@ pub fn read_config_files(
             }
         }
 
-        for column in vec!["parent", "condition", "SQL type"] {
-            if row.get(column).and_then(|c| c.as_str()).unwrap() == "" {
-                row.remove(&column.to_string());
-            }
-        }
-
         let dt_name = row.get("datatype").and_then(|d| d.as_str()).unwrap();
         let html_type = row.get("HTML type").and_then(|s| s.as_str()).unwrap();
-        let sql_type = row
-            .get("SQL type")
-            .and_then(|s| s.as_str())
-            .and_then(|s| Some(s.to_string()));
-        let condition = row
-            .get("condition")
-            .and_then(|s| s.as_str())
-            .and_then(|s| Some(s.to_string()));
+        let sql_type = row.get("SQL type").and_then(|s| s.as_str()).unwrap();
+        let condition = row.get("condition").and_then(|s| s.as_str()).unwrap();
         let description = row.get("description").and_then(|s| s.as_str()).unwrap();
-        let parent = row
-            .get("parent")
-            .and_then(|s| s.as_str())
-            .and_then(|s| Some(s.to_string()));
+        let parent = row.get("parent").and_then(|s| s.as_str()).unwrap();
         let structure = row.get("structure").and_then(|s| s.as_str()).unwrap();
         let transform = row.get("transform").and_then(|s| s.as_str()).unwrap();
         datatypes_config.insert(
             dt_name.to_string(),
             ValveDatatypeConfig {
                 html_type: html_type.to_string(),
-                sql_type: sql_type,
-                condition: condition,
+                sql_type: sql_type.to_string(),
+                condition: condition.to_string(),
                 datatype: dt_name.to_string(),
                 description: description.to_string(),
-                parent: parent,
+                parent: parent.to_string(),
                 structure: structure.to_string(),
                 transform: transform.to_string(),
             },
@@ -447,7 +422,7 @@ pub fn read_config_files(
 
     // Load column table
     let rows = get_special_config("column", &specials_config, &tables_config, path);
-    for mut row in rows {
+    for row in rows {
         for column in vec!["table", "column", "label", "nulltype", "datatype"] {
             if !row.contains_key(column) || row.get(column) == None {
                 panic!("Missing required column '{}' reading '{}'", column, path);
@@ -460,22 +435,19 @@ pub fn read_config_files(
             }
         }
 
-        for column in vec!["nulltype"] {
-            if row.get(column).and_then(|c| c.as_str()).unwrap() == "" {
-                row.remove(&column.to_string());
-            }
-        }
-
         let row_table = row.get("table").and_then(|t| t.as_str()).unwrap();
         if !tables_config.contains_key(row_table) {
             panic!("Undefined table '{}' reading '{}'", row_table, path);
         }
 
-        if let Some(SerdeValue::String(nulltype)) = row.get("nulltype") {
-            if !datatypes_config.contains_key(nulltype) {
-                panic!("Undefined nulltype '{}' reading '{}'", nulltype, path);
+        match row.get("nulltype") {
+            Some(SerdeValue::String(nulltype)) if nulltype != "" => {
+                if !datatypes_config.contains_key(nulltype) {
+                    panic!("Undefined nulltype '{}' reading '{}'", nulltype, path);
+                }
             }
-        }
+            _ => (),
+        };
 
         let datatype = row.get("datatype").and_then(|d| d.as_str()).unwrap();
         if !datatypes_config.contains_key(datatype) {
@@ -484,40 +456,24 @@ pub fn read_config_files(
 
         let row_table = row.get("table").and_then(|t| t.as_str()).unwrap();
         let column_name = row.get("column").and_then(|c| c.as_str()).unwrap();
+        let datatype = row.get("datatype").and_then(|c| c.as_str()).unwrap();
+        let description = row.get("description").and_then(|c| c.as_str()).unwrap();
+        let label = row.get("label").and_then(|c| c.as_str()).unwrap();
+        let structure = row.get("structure").and_then(|c| c.as_str()).unwrap();
+        let nulltype = row.get("nulltype").and_then(|c| c.as_str()).unwrap();
         tables_config.get_mut(row_table).and_then(|t| {
-            Some(
-                t.column.insert(
-                    column_name.to_string(),
-                    ValveColumnConfig {
-                        table: row_table.to_string(),
-                        column: column_name.to_string(),
-                        datatype: row
-                            .get("datatype")
-                            .and_then(|c| c.as_str())
-                            .unwrap()
-                            .to_string(),
-                        description: row
-                            .get("description")
-                            .and_then(|c| c.as_str())
-                            .unwrap()
-                            .to_string(),
-                        label: row
-                            .get("label")
-                            .and_then(|c| c.as_str())
-                            .unwrap()
-                            .to_string(),
-                        structure: row
-                            .get("structure")
-                            .and_then(|c| c.as_str())
-                            .unwrap()
-                            .to_string(),
-                        nulltype: row
-                            .get("nulltype")
-                            .and_then(|c| c.as_str())
-                            .and_then(|s| Some(s.to_string())),
-                    },
-                ),
-            )
+            Some(t.column.insert(
+                column_name.to_string(),
+                ValveColumnConfig {
+                    table: row_table.to_string(),
+                    column: column_name.to_string(),
+                    datatype: datatype.to_string(),
+                    description: description.to_string(),
+                    label: label.to_string(),
+                    structure: structure.to_string(),
+                    nulltype: nulltype.to_string(),
+                },
+            ))
         });
     }
 
@@ -696,7 +652,7 @@ pub fn read_config_files(
         "message".to_string(),
         ValveTableConfig {
             table: "message".to_string(),
-            table_type: Some("message".to_string()),
+            table_type: "message".to_string(),
             description: "Validation messages for all of the tables and columns".to_string(),
             column_order: vec![
                 "table".to_string(),
@@ -792,7 +748,7 @@ pub fn read_config_files(
         "history".to_string(),
         ValveTableConfig {
             table: "history".to_string(),
-            table_type: Some("history".to_string()),
+            table_type: "history".to_string(),
             description: "History of changes to the VALVE database".to_string(),
             column_order: vec![
                 "table".to_string(),
@@ -932,8 +888,8 @@ pub fn get_compiled_datatype_conditions(
 ) -> HashMap<String, CompiledCondition> {
     let mut compiled_datatype_conditions: HashMap<String, CompiledCondition> = HashMap::new();
     for (dt_name, dt_config) in config.datatype.iter() {
-        if let Some(condition) = &dt_config.condition {
-            let condition = condition.as_str();
+        let condition = dt_config.condition.as_str();
+        if condition != "" {
             let compiled_condition =
                 compile_condition(condition, parser, &compiled_datatype_conditions);
             compiled_datatype_conditions.insert(dt_name.to_string(), compiled_condition);
@@ -2198,11 +2154,7 @@ pub async fn insert_new_row_tx(
             }));
         }
 
-        let sql_type = get_sql_type_from_global_config(global_config, table, column, pool).ok_or(
-            ValveError::ConfigError(
-                format!("Could not get SQL type for {}.{}", table, column).into(),
-            ),
-        )?;
+        let sql_type = get_sql_type_from_global_config(global_config, table, column, pool);
         if is_sql_type_error(&sql_type, value) {
             insert_values.push(String::from("NULL"));
         } else {
@@ -2715,22 +2667,21 @@ pub fn get_sql_type(
     dt_config_old: &SerdeMap,
     datatype: &String,
     pool: &AnyPool,
-) -> Option<String> {
-    // If no such datatype exists, default to TEXT type:
-    if !dt_config.contains_key(datatype) {
-        return Some("TEXT".to_string());
-    }
-
-    if let Some(sql_type) = dt_config.get(datatype).and_then(|d| d.sql_type.clone()) {
-        return Some(sql_type);
-    }
+) -> String {
+    match dt_config.get(datatype) {
+        None => return "TEXT".to_string(),
+        Some(datatype) if datatype.sql_type != "" => {
+            return datatype.sql_type.to_string();
+        }
+        _ => (),
+    };
 
     let parent_datatype = dt_config
         .get(datatype)
-        .and_then(|d| d.parent.clone())
+        .and_then(|d| Some(d.parent.to_string()))
         .unwrap();
 
-    return get_sql_type(dt_config, dt_config_old, &parent_datatype.to_string(), pool);
+    return get_sql_type(dt_config, dt_config_old, &parent_datatype, pool);
 }
 
 /// Given the global config map, a table name, a column name, and a database connection pool
@@ -2740,7 +2691,7 @@ pub fn get_sql_type_from_global_config(
     table: &str,
     column: &str,
     pool: &AnyPool,
-) -> Option<String> {
+) -> String {
     let dt_config_old = global_config
         .get("datatype")
         .and_then(|d| d.as_object())
@@ -3064,8 +3015,7 @@ pub fn get_table_constraints(
 
     for row in colvals {
         let datatype = &row.datatype;
-        let sql_type = get_sql_type(datatypes_config, &SerdeMap::new(), datatype, pool)
-            .expect(&format!("Unable to determine SQL type for {}", datatype));
+        let sql_type = get_sql_type(datatypes_config, &SerdeMap::new(), datatype, pool);
         let column_name = &row.column;
         let structure = &row.structure;
         if structure != "" {
@@ -3120,8 +3070,7 @@ pub fn get_table_constraints(
                                     &SerdeMap::new(),
                                     &child_datatype.to_string(),
                                     pool,
-                                )
-                                .unwrap();
+                                );
                                 if sql_type != child_sql_type {
                                     panic!(
                                         "SQL type '{}' of '{}' in 'tree({})' for table \
@@ -3247,8 +3196,7 @@ pub fn get_table_ddl(
                 .and_then(|s| Some(s.to_string()))
                 .unwrap(),
             pool,
-        )
-        .unwrap();
+        );
 
         let short_sql_type = {
             if sql_type.to_lowercase().as_str().starts_with("varchar(") {
@@ -3551,8 +3499,7 @@ pub async fn make_inserts(
                 let cell = row.contents.get(column).unwrap();
                 // Insert the value of the cell into the column unless inserting it will cause a db
                 // error or it has the nulltype field set, in which case insert NULL:
-                let sql_type =
-                    get_sql_type_from_global_config(config, &main_table, column, pool).unwrap();
+                let sql_type = get_sql_type_from_global_config(config, &main_table, column, pool);
                 if cell.nulltype != None || is_sql_type_error(&sql_type, &cell.value) {
                     row_values.push(String::from("NULL"));
                 } else {

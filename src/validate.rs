@@ -159,8 +159,7 @@ pub async fn validate_row_tx(
             // We don't do any further validation on cells that have SQL type violations because
             // they can result in database errors when, for instance, we compare a numeric with a
             // non-numeric type.
-            let sql_type =
-                get_sql_type_from_global_config(&config, table_name, &column_name, pool).unwrap();
+            let sql_type = get_sql_type_from_global_config(&config, table_name, &column_name, pool);
             if !is_sql_type_error(&sql_type, &cell.value) {
                 // TODO: Pass the query_as_if parameter to validate_cell_trees.
                 validate_cell_trees(
@@ -269,8 +268,7 @@ pub async fn validate_under(
         let tree_table = ukey.get("ttable").and_then(|tt| tt.as_str()).unwrap();
         let tree_child = ukey.get("tcolumn").and_then(|tc| tc.as_str()).unwrap();
         let column = ukey.get("column").and_then(|c| c.as_str()).unwrap();
-        let sql_type =
-            get_sql_type_from_global_config(&config, &table_name, &column, pool).unwrap();
+        let sql_type = get_sql_type_from_global_config(&config, &table_name, &column, pool);
         let tree = config
             .get("constraints")
             .and_then(|c| c.as_object())
@@ -461,7 +459,7 @@ pub async fn validate_tree_foreign_keys(
         let child_col = tkey.get("child").and_then(|c| c.as_str()).unwrap();
         let parent_col = tkey.get("parent").and_then(|p| p.as_str()).unwrap();
         let parent_sql_type =
-            get_sql_type_from_global_config(&config, &table_name, &parent_col, pool).unwrap();
+            get_sql_type_from_global_config(&config, &table_name, &parent_col, pool);
         let with_clause;
         let params;
         if let Some(ref extra_row) = extra_row {
@@ -570,8 +568,7 @@ pub async fn validate_rows_trees(
             // We don't do any further validation on cells that are legitimately empty, or on cells
             // that have SQL type violations. We exclude the latter because they can result in
             // database errors when, for instance, we compare a numeric with a non-numeric type.
-            let sql_type =
-                get_sql_type_from_global_config(&config, table_name, &column_name, pool).unwrap();
+            let sql_type = get_sql_type_from_global_config(&config, table_name, &column_name, pool);
             if cell.nulltype == None && !is_sql_type_error(&sql_type, &cell.value) {
                 validate_cell_trees(
                     config,
@@ -629,8 +626,7 @@ pub async fn validate_rows_constraints(
             // We don't do any further validation on cells that are legitimately empty, or on cells
             // that have SQL type violations. We exclude the latter because they can result in
             // database errors when, for instance, we compare a numeric with a non-numeric type.
-            let sql_type =
-                get_sql_type_from_global_config(&config, table_name, &column_name, pool).unwrap();
+            let sql_type = get_sql_type_from_global_config(&config, table_name, &column_name, pool);
             if cell.nulltype == None && !is_sql_type_error(&sql_type, &cell.value) {
                 validate_cell_foreign_constraints(
                     config,
@@ -842,7 +838,7 @@ pub fn select_with_extra_row(
 
     let mut second_select = String::from(r#"SELECT "row_number", "#);
     for (i, (key, content)) in extra_row.contents.iter().enumerate() {
-        let sql_type = get_sql_type_from_global_config(&config, &table, &key, pool).unwrap();
+        let sql_type = get_sql_type_from_global_config(&config, &table, &key, pool);
         let sql_param = cast_sql_param_from_text(&sql_type);
         // enumerate() begins from 0 but we need to begin at 1:
         let i = i + 1;
@@ -890,8 +886,7 @@ pub fn with_tree_sql(
     let mut params = vec![];
     let under_sql;
     if let Some(root) = root {
-        let sql_type =
-            get_sql_type_from_global_config(&config, table_name, &child_col, pool).unwrap();
+        let sql_type = get_sql_type_from_global_config(&config, table_name, &child_col, pool);
         under_sql = format!(
             r#"WHERE "{}" = {}"#,
             child_col,
@@ -1228,8 +1223,7 @@ pub fn as_if_to_sql(
                             &as_if.table,
                             &column,
                             pool,
-                        )
-                        .unwrap();
+                        );
 
                         if sql_type.to_lowercase() == "text"
                             || sql_type.to_lowercase().starts_with("varchar(")
@@ -1329,7 +1323,7 @@ pub async fn validate_cell_foreign_constraints(
             _ => ("".to_string(), ftable.to_string()),
         };
         let fcolumn = fkey.get("fcolumn").and_then(|c| c.as_str()).unwrap();
-        let sql_type = get_sql_type_from_global_config(&config, &ftable, &fcolumn, pool).unwrap();
+        let sql_type = get_sql_type_from_global_config(&config, &ftable, &fcolumn, pool);
         let sql_param = cast_sql_param_from_text(&sql_type);
         let fsql = local_sql_syntax(
             &pool,
@@ -1455,15 +1449,14 @@ pub async fn validate_cell_trees(
     }
 
     let parent_col = column_name;
-    let parent_sql_type =
-        get_sql_type_from_global_config(&config, &table_name, &parent_col, pool).unwrap();
+    let parent_sql_type = get_sql_type_from_global_config(&config, &table_name, &parent_col, pool);
     let parent_sql_param = cast_sql_param_from_text(&parent_sql_type);
     let parent_val = cell.value.clone();
     let view_name = format!("{}_view", table_name);
     for tkey in tkeys {
         let child_col = tkey.get("child").and_then(|c| c.as_str()).unwrap();
         let child_sql_type =
-            get_sql_type_from_global_config(&config, &table_name, &child_col, pool).unwrap();
+            get_sql_type_from_global_config(&config, &table_name, &child_col, pool);
         let child_sql_param = cast_sql_param_from_text(&child_sql_type);
         let child_val = context
             .contents
@@ -1679,8 +1672,7 @@ pub async fn validate_cell_unique_constraints(
             query_table = view_name.to_string();
         }
 
-        let sql_type =
-            get_sql_type_from_global_config(&config, &table_name, &column_name, pool).unwrap();
+        let sql_type = get_sql_type_from_global_config(&config, &table_name, &column_name, pool);
         let sql_param = cast_sql_param_from_text(&sql_type);
         let sql = local_sql_syntax(
             &pool,

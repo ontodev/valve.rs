@@ -80,18 +80,16 @@ pub struct ValveSpecialConfig {
     pub table: String,
 }
 
-// TODO: Make more fields optional.
 #[derive(Debug, Default)]
 pub struct ValveTableConfig {
     pub table: String,
-    pub table_type: Option<String>,
+    pub table_type: String,
     pub description: String,
     pub path: String,
     pub column: HashMap<String, ValveColumnConfig>,
     pub column_order: Vec<String>,
 }
 
-// TODO: Make more fields optional.
 #[derive(Clone, Debug, Default)]
 pub struct ValveColumnConfig {
     pub table: String,
@@ -100,18 +98,17 @@ pub struct ValveColumnConfig {
     pub description: String,
     pub label: String,
     pub structure: String,
-    pub nulltype: Option<String>,
+    pub nulltype: String,
 }
 
-// TODO: Make more fields optional.
 #[derive(Debug, Default)]
 pub struct ValveDatatypeConfig {
     pub html_type: String,
-    pub sql_type: Option<String>,
-    pub condition: Option<String>,
+    pub sql_type: String,
+    pub condition: String,
     pub datatype: String,
     pub description: String,
-    pub parent: Option<String>,
+    pub parent: String,
     pub structure: String,
     pub transform: String,
 }
@@ -161,7 +158,6 @@ pub struct ValveConstraintConfig {
     pub under: HashMap<String, Vec<ValveUnderConstraint>>,
 }
 
-// TODO: Make rule optional.
 #[derive(Debug, Default)]
 pub struct ValveConfig {
     pub special: ValveSpecialConfig,
@@ -274,16 +270,16 @@ impl Valve {
             constraint: constraints_config,
         };
 
-        let config_old = SerdeMap::new();
-
         let datatype_conditions = get_compiled_datatype_conditions(&config, &parser);
         let rule_conditions = get_compiled_rule_conditions(&config, &datatype_conditions, &parser);
         let structure_conditions = get_parsed_structure_conditions(&config, &parser);
 
         if 1 == 1 {
-            println!("STRUCTURE CONDS: {:#?}", structure_conditions);
+            println!("CONFIG: {:#?}", config);
             todo!();
         }
+
+        let config_old = SerdeMap::new();
 
         Ok(Self {
             config: config_old,
@@ -675,8 +671,7 @@ impl Valve {
                 .get(cname)
                 .and_then(|c| c.as_object())
                 .unwrap();
-            let sql_type =
-                get_sql_type_from_global_config(&self.config, table, &cname, &self.pool).unwrap();
+            let sql_type = get_sql_type_from_global_config(&self.config, table, &cname, &self.pool);
 
             // Check the column's SQL type:
             if sql_type.to_lowercase() != ctype.to_lowercase() {
@@ -777,8 +772,7 @@ impl Valve {
             &datatypes_config,
             &"text".to_string(),
             &self.pool,
-        )
-        .unwrap();
+        );
 
         // Generate DDL for the history table:
         let mut history_statements = vec![];
@@ -1821,8 +1815,7 @@ impl Valve {
                 );
 
                 let sql_type =
-                    get_sql_type_from_global_config(&config, table_name, &column_name, &pool)
-                        .unwrap();
+                    get_sql_type_from_global_config(&config, table_name, &column_name, &pool);
 
                 match structure {
                     Some(ParsedStructure { original, parsed }) => {
