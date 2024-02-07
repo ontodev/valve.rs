@@ -34,7 +34,7 @@ use crate::{
         QueryAsIf, QueryAsIfKind, ResultRow,
     },
     valve::{
-        ValveColumnConfig, ValveConstraintConfig, ValveDatatypeConfig, ValveError,
+        ValveColumnConfig, ValveConfig, ValveConstraintConfig, ValveDatatypeConfig, ValveError,
         ValveForeignConstraint, ValveRow, ValveRuleConfig, ValveSpecialConfig, ValveTableConfig,
         ValveTreeConstraint, ValveUnderConstraint,
     },
@@ -927,22 +927,18 @@ pub fn read_config_files(
 /// add them to a hash map whose keys are the text versions of the conditions and whose values
 /// are the compiled conditions, and then finally return the hash map.
 pub fn get_compiled_datatype_conditions(
-    config: &SerdeMap,
+    config: &ValveConfig,
     parser: &StartParser,
 ) -> HashMap<String, CompiledCondition> {
     let mut compiled_datatype_conditions: HashMap<String, CompiledCondition> = HashMap::new();
-    let datatypes_config = config.get("datatype").and_then(|t| t.as_object()).unwrap();
-    for (_, row) in datatypes_config.iter() {
-        let row = row.as_object().unwrap();
-        let dt_name = row.get("datatype").and_then(|d| d.as_str()).unwrap();
-        let condition = row.get("condition").and_then(|c| c.as_str());
-        let compiled_condition =
-            compile_condition(condition, parser, &compiled_datatype_conditions);
-        if let Some(_) = condition {
+    for (dt_name, dt_config) in config.datatype.iter() {
+        if let Some(condition) = &dt_config.condition {
+            let condition = condition.as_str();
+            let compiled_condition =
+                compile_condition(condition, parser, &compiled_datatype_conditions);
             compiled_datatype_conditions.insert(dt_name.to_string(), compiled_condition);
         }
     }
-
     compiled_datatype_conditions
 }
 
@@ -959,77 +955,52 @@ pub fn get_compiled_datatype_conditions(
 /// }
 /// ```
 pub fn get_compiled_rule_conditions(
-    config: &SerdeMap,
-    compiled_datatype_conditions: HashMap<String, CompiledCondition>,
+    config: &ValveConfig,
+    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     parser: &StartParser,
 ) -> HashMap<String, HashMap<String, Vec<ColumnRule>>> {
     let mut compiled_rule_conditions = HashMap::new();
-    let tables_config = config.get("table").and_then(|t| t.as_object()).unwrap();
-    let rules_config = config.get("rule").and_then(|t| t.as_object()).unwrap();
+    let tables_config = &config.table;
+    let rules_config = &config.rule;
     for (rules_table, table_rules) in rules_config.iter() {
-        let table_rules = table_rules.as_object().unwrap();
-        for (_, column_rules) in table_rules.iter() {
-            let column_rules = column_rules.as_array().unwrap();
-            for row in column_rules {
-                // Compile and collect the when and then conditions.
-                let mut column_rule_key = None;
-                for column in vec!["when column", "then column"] {
-                    let row_column = row.get(column).and_then(|c| c.as_str()).unwrap();
-                    if column == "when column" {
-                        column_rule_key = Some(row_column.to_string());
-                    }
-                    if !tables_config
-                        .get(rules_table)
-                        .and_then(|t| t.get("column"))
-                        .and_then(|c| c.as_object())
-                        .and_then(|c| Some(c.contains_key(row_column)))
-                        .unwrap()
-                    {
+        println!("Rules for {}", rules_table);
+        for (column_rule_key, column_rules) in table_rules.iter() {
+            for rule in column_rules {
+                let table_columns = tables_config
+                    .get(rules_table)
+                    .unwrap()
+                    .column
+                    .keys()
+                    .collect::<Vec<_>>();
+                for column in vec![&rule.when_column, &rule.then_column] {
+                    if !table_columns.contains(&column) {
                         panic!(
                             "Undefined column '{}.{}' in rules table",
-                            rules_table, row_column
+                            rules_table, column
                         );
                     }
                 }
-                let column_rule_key = column_rule_key.unwrap();
+                let when_compiled =
+                    compile_condition(&rule.when_condition, parser, &compiled_datatype_conditions);
+                let then_compiled =
+                    compile_condition(&rule.then_condition, parser, &compiled_datatype_conditions);
 
-                let mut when_compiled = None;
-                let mut then_compiled = None;
-                for column in vec!["when condition", "then condition"] {
-                    let condition_option = row.get(column).and_then(|c| c.as_str());
-                    if let Some(_) = condition_option {
-                        let compiled_condition = compile_condition(
-                            condition_option,
-                            parser,
-                            &compiled_datatype_conditions,
-                        );
-                        if column == "when condition" {
-                            when_compiled = Some(compiled_condition);
-                        } else if column == "then condition" {
-                            then_compiled = Some(compiled_condition);
-                        }
-                    }
+                if !compiled_rule_conditions.contains_key(rules_table) {
+                    let table_rules = HashMap::new();
+                    compiled_rule_conditions.insert(rules_table.to_string(), table_rules);
                 }
-
-                if let (Some(when_compiled), Some(then_compiled)) = (when_compiled, then_compiled) {
-                    if !compiled_rule_conditions.contains_key(rules_table) {
-                        let table_rules = HashMap::new();
-                        compiled_rule_conditions.insert(rules_table.to_string(), table_rules);
-                    }
-                    let table_rules = compiled_rule_conditions.get_mut(rules_table).unwrap();
-                    if !table_rules.contains_key(&column_rule_key) {
-                        table_rules.insert(column_rule_key.to_string(), vec![]);
-                    }
-                    let column_rules = table_rules.get_mut(&column_rule_key).unwrap();
-                    column_rules.push(ColumnRule {
-                        when: when_compiled,
-                        then: then_compiled,
-                    });
+                let table_rules = compiled_rule_conditions.get_mut(rules_table).unwrap();
+                if !table_rules.contains_key(column_rule_key) {
+                    table_rules.insert(column_rule_key.to_string(), vec![]);
                 }
+                let column_rules = table_rules.get_mut(column_rule_key).unwrap();
+                column_rules.push(ColumnRule {
+                    when: when_compiled,
+                    then: then_compiled,
+                });
             }
         }
     }
-
     compiled_rule_conditions
 }
 
@@ -1037,44 +1008,33 @@ pub fn get_compiled_rule_conditions(
 /// a hash map whose keys are given by the text versions of the conditions and whose values are
 /// given by the parsed versions, and finally return the hashmap.
 pub fn get_parsed_structure_conditions(
-    config: &SerdeMap,
+    config: &ValveConfig,
     parser: &StartParser,
 ) -> HashMap<String, ParsedStructure> {
     let mut parsed_structure_conditions = HashMap::new();
-    let tables_config = config.get("table").and_then(|t| t.as_object()).unwrap();
+    let tables_config = &config.table;
     for (table, table_config) in tables_config.iter() {
-        let columns_config = table_config
-            .get("column")
-            .and_then(|c| c.as_object())
-            .unwrap();
-        for (_, row) in columns_config.iter() {
-            let row_table = table;
-            let structure = row.get("structure").and_then(|s| s.as_str());
-            match structure {
-                Some(structure) if structure != "" => {
-                    let parsed_structure = parser.parse(structure);
-                    if let Err(e) = parsed_structure {
-                        panic!(
-                            "While parsing structure: '{}' for column: '{}.{}' got error:\n{}",
-                            structure,
-                            row_table,
-                            row.get("table").and_then(|t| t.as_str()).unwrap(),
-                            e
-                        );
-                    }
-                    let parsed_structure = parsed_structure.unwrap();
-                    let parsed_structure = &parsed_structure[0];
-                    let parsed_structure = ParsedStructure {
-                        original: structure.to_string(),
-                        parsed: *parsed_structure.clone(),
-                    };
-                    parsed_structure_conditions.insert(structure.to_string(), parsed_structure);
+        let columns_config = &table_config.column;
+        for (column, column_config) in columns_config.iter() {
+            let structure = &column_config.structure;
+            if structure != "" {
+                let parsed_structure = parser.parse(structure);
+                if let Err(e) = parsed_structure {
+                    panic!(
+                        "While parsing structure: '{}' for column: '{}.{}' got error:\n{}",
+                        structure, table, column, e
+                    );
                 }
-                _ => (),
-            };
+                let parsed_structure = parsed_structure.unwrap();
+                let parsed_structure = &parsed_structure[0];
+                let parsed_structure = ParsedStructure {
+                    original: structure.to_string(),
+                    parsed: *parsed_structure.clone(),
+                };
+                parsed_structure_conditions.insert(structure.to_string(), parsed_structure);
+            }
         }
     }
-
     parsed_structure_conditions
 }
 
@@ -2626,142 +2586,124 @@ pub fn read_db_table_into_vector(database: &str, config_table: &str) -> Vec<Valv
 /// Label, then look for the CompiledCondition corresponding to it in compiled_datatype_conditions
 /// and return it.
 pub fn compile_condition(
-    condition_option: Option<&str>,
+    condition: &str,
     parser: &StartParser,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
 ) -> CompiledCondition {
+    if condition == "null" || condition == "not null" {
+        // The case of a "null" or "not null" condition will be treated specially later during the
+        // validation phase in a way that does not utilise the associated closure. Since we still
+        // have to assign some closure in these cases, we use a constant closure that always
+        // returns true:
+        return CompiledCondition {
+            original: String::from(""),
+            parsed: Expression::None,
+            compiled: Arc::new(|_| true),
+        };
+    }
+
     let unquoted_re = Regex::new(r#"^['"](?P<unquoted>.*)['"]$"#).unwrap();
-    match condition_option {
-        // The case of no condition, or a "null" or "not null" condition, will be treated specially
-        // later during the validation phase in a way that does not utilise the associated closure.
-        // Since we still have to assign some closure in these cases, we use a constant closure that
-        // always returns true:
-        None => {
-            return CompiledCondition {
-                original: String::from(""),
-                parsed: Expression::None,
-                compiled: Arc::new(|_| true),
-            }
-        }
-        Some("null") => {
-            return CompiledCondition {
-                original: String::from("null"),
-                parsed: Expression::Null,
-                compiled: Arc::new(|_| true),
-            }
-        }
-        Some("not null") => {
-            return CompiledCondition {
-                original: String::from("not null"),
-                parsed: Expression::NotNull,
-                compiled: Arc::new(|_| true),
-            }
-        }
-        Some(condition) => {
-            let parsed_condition = parser.parse(condition);
-            if let Err(_) = parsed_condition {
-                panic!("ERROR: Could not parse condition: {}", condition);
-            }
-            let parsed_condition = parsed_condition.unwrap();
-            if parsed_condition.len() != 1 {
-                panic!(
-                    "ERROR: Invalid condition: '{}'. Only one condition per column is allowed.",
-                    condition
-                );
-            }
-            let parsed_condition = &parsed_condition[0];
-            match &**parsed_condition {
-                Expression::Function(name, args) => {
-                    if name == "equals" {
-                        if let Expression::Label(label) = &*args[0] {
-                            let label = String::from(unquoted_re.replace(label, "$unquoted"));
+    let parsed_condition = parser.parse(condition);
+    if let Err(_) = parsed_condition {
+        panic!("ERROR: Could not parse condition: {}", condition);
+    }
+    let parsed_condition = parsed_condition.unwrap();
+    if parsed_condition.len() != 1 {
+        panic!(
+            "ERROR: Invalid condition: '{}'. Only one condition per column is allowed.",
+            condition
+        );
+    }
+    let parsed_condition = &parsed_condition[0];
+    match &**parsed_condition {
+        Expression::Function(name, args) => {
+            if name == "equals" {
+                if let Expression::Label(label) = &*args[0] {
+                    let label = String::from(unquoted_re.replace(label, "$unquoted"));
+                    return CompiledCondition {
+                        original: condition.to_string(),
+                        parsed: *parsed_condition.clone(),
+                        compiled: Arc::new(move |x| x == label),
+                    };
+                } else {
+                    panic!("ERROR: Invalid condition: {}", condition);
+                }
+            } else if vec!["exclude", "match", "search"].contains(&name.as_str()) {
+                if let Expression::RegexMatch(pattern, flags) = &*args[0] {
+                    let mut pattern = String::from(unquoted_re.replace(pattern, "$unquoted"));
+                    let mut flags = String::from(flags);
+                    if flags != "" {
+                        flags = format!("(?{})", flags.as_str());
+                    }
+                    match name.as_str() {
+                        "exclude" => {
+                            pattern = format!("{}{}", flags, pattern);
+                            let re = Regex::new(pattern.as_str()).unwrap();
                             return CompiledCondition {
                                 original: condition.to_string(),
                                 parsed: *parsed_condition.clone(),
-                                compiled: Arc::new(move |x| x == label),
+                                compiled: Arc::new(move |x| !re.is_match(x)),
                             };
-                        } else {
-                            panic!("ERROR: Invalid condition: {}", condition);
                         }
-                    } else if vec!["exclude", "match", "search"].contains(&name.as_str()) {
-                        if let Expression::RegexMatch(pattern, flags) = &*args[0] {
-                            let mut pattern =
-                                String::from(unquoted_re.replace(pattern, "$unquoted"));
-                            let mut flags = String::from(flags);
-                            if flags != "" {
-                                flags = format!("(?{})", flags.as_str());
-                            }
-                            match name.as_str() {
-                                "exclude" => {
-                                    pattern = format!("{}{}", flags, pattern);
-                                    let re = Regex::new(pattern.as_str()).unwrap();
-                                    return CompiledCondition {
-                                        original: condition.to_string(),
-                                        parsed: *parsed_condition.clone(),
-                                        compiled: Arc::new(move |x| !re.is_match(x)),
-                                    };
-                                }
-                                "match" => {
-                                    pattern = format!("^{}{}$", flags, pattern);
-                                    let re = Regex::new(pattern.as_str()).unwrap();
-                                    return CompiledCondition {
-                                        original: condition.to_string(),
-                                        parsed: *parsed_condition.clone(),
-                                        compiled: Arc::new(move |x| re.is_match(x)),
-                                    };
-                                }
-                                "search" => {
-                                    pattern = format!("{}{}", flags, pattern);
-                                    let re = Regex::new(pattern.as_str()).unwrap();
-                                    return CompiledCondition {
-                                        original: condition.to_string(),
-                                        parsed: *parsed_condition.clone(),
-                                        compiled: Arc::new(move |x| re.is_match(x)),
-                                    };
-                                }
-                                _ => panic!("Unrecognized function name: {}", name),
+                        "match" => {
+                            pattern = format!("^{}{}$", flags, pattern);
+                            let re = Regex::new(pattern.as_str()).unwrap();
+                            return CompiledCondition {
+                                original: condition.to_string(),
+                                parsed: *parsed_condition.clone(),
+                                compiled: Arc::new(move |x| re.is_match(x)),
                             };
-                        } else {
-                            panic!(
-                                "Argument to condition: {} is not a regular expression",
-                                condition
-                            );
                         }
-                    } else if name == "in" {
-                        let mut alternatives: Vec<String> = vec![];
-                        for arg in args {
-                            if let Expression::Label(value) = &**arg {
-                                let value = unquoted_re.replace(value, "$unquoted");
-                                alternatives.push(value.to_string());
-                            } else {
-                                panic!("Argument: {:?} to function 'in' is not a label", arg);
-                            }
+                        "search" => {
+                            pattern = format!("{}{}", flags, pattern);
+                            let re = Regex::new(pattern.as_str()).unwrap();
+                            return CompiledCondition {
+                                original: condition.to_string(),
+                                parsed: *parsed_condition.clone(),
+                                compiled: Arc::new(move |x| re.is_match(x)),
+                            };
                         }
-                        return CompiledCondition {
-                            original: condition.to_string(),
-                            parsed: *parsed_condition.clone(),
-                            compiled: Arc::new(move |x| alternatives.contains(&x.to_string())),
-                        };
+                        _ => panic!("Unrecognized function name: {}", name),
+                    };
+                } else {
+                    panic!(
+                        "Argument to condition: {} is not a regular expression",
+                        condition
+                    );
+                }
+            } else if name == "in" {
+                let mut alternatives: Vec<String> = vec![];
+                for arg in args {
+                    if let Expression::Label(value) = &**arg {
+                        let value = unquoted_re.replace(value, "$unquoted");
+                        alternatives.push(value.to_string());
                     } else {
-                        panic!("Unrecognized function name: {}", name);
+                        panic!("Argument: {:?} to function 'in' is not a label", arg);
                     }
                 }
-                Expression::Label(value)
-                    if compiled_datatype_conditions.contains_key(&value.to_string()) =>
-                {
-                    let compiled_datatype_condition = compiled_datatype_conditions
-                        .get(&value.to_string())
-                        .unwrap();
-                    return CompiledCondition {
-                        original: value.to_string(),
-                        parsed: compiled_datatype_condition.parsed.clone(),
-                        compiled: compiled_datatype_condition.compiled.clone(),
-                    };
-                }
-                _ => {
-                    panic!("Unrecognized condition: {}", condition);
-                }
+                return CompiledCondition {
+                    original: condition.to_string(),
+                    parsed: *parsed_condition.clone(),
+                    compiled: Arc::new(move |x| alternatives.contains(&x.to_string())),
+                };
+            } else {
+                panic!("Unrecognized function name: {}", name);
+            }
+        }
+        Expression::Label(value)
+            if compiled_datatype_conditions.contains_key(&value.to_string()) =>
+        {
+            let compiled_datatype_condition = compiled_datatype_conditions
+                .get(&value.to_string())
+                .unwrap();
+            return CompiledCondition {
+                original: value.to_string(),
+                parsed: compiled_datatype_condition.parsed.clone(),
+                compiled: compiled_datatype_condition.compiled.clone(),
             };
+        }
+        _ => {
+            panic!("Unrecognized condition: {}", condition);
         }
     };
 }
@@ -2774,6 +2716,7 @@ pub fn get_sql_type(
     datatype: &String,
     pool: &AnyPool,
 ) -> Option<String> {
+    // If no such datatype exists, default to TEXT type:
     if !dt_config.contains_key(datatype) {
         return Some("TEXT".to_string());
     }

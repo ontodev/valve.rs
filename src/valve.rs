@@ -72,7 +72,6 @@ struct _ValveChange {
     pub _message: String,
 }
 
-// TODO: Make this struct public; remove unneeded derives.
 #[derive(Debug, Default)]
 pub struct ValveSpecialConfig {
     pub column: String,
@@ -81,7 +80,7 @@ pub struct ValveSpecialConfig {
     pub table: String,
 }
 
-// TODO: Make this struct public; remove unneeded derives.
+// TODO: Make more fields optional.
 #[derive(Debug, Default)]
 pub struct ValveTableConfig {
     pub table: String,
@@ -92,7 +91,7 @@ pub struct ValveTableConfig {
     pub column_order: Vec<String>,
 }
 
-// TODO: Make this struct public; remove unneeded derives.
+// TODO: Make more fields optional.
 #[derive(Clone, Debug, Default)]
 pub struct ValveColumnConfig {
     pub table: String,
@@ -104,7 +103,7 @@ pub struct ValveColumnConfig {
     pub nulltype: Option<String>,
 }
 
-// TODO: Make this struct public; remove unneeded derives.
+// TODO: Make more fields optional.
 #[derive(Debug, Default)]
 pub struct ValveDatatypeConfig {
     pub html_type: String,
@@ -117,7 +116,6 @@ pub struct ValveDatatypeConfig {
     pub transform: String,
 }
 
-// TODO: Make this struct public; remove unneeded derives.
 #[derive(Debug, Default)]
 pub struct ValveRuleConfig {
     pub description: String,
@@ -129,14 +127,12 @@ pub struct ValveRuleConfig {
     pub when_condition: String,
 }
 
-// TODO: Make this struct public; remove unneeded derives.
 #[derive(Debug, Default)]
 pub struct ValveTreeConstraint {
     pub child: String,
     pub parent: String,
 }
 
-// TODO: Make this struct public; remove unneeded derives.
 #[derive(Debug, Default)]
 pub struct ValveUnderConstraint {
     pub column: String,
@@ -145,7 +141,6 @@ pub struct ValveUnderConstraint {
     pub value: SerdeValue,
 }
 
-// TODO: Make this struct public; remove unneeded derives.
 #[derive(Debug, Default)]
 pub struct ValveForeignConstraint {
     pub column: String,
@@ -153,7 +148,6 @@ pub struct ValveForeignConstraint {
     pub fcolumn: String,
 }
 
-// TODO: Make this struct public; remove unneeded derives.
 #[derive(Debug, Default)]
 pub struct ValveConstraintConfig {
     // Note that primary would be better as HashMap<String, String>, since it is not possible to
@@ -167,7 +161,7 @@ pub struct ValveConstraintConfig {
     pub under: HashMap<String, Vec<ValveUnderConstraint>>,
 }
 
-// TODO: Make this struct public; remove unneeded derives.
+// TODO: Make rule optional.
 #[derive(Debug, Default)]
 pub struct ValveConfig {
     pub special: ValveSpecialConfig,
@@ -279,32 +273,26 @@ impl Valve {
             rule: rules_config,
             constraint: constraints_config,
         };
-        println!("SPECIALS CONFIG: {:#?}", config.special);
-        println!("TABLES CONFIG: {:#?}", config.table);
-        println!("DATATYPES CONFIG: {:#?}", config.datatype);
-        println!("CONSTRAINTS CONFIG: {:#?}", config.constraint);
-        println!("RULES CONFIG: {:#?}", config.rule);
-
-        // TODO: Obviously remove this later.
-        if 1 == 1 {
-            todo!();
-        }
 
         let config_old = SerdeMap::new();
 
-        let datatype_conditions = get_compiled_datatype_conditions(&config_old, &parser);
-        let rule_conditions =
-            get_compiled_rule_conditions(&config_old, datatype_conditions.clone(), &parser);
-        let structure_conditions = get_parsed_structure_conditions(&config_old, &parser);
+        let datatype_conditions = get_compiled_datatype_conditions(&config, &parser);
+        let rule_conditions = get_compiled_rule_conditions(&config, &datatype_conditions, &parser);
+        let structure_conditions = get_parsed_structure_conditions(&config, &parser);
+
+        if 1 == 1 {
+            println!("STRUCTURE CONDS: {:#?}", structure_conditions);
+            todo!();
+        }
 
         Ok(Self {
             config: config_old,
-            datatype_conditions: datatype_conditions,
-            rule_conditions: rule_conditions,
-            structure_conditions: structure_conditions,
             sorted_table_list: sorted_table_list.clone(),
             table_dependencies_in: table_dependencies_in,
             table_dependencies_out: table_dependencies_out,
+            datatype_conditions: datatype_conditions,
+            rule_conditions: rule_conditions,
+            structure_conditions: structure_conditions,
             pool: pool,
             user: String::from("VALVE"),
             verbose: verbose,
