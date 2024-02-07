@@ -34,8 +34,8 @@ use crate::{
         QueryAsIf, QueryAsIfKind, ResultRow,
     },
     valve::{
-        ValveColumnConfig, ValveDatatypeConfig, ValveError, ValveForeignConstraint, ValveRow,
-        ValveRuleConfig, ValveSpecialConfig, ValveTableConfig, ValveTableConstraints,
+        ValveColumnConfig, ValveConstraintConfig, ValveDatatypeConfig, ValveError,
+        ValveForeignConstraint, ValveRow, ValveRuleConfig, ValveSpecialConfig, ValveTableConfig,
         ValveTreeConstraint, ValveUnderConstraint,
     },
     valve_grammar::StartParser,
@@ -219,7 +219,7 @@ pub fn read_config_files(
     HashMap<String, ValveTableConfig>,
     HashMap<String, ValveDatatypeConfig>,
     HashMap<String, HashMap<String, Vec<ValveRuleConfig>>>,
-    ValveTableConstraints,
+    ValveConstraintConfig,
     Vec<String>,
     HashMap<String, Vec<String>>,
     HashMap<String, Vec<String>>,
@@ -580,7 +580,7 @@ pub fn read_config_files(
     }
 
     // Initialize the constraints config:
-    let mut table_constraints = ValveTableConstraints::default();
+    let mut constraints_config = ValveConstraintConfig::default();
 
     for table_name in tables_config.keys().cloned().collect::<Vec<_>>() {
         let optional_path = tables_config
@@ -674,17 +674,19 @@ pub fn read_config_files(
             &pool,
         );
 
-        table_constraints
+        constraints_config
             .primary
             .insert(table_name.to_string(), primaries);
-        table_constraints
+        constraints_config
             .unique
             .insert(table_name.to_string(), uniques);
-        table_constraints
+        constraints_config
             .foreign
             .insert(table_name.to_string(), foreigns);
-        table_constraints.tree.insert(table_name.to_string(), trees);
-        table_constraints
+        constraints_config
+            .tree
+            .insert(table_name.to_string(), trees);
+        constraints_config
             .under
             .insert(table_name.to_string(), unders);
     }
@@ -905,7 +907,7 @@ pub fn read_config_files(
             // table list that is returned.
             .filter(|m| m != "history" && m != "message")
             .collect(),
-        &table_constraints,
+        &constraints_config,
     );
 
     // Finally, return all the configs:
@@ -914,7 +916,7 @@ pub fn read_config_files(
         tables_config,
         datatypes_config,
         rules_config,
-        table_constraints,
+        constraints_config,
         sorted_tables,
         table_dependencies_in,
         table_dependencies_out,
@@ -2897,7 +2899,7 @@ pub fn local_sql_syntax(pool: &AnyPool, sql: &String) -> String {
 /// list that is returned.
 pub fn verify_table_deps_and_sort(
     table_list: &Vec<String>,
-    constraints: &ValveTableConstraints,
+    constraints: &ValveConstraintConfig,
 ) -> (
     Vec<String>,
     HashMap<String, Vec<String>>,

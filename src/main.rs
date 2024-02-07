@@ -193,17 +193,15 @@ async fn main() -> Result<(), ValveError> {
     } else if dump_config {
         let valve = Valve::build(&source, &destination, verbose, initial_load).await?;
         let mut config = valve.config.clone();
-        let datatype_conditions =
-            format!("{:?}", valve.compiled_datatype_conditions).replace(r"\", r"\\");
+        let datatype_conditions = format!("{:?}", valve.datatype_conditions).replace(r"\", r"\\");
         let datatype_conditions: SerdeValue = from_str(&datatype_conditions).unwrap();
         config.insert(String::from("datatype_conditions"), datatype_conditions);
 
-        let structure_conditions =
-            format!("{:?}", valve.parsed_structure_conditions).replace(r"\", r"\\");
+        let structure_conditions = format!("{:?}", valve.structure_conditions).replace(r"\", r"\\");
         let structure_conditions: SerdeValue = from_str(&structure_conditions).unwrap();
         config.insert(String::from("structure_conditions"), structure_conditions);
 
-        let rule_conditions = format!("{:?}", valve.compiled_rule_conditions).replace(r"\", r"\\");
+        let rule_conditions = format!("{:?}", valve.rule_conditions).replace(r"\", r"\\");
         let rule_conditions: SerdeValue = from_str(&rule_conditions).unwrap();
         config.insert(String::from("rule_conditions"), rule_conditions);
 

@@ -155,7 +155,7 @@ pub struct ValveForeignConstraint {
 
 // TODO: Make this struct public; remove unneeded derives.
 #[derive(Debug, Default)]
-pub struct ValveTableConstraints {
+pub struct ValveConstraintConfig {
     // Note that primary would be better as HashMap<String, String>, since it is not possible to
     // have more than one primary key per table, but the below reflects the current implementation
     // which in principle allows for more than one.
@@ -174,11 +174,7 @@ pub struct ValveConfig {
     pub table: HashMap<String, ValveTableConfig>,
     pub datatype: HashMap<String, ValveDatatypeConfig>,
     pub rule: HashMap<String, HashMap<String, Vec<ValveRuleConfig>>>,
-    pub table_constraints: ValveTableConstraints,
-    //pub datatype_conditions: HashMap<String, CompiledCondition>,
-    //pub rule_conditions: HashMap<String, HashMap<String, Vec<ColumnRule>>>,
-    //pub structure_conditions: HashMap<String, ParsedStructure>,
-    pub sorted_table_list: Vec<String>,
+    pub constraint: ValveConstraintConfig,
 }
 
 /// Main entrypoint for the Valve API.
@@ -186,21 +182,26 @@ pub struct ValveConfig {
 pub struct Valve {
     /// The valve configuration map.
     pub config: SerdeMap,
-    /// Pre-compiled datatype conditions.
-    pub compiled_datatype_conditions: HashMap<String, CompiledCondition>,
-    /// Pre-compiled rule conditions.
-    pub compiled_rule_conditions: HashMap<String, HashMap<String, Vec<ColumnRule>>>,
-    /// Parsed structure conditions:
-    pub parsed_structure_conditions: HashMap<String, ParsedStructure>,
+    /// The full list of tables managed by valve, in dependency order.
+    pub sorted_table_list: Vec<String>,
     /// Lists of tables that depend on a given table, indexed by table.
     pub table_dependencies_in: HashMap<String, Vec<String>>,
     /// Lists of tables that a given table depends on, indexed by table.
     pub table_dependencies_out: HashMap<String, Vec<String>>,
+    /// A map from string representations of datatype conditions to the pre-compiled regexes
+    /// associated with them.
+    pub datatype_conditions: HashMap<String, CompiledCondition>,
+    /// A map from string representations of rule conditions to the pre-compiled regexes
+    /// associated with them.
+    pub rule_conditions: HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    /// A map from string representations of structure conditions to the parsed versions
+    /// associated with them.
+    pub structure_conditions: HashMap<String, ParsedStructure>,
     /// The database connection pool.
     pub pool: AnyPool,
     /// The user associated with this valve instance.
     pub user: String,
-    /// Produce more logging output.
+    /// When set to true, the valve instance produces more logging output.
     pub verbose: bool,
 }
 
@@ -276,15 +277,13 @@ impl Valve {
             table: tables_config,
             datatype: datatypes_config,
             rule: rules_config,
-            table_constraints: constraints_config,
-            sorted_table_list: sorted_table_list.clone(),
+            constraint: constraints_config,
         };
         println!("SPECIALS CONFIG: {:#?}", config.special);
         println!("TABLES CONFIG: {:#?}", config.table);
         println!("DATATYPES CONFIG: {:#?}", config.datatype);
-        println!("TABLE CONSTRAINTS: {:#?}", config.table_constraints);
+        println!("CONSTRAINTS CONFIG: {:#?}", config.constraint);
         println!("RULES CONFIG: {:#?}", config.rule);
-        println!("SORTED TABLE LIST: {:?}", config.sorted_table_list);
 
         // TODO: Obviously remove this later.
         if 1 == 1 {
@@ -293,19 +292,17 @@ impl Valve {
 
         let config_old = SerdeMap::new();
 
-        let compiled_datatype_conditions = get_compiled_datatype_conditions(&config_old, &parser);
-        let compiled_rule_conditions = get_compiled_rule_conditions(
-            &config_old,
-            compiled_datatype_conditions.clone(),
-            &parser,
-        );
-        let parsed_structure_conditions = get_parsed_structure_conditions(&config_old, &parser);
+        let datatype_conditions = get_compiled_datatype_conditions(&config_old, &parser);
+        let rule_conditions =
+            get_compiled_rule_conditions(&config_old, datatype_conditions.clone(), &parser);
+        let structure_conditions = get_parsed_structure_conditions(&config_old, &parser);
 
         Ok(Self {
             config: config_old,
-            compiled_datatype_conditions: compiled_datatype_conditions,
-            compiled_rule_conditions: compiled_rule_conditions,
-            parsed_structure_conditions: parsed_structure_conditions,
+            datatype_conditions: datatype_conditions,
+            rule_conditions: rule_conditions,
+            structure_conditions: structure_conditions,
+            sorted_table_list: sorted_table_list.clone(),
             table_dependencies_in: table_dependencies_in,
             table_dependencies_out: table_dependencies_out,
             pool: pool,
@@ -720,7 +717,7 @@ impl Valve {
             match structure {
                 Some(structure) if structure != "" => {
                     let parsed_structure = self
-                        .parsed_structure_conditions
+                        .structure_conditions
                         .get(structure)
                         .and_then(|p| Some(p.parsed.clone()))
                         .unwrap();
@@ -1003,7 +1000,7 @@ impl Valve {
 
         // TODO: Here.
         let (sorted_subset, _, _) =
-            verify_table_deps_and_sort(&filtered_subset, &ValveTableConstraints::default());
+            verify_table_deps_and_sort(&filtered_subset, &ValveConstraintConfig::default());
 
         // Since the result of verify_table_deps_and_sort() will include dependencies of the tables
         // in its input list, we filter those out here:
@@ -1186,8 +1183,8 @@ impl Valve {
             insert_chunks(
                 &self.config,
                 &self.pool,
-                &self.compiled_datatype_conditions,
-                &self.compiled_rule_conditions,
+                &self.datatype_conditions,
+                &self.rule_conditions,
                 &table_name,
                 &chunks,
                 &headers,
@@ -1402,8 +1399,8 @@ impl Valve {
     ) -> Result<ValveRow, ValveError> {
         validate_row_tx(
             &self.config,
-            &self.compiled_datatype_conditions,
-            &self.compiled_rule_conditions,
+            &self.datatype_conditions,
+            &self.rule_conditions,
             &self.pool,
             None,
             table_name,
@@ -1425,8 +1422,8 @@ impl Valve {
 
         let row = validate_row_tx(
             &self.config,
-            &self.compiled_datatype_conditions,
-            &self.compiled_rule_conditions,
+            &self.datatype_conditions,
+            &self.rule_conditions,
             &self.pool,
             Some(&mut tx),
             table_name,
@@ -1438,8 +1435,8 @@ impl Valve {
 
         let rn = insert_new_row_tx(
             &self.config,
-            &self.compiled_datatype_conditions,
-            &self.compiled_rule_conditions,
+            &self.datatype_conditions,
+            &self.rule_conditions,
             &self.pool,
             &mut tx,
             table_name,
@@ -1471,8 +1468,8 @@ impl Valve {
 
         let row = validate_row_tx(
             &self.config,
-            &self.compiled_datatype_conditions,
-            &self.compiled_rule_conditions,
+            &self.datatype_conditions,
+            &self.rule_conditions,
             &self.pool,
             Some(&mut tx),
             table_name,
@@ -1484,8 +1481,8 @@ impl Valve {
 
         update_row_tx(
             &self.config,
-            &self.compiled_datatype_conditions,
-            &self.compiled_rule_conditions,
+            &self.datatype_conditions,
+            &self.rule_conditions,
             &self.pool,
             &mut tx,
             table_name,
@@ -1530,8 +1527,8 @@ impl Valve {
 
         delete_row_tx(
             &self.config,
-            &self.compiled_datatype_conditions,
-            &self.compiled_rule_conditions,
+            &self.datatype_conditions,
+            &self.rule_conditions,
             &self.pool,
             &mut tx,
             table_name,
@@ -1612,8 +1609,8 @@ impl Valve {
 
                 delete_row_tx(
                     &self.config,
-                    &self.compiled_datatype_conditions,
-                    &self.compiled_rule_conditions,
+                    &self.datatype_conditions,
+                    &self.rule_conditions,
                     &self.pool,
                     &mut tx,
                     table,
@@ -1631,8 +1628,8 @@ impl Valve {
 
                 insert_new_row_tx(
                     &self.config,
-                    &self.compiled_datatype_conditions,
-                    &self.compiled_rule_conditions,
+                    &self.datatype_conditions,
+                    &self.rule_conditions,
                     &self.pool,
                     &mut tx,
                     table,
@@ -1652,8 +1649,8 @@ impl Valve {
 
                 update_row_tx(
                     &self.config,
-                    &self.compiled_datatype_conditions,
-                    &self.compiled_rule_conditions,
+                    &self.datatype_conditions,
+                    &self.rule_conditions,
                     &self.pool,
                     &mut tx,
                     table,
@@ -1707,8 +1704,8 @@ impl Valve {
 
                 insert_new_row_tx(
                     &self.config,
-                    &self.compiled_datatype_conditions,
-                    &self.compiled_rule_conditions,
+                    &self.datatype_conditions,
+                    &self.rule_conditions,
                     &self.pool,
                     &mut tx,
                     table,
@@ -1728,8 +1725,8 @@ impl Valve {
 
                 delete_row_tx(
                     &self.config,
-                    &self.compiled_datatype_conditions,
-                    &self.compiled_rule_conditions,
+                    &self.datatype_conditions,
+                    &self.rule_conditions,
                     &self.pool,
                     &mut tx,
                     table,
@@ -1747,8 +1744,8 @@ impl Valve {
 
                 update_row_tx(
                     &self.config,
-                    &self.compiled_datatype_conditions,
-                    &self.compiled_rule_conditions,
+                    &self.datatype_conditions,
+                    &self.rule_conditions,
                     &self.pool,
                     &mut tx,
                     table,
@@ -1778,8 +1775,8 @@ impl Valve {
         matching_string: Option<&str>,
     ) -> Result<SerdeValue, ValveError> {
         let config = &self.config;
-        let compiled_datatype_conditions = &self.compiled_datatype_conditions;
-        let parsed_structure_conditions = &self.parsed_structure_conditions;
+        let datatype_conditions = &self.datatype_conditions;
+        let structure_conditions = &self.structure_conditions;
         let pool = &self.pool;
         let dt_name = config
             .get("table")
@@ -1794,7 +1791,7 @@ impl Valve {
             .and_then(|d| d.as_str())
             .unwrap();
 
-        let dt_condition = compiled_datatype_conditions
+        let dt_condition = datatype_conditions
             .get(dt_name)
             .and_then(|d| Some(d.parsed.clone()));
 
@@ -1820,7 +1817,7 @@ impl Valve {
                 // the foreign column. Otherwise if the structure includes an
                 // `under(tree_table.tree_column, value)` condition, then get the values from the
                 // tree column that are under `value`.
-                let structure = parsed_structure_conditions.get(
+                let structure = structure_conditions.get(
                     config
                         .get("table")
                         .and_then(|t| t.as_object())
