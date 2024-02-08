@@ -76,7 +76,7 @@ struct _ValveChange {
 pub struct ValveSpecialConfig {
     pub column: String,
     pub datatype: String,
-    pub rule: Option<String>,
+    pub rule: String,
     pub table: String,
 }
 

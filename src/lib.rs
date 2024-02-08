@@ -268,7 +268,7 @@ pub fn read_config_files(
                 row_type, path
             );
             match row_type.as_str() {
-                "" => (), // Tables with no type are fine and are ignored.
+                "" => (), // Tables with no type are ignored.
                 "column" => {
                     if specials_config.column != "" {
                         panic!("{}", duplicate_err_msg);
@@ -282,10 +282,10 @@ pub fn read_config_files(
                     specials_config.datatype = row_table.to_string();
                 }
                 "rule" => {
-                    if let Some(_) = &specials_config.rule {
+                    if specials_config.rule != "" {
                         panic!("{}", duplicate_err_msg);
                     }
-                    specials_config.rule = Some(row_table.to_string());
+                    specials_config.rule = row_table.to_string();
                 }
                 "table" => {
                     if specials_config.table != "" {
@@ -339,10 +339,7 @@ pub fn read_config_files(
             let table_name = match table_type {
                 "column" => &specials_config.column,
                 "datatype" => &specials_config.datatype,
-                "rule" => match &specials_config.rule {
-                    Some(rule_table_name) => rule_table_name,
-                    None => panic!("Tried to retrieve rule configuration but it is undefined."),
-                },
+                "rule" => &specials_config.rule,
                 _ => panic!(
                     "In get_special_config(): Table type '{}' not supported for this function.",
                     table_type
@@ -479,7 +476,8 @@ pub fn read_config_files(
 
     // Load rule table if it exists
     let mut rules_config = HashMap::new();
-    if let Some(table_name) = &specials_config.rule {
+    if specials_config.rule != "" {
+        let table_name = &specials_config.rule;
         let rows = get_special_config(table_name, &specials_config, &tables_config, path);
         for row in rows {
             for column in vec![
