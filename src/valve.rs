@@ -72,7 +72,7 @@ struct _ValveChange {
     pub _message: String,
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct ValveSpecialConfig {
     pub column: String,
     pub datatype: String,
@@ -80,7 +80,7 @@ pub struct ValveSpecialConfig {
     pub table: String,
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct ValveTableConfig {
     pub table: String,
     pub table_type: String,
@@ -101,7 +101,7 @@ pub struct ValveColumnConfig {
     pub nulltype: String,
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct ValveDatatypeConfig {
     pub html_type: String,
     pub sql_type: String,
@@ -113,7 +113,7 @@ pub struct ValveDatatypeConfig {
     pub transform: String,
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct ValveRuleConfig {
     pub description: String,
     pub level: String,
@@ -124,13 +124,13 @@ pub struct ValveRuleConfig {
     pub when_condition: String,
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct ValveTreeConstraint {
     pub child: String,
     pub parent: String,
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct ValveUnderConstraint {
     pub column: String,
     pub ttable: String,
@@ -138,14 +138,14 @@ pub struct ValveUnderConstraint {
     pub value: SerdeValue,
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct ValveForeignConstraint {
     pub column: String,
     pub ftable: String,
     pub fcolumn: String,
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct ValveConstraintConfig {
     // Note that primary would be better as HashMap<String, String>, since it is not possible to
     // have more than one primary key per table, but the below reflects the current implementation
@@ -158,7 +158,7 @@ pub struct ValveConstraintConfig {
     pub under: HashMap<String, Vec<ValveUnderConstraint>>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct ValveConfig {
     pub special: ValveSpecialConfig,
     pub table: HashMap<String, ValveTableConfig>,
@@ -171,7 +171,8 @@ pub struct ValveConfig {
 #[derive(Clone, Debug)]
 pub struct Valve {
     /// The valve configuration map.
-    pub config: SerdeMap,
+    pub config: SerdeMap, // TODO: Remove this field later.
+    pub config_new: ValveConfig,
     /// The full list of tables managed by valve, in dependency order.
     pub sorted_table_list: Vec<String>,
     /// Lists of tables that depend on a given table, indexed by table.
@@ -274,15 +275,11 @@ impl Valve {
         let rule_conditions = get_compiled_rule_conditions(&config, &datatype_conditions, &parser);
         let structure_conditions = get_parsed_structure_conditions(&config, &parser);
 
-        if 1 == 1 {
-            println!("CONFIG: {:#?}", config);
-            todo!();
-        }
-
         let config_old = SerdeMap::new();
 
         Ok(Self {
             config: config_old,
+            config_new: config,
             sorted_table_list: sorted_table_list.clone(),
             table_dependencies_in: table_dependencies_in,
             table_dependencies_out: table_dependencies_out,
@@ -298,13 +295,10 @@ impl Valve {
     /// Convenience function to retrieve the path to Valve's "table table", the main entrypoint
     /// to Valve's configuration.
     pub fn get_path(&self) -> String {
-        self.config
+        self.config_new
+            .table
             .get("table")
-            .and_then(|t| t.as_object())
-            .and_then(|t| t.get("table"))
-            .and_then(|t| t.as_object())
-            .and_then(|t| t.get("path"))
-            .and_then(|p| p.as_str())
+            .and_then(|t| Some(t.path.as_str()))
             .unwrap()
             .to_string()
     }
@@ -344,12 +338,10 @@ impl Valve {
     /// reverse flag is set.
     pub fn get_sorted_table_list(&self, reverse: bool) -> Vec<&str> {
         let mut sorted_tables = self
-            .config
-            .get("sorted_table_list")
-            .and_then(|l| l.as_array())
-            .and_then(|l| Some(l.iter().map(|i| i.as_str().unwrap())))
-            .and_then(|l| Some(l.collect::<Vec<_>>()))
-            .unwrap();
+            .sorted_table_list
+            .iter()
+            .map(|i| i.as_str())
+            .collect::<Vec<_>>();
         if reverse {
             sorted_tables.reverse();
         }
@@ -453,22 +445,15 @@ impl Valve {
                     if !unique_in_db {
                         return Ok(true);
                     } else {
-                        let trees =
-                            self.config
-                                .get("constraints")
-                                .and_then(|c| c.as_object())
-                                .and_then(|o| o.get("tree"))
-                                .and_then(|t| t.as_object())
-                                .and_then(|o| o.get(table))
-                                .and_then(|t| t.as_array())
-                                .and_then(|a| {
-                                    Some(a.iter().map(|o| {
-                                        o.as_object().and_then(|o| o.get("child")).unwrap()
-                                    }))
-                                })
-                                .unwrap()
-                                .collect::<Vec<_>>();
-                        if !trees.contains(&&SerdeValue::String(column.to_string())) {
+                        let trees = self
+                            .config_new
+                            .constraint
+                            .tree
+                            .get(table)
+                            .and_then(|v| Some(v.iter().map(|t| t.child.to_string())))
+                            .unwrap()
+                            .collect::<Vec<_>>();
+                        if !trees.contains(&column.to_string()) {
                             return Ok(true);
                         }
                     }
@@ -538,16 +523,8 @@ impl Valve {
         };
 
         let (columns_config, configured_column_order) = {
-            let table_config = self
-                .config
-                .get("table")
-                .and_then(|tc| tc.get(table))
-                .and_then(|t| t.as_object())
-                .unwrap();
-            let columns_config = table_config
-                .get("column")
-                .and_then(|c| c.as_object())
-                .unwrap();
+            let table_config = self.config_new.table.get(table).unwrap();
+            let columns_config = &table_config.column;
             let configured_column_order = {
                 let mut configured_column_order = {
                     if table == "message" {
@@ -558,15 +535,7 @@ impl Valve {
                         vec!["row_number".to_string()]
                     }
                 };
-                configured_column_order.append(
-                    &mut table_config
-                        .get("column_order")
-                        .and_then(|c| c.as_array())
-                        .and_then(|a| Some(a.iter()))
-                        .and_then(|a| Some(a.map(|c| c.as_str().unwrap().to_string())))
-                        .and_then(|a| Some(a.collect::<Vec<_>>()))
-                        .unwrap(),
-                );
+                configured_column_order.append(&mut table_config.column_order.clone());
                 configured_column_order
             };
 
@@ -667,11 +636,14 @@ impl Valve {
             {
                 continue;
             }
-            let column_config = columns_config
-                .get(cname)
-                .and_then(|c| c.as_object())
-                .unwrap();
-            let sql_type = get_sql_type_from_global_config(&self.config, table, &cname, &self.pool);
+            let column_config = columns_config.get(cname).unwrap();
+            let sql_type = get_sql_type_from_global_config(
+                &self.config_new,
+                &self.config,
+                table,
+                &cname,
+                &self.pool,
+            );
 
             // Check the column's SQL type:
             if sql_type.to_lowercase() != ctype.to_lowercase() {
@@ -696,28 +668,25 @@ impl Valve {
             }
 
             // Check the column's structure:
-            let structure = column_config.get("structure").and_then(|d| d.as_str());
-            match structure {
-                Some(structure) if structure != "" => {
-                    let parsed_structure = self
-                        .structure_conditions
-                        .get(structure)
-                        .and_then(|p| Some(p.parsed.clone()))
-                        .unwrap();
-                    if structure_has_changed(&parsed_structure, table, &cname, &pk)? {
-                        if self.verbose {
-                            info!(
-                                "The table '{}' will be recreated because the database \
-                                 constraints for column '{}' do not match the configured \
-                                 structure, '{}'",
-                                table, cname, structure
-                            );
-                        }
-                        return Ok(true);
+            let structure = &column_config.structure;
+            if structure != "" {
+                let parsed_structure = self
+                    .structure_conditions
+                    .get(structure)
+                    .and_then(|p| Some(p.parsed.clone()))
+                    .unwrap();
+                if structure_has_changed(&parsed_structure, table, &cname, &pk)? {
+                    if self.verbose {
+                        info!(
+                            "The table '{}' will be recreated because the database \
+                             constraints for column '{}' do not match the configured \
+                             structure, '{}'",
+                            table, cname, structure
+                        );
                     }
+                    return Ok(true);
                 }
-                _ => (),
-            };
+            }
         }
 
         Ok(false)
@@ -725,19 +694,8 @@ impl Valve {
 
     /// Generates and returns the DDL required to setup the database.
     pub async fn get_setup_statements(&self) -> Result<HashMap<String, Vec<String>>, ValveError> {
-        let tables_config = self
-            .config
-            .get("table")
-            .and_then(|t| t.as_object())
-            .unwrap()
-            .clone();
-        let datatypes_config = self
-            .config
-            .get("datatype")
-            .and_then(|d| d.as_object())
-            .unwrap()
-            .clone();
-
+        let tables_config = &self.config_new.table;
+        let datatypes_config = &self.config_new.datatype;
         let parser = StartParser::new();
 
         // Begin by reading in the TSV files corresponding to the tables defined in tables_config,
@@ -749,8 +707,10 @@ impl Valve {
             let mut table_statements = vec![];
             for table in vec![table_name.to_string(), format!("{}_conflict", table_name)] {
                 let mut statements = get_table_ddl(
-                    &tables_config,
-                    &datatypes_config,
+                    tables_config,
+                    datatypes_config,
+                    &SerdeMap::new(),
+                    &SerdeMap::new(),
                     &parser,
                     &table,
                     &self.pool,
@@ -760,7 +720,7 @@ impl Valve {
 
             let create_view_sql = get_sql_for_standard_view(&table_name, &self.pool);
             let create_text_view_sql =
-                get_sql_for_text_view(&tables_config, &table_name, &self.pool);
+                get_sql_for_text_view(tables_config, &SerdeMap::new(), &table_name, &self.pool);
             table_statements.push(create_view_sql);
             table_statements.push(create_text_view_sql);
 
@@ -768,8 +728,8 @@ impl Valve {
         }
 
         let text_type = get_sql_type(
-            &HashMap::new(),
-            &datatypes_config,
+            datatypes_config,
+            &SerdeMap::new(),
             &"text".to_string(),
             &self.pool,
         );
@@ -1814,8 +1774,13 @@ impl Valve {
                         .unwrap_or_else(|| ""),
                 );
 
-                let sql_type =
-                    get_sql_type_from_global_config(&config, table_name, &column_name, &pool);
+                let sql_type = get_sql_type_from_global_config(
+                    &ValveConfig::default(),
+                    &config,
+                    table_name,
+                    &column_name,
+                    &pool,
+                );
 
                 match structure {
                     Some(ParsedStructure { original, parsed }) => {
