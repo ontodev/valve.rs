@@ -637,13 +637,8 @@ impl Valve {
                 continue;
             }
             let column_config = columns_config.get(cname).unwrap();
-            let sql_type = get_sql_type_from_global_config(
-                &self.config_new,
-                &self.config,
-                table,
-                &cname,
-                &self.pool,
-            );
+            let sql_type =
+                get_sql_type_from_global_config(&self.config_new, table, &cname, &self.pool);
 
             // Check the column's SQL type:
             if sql_type.to_lowercase() != ctype.to_lowercase() {
@@ -706,33 +701,21 @@ impl Valve {
             // Generate the statements for creating the table and its corresponding conflict table:
             let mut table_statements = vec![];
             for table in vec![table_name.to_string(), format!("{}_conflict", table_name)] {
-                let mut statements = get_table_ddl(
-                    tables_config,
-                    datatypes_config,
-                    &SerdeMap::new(),
-                    &SerdeMap::new(),
-                    &parser,
-                    &table,
-                    &self.pool,
-                );
+                let mut statements =
+                    get_table_ddl(tables_config, datatypes_config, &parser, &table, &self.pool);
                 table_statements.append(&mut statements);
             }
 
             let create_view_sql = get_sql_for_standard_view(&table_name, &self.pool);
             let create_text_view_sql =
-                get_sql_for_text_view(tables_config, &SerdeMap::new(), &table_name, &self.pool);
+                get_sql_for_text_view(tables_config, &table_name, &self.pool);
             table_statements.push(create_view_sql);
             table_statements.push(create_text_view_sql);
 
             setup_statements.insert(table_name.to_string(), table_statements);
         }
 
-        let text_type = get_sql_type(
-            datatypes_config,
-            &SerdeMap::new(),
-            &"text".to_string(),
-            &self.pool,
-        );
+        let text_type = get_sql_type(datatypes_config, &"text".to_string(), &self.pool);
 
         // Generate DDL for the history table:
         let mut history_statements = vec![];
@@ -905,7 +888,7 @@ impl Valve {
     }
 
     /// Given a subset of the configured tables, return them in sorted dependency order, or in
-    /// reverse if `reverse` is set to true.
+    /// reverse dependency order if `reverse` is set to true.
     pub fn sort_tables(
         &self,
         table_subset: &Vec<&str>,
@@ -923,15 +906,6 @@ impl Valve {
             )));
         }
 
-        // TODO: Here.
-        let _constraints_config_old = self
-            .config
-            .get("constraints")
-            .and_then(|c| c.as_object())
-            .ok_or(ValveError::ConfigError(
-                "Unable to retrieve configured constraints.".into(),
-            ))?;
-
         // Filter out message and history since they are not represented in the constraints config.
         // They will be added implicitly to the list returned by verify_table_deps_and_sort.
         let filtered_subset = table_subset
@@ -940,9 +914,8 @@ impl Valve {
             .map(|s| s.to_string())
             .collect::<Vec<_>>();
 
-        // TODO: Here.
         let (sorted_subset, _, _) =
-            verify_table_deps_and_sort(&filtered_subset, &ValveConstraintConfig::default());
+            verify_table_deps_and_sort(&filtered_subset, &self.config_new.constraint);
 
         // Since the result of verify_table_deps_and_sort() will include dependencies of the tables
         // in its input list, we filter those out here:
@@ -1041,6 +1014,7 @@ impl Valve {
         self.load_tables(&table_list, validate).await
     }
 
+    // TODO: This one is the biggest job. Save it for last.
     /// Given a vector of table names, load those tables in the given order. If `validate` is false,
     /// just try to insert all rows, irrespective of whether they are valid or not or will possibly
     /// trigger a db error.
@@ -1143,11 +1117,17 @@ impl Valve {
                 // tree's child). We also need to wait before validating a table's "under"
                 // constraints. Although the tree associated with such a constraint need not be
                 // defined on the same table, it can be.
-                let mut recs_to_update =
-                    validate_tree_foreign_keys(&self.config, &self.pool, None, &table_name, None)
-                        .await?;
+                let mut recs_to_update = validate_tree_foreign_keys(
+                    &self.config_new,
+                    &self.pool,
+                    None,
+                    &table_name,
+                    None,
+                )
+                .await?;
                 recs_to_update.append(
-                    &mut validate_under(&self.config, &self.pool, None, &table_name, None).await?,
+                    &mut validate_under(&self.config_new, &self.pool, None, &table_name, None)
+                        .await?,
                 );
 
                 for record in recs_to_update {
@@ -1234,23 +1214,15 @@ impl Valve {
         save_dir: &Option<String>,
     ) -> Result<&Self, ValveError> {
         let table_paths: HashMap<String, String> = self
-            .config
-            .get("table")
-            .unwrap()
-            .as_object()
-            .unwrap()
+            .config_new
+            .table
             .iter()
             .filter(|(k, v)| {
                 !["message", "history"].contains(&k.as_str())
                     && tables.contains(&k.as_str())
-                    && v.get("path").is_some()
+                    && v.path != ""
             })
-            .map(|(k, v)| {
-                (
-                    k.clone(),
-                    v.get("path").unwrap().as_str().unwrap().to_string(),
-                )
-            })
+            .map(|(k, v)| (k.to_string(), v.path.to_string()))
             .collect();
 
         info!(
@@ -1263,14 +1235,10 @@ impl Valve {
         );
         for (table, path) in table_paths.iter() {
             let columns: Vec<&str> = self
-                .config
-                .get("table")
-                .and_then(|v| v.as_object())
-                .and_then(|o| o.get(table))
-                .and_then(|v| v.as_object())
-                .and_then(|o| o.get("column_order"))
-                .and_then(|v| v.as_array())
-                .and_then(|v| Some(v.iter().map(|i| i.as_str().unwrap()).collect()))
+                .config_new
+                .table
+                .get(table)
+                .and_then(|t| Some(t.column_order.iter().map(|i| i.as_str()).collect()))
                 .unwrap();
 
             let path = match save_dir {
@@ -1297,8 +1265,6 @@ impl Valve {
         columns: &Vec<&str>,
         path: &str,
     ) -> Result<&Self, ValveError> {
-        // TODO: Do some validation on the path.
-
         let mut quoted_columns = vec!["\"row_number\"".to_string()];
         quoted_columns.append(
             &mut columns
@@ -1340,7 +1306,7 @@ impl Valve {
         row_number: Option<u32>,
     ) -> Result<ValveRow, ValveError> {
         validate_row_tx(
-            &self.config,
+            &self.config_new,
             &self.datatype_conditions,
             &self.rule_conditions,
             &self.pool,
@@ -1363,7 +1329,7 @@ impl Valve {
         let mut tx = self.pool.begin().await?;
 
         let row = validate_row_tx(
-            &self.config,
+            &self.config_new,
             &self.datatype_conditions,
             &self.rule_conditions,
             &self.pool,
@@ -1409,7 +1375,7 @@ impl Valve {
             get_row_from_db(&self.config, &self.pool, &mut tx, table_name, &row_number).await?;
 
         let row = validate_row_tx(
-            &self.config,
+            &self.config_new,
             &self.datatype_conditions,
             &self.rule_conditions,
             &self.pool,
@@ -1776,7 +1742,6 @@ impl Valve {
 
                 let sql_type = get_sql_type_from_global_config(
                     &ValveConfig::default(),
-                    &config,
                     table_name,
                     &column_name,
                     &pool,
@@ -1852,8 +1817,8 @@ impl Valve {
                                     tree.get("child").and_then(|c| c.as_str()).unwrap();
 
                                 let (tree_sql, mut params) = with_tree_sql(
-                                    &config,
-                                    tree,
+                                    &self.config_new,
+                                    &ValveTreeConstraint::default(),
                                     &table_name.to_string(),
                                     &table_name.to_string(),
                                     under_val.as_ref(),

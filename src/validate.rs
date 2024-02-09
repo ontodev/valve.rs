@@ -3,7 +3,10 @@
 use crate::{
     cast_sql_param_from_text, error, get_column_value, get_sql_type_from_global_config,
     is_sql_type_error, local_sql_syntax,
-    valve::{ValveConfig, ValveError, ValveRow},
+    valve::{
+        ValveConfig, ValveDatatypeConfig, ValveError, ValveRow, ValveRuleConfig,
+        ValveTreeConstraint,
+    },
     ColumnRule, CompiledCondition, SerdeMap,
 };
 use chrono::Utc;
@@ -55,7 +58,7 @@ pub struct QueryAsIf {
 /// Optionally, if query_as_if is given, validate the row counterfactually according to that
 /// parameter. Note that this function is idempotent.
 pub async fn validate_row_tx(
-    config: &SerdeMap,
+    config: &ValveConfig,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     pool: &AnyPool,
@@ -159,13 +162,7 @@ pub async fn validate_row_tx(
             // We don't do any further validation on cells that have SQL type violations because
             // they can result in database errors when, for instance, we compare a numeric with a
             // non-numeric type.
-            let sql_type = get_sql_type_from_global_config(
-                &ValveConfig::default(),
-                &config,
-                table_name,
-                &column_name,
-                pool,
-            );
+            let sql_type = get_sql_type_from_global_config(&config, table_name, &column_name, pool);
             if !is_sql_type_error(&sql_type, &cell.value) {
                 // TODO: Pass the query_as_if parameter to validate_cell_trees.
                 validate_cell_trees(
@@ -252,58 +249,35 @@ pub async fn validate_row_tx(
 /// any associated under constraints for the current column. Optionally, if a transaction is
 /// given, use that instead of the pool for database access.
 pub async fn validate_under(
-    config: &SerdeMap,
+    config: &ValveConfig,
     pool: &AnyPool,
     mut tx: Option<&mut Transaction<'_, sqlx::Any>>,
     table_name: &String,
     extra_row: Option<&ResultRow>,
 ) -> Result<Vec<SerdeValue>, ValveError> {
     let mut results = vec![];
-    let ukeys = config
-        .get("constraints")
-        .and_then(|c| c.as_object())
-        .and_then(|o| o.get("under"))
-        .and_then(|t| t.as_object())
-        .and_then(|o| o.get(table_name))
-        .and_then(|t| t.as_array())
-        .unwrap();
+    let ukeys = config.constraint.under.get(table_name).unwrap();
 
     let view_name = format!("{}_view", table_name);
     for ukey in ukeys {
-        let ukey = ukey.as_object().unwrap();
-        let tree_table = ukey.get("ttable").and_then(|tt| tt.as_str()).unwrap();
-        let tree_child = ukey.get("tcolumn").and_then(|tc| tc.as_str()).unwrap();
-        let column = ukey.get("column").and_then(|c| c.as_str()).unwrap();
-        let sql_type = get_sql_type_from_global_config(
-            &ValveConfig::default(),
-            &config,
-            &table_name,
-            &column,
-            pool,
-        );
+        let tree_table = &ukey.ttable;
+        let tree_child = &ukey.tcolumn;
+        let column = &ukey.column;
+        let sql_type = get_sql_type_from_global_config(&config, &table_name, &column, pool);
         let tree = config
-            .get("constraints")
-            .and_then(|c| c.as_object())
-            .and_then(|o| o.get("tree"))
-            .and_then(|t| t.as_object())
-            .and_then(|o| o.get(tree_table))
-            .and_then(|t| t.as_array())
+            .constraint
+            .tree
+            .get(tree_table)
             .unwrap()
             .iter()
-            .find(|tkey| {
-                tkey.as_object()
-                    .and_then(|o| o.get("child"))
-                    .and_then(|c| Some(c == tree_child))
-                    .unwrap()
-            })
-            .and_then(|tree| Some(tree.as_object().unwrap()))
+            .find(|tkey| tkey.child == *tree_child)
             .unwrap();
-        let tree_parent = tree.get("parent").and_then(|p| p.as_str()).unwrap();
+        let tree_parent = &tree.parent;
         let mut extra_clause;
         let mut params;
         if let Some(ref extra_row) = extra_row {
             (extra_clause, params) =
-                select_with_extra_row(&config, extra_row, table_name, &view_name, pool);
+                select_with_extra_row(config, extra_row, table_name, &view_name, pool);
         } else {
             extra_clause = String::new();
             params = vec![];
@@ -334,16 +308,16 @@ pub async fn validate_under(
         }
 
         let uval = ukey
-            .get("value")
-            .and_then(|v| v.as_str())
-            .unwrap()
-            .to_string();
+            .value
+            .as_str()
+            .and_then(|v| Some(v.to_string()))
+            .unwrap();
         let (tree_sql, mut tree_params) = with_tree_sql(
-            &config,
-            tree,
+            config,
+            &tree,
             &table_name,
             &effective_tree,
-            Some(&uval.clone()),
+            Some(&uval),
             None,
             pool,
         );
@@ -449,34 +423,21 @@ pub async fn validate_under(
 /// has a given parent column, validate that all of the values in the parent column are in the child
 /// column. Optionally, if a transaction is given, use that instead of the pool for database access.
 pub async fn validate_tree_foreign_keys(
-    config: &SerdeMap,
+    config: &ValveConfig,
     pool: &AnyPool,
     mut tx: Option<&mut Transaction<'_, sqlx::Any>>,
     table_name: &String,
     extra_row: Option<&ResultRow>,
 ) -> Result<Vec<SerdeValue>, ValveError> {
-    let tkeys = config
-        .get("constraints")
-        .and_then(|c| c.as_object())
-        .and_then(|o| o.get("tree"))
-        .and_then(|t| t.as_object())
-        .and_then(|o| o.get(table_name))
-        .and_then(|t| t.as_array())
-        .unwrap();
+    let tkeys = config.constraint.tree.get(table_name).unwrap();
 
     let view_name = format!("{}_view", table_name);
     let mut results = vec![];
     for tkey in tkeys {
-        let tkey = tkey.as_object().unwrap();
-        let child_col = tkey.get("child").and_then(|c| c.as_str()).unwrap();
-        let parent_col = tkey.get("parent").and_then(|p| p.as_str()).unwrap();
-        let parent_sql_type = get_sql_type_from_global_config(
-            &ValveConfig::default(),
-            &config,
-            &table_name,
-            &parent_col,
-            pool,
-        );
+        let child_col = &tkey.child;
+        let parent_col = &tkey.parent;
+        let parent_sql_type =
+            get_sql_type_from_global_config(&config, &table_name, &parent_col, pool);
         let with_clause;
         let params;
         if let Some(ref extra_row) = extra_row {
@@ -558,12 +519,12 @@ pub async fn validate_tree_foreign_keys(
 /// Given a config map, a database connection pool, a table name, and a number of rows to validate,
 /// perform tree validation on the rows and return the validated results.
 pub async fn validate_rows_trees(
-    config: &SerdeMap,
+    config_old: &SerdeMap,
     pool: &AnyPool,
     table_name: &String,
     rows: &mut Vec<ResultRow>,
 ) -> Result<(), ValveError> {
-    let column_names = config
+    let column_names = config_old
         .get("table")
         .and_then(|t| t.get(table_name))
         .and_then(|t| t.get("column_order"))
@@ -587,14 +548,13 @@ pub async fn validate_rows_trees(
             // database errors when, for instance, we compare a numeric with a non-numeric type.
             let sql_type = get_sql_type_from_global_config(
                 &ValveConfig::default(),
-                &config,
                 table_name,
                 &column_name,
                 pool,
             );
             if cell.nulltype == None && !is_sql_type_error(&sql_type, &cell.value) {
                 validate_cell_trees(
-                    config,
+                    &ValveConfig::default(),
                     pool,
                     None,
                     table_name,
@@ -623,12 +583,12 @@ pub async fn validate_rows_trees(
 /// validate foreign and unique constraints, where the latter include primary and "tree child" keys
 /// (which imply unique constraints) and return the validated results.
 pub async fn validate_rows_constraints(
-    config: &SerdeMap,
+    config_old: &SerdeMap,
     pool: &AnyPool,
     table_name: &String,
     rows: &mut Vec<ResultRow>,
 ) -> Result<(), ValveError> {
-    let column_names = config
+    let column_names = config_old
         .get("table")
         .and_then(|t| t.get(table_name))
         .and_then(|t| t.get("column_order"))
@@ -651,14 +611,13 @@ pub async fn validate_rows_constraints(
             // database errors when, for instance, we compare a numeric with a non-numeric type.
             let sql_type = get_sql_type_from_global_config(
                 &ValveConfig::default(),
-                &config,
                 table_name,
                 &column_name,
                 pool,
             );
             if cell.nulltype == None && !is_sql_type_error(&sql_type, &cell.value) {
                 validate_cell_foreign_constraints(
-                    config,
+                    &ValveConfig::default(),
                     pool,
                     None,
                     table_name,
@@ -669,7 +628,7 @@ pub async fn validate_rows_constraints(
                 .await?;
 
                 validate_cell_unique_constraints(
-                    config,
+                    &ValveConfig::default(),
                     pool,
                     None,
                     table_name,
@@ -698,7 +657,7 @@ pub async fn validate_rows_constraints(
 /// table, and a number of rows to validate, run intra-row validatation on all of the rows and
 /// return the validated versions.
 pub fn validate_rows_intra(
-    config: &SerdeMap,
+    config_old: &SerdeMap,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     table_name: &String,
@@ -729,7 +688,7 @@ pub fn validate_rows_intra(
                     result_row.contents.insert(column.to_string(), result_cell);
                 }
 
-                let column_names = config
+                let column_names = config_old
                     .get("table")
                     .and_then(|t| t.get(table_name))
                     .and_then(|t| t.get("column_order"))
@@ -744,7 +703,7 @@ pub fn validate_rows_intra(
                 for column_name in &column_names {
                     let cell = result_row.contents.get_mut(column_name).unwrap();
                     validate_cell_nulltype(
-                        config,
+                        &ValveConfig::default(),
                         compiled_datatype_conditions,
                         table_name,
                         &column_name,
@@ -757,7 +716,7 @@ pub fn validate_rows_intra(
                         let context = result_row.clone();
                         let cell = result_row.contents.get_mut(column_name).unwrap();
                         validate_cell_rules(
-                            config,
+                            &ValveConfig::default(),
                             compiled_rule_conditions,
                             table_name,
                             &column_name,
@@ -767,7 +726,7 @@ pub fn validate_rows_intra(
 
                         if cell.nulltype == None {
                             validate_cell_datatype(
-                                config,
+                                &ValveConfig::default(),
                                 compiled_datatype_conditions,
                                 table_name,
                                 &column_name,
@@ -851,7 +810,7 @@ pub fn result_row_to_config_map(incoming: &ResultRow) -> ValveRow {
 /// Generate a SQL Select clause that is a union of: (a) the literal values of the given extra row,
 /// and (b) a Select statement over `table_name` of all the fields in the extra row.
 pub fn select_with_extra_row(
-    config: &SerdeMap,
+    config: &ValveConfig,
     extra_row: &ResultRow,
     table: &str,
     effective_table: &str,
@@ -867,8 +826,7 @@ pub fn select_with_extra_row(
 
     let mut second_select = String::from(r#"SELECT "row_number", "#);
     for (i, (key, content)) in extra_row.contents.iter().enumerate() {
-        let sql_type =
-            get_sql_type_from_global_config(&ValveConfig::default(), &config, &table, &key, pool);
+        let sql_type = get_sql_type_from_global_config(config, &table, &key, pool);
         let sql_param = cast_sql_param_from_text(&sql_type);
         // enumerate() begins from 0 but we need to begin at 1:
         let i = i + 1;
@@ -900,8 +858,8 @@ pub fn select_with_extra_row(
 /// sub-tree of the tree, and an extra SQL clause, generate the SQL for a WITH clause representing
 /// the sub-tree.
 pub fn with_tree_sql(
-    config: &SerdeMap,
-    tree: &SerdeMap,
+    config: &ValveConfig,
+    tree: &ValveTreeConstraint,
     table_name: &str,
     effective_table_name: &str,
     root: Option<&String>,
@@ -910,19 +868,13 @@ pub fn with_tree_sql(
 ) -> (String, Vec<String>) {
     let empty_string = String::new();
     let extra_clause = extra_clause.unwrap_or_else(|| &empty_string);
-    let child_col = tree.get("child").and_then(|c| c.as_str()).unwrap();
-    let parent_col = tree.get("parent").and_then(|c| c.as_str()).unwrap();
+    let child_col = &tree.child;
+    let parent_col = &tree.parent;
 
     let mut params = vec![];
     let under_sql;
     if let Some(root) = root {
-        let sql_type = get_sql_type_from_global_config(
-            &ValveConfig::default(),
-            &config,
-            table_name,
-            &child_col,
-            pool,
-        );
+        let sql_type = get_sql_type_from_global_config(config, table_name, &child_col, pool);
         under_sql = format!(
             r#"WHERE "{}" = {}"#,
             child_col,
@@ -959,22 +911,20 @@ pub fn with_tree_sql(
 /// nulltype values for this column, then fill in the cell's nulltype value before returning the
 /// cell.
 pub fn validate_cell_nulltype(
-    config: &SerdeMap,
+    config: &ValveConfig,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     table_name: &String,
     column_name: &String,
     cell: &mut ResultCell,
 ) {
     let column = config
-        .get("table")
-        .and_then(|t| t.as_object())
-        .and_then(|o| o.get(table_name))
-        .and_then(|t| t.as_object())
-        .and_then(|o| o.get("column"))
-        .and_then(|c| c.as_object())
-        .and_then(|o| o.get(column_name))
+        .table
+        .get(table_name)
+        .and_then(|t| t.column.get(column_name))
         .unwrap();
-    if let Some(SerdeValue::String(nt_name)) = column.get("nulltype") {
+
+    if column.nulltype != "" {
+        let nt_name = &column.nulltype;
         let nt_condition = &compiled_datatype_conditions.get(nt_name).unwrap().compiled;
         let value = &cell.value;
         if nt_condition(&value) {
@@ -986,32 +936,24 @@ pub fn validate_cell_nulltype(
 /// Given a config map, compiled datatype conditions, a table name, a column name, and a cell to
 /// validate, validate the cell's datatype and return the validated cell.
 pub fn validate_cell_datatype(
-    config: &SerdeMap,
+    config: &ValveConfig,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     table_name: &String,
     column_name: &String,
     cell: &mut ResultCell,
 ) {
     fn get_datatypes_to_check(
-        config: &SerdeMap,
+        config: &ValveConfig,
         compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
         primary_dt_name: &str,
-        dt_name: Option<&String>,
-    ) -> Vec<SerdeMap> {
+        dt_name: &str,
+    ) -> Vec<ValveDatatypeConfig> {
         let mut datatypes = vec![];
-        if let Some(dt_name) = dt_name {
-            let datatype = config
-                .get("datatype")
-                .and_then(|d| d.as_object())
-                .and_then(|o| o.get(dt_name))
-                .and_then(|d| d.as_object())
-                .unwrap();
-            let dt_name = datatype.get("datatype").and_then(|d| d.as_str()).unwrap();
+        if dt_name != "" {
+            let datatype = config.datatype.get(dt_name).unwrap();
+            let dt_name = datatype.datatype.as_str();
             let dt_condition = compiled_datatype_conditions.get(dt_name);
-            let dt_parent = match datatype.get("parent") {
-                Some(SerdeValue::String(s)) => Some(s.clone()),
-                _ => None,
-            };
+            let dt_parent = datatype.parent.as_str();
             if dt_name != primary_dt_name {
                 if let Some(_) = dt_condition {
                     datatypes.push(datatype.clone());
@@ -1021,7 +963,7 @@ pub fn validate_cell_datatype(
                 config,
                 compiled_datatype_conditions,
                 primary_dt_name,
-                dt_parent.as_ref(),
+                dt_parent,
             );
             datatypes.append(&mut more_datatypes);
         }
@@ -1029,24 +971,13 @@ pub fn validate_cell_datatype(
     }
 
     let column = config
-        .get("table")
-        .and_then(|t| t.as_object())
-        .and_then(|o| o.get(table_name))
-        .and_then(|t| t.as_object())
-        .and_then(|o| o.get("column"))
-        .and_then(|c| c.as_object())
-        .and_then(|o| o.get(column_name))
+        .table
+        .get(table_name)
+        .and_then(|t| t.column.get(column_name))
         .unwrap();
-    let primary_dt_name = column.get("datatype").and_then(|d| d.as_str()).unwrap();
-    let primary_datatype = config
-        .get("datatype")
-        .and_then(|d| d.as_object())
-        .and_then(|o| o.get(primary_dt_name))
-        .unwrap();
-    let primary_dt_description = primary_datatype
-        .get("description")
-        .and_then(|d| d.as_str())
-        .unwrap();
+    let primary_dt_name = &column.datatype;
+    let primary_datatype = &config.datatype.get(primary_dt_name).unwrap();
+    let primary_dt_description = &primary_datatype.description;
     if let Some(primary_dt_condition_func) = compiled_datatype_conditions.get(primary_dt_name) {
         let primary_dt_condition_func = &primary_dt_condition_func.compiled;
         if !primary_dt_condition_func(&cell.value) {
@@ -1055,18 +986,15 @@ pub fn validate_cell_datatype(
                 config,
                 compiled_datatype_conditions,
                 primary_dt_name,
-                Some(&primary_dt_name.to_string()),
+                primary_dt_name,
             );
             // If this datatype has any parents, check them beginning from the most general to the
             // most specific. We use while and pop instead of a for loop so as to check the
             // conditions in LIFO order.
             while !parent_datatypes.is_empty() {
                 let datatype = parent_datatypes.pop().unwrap();
-                let dt_name = datatype.get("datatype").and_then(|d| d.as_str()).unwrap();
-                let dt_description = datatype
-                    .get("description")
-                    .and_then(|d| d.as_str())
-                    .unwrap();
+                let dt_name = &datatype.datatype;
+                let dt_description = &datatype.description;
                 let dt_condition = &compiled_datatype_conditions.get(dt_name).unwrap().compiled;
                 if !dt_condition(&cell.value) {
                     let message = if dt_description == "" {
@@ -1102,7 +1030,7 @@ pub fn validate_cell_datatype(
 /// and the cell to validate, look in the rule table (if it exists) and validate the cell according
 /// to any applicable rules.
 pub fn validate_cell_rules(
-    config: &SerdeMap,
+    config: &ValveConfig,
     compiled_rules: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     table_name: &String,
     column_name: &String,
@@ -1112,15 +1040,21 @@ pub fn validate_cell_rules(
     fn check_condition(
         condition_type: &str,
         cell: &ResultCell,
-        rule: &SerdeMap,
+        rule: &ValveRuleConfig,
         table_name: &String,
         column_name: &String,
         compiled_rules: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     ) -> bool {
-        let condition = rule
-            .get(format!("{} condition", condition_type).as_str())
-            .and_then(|c| c.as_str())
-            .unwrap();
+        let condition = {
+            if condition_type == "when" {
+                rule.when_condition.as_str()
+            } else if condition_type == "then" {
+                rule.then_condition.as_str()
+            } else {
+                panic!("Invalid condition type: {}", condition_type);
+            }
+        };
+
         if vec!["null", "not null"].contains(&condition) {
             return (condition == "null" && cell.nulltype != None)
                 || (condition == "not null" && cell.nulltype == None);
@@ -1149,28 +1083,17 @@ pub fn validate_cell_rules(
         }
     }
 
-    let rules_config = config.get("rule").and_then(|r| r.as_object()).unwrap();
-    let applicable_rules;
-    match rules_config.get(table_name) {
-        Some(SerdeValue::Object(table_rules)) => {
-            match table_rules.get(column_name) {
-                Some(SerdeValue::Array(column_rules)) => {
-                    applicable_rules = column_rules;
-                }
-                _ => return,
-            };
-        }
+    let applicable_rules = match config.rule.get(table_name).and_then(|t| t.get(column_name)) {
+        Some(rules) => rules,
         _ => return,
     };
 
     for (rule_number, rule) in applicable_rules.iter().enumerate() {
         // enumerate() begins at 0 by default but we need to begin with 1:
         let rule_number = rule_number + 1;
-        let rule = rule.as_object().unwrap();
         // Check the then condition only if the when condition is satisfied:
         if check_condition("when", cell, rule, table_name, column_name, compiled_rules) {
-            let then_column = rule.get("then column").and_then(|c| c.as_str()).unwrap();
-            let then_cell = context.contents.get(then_column).unwrap();
+            let then_cell = context.contents.get(&rule.then_column).unwrap();
             if !check_condition(
                 "then",
                 then_cell,
@@ -1182,8 +1105,8 @@ pub fn validate_cell_rules(
                 cell.valid = false;
                 cell.messages.push(json!({
                     "rule": format!("rule:{}-{}", column_name, rule_number),
-                    "level": rule.get("level").unwrap(),
-                    "message": rule.get("description").unwrap(),
+                    "level": rule.level,
+                    "message": rule.description,
                 }));
             }
         }
@@ -1193,7 +1116,7 @@ pub fn validate_cell_rules(
 /// Generates an SQL fragment representing the "as if" portion of a query that will be used for
 /// counterfactual validation.
 pub fn as_if_to_sql(
-    global_config: &SerdeMap,
+    config: &ValveConfig,
     pool: &AnyPool,
     as_if: &QueryAsIf,
     conflict_table: bool,
@@ -1254,13 +1177,8 @@ pub fn as_if_to_sql(
                             }
                         };
 
-                        let sql_type = get_sql_type_from_global_config(
-                            &ValveConfig::default(),
-                            &global_config,
-                            &as_if.table,
-                            &column,
-                            pool,
-                        );
+                        let sql_type =
+                            get_sql_type_from_global_config(&config, &as_if.table, &column, pool);
 
                         if sql_type.to_lowercase() == "text"
                             || sql_type.to_lowercase().starts_with("varchar(")
@@ -1312,7 +1230,7 @@ pub fn as_if_to_sql(
 /// a violation, indicate it with an error message attached to the cell. Optionally, if a
 /// transaction is given, use that instead of the pool for database access.
 pub async fn validate_cell_foreign_constraints(
-    config: &SerdeMap,
+    config: &ValveConfig,
     pool: &AnyPool,
     mut tx: Option<&mut Transaction<'_, sqlx::Any>>,
     table_name: &String,
@@ -1321,21 +1239,12 @@ pub async fn validate_cell_foreign_constraints(
     query_as_if: Option<&QueryAsIf>,
 ) -> Result<(), ValveError> {
     let fkeys = config
-        .get("constraints")
-        .and_then(|c| c.as_object())
-        .and_then(|o| o.get("foreign"))
-        .and_then(|t| t.as_object())
-        .and_then(|o| o.get(table_name))
-        .and_then(|t| t.as_array())
+        .constraint
+        .foreign
+        .get(table_name)
         .unwrap()
         .iter()
-        .filter(|t| {
-            t.as_object()
-                .and_then(|o| o.get("column"))
-                .and_then(|p| Some(p == column_name))
-                .unwrap()
-        })
-        .map(|v| v.as_object().unwrap())
+        .filter(|t| t.column == *column_name)
         .collect::<Vec<_>>();
 
     let as_if_clause = match query_as_if {
@@ -1352,21 +1261,15 @@ pub async fn validate_cell_foreign_constraints(
     };
 
     for fkey in fkeys {
-        let ftable = fkey.get("ftable").and_then(|t| t.as_str()).unwrap();
+        let ftable = &fkey.ftable;
         let (as_if_clause, ftable_alias) = match query_as_if {
-            Some(query_as_if) if ftable == query_as_if.table => {
+            Some(query_as_if) if *ftable == query_as_if.table => {
                 (as_if_clause.to_string(), query_as_if.alias.to_string())
             }
             _ => ("".to_string(), ftable.to_string()),
         };
-        let fcolumn = fkey.get("fcolumn").and_then(|c| c.as_str()).unwrap();
-        let sql_type = get_sql_type_from_global_config(
-            &ValveConfig::default(),
-            &config,
-            &ftable,
-            &fcolumn,
-            pool,
-        );
+        let fcolumn = &fkey.fcolumn;
+        let sql_type = get_sql_type_from_global_config(&config, ftable, fcolumn, pool);
         let sql_param = cast_sql_param_from_text(&sql_type);
         let fsql = local_sql_syntax(
             &pool,
@@ -1394,7 +1297,7 @@ pub async fn validate_cell_foreign_constraints(
             });
 
             let (as_if_clause_for_conflict, ftable_alias) = match query_as_if {
-                Some(query_as_if) if ftable == query_as_if.table => (
+                Some(query_as_if) if *ftable == query_as_if.table => (
                     as_if_clause_for_conflict.to_string(),
                     query_as_if.alias.to_string(),
                 ),
@@ -1456,7 +1359,7 @@ pub async fn validate_cell_foreign_constraints(
 /// violations by attaching error messages to the cell. Optionally, if a transaction is
 /// given, use that instead of the pool for database access.
 pub async fn validate_cell_trees(
-    config: &SerdeMap,
+    config: &ValveConfig,
     pool: &AnyPool,
     mut tx: Option<&mut Transaction<'_, sqlx::Any>>,
     table_name: &String,
@@ -1468,21 +1371,12 @@ pub async fn validate_cell_trees(
     // If the current column is the parent column of a tree, validate that adding the current value
     // will not result in a cycle between this and the parent column:
     let tkeys = config
-        .get("constraints")
-        .and_then(|c| c.as_object())
-        .and_then(|o| o.get("tree"))
-        .and_then(|t| t.as_object())
-        .and_then(|o| o.get(table_name))
-        .and_then(|t| t.as_array())
+        .constraint
+        .tree
+        .get(table_name)
         .unwrap()
         .iter()
-        .filter(|t| {
-            t.as_object()
-                .and_then(|o| o.get("parent"))
-                .and_then(|p| Some(p == column_name))
-                .unwrap()
-        })
-        .map(|v| v.as_object().unwrap())
+        .filter(|t| t.parent == *column_name)
         .collect::<Vec<_>>();
 
     // If there are no tree keys, just silently return so as to save the cost of finding the
@@ -1492,25 +1386,14 @@ pub async fn validate_cell_trees(
     }
 
     let parent_col = column_name;
-    let parent_sql_type = get_sql_type_from_global_config(
-        &ValveConfig::default(),
-        &config,
-        &table_name,
-        &parent_col,
-        pool,
-    );
+    let parent_sql_type = get_sql_type_from_global_config(&config, &table_name, &parent_col, pool);
     let parent_sql_param = cast_sql_param_from_text(&parent_sql_type);
     let parent_val = cell.value.clone();
     let view_name = format!("{}_view", table_name);
     for tkey in tkeys {
-        let child_col = tkey.get("child").and_then(|c| c.as_str()).unwrap();
-        let child_sql_type = get_sql_type_from_global_config(
-            &ValveConfig::default(),
-            &config,
-            &table_name,
-            &child_col,
-            pool,
-        );
+        let child_col = &tkey.child;
+        let child_sql_type =
+            get_sql_type_from_global_config(&config, &table_name, &child_col, pool);
         let child_sql_param = cast_sql_param_from_text(&child_sql_type);
         let child_val = context
             .contents
@@ -1648,7 +1531,7 @@ pub async fn validate_cell_trees(
 /// in the table. Optionally, if a transaction is given, use that instead of the pool for database
 /// access.
 pub async fn validate_cell_unique_constraints(
-    config: &SerdeMap,
+    config: &ValveConfig,
     pool: &AnyPool,
     mut tx: Option<&mut Transaction<'_, sqlx::Any>>,
     table_name: &String,
@@ -1661,41 +1544,20 @@ pub async fn validate_cell_unique_constraints(
     // a tree, then if the value of the cell is a duplicate either of one of the previously
     // validated rows in the batch, or a duplicate of a validated row that has already been inserted
     // into the table, mark it with the corresponding error:
-    let primaries = config
-        .get("constraints")
-        .and_then(|c| c.as_object())
-        .and_then(|o| o.get("primary"))
-        .and_then(|t| t.as_object())
-        .and_then(|o| o.get(table_name))
-        .and_then(|t| t.as_array())
-        .unwrap();
-    let uniques = config
-        .get("constraints")
-        .and_then(|c| c.as_object())
-        .and_then(|o| o.get("unique"))
-        .and_then(|t| t.as_object())
-        .and_then(|o| o.get(table_name))
-        .and_then(|t| t.as_array())
-        .unwrap();
+    let primaries = config.constraint.primary.get(table_name).unwrap();
+    let uniques = config.constraint.unique.get(table_name).unwrap();
     let trees = config
-        .get("constraints")
-        .and_then(|c| c.as_object())
-        .and_then(|o| o.get("tree"))
-        .and_then(|t| t.as_object())
-        .and_then(|o| o.get(table_name))
-        .and_then(|t| t.as_array())
-        .and_then(|a| {
-            Some(
-                a.iter()
-                    .map(|o| o.as_object().and_then(|o| o.get("child")).unwrap()),
-            )
-        })
+        .constraint
+        .tree
+        .get(table_name)
         .unwrap()
+        .iter()
+        .map(|t| &t.child)
         .collect::<Vec<_>>();
 
-    let is_primary = primaries.contains(&SerdeValue::String(column_name.to_string()));
-    let is_unique = !is_primary && uniques.contains(&SerdeValue::String(column_name.to_string()));
-    let is_tree_child = trees.contains(&&SerdeValue::String(column_name.to_string()));
+    let is_primary = primaries.contains(column_name);
+    let is_unique = !is_primary && uniques.contains(column_name);
+    let is_tree_child = trees.contains(&column_name);
 
     fn make_error(rule: &str, column_name: &String) -> SerdeValue {
         json!({
@@ -1726,13 +1588,7 @@ pub async fn validate_cell_unique_constraints(
             query_table = view_name.to_string();
         }
 
-        let sql_type = get_sql_type_from_global_config(
-            &ValveConfig::default(),
-            &config,
-            &table_name,
-            &column_name,
-            pool,
-        );
+        let sql_type = get_sql_type_from_global_config(&config, &table_name, &column_name, pool);
         let sql_param = cast_sql_param_from_text(&sql_type);
         let sql = local_sql_syntax(
             &pool,

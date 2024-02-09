@@ -1111,7 +1111,6 @@ pub fn get_sql_for_standard_view(table: &str, pool: &AnyPool) -> String {
 /// for dropping the view, and the second string being a SQL statement for creating it.
 pub fn get_sql_for_text_view(
     tables_config: &HashMap<String, ValveTableConfig>,
-    tables_config_old: &SerdeMap,
     table: &str,
     pool: &AnyPool,
 ) -> String {
@@ -1234,8 +1233,8 @@ pub fn query_column_with_message_value(table: &str, column: &str, pool: &AnyPool
 /// SQL query that one can use to get the logical contents of the table, such that when the value
 /// of a given column is null, the query attempts to extract it from the message table. Returns a
 /// String representing the query.
-pub fn query_with_message_values(table: &str, global_config: &SerdeMap, pool: &AnyPool) -> String {
-    let real_columns = global_config
+pub fn query_with_message_values(table: &str, config_old: &SerdeMap, pool: &AnyPool) -> String {
+    let real_columns = config_old
         .get("table")
         .and_then(|t| t.get(table))
         .and_then(|t| t.as_object())
@@ -1289,7 +1288,7 @@ pub async fn get_affected_rows(
     column: &str,
     value: &str,
     except: Option<&u32>,
-    global_config: &SerdeMap,
+    config_old: &SerdeMap,
     pool: &AnyPool,
     tx: &mut Transaction<'_, sqlx::Any>,
 ) -> Result<IndexMap<u32, ValveRow>, ValveError> {
@@ -1299,7 +1298,7 @@ pub async fn get_affected_rows(
     let sql = {
         format!(
             r#"{main_query} WHERE "{column}" = '{value}'{except}"#,
-            main_query = query_with_message_values(table, global_config, pool),
+            main_query = query_with_message_values(table, config_old, pool),
             column = column,
             value = value,
             except = match except {
@@ -1349,7 +1348,7 @@ pub async fn get_affected_rows(
 /// name and a row number, get the logical contents of that row (whether or not it is valid),
 /// including any messages, from the database.
 pub async fn get_row_from_db(
-    global_config: &SerdeMap,
+    config_old: &SerdeMap,
     pool: &AnyPool,
     tx: &mut Transaction<'_, sqlx::Any>,
     table: &str,
@@ -1357,7 +1356,7 @@ pub async fn get_row_from_db(
 ) -> Result<ValveRow, ValveError> {
     let sql = format!(
         "{} WHERE row_number = {}",
-        query_with_message_values(table, global_config, pool),
+        query_with_message_values(table, config_old, pool),
         row_number
     );
     let query = sqlx_query(&sql);
@@ -1488,7 +1487,7 @@ pub async fn get_db_value(
 /// the rows that will potentially be affected by the database change to the row indicated in
 /// query_as_if.
 pub async fn get_rows_to_update(
-    global_config: &SerdeMap,
+    config_old: &SerdeMap,
     pool: &AnyPool,
     tx: &mut Transaction<'_, sqlx::Any>,
     table: &str,
@@ -1519,7 +1518,7 @@ pub async fn get_rows_to_update(
     // Collect foreign key dependencies:
     let foreign_dependencies = {
         let mut foreign_dependencies = vec![];
-        let global_fconstraints = global_config
+        let global_fconstraints = config_old
             .get("constraints")
             .and_then(|c| c.get("foreign"))
             .and_then(|c| c.as_object())
@@ -1574,7 +1573,7 @@ pub async fn get_rows_to_update(
                     dependent_column,
                     &current_value,
                     None,
-                    global_config,
+                    config_old,
                     pool,
                     tx,
                 )
@@ -1601,7 +1600,7 @@ pub async fn get_rows_to_update(
                     dependent_column,
                     &new_value,
                     None,
-                    global_config,
+                    config_old,
                     pool,
                     tx,
                 )
@@ -1614,7 +1613,7 @@ pub async fn get_rows_to_update(
 
     // Collect the intra-table dependencies:
     // TODO: Consider also the tree intra-table dependencies.
-    let primaries = global_config
+    let primaries = config_old
         .get("constraints")
         .and_then(|c| c.as_object())
         .and_then(|c| c.get("primary"))
@@ -1625,7 +1624,7 @@ pub async fn get_rows_to_update(
         .and_then(|t| Some(t.map(|t| t.as_str().unwrap().to_string())))
         .and_then(|t| Some(t.collect::<Vec<_>>()))
         .unwrap();
-    let uniques = global_config
+    let uniques = config_old
         .get("constraints")
         .and_then(|c| c.as_object())
         .and_then(|c| c.get("unique"))
@@ -1636,7 +1635,7 @@ pub async fn get_rows_to_update(
         .and_then(|t| Some(t.map(|t| t.as_str().unwrap().to_string())))
         .and_then(|t| Some(t.collect::<Vec<_>>()))
         .unwrap();
-    let columns = global_config
+    let columns = config_old
         .get("table")
         .and_then(|t| t.get(table))
         .and_then(|t| t.as_object())
@@ -1678,7 +1677,7 @@ pub async fn get_rows_to_update(
                     column,
                     &current_value,
                     Some(&query_as_if.row_number),
-                    global_config,
+                    config_old,
                     pool,
                     tx,
                 )
@@ -1703,7 +1702,7 @@ pub async fn get_rows_to_update(
 /// we should modify 'in thought' the current state of the database, and a flag indicating whether
 /// we should allow recursive updates, validate and then update each row indicated in `updates`.
 pub async fn process_updates(
-    global_config: &SerdeMap,
+    config_old: &SerdeMap,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     pool: &AnyPool,
@@ -1716,7 +1715,7 @@ pub async fn process_updates(
         for (row_number, row) in rows_to_update {
             // Validate each row 'counterfactually':
             let vrow = validate_row_tx(
-                global_config,
+                &ValveConfig::default(),
                 compiled_datatype_conditions,
                 compiled_rule_conditions,
                 pool,
@@ -1730,7 +1729,7 @@ pub async fn process_updates(
 
             // Update the row in the database:
             update_row_tx(
-                global_config,
+                config_old,
                 compiled_datatype_conditions,
                 compiled_rule_conditions,
                 pool,
@@ -1921,9 +1920,9 @@ pub async fn switch_undone_state(
 
 /// Given a global config map and a table name, return a list of the columns from the table
 /// that may potentially result in database conflicts.
-pub fn get_conflict_columns(global_config: &SerdeMap, table_name: &str) -> Vec<SerdeValue> {
+pub fn get_conflict_columns(config_old: &SerdeMap, table_name: &str) -> Vec<SerdeValue> {
     let mut conflict_columns = vec![];
-    let primaries = global_config
+    let primaries = config_old
         .get("constraints")
         .and_then(|c| c.as_object())
         .and_then(|c| c.get("primary"))
@@ -1932,7 +1931,7 @@ pub fn get_conflict_columns(global_config: &SerdeMap, table_name: &str) -> Vec<S
         .and_then(|t| t.as_array())
         .unwrap();
 
-    let uniques = global_config
+    let uniques = config_old
         .get("constraints")
         .and_then(|c| c.as_object())
         .and_then(|c| c.get("unique"))
@@ -1943,7 +1942,7 @@ pub fn get_conflict_columns(global_config: &SerdeMap, table_name: &str) -> Vec<S
 
     // We take tree-children because these imply a unique database constraint on the corresponding
     // column.
-    let tree_children = global_config
+    let tree_children = config_old
         .get("constraints")
         .and_then(|c| c.as_object())
         .and_then(|o| o.get("tree"))
@@ -1956,7 +1955,7 @@ pub fn get_conflict_columns(global_config: &SerdeMap, table_name: &str) -> Vec<S
         .map(|v| v.get("child").unwrap().clone())
         .collect::<Vec<_>>();
 
-    let foreign_sources = global_config
+    let foreign_sources = config_old
         .get("constraints")
         .and_then(|c| c.as_object())
         .and_then(|o| o.get("foreign"))
@@ -1969,7 +1968,7 @@ pub fn get_conflict_columns(global_config: &SerdeMap, table_name: &str) -> Vec<S
         .map(|v| v.get("column").unwrap().clone())
         .collect::<Vec<_>>();
 
-    let foreign_targets = global_config
+    let foreign_targets = config_old
         .get("constraints")
         .and_then(|c| c.as_object())
         .and_then(|o| o.get("foreign"))
@@ -2035,7 +2034,7 @@ pub fn is_sql_type_error(sql_type: &str, value: &str) -> bool {
 /// If skip_validation is set to true, omit the implicit call to [validate_row_tx()].
 #[async_recursion]
 pub async fn insert_new_row_tx(
-    global_config: &SerdeMap,
+    config_old: &SerdeMap,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     pool: &AnyPool,
@@ -2049,7 +2048,7 @@ pub async fn insert_new_row_tx(
     // to mark them with appropriate messages:
     let row = if !skip_validation {
         validate_row_tx(
-            global_config,
+            &ValveConfig::default(),
             compiled_datatype_conditions,
             compiled_rule_conditions,
             pool,
@@ -2102,8 +2101,8 @@ pub async fn insert_new_row_tx(
     let mut insert_values = vec![];
     let mut insert_params = vec![];
     let mut all_messages = vec![];
-    let sorted_datatypes = get_sorted_datatypes(global_config);
-    let conflict_columns = get_conflict_columns(global_config, table);
+    let sorted_datatypes = get_sorted_datatypes(config_old);
+    let conflict_columns = get_conflict_columns(config_old, table);
     let mut use_conflict_table = false;
     for (column, cell) in row.iter() {
         insert_columns.append(&mut vec![format!(r#""{}""#, column)]);
@@ -2152,13 +2151,8 @@ pub async fn insert_new_row_tx(
             }));
         }
 
-        let sql_type = get_sql_type_from_global_config(
-            &ValveConfig::default(),
-            global_config,
-            table,
-            column,
-            pool,
-        );
+        let sql_type =
+            get_sql_type_from_global_config(&ValveConfig::default(), table, column, pool);
         if is_sql_type_error(&sql_type, value) {
             insert_values.push(String::from("NULL"));
         } else {
@@ -2184,7 +2178,7 @@ pub async fn insert_new_row_tx(
     // Look through the valve config to see which tables are dependent on this table
     // and find the rows that need to be updated:
     let (_, updates_after, _) =
-        get_rows_to_update(global_config, pool, tx, table, &query_as_if).await?;
+        get_rows_to_update(config_old, pool, tx, table, &query_as_if).await?;
 
     // Check it to see if the row should be redirected to the conflict table:
     let table_to_write = {
@@ -2233,7 +2227,7 @@ pub async fn insert_new_row_tx(
 
     // Now process the updates that need to be performed after the update of the target row:
     process_updates(
-        global_config,
+        config_old,
         compiled_datatype_conditions,
         compiled_rule_conditions,
         pool,
@@ -2251,7 +2245,7 @@ pub async fn insert_new_row_tx(
 /// database transaction, a table name, and a row number, delete the given row from the database.
 #[async_recursion]
 pub async fn delete_row_tx(
-    global_config: &SerdeMap,
+    config_old: &SerdeMap,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     pool: &AnyPool,
@@ -2273,11 +2267,11 @@ pub async fn delete_row_tx(
     // rows that need to be updated. Since this is a delete there will only be rows to update
     // before and none after the delete:
     let (updates_before, _, updates_intra) =
-        get_rows_to_update(global_config, pool, tx, table, &query_as_if).await?;
+        get_rows_to_update(config_old, pool, tx, table, &query_as_if).await?;
 
     // Process the updates that need to be performed before the update of the target row:
     process_updates(
-        global_config,
+        config_old,
         compiled_datatype_conditions,
         compiled_rule_conditions,
         pool,
@@ -2312,7 +2306,7 @@ pub async fn delete_row_tx(
     // Finally process the rows from the same table as the target table that need to be re-validated
     // because of unique or primary constraints:
     process_updates(
-        global_config,
+        config_old,
         compiled_datatype_conditions,
         compiled_rule_conditions,
         pool,
@@ -2333,7 +2327,7 @@ pub async fn delete_row_tx(
 /// this update.
 #[async_recursion]
 pub async fn update_row_tx(
-    global_config: &SerdeMap,
+    config_old: &SerdeMap,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     pool: &AnyPool,
@@ -2359,13 +2353,13 @@ pub async fn update_row_tx(
         if do_not_recurse {
             (IndexMap::new(), IndexMap::new(), IndexMap::new())
         } else {
-            get_rows_to_update(global_config, pool, tx, table, &query_as_if).await?
+            get_rows_to_update(config_old, pool, tx, table, &query_as_if).await?
         }
     };
 
     // Process the updates that need to be performed before the update of the target row:
     process_updates(
-        global_config,
+        config_old,
         compiled_datatype_conditions,
         compiled_rule_conditions,
         pool,
@@ -2380,7 +2374,7 @@ pub async fn update_row_tx(
     // to mark them with appropriate messages:
     let row = if !skip_validation {
         validate_row_tx(
-            global_config,
+            &ValveConfig::default(),
             compiled_datatype_conditions,
             compiled_rule_conditions,
             pool,
@@ -2397,7 +2391,7 @@ pub async fn update_row_tx(
 
     // Perform the update in two steps:
     delete_row_tx(
-        global_config,
+        config_old,
         compiled_datatype_conditions,
         compiled_rule_conditions,
         pool,
@@ -2407,7 +2401,7 @@ pub async fn update_row_tx(
     )
     .await?;
     insert_new_row_tx(
-        global_config,
+        config_old,
         compiled_datatype_conditions,
         compiled_rule_conditions,
         pool,
@@ -2422,7 +2416,7 @@ pub async fn update_row_tx(
     // Now process the rows from the same table as the target table that need to be re-validated
     // because of unique or primary constraints:
     process_updates(
-        global_config,
+        config_old,
         compiled_datatype_conditions,
         compiled_rule_conditions,
         pool,
@@ -2436,7 +2430,7 @@ pub async fn update_row_tx(
     // Finally process the updates from other tables that need to be performed after the update of
     // the target row:
     process_updates(
-        global_config,
+        config_old,
         compiled_datatype_conditions,
         compiled_rule_conditions,
         pool,
@@ -2668,7 +2662,6 @@ pub fn compile_condition(
 /// the database type, climb the datatype tree (as required), and return the first 'SQL type' found.
 pub fn get_sql_type(
     dt_config: &HashMap<String, ValveDatatypeConfig>,
-    dt_config_old: &SerdeMap,
     datatype: &String,
     pool: &AnyPool,
 ) -> String {
@@ -2685,14 +2678,13 @@ pub fn get_sql_type(
         .and_then(|d| Some(d.parent.to_string()))
         .unwrap();
 
-    return get_sql_type(dt_config, dt_config_old, &parent_datatype, pool);
+    return get_sql_type(dt_config, &parent_datatype, pool);
 }
 
 /// Given the global config map, a table name, a column name, and a database connection pool
 /// used to determine the database type return the column's SQL type.
 pub fn get_sql_type_from_global_config(
     config: &ValveConfig,
-    config_old: &SerdeMap,
     table: &str,
     column: &str,
     pool: &AnyPool,
@@ -2704,7 +2696,7 @@ pub fn get_sql_type_from_global_config(
         .and_then(|t| t.column.get(column))
         .and_then(|c| Some(c.datatype.to_string()))
         .unwrap();
-    get_sql_type(dt_config, &SerdeMap::new(), &dt, pool)
+    get_sql_type(dt_config, &dt, pool)
 }
 
 /// Given a SQL type, return the appropriate CAST(...) statement for casting the SQL_PARAM
@@ -3014,7 +3006,7 @@ pub fn get_table_constraints(
 
     for row in colvals {
         let datatype = &row.datatype;
-        let sql_type = get_sql_type(datatypes_config, &SerdeMap::new(), datatype, pool);
+        let sql_type = get_sql_type(datatypes_config, datatype, pool);
         let column_name = &row.column;
         let structure = &row.structure;
         if structure != "" {
@@ -3066,7 +3058,6 @@ pub fn get_table_constraints(
                                 let parent = column_name;
                                 let child_sql_type = get_sql_type(
                                     datatypes_config,
-                                    &SerdeMap::new(),
                                     &child_datatype.to_string(),
                                     pool,
                                 );
@@ -3128,8 +3119,6 @@ pub fn get_table_constraints(
 pub fn get_table_ddl(
     tables_config: &HashMap<String, ValveTableConfig>,
     datatypes_config: &HashMap<String, ValveDatatypeConfig>,
-    tables_config_old: &SerdeMap,
-    datatypes_config_old: &SerdeMap,
     parser: &StartParser,
     table_name: &String,
     pool: &AnyPool,
@@ -3169,12 +3158,7 @@ pub fn get_table_ddl(
     let mut r = 0;
     for column_config in column_configs {
         r += 1;
-        let sql_type = get_sql_type(
-            datatypes_config,
-            datatypes_config_old,
-            &column_config.datatype,
-            pool,
-        );
+        let sql_type = get_sql_type(datatypes_config, &column_config.datatype, pool);
 
         let short_sql_type = {
             if sql_type.to_lowercase().as_str().starts_with("varchar(") {
@@ -3275,9 +3259,9 @@ pub fn add_message_counts(messages: &Vec<SerdeValue>, messages_stats: &mut HashM
 
 /// Given a global config map, return a list of defined datatype names sorted from the most generic
 /// to the most specific. This function will panic if circular dependencies are encountered.
-pub fn get_sorted_datatypes(global_config: &SerdeMap) -> Vec<&str> {
+pub fn get_sorted_datatypes(config_old: &SerdeMap) -> Vec<&str> {
     let mut graph = DiGraphMap::<&str, ()>::new();
-    let dt_config = global_config
+    let dt_config = config_old
         .get("datatype")
         .and_then(|d| d.as_object())
         .unwrap();
@@ -3380,7 +3364,7 @@ pub fn sort_messages(
 /// and information messages generated are added to messages_stats, the contents of which will
 /// later be written to stderr.
 pub async fn make_inserts(
-    config: &SerdeMap,
+    config_old: &SerdeMap,
     table_name: &String,
     rows: &mut Vec<ResultRow>,
     chunk_number: usize,
@@ -3409,7 +3393,7 @@ pub async fn make_inserts(
     }
 
     fn generate_sql(
-        config: &SerdeMap,
+        config_old: &SerdeMap,
         main_table: &String,
         columns: &Vec<String>,
         rows: &mut Vec<ResultRow>,
@@ -3431,8 +3415,8 @@ pub async fn make_inserts(
         let mut conflict_params = vec![];
         let mut message_lines = vec![];
         let mut message_params = vec![];
-        let sorted_datatypes = get_sorted_datatypes(config);
-        let conflict_columns = get_conflict_columns(config, main_table);
+        let sorted_datatypes = get_sorted_datatypes(config_old);
+        let conflict_columns = get_conflict_columns(config_old, main_table);
         for (i, row) in rows.iter_mut().enumerate() {
             // enumerate begins at 0 but we need to begin at 1:
             let i = i + 1;
@@ -3446,7 +3430,6 @@ pub async fn make_inserts(
                 // error or it has the nulltype field set, in which case insert NULL:
                 let sql_type = get_sql_type_from_global_config(
                     &ValveConfig::default(),
-                    config,
                     &main_table,
                     column,
                     pool,
@@ -3562,7 +3545,7 @@ pub async fn make_inserts(
 
     // Use the "column_order" field of the table config for this table to retrieve the column names
     // in the correct order:
-    let column_names = config
+    let column_names = config_old
         .get("table")
         .and_then(|t| t.get(table_name))
         .and_then(|t| t.get("column_order"))
@@ -3574,7 +3557,7 @@ pub async fn make_inserts(
 
     let (main_sql, main_params, conflict_sql, conflict_params, message_sql, message_params) =
         generate_sql(
-            &config,
+            &config_old,
             &table_name,
             &column_names,
             rows,
@@ -3599,7 +3582,7 @@ pub async fn make_inserts(
 /// them to the table. If the verbose flag is set to true, error/warning/info stats will be
 /// collected in messages_stats and later written to stderr.
 pub async fn insert_chunk(
-    config: &SerdeMap,
+    config_old: &SerdeMap,
     pool: &AnyPool,
     table_name: &String,
     rows: &mut Vec<ResultRow>,
@@ -3611,7 +3594,7 @@ pub async fn insert_chunk(
     // First, do the tree validation. TODO: I don't remember why this needs to be done first, but
     // it does. Add a comment here explaining why.
     if validate {
-        validate_rows_trees(config, pool, table_name, rows).await?;
+        validate_rows_trees(config_old, pool, table_name, rows).await?;
     }
 
     // Try to insert the rows to the db first without validating unique and foreign constraints.
@@ -3629,7 +3612,7 @@ pub async fn insert_chunk(
     tmp_messages_stats.insert("info".to_string(), 0);
     let (main_sql, main_params, conflict_sql, conflict_params, message_sql, message_params) =
         make_inserts(
-            config,
+            config_old,
             table_name,
             rows,
             chunk_number,
@@ -3681,7 +3664,7 @@ pub async fn insert_chunk(
         }
         Err(e) => {
             if validate {
-                validate_rows_constraints(config, pool, table_name, rows).await?;
+                validate_rows_constraints(config_old, pool, table_name, rows).await?;
                 let (
                     main_sql,
                     main_params,
@@ -3690,7 +3673,7 @@ pub async fn insert_chunk(
                     message_sql,
                     message_params,
                 ) = make_inserts(
-                    config,
+                    config_old,
                     table_name,
                     rows,
                     chunk_number,
@@ -3735,7 +3718,7 @@ pub async fn insert_chunk(
 /// to the table. If the verbose flag is set to true, error/warning/info stats will be collected in
 /// messages_stats and later written to stderr.
 pub async fn insert_chunks(
-    config: &SerdeMap,
+    config_old: &SerdeMap,
     pool: &AnyPool,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
@@ -3752,7 +3735,7 @@ pub async fn insert_chunks(
             let mut intra_validated_rows = {
                 let only_nulltype = !validate;
                 validate_rows_intra(
-                    config,
+                    config_old,
                     compiled_datatype_conditions,
                     compiled_rule_conditions,
                     table_name,
@@ -3762,7 +3745,7 @@ pub async fn insert_chunks(
                 )
             };
             insert_chunk(
-                config,
+                config_old,
                 pool,
                 table_name,
                 &mut intra_validated_rows,
@@ -3796,7 +3779,7 @@ pub async fn insert_chunks(
                     workers.push(scope.spawn(move |_| {
                         let only_nulltype = !validate;
                         validate_rows_intra(
-                            config,
+                            config_old,
                             compiled_datatype_conditions,
                             compiled_rule_conditions,
                             table_name,
@@ -3817,7 +3800,7 @@ pub async fn insert_chunks(
 
             for (chunk_number, mut intra_validated_rows) in results {
                 insert_chunk(
-                    config,
+                    config_old,
                     pool,
                     table_name,
                     &mut intra_validated_rows,
