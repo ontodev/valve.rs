@@ -140,6 +140,7 @@ pub struct ValveUnderConstraint {
 
 #[derive(Clone, Debug, Default)]
 pub struct ValveForeignConstraint {
+    pub table: String,
     pub column: String,
     pub ftable: String,
     pub fcolumn: String,
@@ -171,8 +172,8 @@ pub struct ValveConfig {
 #[derive(Clone, Debug)]
 pub struct Valve {
     /// The valve configuration map.
-    pub config: SerdeMap, // TODO: Remove this field later.
-    pub config_new: ValveConfig,
+    pub config_old: SerdeMap, // TODO: Remove this field later.
+    pub config: ValveConfig,
     /// The full list of tables managed by valve, in dependency order.
     pub sorted_table_list: Vec<String>,
     /// Lists of tables that depend on a given table, indexed by table.
@@ -278,8 +279,8 @@ impl Valve {
         let config_old = SerdeMap::new();
 
         Ok(Self {
-            config: config_old,
-            config_new: config,
+            config_old: config_old,
+            config: config,
             sorted_table_list: sorted_table_list.clone(),
             table_dependencies_in: table_dependencies_in,
             table_dependencies_out: table_dependencies_out,
@@ -295,7 +296,7 @@ impl Valve {
     /// Convenience function to retrieve the path to Valve's "table table", the main entrypoint
     /// to Valve's configuration.
     pub fn get_path(&self) -> String {
-        self.config_new
+        self.config
             .table
             .get("table")
             .and_then(|t| Some(t.path.as_str()))
@@ -446,7 +447,7 @@ impl Valve {
                         return Ok(true);
                     } else {
                         let trees = self
-                            .config_new
+                            .config
                             .constraint
                             .tree
                             .get(table)
@@ -523,7 +524,7 @@ impl Valve {
         };
 
         let (columns_config, configured_column_order) = {
-            let table_config = self.config_new.table.get(table).unwrap();
+            let table_config = self.config.table.get(table).unwrap();
             let columns_config = &table_config.column;
             let configured_column_order = {
                 let mut configured_column_order = {
@@ -637,8 +638,7 @@ impl Valve {
                 continue;
             }
             let column_config = columns_config.get(cname).unwrap();
-            let sql_type =
-                get_sql_type_from_global_config(&self.config_new, table, &cname, &self.pool);
+            let sql_type = get_sql_type_from_global_config(&self.config, table, &cname, &self.pool);
 
             // Check the column's SQL type:
             if sql_type.to_lowercase() != ctype.to_lowercase() {
@@ -689,8 +689,8 @@ impl Valve {
 
     /// Generates and returns the DDL required to setup the database.
     pub async fn get_setup_statements(&self) -> Result<HashMap<String, Vec<String>>, ValveError> {
-        let tables_config = &self.config_new.table;
-        let datatypes_config = &self.config_new.datatype;
+        let tables_config = &self.config.table;
+        let datatypes_config = &self.config.datatype;
         let parser = StartParser::new();
 
         // Begin by reading in the TSV files corresponding to the tables defined in tables_config,
@@ -915,7 +915,7 @@ impl Valve {
             .collect::<Vec<_>>();
 
         let (sorted_subset, _, _) =
-            verify_table_deps_and_sort(&filtered_subset, &self.config_new.constraint);
+            verify_table_deps_and_sort(&filtered_subset, &self.config.constraint);
 
         // Since the result of verify_table_deps_and_sort() will include dependencies of the tables
         // in its input list, we filter those out here:
@@ -1043,7 +1043,7 @@ impl Valve {
             }
             let table_name = table_name.to_string();
             let path = String::from(
-                self.config
+                self.config_old
                     .get("table")
                     .and_then(|t| t.as_object())
                     .and_then(|o| o.get(&table_name))
@@ -1097,7 +1097,7 @@ impl Valve {
             // logic:
             let chunks = records.chunks(CHUNK_SIZE);
             insert_chunks(
-                &self.config,
+                &self.config_old,
                 &self.pool,
                 &self.datatype_conditions,
                 &self.rule_conditions,
@@ -1117,17 +1117,11 @@ impl Valve {
                 // tree's child). We also need to wait before validating a table's "under"
                 // constraints. Although the tree associated with such a constraint need not be
                 // defined on the same table, it can be.
-                let mut recs_to_update = validate_tree_foreign_keys(
-                    &self.config_new,
-                    &self.pool,
-                    None,
-                    &table_name,
-                    None,
-                )
-                .await?;
+                let mut recs_to_update =
+                    validate_tree_foreign_keys(&self.config, &self.pool, None, &table_name, None)
+                        .await?;
                 recs_to_update.append(
-                    &mut validate_under(&self.config_new, &self.pool, None, &table_name, None)
-                        .await?,
+                    &mut validate_under(&self.config, &self.pool, None, &table_name, None).await?,
                 );
 
                 for record in recs_to_update {
@@ -1214,7 +1208,7 @@ impl Valve {
         save_dir: &Option<String>,
     ) -> Result<&Self, ValveError> {
         let table_paths: HashMap<String, String> = self
-            .config_new
+            .config
             .table
             .iter()
             .filter(|(k, v)| {
@@ -1235,7 +1229,7 @@ impl Valve {
         );
         for (table, path) in table_paths.iter() {
             let columns: Vec<&str> = self
-                .config_new
+                .config
                 .table
                 .get(table)
                 .and_then(|t| Some(t.column_order.iter().map(|i| i.as_str()).collect()))
@@ -1306,7 +1300,7 @@ impl Valve {
         row_number: Option<u32>,
     ) -> Result<ValveRow, ValveError> {
         validate_row_tx(
-            &self.config_new,
+            &self.config,
             &self.datatype_conditions,
             &self.rule_conditions,
             &self.pool,
@@ -1329,7 +1323,7 @@ impl Valve {
         let mut tx = self.pool.begin().await?;
 
         let row = validate_row_tx(
-            &self.config_new,
+            &self.config,
             &self.datatype_conditions,
             &self.rule_conditions,
             &self.pool,
@@ -1343,6 +1337,7 @@ impl Valve {
 
         let rn = insert_new_row_tx(
             &self.config,
+            &self.config_old,
             &self.datatype_conditions,
             &self.rule_conditions,
             &self.pool,
@@ -1371,11 +1366,17 @@ impl Valve {
 
         // Get the old version of the row from the database so that we can later record it to the
         // history table:
-        let old_row =
-            get_row_from_db(&self.config, &self.pool, &mut tx, table_name, &row_number).await?;
+        let old_row = get_row_from_db(
+            &self.config_old,
+            &self.pool,
+            &mut tx,
+            table_name,
+            &row_number,
+        )
+        .await?;
 
         let row = validate_row_tx(
-            &self.config_new,
+            &self.config,
             &self.datatype_conditions,
             &self.rule_conditions,
             &self.pool,
@@ -1388,7 +1389,7 @@ impl Valve {
         .await?;
 
         update_row_tx(
-            &self.config,
+            &self.config_old,
             &self.datatype_conditions,
             &self.rule_conditions,
             &self.pool,
@@ -1420,8 +1421,14 @@ impl Valve {
     pub async fn delete_row(&self, table_name: &str, row_number: &u32) -> Result<(), ValveError> {
         let mut tx = self.pool.begin().await?;
 
-        let row =
-            get_row_from_db(&self.config, &self.pool, &mut tx, &table_name, row_number).await?;
+        let row = get_row_from_db(
+            &self.config_old,
+            &self.pool,
+            &mut tx,
+            &table_name,
+            row_number,
+        )
+        .await?;
 
         record_row_change(
             &mut tx,
@@ -1434,7 +1441,7 @@ impl Valve {
         .await?;
 
         delete_row_tx(
-            &self.config,
+            &self.config_old,
             &self.datatype_conditions,
             &self.rule_conditions,
             &self.pool,
@@ -1516,7 +1523,7 @@ impl Valve {
                 let mut tx = self.pool.begin().await?;
 
                 delete_row_tx(
-                    &self.config,
+                    &self.config_old,
                     &self.datatype_conditions,
                     &self.rule_conditions,
                     &self.pool,
@@ -1536,6 +1543,7 @@ impl Valve {
 
                 insert_new_row_tx(
                     &self.config,
+                    &self.config_old,
                     &self.datatype_conditions,
                     &self.rule_conditions,
                     &self.pool,
@@ -1556,7 +1564,7 @@ impl Valve {
                 let mut tx = self.pool.begin().await?;
 
                 update_row_tx(
-                    &self.config,
+                    &self.config_old,
                     &self.datatype_conditions,
                     &self.rule_conditions,
                     &self.pool,
@@ -1612,6 +1620,7 @@ impl Valve {
 
                 insert_new_row_tx(
                     &self.config,
+                    &self.config_old,
                     &self.datatype_conditions,
                     &self.rule_conditions,
                     &self.pool,
@@ -1632,7 +1641,7 @@ impl Valve {
                 let mut tx = self.pool.begin().await?;
 
                 delete_row_tx(
-                    &self.config,
+                    &self.config_old,
                     &self.datatype_conditions,
                     &self.rule_conditions,
                     &self.pool,
@@ -1651,7 +1660,7 @@ impl Valve {
                 let mut tx = self.pool.begin().await?;
 
                 update_row_tx(
-                    &self.config,
+                    &self.config_old,
                     &self.datatype_conditions,
                     &self.rule_conditions,
                     &self.pool,
@@ -1682,7 +1691,7 @@ impl Valve {
         column_name: &str,
         matching_string: Option<&str>,
     ) -> Result<SerdeValue, ValveError> {
-        let config = &self.config;
+        let config = &self.config_old;
         let datatype_conditions = &self.datatype_conditions;
         let structure_conditions = &self.structure_conditions;
         let pool = &self.pool;
@@ -1817,7 +1826,7 @@ impl Valve {
                                     tree.get("child").and_then(|c| c.as_str()).unwrap();
 
                                 let (tree_sql, mut params) = with_tree_sql(
-                                    &self.config_new,
+                                    &self.config,
                                     &ValveTreeConstraint::default(),
                                     &table_name.to_string(),
                                     &table_name.to_string(),

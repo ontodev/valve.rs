@@ -1233,17 +1233,14 @@ pub fn query_column_with_message_value(table: &str, column: &str, pool: &AnyPool
 /// SQL query that one can use to get the logical contents of the table, such that when the value
 /// of a given column is null, the query attempts to extract it from the message table. Returns a
 /// String representing the query.
-pub fn query_with_message_values(table: &str, config_old: &SerdeMap, pool: &AnyPool) -> String {
-    let real_columns = config_old
-        .get("table")
-        .and_then(|t| t.get(table))
-        .and_then(|t| t.as_object())
-        .and_then(|t| t.get("column"))
-        .and_then(|t| t.as_object())
-        .and_then(|t| Some(t.keys()))
-        .and_then(|k| Some(k.map(|k| k.to_string())))
-        .and_then(|t| Some(t.collect::<Vec<_>>()))
-        .unwrap();
+pub fn query_with_message_values(table: &str, config: &ValveConfig, pool: &AnyPool) -> String {
+    let real_columns = config
+        .table
+        .get(table)
+        .unwrap()
+        .column
+        .keys()
+        .collect::<Vec<_>>();
 
     let mut inner_columns = real_columns
         .iter()
@@ -1288,7 +1285,7 @@ pub async fn get_affected_rows(
     column: &str,
     value: &str,
     except: Option<&u32>,
-    config_old: &SerdeMap,
+    config: &ValveConfig,
     pool: &AnyPool,
     tx: &mut Transaction<'_, sqlx::Any>,
 ) -> Result<IndexMap<u32, ValveRow>, ValveError> {
@@ -1298,7 +1295,7 @@ pub async fn get_affected_rows(
     let sql = {
         format!(
             r#"{main_query} WHERE "{column}" = '{value}'{except}"#,
-            main_query = query_with_message_values(table, config_old, pool),
+            main_query = query_with_message_values(table, config, pool),
             column = column,
             value = value,
             except = match except {
@@ -1356,7 +1353,7 @@ pub async fn get_row_from_db(
 ) -> Result<ValveRow, ValveError> {
     let sql = format!(
         "{} WHERE row_number = {}",
-        query_with_message_values(table, config_old, pool),
+        query_with_message_values(table, &ValveConfig::default(), pool),
         row_number
     );
     let query = sqlx_query(&sql);
@@ -1487,7 +1484,7 @@ pub async fn get_db_value(
 /// the rows that will potentially be affected by the database change to the row indicated in
 /// query_as_if.
 pub async fn get_rows_to_update(
-    config_old: &SerdeMap,
+    config: &ValveConfig,
     pool: &AnyPool,
     tx: &mut Transaction<'_, sqlx::Any>,
     table: &str,
@@ -1518,17 +1515,16 @@ pub async fn get_rows_to_update(
     // Collect foreign key dependencies:
     let foreign_dependencies = {
         let mut foreign_dependencies = vec![];
-        let global_fconstraints = config_old
-            .get("constraints")
-            .and_then(|c| c.get("foreign"))
-            .and_then(|c| c.as_object())
-            .unwrap();
+        let global_fconstraints = &config.constraint.foreign;
         for (dependent_table, fconstraints) in global_fconstraints {
-            for entry in fconstraints.as_array().unwrap() {
-                let ftable = entry.get("ftable").and_then(|c| c.as_str()).unwrap();
+            for entry in fconstraints {
+                // TODO: Remove this assert later. If this turns out to always be true, then
+                // there is no need to assign to fdep.table below.
+                assert_eq!(entry.table, *dependent_table);
+                let ftable = &entry.ftable;
                 if ftable == table {
-                    let mut fdep = entry.as_object().unwrap().clone();
-                    fdep.insert("table".to_string(), json!(dependent_table));
+                    let mut fdep = entry.clone();
+                    fdep.table = dependent_table.to_string();
                     foreign_dependencies.push(fdep);
                 }
             }
@@ -1539,10 +1535,10 @@ pub async fn get_rows_to_update(
     let mut rows_to_update_before = IndexMap::new();
     let mut rows_to_update_after = IndexMap::new();
     for fdep in &foreign_dependencies {
-        let dependent_table = fdep.get("table").and_then(|c| c.as_str()).unwrap();
-        let dependent_column = fdep.get("column").and_then(|c| c.as_str()).unwrap();
-        let target_column = fdep.get("fcolumn").and_then(|c| c.as_str()).unwrap();
-        let target_table = fdep.get("ftable").and_then(|c| c.as_str()).unwrap();
+        let dependent_table = &fdep.table;
+        let dependent_column = &fdep.column;
+        let target_column = &fdep.fcolumn;
+        let target_table = &fdep.ftable;
 
         // Query the database using `row_number` to get the current value of the column for
         // the row.
@@ -1573,7 +1569,7 @@ pub async fn get_rows_to_update(
                     dependent_column,
                     &current_value,
                     None,
-                    config_old,
+                    config,
                     pool,
                     tx,
                 )
@@ -1600,7 +1596,7 @@ pub async fn get_rows_to_update(
                     dependent_column,
                     &new_value,
                     None,
-                    config_old,
+                    config,
                     pool,
                     tx,
                 )
@@ -1613,38 +1609,16 @@ pub async fn get_rows_to_update(
 
     // Collect the intra-table dependencies:
     // TODO: Consider also the tree intra-table dependencies.
-    let primaries = config_old
-        .get("constraints")
-        .and_then(|c| c.as_object())
-        .and_then(|c| c.get("primary"))
-        .and_then(|t| t.as_object())
-        .and_then(|t| t.get(table))
-        .and_then(|t| t.as_array())
-        .and_then(|t| Some(t.iter()))
-        .and_then(|t| Some(t.map(|t| t.as_str().unwrap().to_string())))
-        .and_then(|t| Some(t.collect::<Vec<_>>()))
-        .unwrap();
-    let uniques = config_old
-        .get("constraints")
-        .and_then(|c| c.as_object())
-        .and_then(|c| c.get("unique"))
-        .and_then(|t| t.as_object())
-        .and_then(|t| t.get(table))
-        .and_then(|t| t.as_array())
-        .and_then(|t| Some(t.iter()))
-        .and_then(|t| Some(t.map(|t| t.as_str().unwrap().to_string())))
-        .and_then(|t| Some(t.collect::<Vec<_>>()))
-        .unwrap();
-    let columns = config_old
-        .get("table")
-        .and_then(|t| t.get(table))
-        .and_then(|t| t.as_object())
-        .and_then(|t| t.get("column"))
-        .and_then(|t| t.as_object())
-        .and_then(|t| Some(t.keys()))
-        .and_then(|k| Some(k.map(|k| k.to_string())))
-        .and_then(|t| Some(t.collect::<Vec<_>>()))
-        .unwrap();
+    let primaries = config.constraint.primary.get(table).unwrap();
+    let uniques = config.constraint.unique.get(table).unwrap();
+    let columns = config
+        .table
+        .get(table)
+        .unwrap()
+        .column
+        .keys()
+        .map(|k| k.to_string())
+        .collect::<Vec<_>>();
 
     let mut rows_to_update_intra = IndexMap::new();
     for column in &columns {
@@ -1677,7 +1651,7 @@ pub async fn get_rows_to_update(
                     column,
                     &current_value,
                     Some(&query_as_if.row_number),
-                    config_old,
+                    config,
                     pool,
                     tx,
                 )
@@ -1920,66 +1894,36 @@ pub async fn switch_undone_state(
 
 /// Given a global config map and a table name, return a list of the columns from the table
 /// that may potentially result in database conflicts.
-pub fn get_conflict_columns(config_old: &SerdeMap, table_name: &str) -> Vec<SerdeValue> {
+pub fn get_conflict_columns(config: &ValveConfig, table_name: &str) -> Vec<String> {
     let mut conflict_columns = vec![];
-    let primaries = config_old
-        .get("constraints")
-        .and_then(|c| c.as_object())
-        .and_then(|c| c.get("primary"))
-        .and_then(|t| t.as_object())
-        .and_then(|t| t.get(table_name))
-        .and_then(|t| t.as_array())
-        .unwrap();
-
-    let uniques = config_old
-        .get("constraints")
-        .and_then(|c| c.as_object())
-        .and_then(|c| c.get("unique"))
-        .and_then(|t| t.as_object())
-        .and_then(|t| t.get(table_name))
-        .and_then(|t| t.as_array())
-        .unwrap();
-
+    let primaries = config.constraint.primary.get(table_name).unwrap();
+    let uniques = config.constraint.unique.get(table_name).unwrap();
     // We take tree-children because these imply a unique database constraint on the corresponding
     // column.
-    let tree_children = config_old
-        .get("constraints")
-        .and_then(|c| c.as_object())
-        .and_then(|o| o.get("tree"))
-        .and_then(|t| t.as_object())
-        .and_then(|o| o.get(table_name))
-        .and_then(|t| t.as_array())
+    let tree_children = config
+        .constraint
+        .tree
+        .get(table_name)
         .unwrap()
         .iter()
-        .map(|v| v.as_object().unwrap())
-        .map(|v| v.get("child").unwrap().clone())
+        .map(|t| t.child.to_string())
         .collect::<Vec<_>>();
-
-    let foreign_sources = config_old
-        .get("constraints")
-        .and_then(|c| c.as_object())
-        .and_then(|o| o.get("foreign"))
-        .and_then(|t| t.as_object())
-        .and_then(|o| o.get(table_name))
-        .and_then(|t| t.as_array())
+    let foreign_sources = config
+        .constraint
+        .foreign
+        .get(table_name)
         .unwrap()
         .iter()
-        .map(|v| v.as_object().unwrap())
-        .map(|v| v.get("column").unwrap().clone())
+        .map(|t| t.column.to_string())
         .collect::<Vec<_>>();
-
-    let foreign_targets = config_old
-        .get("constraints")
-        .and_then(|c| c.as_object())
-        .and_then(|o| o.get("foreign"))
-        .and_then(|t| t.as_object())
-        .and_then(|o| o.get(table_name))
-        .and_then(|t| t.as_array())
+    let foreign_targets = config
+        .constraint
+        .foreign
+        .get(table_name)
         .unwrap()
         .iter()
-        .map(|v| v.as_object().unwrap())
-        .filter(|o| o.get("ftable").unwrap().as_str() == Some(table_name))
-        .map(|v| v.get("fcolumn").unwrap().clone())
+        .filter(|t| t.ftable == *table_name)
+        .map(|t| t.fcolumn.to_string())
         .collect::<Vec<_>>();
 
     for key_columns in vec![
@@ -1991,7 +1935,7 @@ pub fn get_conflict_columns(config_old: &SerdeMap, table_name: &str) -> Vec<Serd
     ] {
         for column in key_columns {
             if !conflict_columns.contains(column) {
-                conflict_columns.push(column.clone());
+                conflict_columns.push(column.to_string());
             }
         }
     }
@@ -2034,6 +1978,7 @@ pub fn is_sql_type_error(sql_type: &str, value: &str) -> bool {
 /// If skip_validation is set to true, omit the implicit call to [validate_row_tx()].
 #[async_recursion]
 pub async fn insert_new_row_tx(
+    config: &ValveConfig,
     config_old: &SerdeMap,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
@@ -2048,7 +1993,7 @@ pub async fn insert_new_row_tx(
     // to mark them with appropriate messages:
     let row = if !skip_validation {
         validate_row_tx(
-            &ValveConfig::default(),
+            config,
             compiled_datatype_conditions,
             compiled_rule_conditions,
             pool,
@@ -2101,8 +2046,8 @@ pub async fn insert_new_row_tx(
     let mut insert_values = vec![];
     let mut insert_params = vec![];
     let mut all_messages = vec![];
-    let sorted_datatypes = get_sorted_datatypes(config_old);
-    let conflict_columns = get_conflict_columns(config_old, table);
+    let sorted_datatypes = get_sorted_datatypes(config);
+    let conflict_columns = get_conflict_columns(config, table);
     let mut use_conflict_table = false;
     for (column, cell) in row.iter() {
         insert_columns.append(&mut vec![format!(r#""{}""#, column)]);
@@ -2151,8 +2096,7 @@ pub async fn insert_new_row_tx(
             }));
         }
 
-        let sql_type =
-            get_sql_type_from_global_config(&ValveConfig::default(), table, column, pool);
+        let sql_type = get_sql_type_from_global_config(config, table, column, pool);
         if is_sql_type_error(&sql_type, value) {
             insert_values.push(String::from("NULL"));
         } else {
@@ -2160,7 +2104,7 @@ pub async fn insert_new_row_tx(
             insert_params.push(String::from(value));
         }
 
-        if !use_conflict_table && !valid && conflict_columns.contains(&json!(column)) {
+        if !use_conflict_table && !valid && conflict_columns.contains(&column) {
             use_conflict_table = true;
         }
     }
@@ -2177,8 +2121,7 @@ pub async fn insert_new_row_tx(
 
     // Look through the valve config to see which tables are dependent on this table
     // and find the rows that need to be updated:
-    let (_, updates_after, _) =
-        get_rows_to_update(config_old, pool, tx, table, &query_as_if).await?;
+    let (_, updates_after, _) = get_rows_to_update(config, pool, tx, table, &query_as_if).await?;
 
     // Check it to see if the row should be redirected to the conflict table:
     let table_to_write = {
@@ -2267,7 +2210,7 @@ pub async fn delete_row_tx(
     // rows that need to be updated. Since this is a delete there will only be rows to update
     // before and none after the delete:
     let (updates_before, _, updates_intra) =
-        get_rows_to_update(config_old, pool, tx, table, &query_as_if).await?;
+        get_rows_to_update(&ValveConfig::default(), pool, tx, table, &query_as_if).await?;
 
     // Process the updates that need to be performed before the update of the target row:
     process_updates(
@@ -2353,7 +2296,7 @@ pub async fn update_row_tx(
         if do_not_recurse {
             (IndexMap::new(), IndexMap::new(), IndexMap::new())
         } else {
-            get_rows_to_update(config_old, pool, tx, table, &query_as_if).await?
+            get_rows_to_update(&ValveConfig::default(), pool, tx, table, &query_as_if).await?
         }
     };
 
@@ -2401,6 +2344,7 @@ pub async fn update_row_tx(
     )
     .await?;
     insert_new_row_tx(
+        &ValveConfig::default(),
         config_old,
         compiled_datatype_conditions,
         compiled_rule_conditions,
@@ -3026,6 +2970,7 @@ pub fn get_table_constraints(
                         match &*args[0] {
                             Expression::Field(ftable, fcolumn) => {
                                 foreigns.push(ValveForeignConstraint {
+                                    table: table_name.to_string(),
                                     column: column_name.to_string(),
                                     ftable: ftable.to_string(),
                                     fcolumn: fcolumn.to_string(),
@@ -3259,16 +3204,13 @@ pub fn add_message_counts(messages: &Vec<SerdeValue>, messages_stats: &mut HashM
 
 /// Given a global config map, return a list of defined datatype names sorted from the most generic
 /// to the most specific. This function will panic if circular dependencies are encountered.
-pub fn get_sorted_datatypes(config_old: &SerdeMap) -> Vec<&str> {
+pub fn get_sorted_datatypes(config: &ValveConfig) -> Vec<&str> {
     let mut graph = DiGraphMap::<&str, ()>::new();
-    let dt_config = config_old
-        .get("datatype")
-        .and_then(|d| d.as_object())
-        .unwrap();
+    let dt_config = &config.datatype;
     for (dt_name, dt_obj) in dt_config.iter() {
         let d_index = graph.add_node(dt_name);
-        if let Some(parent) = dt_obj.get("parent").and_then(|p| p.as_str()) {
-            let p_index = graph.add_node(parent);
+        if dt_obj.parent != "" {
+            let p_index = graph.add_node(&dt_obj.parent);
             graph.add_edge(d_index, p_index, ());
         }
     }
@@ -3382,9 +3324,8 @@ pub async fn make_inserts(
     ),
     ValveError,
 > {
-    fn is_conflict_row(row: &ResultRow, conflict_columns: &Vec<SerdeValue>) -> bool {
+    fn is_conflict_row(row: &ResultRow, conflict_columns: &Vec<String>) -> bool {
         for (column, cell) in &row.contents {
-            let column = SerdeValue::String(column.to_string());
             if !cell.valid && conflict_columns.contains(&column) {
                 return true;
             }
@@ -3415,8 +3356,9 @@ pub async fn make_inserts(
         let mut conflict_params = vec![];
         let mut message_lines = vec![];
         let mut message_params = vec![];
-        let sorted_datatypes = get_sorted_datatypes(config_old);
-        let conflict_columns = get_conflict_columns(config_old, main_table);
+        let dummy_config_new = ValveConfig::default();
+        let sorted_datatypes = get_sorted_datatypes(&dummy_config_new);
+        let conflict_columns = get_conflict_columns(&dummy_config_new, main_table);
         for (i, row) in rows.iter_mut().enumerate() {
             // enumerate begins at 0 but we need to begin at 1:
             let i = i + 1;
