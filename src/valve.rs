@@ -1428,7 +1428,7 @@ impl Valve {
         .await?;
 
         delete_row_tx(
-            &self.config_old,
+            &self.config,
             &self.datatype_conditions,
             &self.rule_conditions,
             &self.pool,
@@ -1510,7 +1510,7 @@ impl Valve {
                 let mut tx = self.pool.begin().await?;
 
                 delete_row_tx(
-                    &self.config_old,
+                    &self.config,
                     &self.datatype_conditions,
                     &self.rule_conditions,
                     &self.pool,
@@ -1626,7 +1626,7 @@ impl Valve {
                 let mut tx = self.pool.begin().await?;
 
                 delete_row_tx(
-                    &self.config_old,
+                    &self.config,
                     &self.datatype_conditions,
                     &self.rule_conditions,
                     &self.pool,

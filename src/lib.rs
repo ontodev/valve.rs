@@ -2187,7 +2187,7 @@ pub async fn insert_new_row_tx(
 /// database transaction, a table name, and a row number, delete the given row from the database.
 #[async_recursion]
 pub async fn delete_row_tx(
-    config_old: &SerdeMap,
+    config: &ValveConfig,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     pool: &AnyPool,
@@ -2209,11 +2209,11 @@ pub async fn delete_row_tx(
     // rows that need to be updated. Since this is a delete there will only be rows to update
     // before and none after the delete:
     let (updates_before, _, updates_intra) =
-        get_rows_to_update(&ValveConfig::default(), pool, tx, table, &query_as_if).await?;
+        get_rows_to_update(config, pool, tx, table, &query_as_if).await?;
 
     // Process the updates that need to be performed before the update of the target row:
     process_updates(
-        &ValveConfig::default(),
+        config,
         compiled_datatype_conditions,
         compiled_rule_conditions,
         pool,
@@ -2248,7 +2248,7 @@ pub async fn delete_row_tx(
     // Finally process the rows from the same table as the target table that need to be re-validated
     // because of unique or primary constraints:
     process_updates(
-        &ValveConfig::default(),
+        config,
         compiled_datatype_conditions,
         compiled_rule_conditions,
         pool,
@@ -2333,7 +2333,7 @@ pub async fn update_row_tx(
 
     // Perform the update in two steps:
     delete_row_tx(
-        &SerdeMap::new(),
+        config,
         compiled_datatype_conditions,
         compiled_rule_conditions,
         pool,
