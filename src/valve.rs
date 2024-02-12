@@ -1014,7 +1014,9 @@ impl Valve {
         self.load_tables(&table_list, validate).await
     }
 
-    // TODO: This one is the biggest job. Save it for last.
+    /////////////////////////////////
+    // TODO:
+    /////////////////////////////////
     /// Given a vector of table names, load those tables in the given order. If `validate` is false,
     /// just try to insert all rows, irrespective of whether they are valid or not or will possibly
     /// trigger a db error.
@@ -1676,22 +1678,18 @@ impl Valve {
         column_name: &str,
         matching_string: Option<&str>,
     ) -> Result<SerdeValue, ValveError> {
-        let config = &self.config_old;
+        let config = &self.config;
         let datatype_conditions = &self.datatype_conditions;
         let structure_conditions = &self.structure_conditions;
         let pool = &self.pool;
-        let dt_name = config
-            .get("table")
-            .and_then(|t| t.as_object())
-            .and_then(|t| t.get(table_name))
-            .and_then(|t| t.as_object())
-            .and_then(|t| t.get("column"))
-            .and_then(|c| c.as_object())
-            .and_then(|c| c.get(column_name))
-            .and_then(|c| c.as_object())
-            .and_then(|c| c.get("datatype"))
-            .and_then(|d| d.as_str())
-            .unwrap();
+        let dt_name = &config
+            .table
+            .get(table_name)
+            .unwrap()
+            .column
+            .get(column_name)
+            .unwrap()
+            .datatype;
 
         let dt_condition = datatype_conditions
             .get(dt_name)
@@ -1720,26 +1718,18 @@ impl Valve {
                 // `under(tree_table.tree_column, value)` condition, then get the values from the
                 // tree column that are under `value`.
                 let structure = structure_conditions.get(
-                    config
-                        .get("table")
-                        .and_then(|t| t.as_object())
-                        .and_then(|t| t.get(table_name))
-                        .and_then(|t| t.as_object())
-                        .and_then(|t| t.get("column"))
-                        .and_then(|c| c.as_object())
-                        .and_then(|c| c.get(column_name))
-                        .and_then(|c| c.as_object())
-                        .and_then(|c| c.get("structure"))
-                        .and_then(|d| d.as_str())
-                        .unwrap_or_else(|| ""),
+                    &config
+                        .table
+                        .get(table_name)
+                        .unwrap()
+                        .column
+                        .get(column_name)
+                        .unwrap()
+                        .structure,
                 );
 
-                let sql_type = get_sql_type_from_global_config(
-                    &ValveConfig::default(),
-                    table_name,
-                    &column_name,
-                    &pool,
-                );
+                let sql_type =
+                    get_sql_type_from_global_config(&config, table_name, &column_name, &pool);
 
                 match structure {
                     Some(ParsedStructure { original, parsed }) => {
@@ -1792,27 +1782,24 @@ impl Valve {
                                 }
 
                                 let tree = config
-                                    .get("constraints")
-                                    .and_then(|c| c.as_object())
-                                    .and_then(|c| c.get("tree"))
-                                    .and_then(|t| t.as_object())
-                                    .and_then(|t| t.get(table_name))
-                                    .and_then(|t| t.as_array())
-                                    .and_then(|t| {
-                                        t.iter().find(|o| o.get("child").unwrap() == tree_col)
-                                    })
-                                    .expect(
-                                        format!("No tree: '{}.{}' found", table_name, tree_col)
-                                            .as_str(),
-                                    )
-                                    .as_object()
-                                    .unwrap();
-                                let child_column =
-                                    tree.get("child").and_then(|c| c.as_str()).unwrap();
+                                    .constraint
+                                    .tree
+                                    .get(table_name)
+                                    .expect(&format!(
+                                        "No tree config found for table '{}' found",
+                                        table_name
+                                    ))
+                                    .iter()
+                                    .find(|t| t.child == *tree_col)
+                                    .expect(&format!(
+                                        "No tree: '{}.{}' found",
+                                        table_name, tree_col
+                                    ));
+                                let child_column = &tree.child;
 
                                 let (tree_sql, mut params) = with_tree_sql(
                                     &self.config,
-                                    &ValveTreeConstraint::default(),
+                                    &tree,
                                     &table_name.to_string(),
                                     &table_name.to_string(),
                                     under_val.as_ref(),
