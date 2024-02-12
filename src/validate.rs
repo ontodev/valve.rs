@@ -7,7 +7,7 @@ use crate::{
         ValveConfig, ValveDatatypeConfig, ValveError, ValveRow, ValveRuleConfig,
         ValveTreeConstraint,
     },
-    ColumnRule, CompiledCondition, SerdeMap,
+    ColumnRule, CompiledCondition,
 };
 use chrono::Utc;
 use indexmap::IndexMap;
@@ -519,20 +519,12 @@ pub async fn validate_tree_foreign_keys(
 /// Given a config map, a database connection pool, a table name, and a number of rows to validate,
 /// perform tree validation on the rows and return the validated results.
 pub async fn validate_rows_trees(
-    config_old: &SerdeMap,
+    config: &ValveConfig,
     pool: &AnyPool,
     table_name: &String,
     rows: &mut Vec<ResultRow>,
 ) -> Result<(), ValveError> {
-    let column_names = config_old
-        .get("table")
-        .and_then(|t| t.get(table_name))
-        .and_then(|t| t.get("column_order"))
-        .and_then(|c| c.as_array())
-        .unwrap()
-        .iter()
-        .map(|v| v.as_str().unwrap().to_string())
-        .collect::<Vec<_>>();
+    let column_names = &config.table.get(table_name).unwrap().column_order;
 
     let mut result_rows = vec![];
     for row in rows {
@@ -540,21 +532,16 @@ pub async fn validate_rows_trees(
             row_number: None,
             contents: IndexMap::new(),
         };
-        for column_name in &column_names {
+        for column_name in column_names {
             let context = row.clone();
             let cell = row.contents.get_mut(column_name).unwrap();
             // We don't do any further validation on cells that are legitimately empty, or on cells
             // that have SQL type violations. We exclude the latter because they can result in
             // database errors when, for instance, we compare a numeric with a non-numeric type.
-            let sql_type = get_sql_type_from_global_config(
-                &ValveConfig::default(),
-                table_name,
-                &column_name,
-                pool,
-            );
+            let sql_type = get_sql_type_from_global_config(config, table_name, &column_name, pool);
             if cell.nulltype == None && !is_sql_type_error(&sql_type, &cell.value) {
                 validate_cell_trees(
-                    &ValveConfig::default(),
+                    config,
                     pool,
                     None,
                     table_name,
@@ -583,20 +570,12 @@ pub async fn validate_rows_trees(
 /// validate foreign and unique constraints, where the latter include primary and "tree child" keys
 /// (which imply unique constraints) and return the validated results.
 pub async fn validate_rows_constraints(
-    config_old: &SerdeMap,
+    config: &ValveConfig,
     pool: &AnyPool,
     table_name: &String,
     rows: &mut Vec<ResultRow>,
 ) -> Result<(), ValveError> {
-    let column_names = config_old
-        .get("table")
-        .and_then(|t| t.get(table_name))
-        .and_then(|t| t.get("column_order"))
-        .and_then(|c| c.as_array())
-        .unwrap()
-        .iter()
-        .map(|v| v.as_str().unwrap().to_string())
-        .collect::<Vec<_>>();
+    let column_names = &config.table.get(table_name).unwrap().column_order;
 
     let mut result_rows = vec![];
     for row in rows.iter_mut() {
@@ -604,20 +583,15 @@ pub async fn validate_rows_constraints(
             row_number: None,
             contents: IndexMap::new(),
         };
-        for column_name in &column_names {
+        for column_name in column_names {
             let cell = row.contents.get_mut(column_name).unwrap();
             // We don't do any further validation on cells that are legitimately empty, or on cells
             // that have SQL type violations. We exclude the latter because they can result in
             // database errors when, for instance, we compare a numeric with a non-numeric type.
-            let sql_type = get_sql_type_from_global_config(
-                &ValveConfig::default(),
-                table_name,
-                &column_name,
-                pool,
-            );
+            let sql_type = get_sql_type_from_global_config(config, table_name, &column_name, pool);
             if cell.nulltype == None && !is_sql_type_error(&sql_type, &cell.value) {
                 validate_cell_foreign_constraints(
-                    &ValveConfig::default(),
+                    config,
                     pool,
                     None,
                     table_name,
@@ -628,7 +602,7 @@ pub async fn validate_rows_constraints(
                 .await?;
 
                 validate_cell_unique_constraints(
-                    &ValveConfig::default(),
+                    config,
                     pool,
                     None,
                     table_name,
@@ -657,7 +631,7 @@ pub async fn validate_rows_constraints(
 /// table, and a number of rows to validate, run intra-row validatation on all of the rows and
 /// return the validated versions.
 pub fn validate_rows_intra(
-    config_old: &SerdeMap,
+    config: &ValveConfig,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     table_name: &String,
@@ -688,22 +662,14 @@ pub fn validate_rows_intra(
                     result_row.contents.insert(column.to_string(), result_cell);
                 }
 
-                let column_names = config_old
-                    .get("table")
-                    .and_then(|t| t.get(table_name))
-                    .and_then(|t| t.get("column_order"))
-                    .and_then(|c| c.as_array())
-                    .unwrap()
-                    .iter()
-                    .map(|v| v.as_str().unwrap().to_string())
-                    .collect::<Vec<_>>();
+                let column_names = &config.table.get(table_name).unwrap().column_order;
 
                 // We begin by determining the nulltype of all of the cells, since the rules
                 // validation step requires that all cells have this information.
-                for column_name in &column_names {
+                for column_name in column_names {
                     let cell = result_row.contents.get_mut(column_name).unwrap();
                     validate_cell_nulltype(
-                        &ValveConfig::default(),
+                        config,
                         compiled_datatype_conditions,
                         table_name,
                         &column_name,
@@ -712,11 +678,11 @@ pub fn validate_rows_intra(
                 }
 
                 if !only_nulltype {
-                    for column_name in &column_names {
+                    for column_name in column_names {
                         let context = result_row.clone();
                         let cell = result_row.contents.get_mut(column_name).unwrap();
                         validate_cell_rules(
-                            &ValveConfig::default(),
+                            config,
                             compiled_rule_conditions,
                             table_name,
                             &column_name,
@@ -726,7 +692,7 @@ pub fn validate_rows_intra(
 
                         if cell.nulltype == None {
                             validate_cell_datatype(
-                                &ValveConfig::default(),
+                                config,
                                 compiled_datatype_conditions,
                                 table_name,
                                 &column_name,

@@ -11,8 +11,8 @@ use crate::{
     switch_undone_state, update_row_tx,
     validate::{validate_row_tx, validate_tree_foreign_keys, validate_under, with_tree_sql},
     valve_grammar::StartParser,
-    verify_table_deps_and_sort, warn, ColumnRule, CompiledCondition, ParsedStructure, SerdeMap,
-    CHUNK_SIZE, SQL_PARAM,
+    verify_table_deps_and_sort, warn, ColumnRule, CompiledCondition, ParsedStructure, CHUNK_SIZE,
+    SQL_PARAM,
 };
 use chrono::Utc;
 use csv::{QuoteStyle, ReaderBuilder, WriterBuilder};
@@ -172,7 +172,6 @@ pub struct ValveConfig {
 #[derive(Clone, Debug)]
 pub struct Valve {
     /// The valve configuration map.
-    pub config_old: SerdeMap, // TODO: Remove this field later.
     pub config: ValveConfig,
     /// The full list of tables managed by valve, in dependency order.
     pub sorted_table_list: Vec<String>,
@@ -276,10 +275,7 @@ impl Valve {
         let rule_conditions = get_compiled_rule_conditions(&config, &datatype_conditions, &parser);
         let structure_conditions = get_parsed_structure_conditions(&config, &parser);
 
-        let config_old = SerdeMap::new();
-
         Ok(Self {
-            config_old: config_old,
             config: config,
             sorted_table_list: sorted_table_list.clone(),
             table_dependencies_in: table_dependencies_in,
@@ -1014,9 +1010,6 @@ impl Valve {
         self.load_tables(&table_list, validate).await
     }
 
-    /////////////////////////////////
-    // TODO:
-    /////////////////////////////////
     /// Given a vector of table names, load those tables in the given order. If `validate` is false,
     /// just try to insert all rows, irrespective of whether they are valid or not or will possibly
     /// trigger a db error.
@@ -1044,15 +1037,7 @@ impl Valve {
                 continue;
             }
             let table_name = table_name.to_string();
-            let path = String::from(
-                self.config_old
-                    .get("table")
-                    .and_then(|t| t.as_object())
-                    .and_then(|o| o.get(&table_name))
-                    .and_then(|n| n.get("path"))
-                    .and_then(|p| p.as_str())
-                    .unwrap(),
-            );
+            let path = String::from(&self.config.table.get(&table_name).unwrap().path);
             let mut rdr = {
                 match File::open(path.clone()) {
                     Err(e) => {
@@ -1099,7 +1084,7 @@ impl Valve {
             // logic:
             let chunks = records.chunks(CHUNK_SIZE);
             insert_chunks(
-                &self.config_old,
+                &self.config,
                 &self.pool,
                 &self.datatype_conditions,
                 &self.rule_conditions,

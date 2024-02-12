@@ -917,7 +917,6 @@ pub fn get_compiled_rule_conditions(
     let tables_config = &config.table;
     let rules_config = &config.rule;
     for (rules_table, table_rules) in rules_config.iter() {
-        println!("Rules for {}", rules_table);
         for (column_rule_key, column_rules) in table_rules.iter() {
             for rule in column_rules {
                 let table_columns = tables_config
@@ -3088,7 +3087,7 @@ pub fn get_table_ddl(
             .collect::<Vec<_>>()
     };
 
-    let (primaries, uniques, foreigns, trees, unders) = {
+    let (primaries, uniques, foreigns, trees, _unders) = {
         // Conflict tables have no database constraints:
         if table_name.ends_with("_conflict") {
             (vec![], vec![], vec![], vec![], vec![])
@@ -3304,7 +3303,7 @@ pub fn sort_messages(
 /// and information messages generated are added to messages_stats, the contents of which will
 /// later be written to stderr.
 pub async fn make_inserts(
-    config_old: &SerdeMap,
+    config: &ValveConfig,
     table_name: &String,
     rows: &mut Vec<ResultRow>,
     chunk_number: usize,
@@ -3332,7 +3331,7 @@ pub async fn make_inserts(
     }
 
     fn generate_sql(
-        config_old: &SerdeMap,
+        config: &ValveConfig,
         main_table: &String,
         columns: &Vec<String>,
         rows: &mut Vec<ResultRow>,
@@ -3354,9 +3353,8 @@ pub async fn make_inserts(
         let mut conflict_params = vec![];
         let mut message_lines = vec![];
         let mut message_params = vec![];
-        let dummy_config_new = ValveConfig::default();
-        let sorted_datatypes = get_sorted_datatypes(&dummy_config_new);
-        let conflict_columns = get_conflict_columns(&dummy_config_new, main_table);
+        let sorted_datatypes = get_sorted_datatypes(config);
+        let conflict_columns = get_conflict_columns(config, main_table);
         for (i, row) in rows.iter_mut().enumerate() {
             // enumerate begins at 0 but we need to begin at 1:
             let i = i + 1;
@@ -3368,12 +3366,7 @@ pub async fn make_inserts(
                 let cell = row.contents.get(column).unwrap();
                 // Insert the value of the cell into the column unless inserting it will cause a db
                 // error or it has the nulltype field set, in which case insert NULL:
-                let sql_type = get_sql_type_from_global_config(
-                    &ValveConfig::default(),
-                    &main_table,
-                    column,
-                    pool,
-                );
+                let sql_type = get_sql_type_from_global_config(config, &main_table, column, pool);
                 if cell.nulltype != None || is_sql_type_error(&sql_type, &cell.value) {
                     row_values.push(String::from("NULL"));
                 } else {
@@ -3485,21 +3478,13 @@ pub async fn make_inserts(
 
     // Use the "column_order" field of the table config for this table to retrieve the column names
     // in the correct order:
-    let column_names = config_old
-        .get("table")
-        .and_then(|t| t.get(table_name))
-        .and_then(|t| t.get("column_order"))
-        .and_then(|c| c.as_array())
-        .unwrap()
-        .iter()
-        .map(|v| v.as_str().unwrap().to_string())
-        .collect::<Vec<_>>();
+    let column_names = &config.table.get(table_name).unwrap().column_order;
 
     let (main_sql, main_params, conflict_sql, conflict_params, message_sql, message_params) =
         generate_sql(
-            &config_old,
+            config,
             &table_name,
-            &column_names,
+            column_names,
             rows,
             chunk_number,
             messages_stats,
@@ -3522,7 +3507,7 @@ pub async fn make_inserts(
 /// them to the table. If the verbose flag is set to true, error/warning/info stats will be
 /// collected in messages_stats and later written to stderr.
 pub async fn insert_chunk(
-    config_old: &SerdeMap,
+    config: &ValveConfig,
     pool: &AnyPool,
     table_name: &String,
     rows: &mut Vec<ResultRow>,
@@ -3534,7 +3519,7 @@ pub async fn insert_chunk(
     // First, do the tree validation. TODO: I don't remember why this needs to be done first, but
     // it does. Add a comment here explaining why.
     if validate {
-        validate_rows_trees(config_old, pool, table_name, rows).await?;
+        validate_rows_trees(config, pool, table_name, rows).await?;
     }
 
     // Try to insert the rows to the db first without validating unique and foreign constraints.
@@ -3552,7 +3537,7 @@ pub async fn insert_chunk(
     tmp_messages_stats.insert("info".to_string(), 0);
     let (main_sql, main_params, conflict_sql, conflict_params, message_sql, message_params) =
         make_inserts(
-            config_old,
+            config,
             table_name,
             rows,
             chunk_number,
@@ -3604,7 +3589,7 @@ pub async fn insert_chunk(
         }
         Err(e) => {
             if validate {
-                validate_rows_constraints(config_old, pool, table_name, rows).await?;
+                validate_rows_constraints(config, pool, table_name, rows).await?;
                 let (
                     main_sql,
                     main_params,
@@ -3613,7 +3598,7 @@ pub async fn insert_chunk(
                     message_sql,
                     message_params,
                 ) = make_inserts(
-                    config_old,
+                    config,
                     table_name,
                     rows,
                     chunk_number,
@@ -3658,7 +3643,7 @@ pub async fn insert_chunk(
 /// to the table. If the verbose flag is set to true, error/warning/info stats will be collected in
 /// messages_stats and later written to stderr.
 pub async fn insert_chunks(
-    config_old: &SerdeMap,
+    config: &ValveConfig,
     pool: &AnyPool,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
@@ -3675,7 +3660,7 @@ pub async fn insert_chunks(
             let mut intra_validated_rows = {
                 let only_nulltype = !validate;
                 validate_rows_intra(
-                    config_old,
+                    config,
                     compiled_datatype_conditions,
                     compiled_rule_conditions,
                     table_name,
@@ -3685,7 +3670,7 @@ pub async fn insert_chunks(
                 )
             };
             insert_chunk(
-                config_old,
+                config,
                 pool,
                 table_name,
                 &mut intra_validated_rows,
@@ -3719,7 +3704,7 @@ pub async fn insert_chunks(
                     workers.push(scope.spawn(move |_| {
                         let only_nulltype = !validate;
                         validate_rows_intra(
-                            config_old,
+                            config,
                             compiled_datatype_conditions,
                             compiled_rule_conditions,
                             table_name,
@@ -3740,7 +3725,7 @@ pub async fn insert_chunks(
 
             for (chunk_number, mut intra_validated_rows) in results {
                 insert_chunk(
-                    config_old,
+                    config,
                     pool,
                     table_name,
                     &mut intra_validated_rows,

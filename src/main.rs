@@ -3,15 +3,17 @@ mod api_test;
 use crate::api_test::run_api_tests;
 use argparse::{ArgumentParser, Store, StoreTrue};
 use ontodev_valve::{valve::Valve, valve::ValveError};
-use serde_json::{from_str, Value as SerdeValue};
 use std::{env, process};
 
 #[async_std::main]
 async fn main() -> Result<(), ValveError> {
     // Command line parameters and their default values. See below for descriptions. Note that some
     // of these are mutually exclusive. This is accounted for below.
+
     // TODO: Use a more powerful command-line parser library that can automatically take care of
     // things like mutually exclusive options, since argparse doesn't seem to be able to do it.
+
+    let mut ad_hoc = false; // TODO: Remove the ad_hoc parameter before merging this PR.
     let mut verbose = false;
     let mut api_test = false;
     let mut dump_config = false;
@@ -33,6 +35,10 @@ async fn main() -> Result<(), ValveError> {
         // this block limits scope of borrows by ap.refer() method
         let mut ap = ArgumentParser::new();
         ap.set_description(r#"Valve is a lightweight validation engine written in rust."#);
+
+        // TODO: Remove the ad_hoc parameter before merging this PR.
+        ap.refer(&mut ad_hoc)
+            .add_option(&["--ad_hoc"], StoreTrue, r#"Do something ad hoc."#);
         ap.refer(&mut verbose).add_option(
             &["--verbose"],
             StoreTrue,
@@ -138,6 +144,8 @@ async fn main() -> Result<(), ValveError> {
     let advice = format!("Run `{} --help` for command line usage.", program_name);
 
     let mutually_exclusive_options = vec![
+        // TODO: Remove the ad_hoc parameter before merging this PR.
+        ad_hoc,
         api_test,
         dump_config,
         dump_schema,
@@ -173,7 +181,11 @@ async fn main() -> Result<(), ValveError> {
         process::exit(1);
     }
 
-    if api_test {
+    // TODO: Remove the ad_hoc parameter before merging this PR.
+    if ad_hoc {
+        let valve = Valve::build(&source, &destination, verbose, initial_load).await?;
+        valve.save_all_tables(&None)?;
+    } else if api_test {
         run_api_tests(&source, &destination).await?;
     } else if save_all || save != "" {
         let valve = Valve::build(&source, &destination, verbose, initial_load).await?;
@@ -192,21 +204,10 @@ async fn main() -> Result<(), ValveError> {
         }
     } else if dump_config {
         let valve = Valve::build(&source, &destination, verbose, initial_load).await?;
-        let mut config = valve.config.clone();
-        let datatype_conditions = format!("{:?}", valve.datatype_conditions).replace(r"\", r"\\");
-        let datatype_conditions: SerdeValue = from_str(&datatype_conditions).unwrap();
-        config.insert(String::from("datatype_conditions"), datatype_conditions);
-
-        let structure_conditions = format!("{:?}", valve.structure_conditions).replace(r"\", r"\\");
-        let structure_conditions: SerdeValue = from_str(&structure_conditions).unwrap();
-        config.insert(String::from("structure_conditions"), structure_conditions);
-
-        let rule_conditions = format!("{:?}", valve.rule_conditions).replace(r"\", r"\\");
-        let rule_conditions: SerdeValue = from_str(&rule_conditions).unwrap();
-        config.insert(String::from("rule_conditions"), rule_conditions);
-
-        let config = serde_json::to_string(&config).unwrap();
-        println!("{}", config);
+        // TODO: Somehow convert this output to JSON. We will likely have to rewrite the display()
+        // functions for the structs involved. Note that this is required for the
+        // test/generate_random_test_data.py to work.
+        println!("{:#?}", valve);
     } else if dump_schema {
         let valve = Valve::build(&source, &destination, verbose, initial_load).await?;
         valve.dump_schema().await?;
