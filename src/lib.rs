@@ -1345,7 +1345,7 @@ pub async fn get_affected_rows(
 /// name and a row number, get the logical contents of that row (whether or not it is valid),
 /// including any messages, from the database.
 pub async fn get_row_from_db(
-    config_old: &SerdeMap,
+    config: &ValveConfig,
     pool: &AnyPool,
     tx: &mut Transaction<'_, sqlx::Any>,
     table: &str,
@@ -1353,7 +1353,7 @@ pub async fn get_row_from_db(
 ) -> Result<ValveRow, ValveError> {
     let sql = format!(
         "{} WHERE row_number = {}",
-        query_with_message_values(table, &ValveConfig::default(), pool),
+        query_with_message_values(table, config, pool),
         row_number
     );
     let query = sqlx_query(&sql);
@@ -1676,7 +1676,7 @@ pub async fn get_rows_to_update(
 /// we should modify 'in thought' the current state of the database, and a flag indicating whether
 /// we should allow recursive updates, validate and then update each row indicated in `updates`.
 pub async fn process_updates(
-    config_old: &SerdeMap,
+    config: &ValveConfig,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     pool: &AnyPool,
@@ -1689,7 +1689,7 @@ pub async fn process_updates(
         for (row_number, row) in rows_to_update {
             // Validate each row 'counterfactually':
             let vrow = validate_row_tx(
-                &ValveConfig::default(),
+                config,
                 compiled_datatype_conditions,
                 compiled_rule_conditions,
                 pool,
@@ -1703,7 +1703,7 @@ pub async fn process_updates(
 
             // Update the row in the database:
             update_row_tx(
-                config_old,
+                config,
                 compiled_datatype_conditions,
                 compiled_rule_conditions,
                 pool,
@@ -1979,7 +1979,6 @@ pub fn is_sql_type_error(sql_type: &str, value: &str) -> bool {
 #[async_recursion]
 pub async fn insert_new_row_tx(
     config: &ValveConfig,
-    config_old: &SerdeMap,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     pool: &AnyPool,
@@ -2170,7 +2169,7 @@ pub async fn insert_new_row_tx(
 
     // Now process the updates that need to be performed after the update of the target row:
     process_updates(
-        config_old,
+        config,
         compiled_datatype_conditions,
         compiled_rule_conditions,
         pool,
@@ -2214,7 +2213,7 @@ pub async fn delete_row_tx(
 
     // Process the updates that need to be performed before the update of the target row:
     process_updates(
-        config_old,
+        &ValveConfig::default(),
         compiled_datatype_conditions,
         compiled_rule_conditions,
         pool,
@@ -2249,7 +2248,7 @@ pub async fn delete_row_tx(
     // Finally process the rows from the same table as the target table that need to be re-validated
     // because of unique or primary constraints:
     process_updates(
-        config_old,
+        &ValveConfig::default(),
         compiled_datatype_conditions,
         compiled_rule_conditions,
         pool,
@@ -2270,7 +2269,7 @@ pub async fn delete_row_tx(
 /// this update.
 #[async_recursion]
 pub async fn update_row_tx(
-    config_old: &SerdeMap,
+    config: &ValveConfig,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     pool: &AnyPool,
@@ -2296,13 +2295,13 @@ pub async fn update_row_tx(
         if do_not_recurse {
             (IndexMap::new(), IndexMap::new(), IndexMap::new())
         } else {
-            get_rows_to_update(&ValveConfig::default(), pool, tx, table, &query_as_if).await?
+            get_rows_to_update(config, pool, tx, table, &query_as_if).await?
         }
     };
 
     // Process the updates that need to be performed before the update of the target row:
     process_updates(
-        config_old,
+        config,
         compiled_datatype_conditions,
         compiled_rule_conditions,
         pool,
@@ -2317,7 +2316,7 @@ pub async fn update_row_tx(
     // to mark them with appropriate messages:
     let row = if !skip_validation {
         validate_row_tx(
-            &ValveConfig::default(),
+            config,
             compiled_datatype_conditions,
             compiled_rule_conditions,
             pool,
@@ -2334,7 +2333,7 @@ pub async fn update_row_tx(
 
     // Perform the update in two steps:
     delete_row_tx(
-        config_old,
+        &SerdeMap::new(),
         compiled_datatype_conditions,
         compiled_rule_conditions,
         pool,
@@ -2344,8 +2343,7 @@ pub async fn update_row_tx(
     )
     .await?;
     insert_new_row_tx(
-        &ValveConfig::default(),
-        config_old,
+        config,
         compiled_datatype_conditions,
         compiled_rule_conditions,
         pool,
@@ -2360,7 +2358,7 @@ pub async fn update_row_tx(
     // Now process the rows from the same table as the target table that need to be re-validated
     // because of unique or primary constraints:
     process_updates(
-        config_old,
+        config,
         compiled_datatype_conditions,
         compiled_rule_conditions,
         pool,
@@ -2374,7 +2372,7 @@ pub async fn update_row_tx(
     // Finally process the updates from other tables that need to be performed after the update of
     // the target row:
     process_updates(
-        config_old,
+        config,
         compiled_datatype_conditions,
         compiled_rule_conditions,
         pool,

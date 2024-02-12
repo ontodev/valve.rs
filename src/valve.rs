@@ -1337,7 +1337,6 @@ impl Valve {
 
         let rn = insert_new_row_tx(
             &self.config,
-            &self.config_old,
             &self.datatype_conditions,
             &self.rule_conditions,
             &self.pool,
@@ -1366,14 +1365,8 @@ impl Valve {
 
         // Get the old version of the row from the database so that we can later record it to the
         // history table:
-        let old_row = get_row_from_db(
-            &self.config_old,
-            &self.pool,
-            &mut tx,
-            table_name,
-            &row_number,
-        )
-        .await?;
+        let old_row =
+            get_row_from_db(&self.config, &self.pool, &mut tx, table_name, &row_number).await?;
 
         let row = validate_row_tx(
             &self.config,
@@ -1389,7 +1382,7 @@ impl Valve {
         .await?;
 
         update_row_tx(
-            &self.config_old,
+            &self.config,
             &self.datatype_conditions,
             &self.rule_conditions,
             &self.pool,
@@ -1421,14 +1414,8 @@ impl Valve {
     pub async fn delete_row(&self, table_name: &str, row_number: &u32) -> Result<(), ValveError> {
         let mut tx = self.pool.begin().await?;
 
-        let row = get_row_from_db(
-            &self.config_old,
-            &self.pool,
-            &mut tx,
-            &table_name,
-            row_number,
-        )
-        .await?;
+        let row =
+            get_row_from_db(&self.config, &self.pool, &mut tx, &table_name, row_number).await?;
 
         record_row_change(
             &mut tx,
@@ -1543,7 +1530,6 @@ impl Valve {
 
                 insert_new_row_tx(
                     &self.config,
-                    &self.config_old,
                     &self.datatype_conditions,
                     &self.rule_conditions,
                     &self.pool,
@@ -1564,7 +1550,7 @@ impl Valve {
                 let mut tx = self.pool.begin().await?;
 
                 update_row_tx(
-                    &self.config_old,
+                    &self.config,
                     &self.datatype_conditions,
                     &self.rule_conditions,
                     &self.pool,
@@ -1620,7 +1606,6 @@ impl Valve {
 
                 insert_new_row_tx(
                     &self.config,
-                    &self.config_old,
                     &self.datatype_conditions,
                     &self.rule_conditions,
                     &self.pool,
@@ -1660,7 +1645,7 @@ impl Valve {
                 let mut tx = self.pool.begin().await?;
 
                 update_row_tx(
-                    &self.config_old,
+                    &self.config,
                     &self.datatype_conditions,
                     &self.rule_conditions,
                     &self.pool,
