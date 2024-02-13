@@ -22,12 +22,13 @@ use indexmap::IndexMap;
 use indoc::indoc;
 use itertools::Itertools;
 use regex::Regex;
+use serde::Serialize;
 use serde_json::{json, Value as SerdeValue};
 use sqlx::{
     any::{AnyKind, AnyPool, AnyRow},
     query as sqlx_query, Row, ValueRef,
 };
-use std::{collections::HashMap, fs::File, path::Path};
+use std::{collections::HashMap, fmt, fs::File, path::Path};
 
 /// Alias for [serde_json::Map](..//serde_json/struct.Map.html)<String, [serde_json::Value](../serde_json/enum.Value.html)>.
 // Note: serde_json::Map is
@@ -72,7 +73,7 @@ struct _ValveChange {
     pub _message: String,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct ValveSpecialConfig {
     pub column: String,
     pub datatype: String,
@@ -80,7 +81,7 @@ pub struct ValveSpecialConfig {
     pub table: String,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct ValveTableConfig {
     pub table: String,
     pub table_type: String,
@@ -90,7 +91,7 @@ pub struct ValveTableConfig {
     pub column_order: Vec<String>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct ValveColumnConfig {
     pub table: String,
     pub column: String,
@@ -101,7 +102,7 @@ pub struct ValveColumnConfig {
     pub nulltype: String,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct ValveDatatypeConfig {
     pub html_type: String,
     pub sql_type: String,
@@ -113,7 +114,7 @@ pub struct ValveDatatypeConfig {
     pub transform: String,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct ValveRuleConfig {
     pub description: String,
     pub level: String,
@@ -124,13 +125,13 @@ pub struct ValveRuleConfig {
     pub when_condition: String,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct ValveTreeConstraint {
     pub child: String,
     pub parent: String,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct ValveUnderConstraint {
     pub column: String,
     pub ttable: String,
@@ -138,7 +139,7 @@ pub struct ValveUnderConstraint {
     pub value: SerdeValue,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct ValveForeignConstraint {
     pub table: String,
     pub column: String,
@@ -146,7 +147,7 @@ pub struct ValveForeignConstraint {
     pub fcolumn: String,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct ValveConstraintConfig {
     // Note that primary would be better as HashMap<String, String>, since it is not possible to
     // have more than one primary key per table, but the below reflects the current implementation
@@ -159,13 +160,23 @@ pub struct ValveConstraintConfig {
     pub under: HashMap<String, Vec<ValveUnderConstraint>>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct ValveConfig {
     pub special: ValveSpecialConfig,
     pub table: HashMap<String, ValveTableConfig>,
     pub datatype: HashMap<String, ValveDatatypeConfig>,
     pub rule: HashMap<String, HashMap<String, Vec<ValveRuleConfig>>>,
     pub constraint: ValveConstraintConfig,
+}
+
+impl fmt::Display for ValveConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let json = serde_json::to_string(&self).expect(&format!(
+            "Unable to render Valve configuration: {:?} as JSON.",
+            self
+        ));
+        write!(f, "{}", json)
+    }
 }
 
 /// Main entrypoint for the Valve API.
@@ -782,14 +793,15 @@ impl Valve {
     }
 
     /// Writes the database schema to stdout.
-    pub async fn dump_schema(&self) -> Result<(), ValveError> {
+    pub async fn dump_schema(&self) -> Result<String, ValveError> {
         let setup_statements = self.get_setup_statements().await?;
+        let mut output = String::from("");
         for table in self.get_sorted_table_list(false) {
             let table_statements = setup_statements.get(table).unwrap();
-            let output = String::from(table_statements.join("\n"));
-            println!("{}\n", output);
+            let table_output = String::from(table_statements.join("\n"));
+            output.push_str(&table_output);
         }
-        Ok(())
+        Ok(output)
     }
 
     /// Create all configured database tables and views if they do not already exist as configured.

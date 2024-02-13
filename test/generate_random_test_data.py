@@ -15,7 +15,7 @@ WINDOW_SIZE = 50
 
 
 def get_special_tables(config):
-    return [k for k, v in config["special"].items() if v is not None]
+    return ["message", "history"] + [k for k, v in config["special"].items() if v is not None]
 
 
 def get_table_columns(config, table):
@@ -35,15 +35,15 @@ def get_column_datatype(config, table, column):
 
 
 def get_foreign_key(config, table, column):
-    return [f for f in config["constraints"]["foreign"][table] if f["column"] == column][0]
+    return [f for f in config["constraint"]["foreign"][table] if f["column"] == column][0]
 
 
 def get_tree(config, table, column):
-    return [f for f in config["constraints"]["tree"][table] if f["parent"] == column][0]
+    return [f for f in config["constraint"]["tree"][table] if f["parent"] == column][0]
 
 
 def get_under(config, table, column):
-    return [f for f in config["constraints"]["under"][table] if f["column"] == column][0]
+    return [f for f in config["constraint"]["under"][table] if f["column"] == column][0]
 
 
 def get_value_from_prev_insert(config, prev_inserts, from_table, from_column, to_table, to_column):
@@ -172,13 +172,22 @@ def main():
         sys.exit(result.returncode)
     config = json.loads(result.stdout.decode())
 
+    # Get the sorted list of tables to generate:
+    result = subprocess.run(["./valve", "--table_order", input_table], capture_output=True)
+    if result.returncode != 0:
+        error = result.stderr.decode()
+        output = result.stdout.decode()
+        if output:
+            error = f"{error}\n{output}"
+        print(f"{error}", file=sys.stderr)
+        sys.exit(result.returncode)
+    data_tables = [t.strip() for t in result.stdout.decode().split(",")]
+    data_tables = [t for t in data_tables if t not in get_special_tables(config)]
+
     # This is a record of the last inserted values for each table and column. When one column
     # takes its values from another column, then we look here and fetch the last inserted value of
     # the second column.
     prev_inserts = {}
-
-    # The data tables to generate:
-    data_tables = [t for t in config["sorted_table_list"] if t not in get_special_tables(config)]
 
     # The TSV files corresponding to each data table:
     tsv_files = {}

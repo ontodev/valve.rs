@@ -13,7 +13,6 @@ async fn main() -> Result<(), ValveError> {
     // TODO: Use a more powerful command-line parser library that can automatically take care of
     // things like mutually exclusive options, since argparse doesn't seem to be able to do it.
 
-    let mut ad_hoc = false; // TODO: Remove the ad_hoc parameter before merging this PR.
     let mut verbose = false;
     let mut api_test = false;
     let mut dump_config = false;
@@ -35,10 +34,6 @@ async fn main() -> Result<(), ValveError> {
         // this block limits scope of borrows by ap.refer() method
         let mut ap = ArgumentParser::new();
         ap.set_description(r#"Valve is a lightweight validation engine written in rust."#);
-
-        // TODO: Remove the ad_hoc parameter before merging this PR.
-        ap.refer(&mut ad_hoc)
-            .add_option(&["--ad_hoc"], StoreTrue, r#"Do something ad hoc."#);
         ap.refer(&mut verbose).add_option(
             &["--verbose"],
             StoreTrue,
@@ -144,8 +139,6 @@ async fn main() -> Result<(), ValveError> {
     let advice = format!("Run `{} --help` for command line usage.", program_name);
 
     let mutually_exclusive_options = vec![
-        // TODO: Remove the ad_hoc parameter before merging this PR.
-        ad_hoc,
         api_test,
         dump_config,
         dump_schema,
@@ -181,11 +174,7 @@ async fn main() -> Result<(), ValveError> {
         process::exit(1);
     }
 
-    // TODO: Remove the ad_hoc parameter before merging this PR.
-    if ad_hoc {
-        let valve = Valve::build(&source, &destination, verbose, initial_load).await?;
-        valve.save_all_tables(&None)?;
-    } else if api_test {
+    if api_test {
         run_api_tests(&source, &destination).await?;
     } else if save_all || save != "" {
         let valve = Valve::build(&source, &destination, verbose, initial_load).await?;
@@ -204,13 +193,11 @@ async fn main() -> Result<(), ValveError> {
         }
     } else if dump_config {
         let valve = Valve::build(&source, &destination, verbose, initial_load).await?;
-        // TODO: Somehow convert this output to JSON. We will likely have to rewrite the display()
-        // functions for the structs involved. Note that this is required for the
-        // test/generate_random_test_data.py to work.
-        println!("{:#?}", valve);
+        println!("{}", valve.config);
     } else if dump_schema {
         let valve = Valve::build(&source, &destination, verbose, initial_load).await?;
-        valve.dump_schema().await?;
+        let schema = valve.dump_schema().await?;
+        println!("{}", schema);
     } else if table_order {
         let valve = Valve::build(&source, &destination, verbose, initial_load).await?;
         let sorted_table_list = valve.get_sorted_table_list(false);
