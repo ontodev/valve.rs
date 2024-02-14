@@ -229,12 +229,12 @@ pub fn read_config_files(
     let mut specials_config = ValveSpecialConfig::default();
     let mut tables_config = HashMap::new();
     let rows = {
-        // Read in the configuration entry point (the "table table") from either a file or a
-        // database table.
+        // Read in the configuration entry point (the "table table") from either a file or the
+        // database table called "table".
         if path.to_lowercase().ends_with(".tsv") {
             read_tsv_into_vector(path)
         } else {
-            read_db_table_into_vector(path, "table")
+            read_db_table_into_vector(pool, "table")
         }
     };
 
@@ -334,6 +334,7 @@ pub fn read_config_files(
         specials_config: &ValveSpecialConfig,
         tables_config: &HashMap<String, ValveTableConfig>,
         path: &str,
+        pool: &AnyPool,
     ) -> Vec<SerdeMap> {
         if path.to_lowercase().ends_with(".tsv") {
             let table_name = match table_type {
@@ -351,7 +352,7 @@ pub fn read_config_files(
                     .and_then(|t| Some(t.path.to_string()))
                     .unwrap(),
             );
-            return read_tsv_into_vector(&path);
+            read_tsv_into_vector(&path)
         } else {
             let mut db_table = None;
             for (table_name, table_config) in tables_config {
@@ -368,13 +369,13 @@ pub fn read_config_files(
                 ),
                 Some(table) => table,
             };
-            read_db_table_into_vector(path, db_table)
+            read_db_table_into_vector(pool, db_table)
         }
     }
 
     // Load datatype table
     let mut datatypes_config = HashMap::new();
-    let rows = get_special_config("datatype", &specials_config, &tables_config, path);
+    let rows = get_special_config("datatype", &specials_config, &tables_config, path, pool);
     for row in rows {
         for column in vec!["datatype", "parent", "condition", "SQL type"] {
             if !row.contains_key(column) || row.get(column) == None {
@@ -418,7 +419,7 @@ pub fn read_config_files(
     }
 
     // Load column table
-    let rows = get_special_config("column", &specials_config, &tables_config, path);
+    let rows = get_special_config("column", &specials_config, &tables_config, path, pool);
     for row in rows {
         for column in vec!["table", "column", "label", "nulltype", "datatype"] {
             if !row.contains_key(column) || row.get(column) == None {
@@ -478,7 +479,7 @@ pub fn read_config_files(
     let mut rules_config = HashMap::new();
     if specials_config.rule != "" {
         let table_name = &specials_config.rule;
-        let rows = get_special_config(table_name, &specials_config, &tables_config, path);
+        let rows = get_special_config(table_name, &specials_config, &tables_config, path, pool);
         for row in rows {
             for column in vec![
                 "table",
@@ -2429,29 +2430,9 @@ pub fn read_tsv_into_vector(path: &str) -> Vec<ValveRow> {
 
 /// Given a database at the specified location, query the given table and return a vector of rows
 /// represented as ValveRows.
-pub fn read_db_table_into_vector(database: &str, config_table: &str) -> Vec<ValveRow> {
-    let connection_options;
-    if database.starts_with("postgresql://") {
-        connection_options = AnyConnectOptions::from_str(database).unwrap();
-    } else {
-        let connection_string;
-        if !database.starts_with("sqlite://") {
-            connection_string = format!("sqlite://{}?mode=ro", database);
-        } else {
-            connection_string = database.to_string();
-        }
-        connection_options = AnyConnectOptions::from_str(connection_string.as_str()).unwrap();
-    }
-
-    let pool = block_on(
-        AnyPoolOptions::new()
-            .max_connections(5)
-            .connect_with(connection_options),
-    )
-    .unwrap();
-
+pub fn read_db_table_into_vector(pool: &AnyPool, config_table: &str) -> Vec<ValveRow> {
     let sql = format!("SELECT * FROM \"{}\"", config_table);
-    let rows = block_on(sqlx_query(&sql).fetch_all(&pool)).unwrap();
+    let rows = block_on(sqlx_query(&sql).fetch_all(pool)).unwrap();
     let mut table_rows = vec![];
     for row in rows {
         let mut table_row = ValveRow::new();
