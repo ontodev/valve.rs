@@ -224,7 +224,34 @@ pub fn read_config_files(
     HashMap<String, Vec<String>>,
     HashMap<String, Vec<String>>,
 ) {
-    // Load the table config for the 'table' table from the given path, and determine the
+    // Given a list of columns that are required for some table, and a list of those columns
+    // that are required to have values, check if those requirements are met by the given row.
+    fn check_table_requirements(
+        columns_are_required: &Vec<&str>,
+        values_are_required: &Vec<&str>,
+        row: &ValveRow,
+    ) -> Result<(), ValveError> {
+        for &column in columns_are_required.iter() {
+            match row.get(column).and_then(|c| c.as_str()) {
+                None => {
+                    return Err(ValveError::ConfigError(format!(
+                        "Missing required column '{}'",
+                        column
+                    )))
+                }
+                Some(value) if value == "" && values_are_required.contains(&column) => {
+                    return Err(ValveError::ConfigError(format!(
+                        "Missing required value for '{}'",
+                        column
+                    )));
+                }
+                _ => (),
+            }
+        }
+        Ok(())
+    }
+
+    // 1. Load the table config for the 'table' table from the given path, and determine the
     // table names to use for the other special config types: 'column', 'datatype', and 'rule':
     let mut specials_config = ValveSpecialConfig::default();
     let mut tables_config = HashMap::new();
@@ -239,67 +266,59 @@ pub fn read_config_files(
     };
 
     for row in rows {
-        for column in vec!["table", "path", "type"] {
-            if !row.contains_key(column) || row.get(column) == None {
-                panic!("Missing required column '{}' reading '{}'", column, path);
-            }
-        }
-
-        for column in vec!["table", "path"] {
-            if row.get(column).and_then(|c| c.as_str()).unwrap() == "" {
-                panic!("Missing required value for '{}' reading '{}'", column, path);
-            }
-        }
-
-        if let Some(SerdeValue::String(row_type)) = row.get("type") {
-            if row_type == "table" {
-                let row_path = row.get("path").unwrap();
-                if path.to_lowercase().ends_with(".tsv") && row_path != path {
-                    panic!(
-                        "Special 'table' path '{}' does not match this path '{}'",
-                        row_path, path
-                    );
-                }
-            }
-
-            let row_table = row.get("table").and_then(|t| t.as_str()).unwrap();
-            let duplicate_err_msg = format!(
-                "Multiple tables with type '{}' declared in '{}'",
-                row_type, path
-            );
-            match row_type.as_str() {
-                "" => (), // Tables with no type are ignored.
-                "column" => {
-                    if specials_config.column != "" {
-                        panic!("{}", duplicate_err_msg);
-                    }
-                    specials_config.column = row_table.to_string();
-                }
-                "datatype" => {
-                    if specials_config.datatype != "" {
-                        panic!("{}", duplicate_err_msg);
-                    }
-                    specials_config.datatype = row_table.to_string();
-                }
-                "rule" => {
-                    if specials_config.rule != "" {
-                        panic!("{}", duplicate_err_msg);
-                    }
-                    specials_config.rule = row_table.to_string();
-                }
-                "table" => {
-                    if specials_config.table != "" {
-                        panic!("{}", duplicate_err_msg);
-                    }
-                    specials_config.table = row_table.to_string();
-                }
-                _ => panic!("Unrecognized table type '{}' in '{}'", row_type, path),
-            };
-        }
+        check_table_requirements(
+            &vec!["table", "path", "type", "description"],
+            &vec!["table", "path"],
+            &row,
+        )
+        .expect(&format!("Error while reading '{}'", path));
         let row_table = row.get("table").and_then(|t| t.as_str()).unwrap();
-        let row_desc = row.get("description").and_then(|t| t.as_str()).unwrap();
         let row_path = row.get("path").and_then(|t| t.as_str()).unwrap();
         let row_type = row.get("type").and_then(|t| t.as_str()).unwrap();
+        let row_desc = row.get("description").and_then(|t| t.as_str()).unwrap();
+
+        if row_type == "table" {
+            if path.to_lowercase().ends_with(".tsv") && row_path != path {
+                panic!(
+                    "Special 'table' path '{}' does not match this path '{}'",
+                    row_path, path
+                );
+            }
+        }
+
+        let duplicate_err_msg = format!(
+            "Multiple tables with type '{}' declared in '{}'",
+            row_type, path
+        );
+        match row_type {
+            "" => (), // Tables with no type are ignored.
+            "column" => {
+                if specials_config.column != "" {
+                    panic!("{}", duplicate_err_msg);
+                }
+                specials_config.column = row_table.to_string();
+            }
+            "datatype" => {
+                if specials_config.datatype != "" {
+                    panic!("{}", duplicate_err_msg);
+                }
+                specials_config.datatype = row_table.to_string();
+            }
+            "rule" => {
+                if specials_config.rule != "" {
+                    panic!("{}", duplicate_err_msg);
+                }
+                specials_config.rule = row_table.to_string();
+            }
+            "table" => {
+                if specials_config.table != "" {
+                    panic!("{}", duplicate_err_msg);
+                }
+                specials_config.table = row_table.to_string();
+            }
+            _ => panic!("Unrecognized table type '{}' in '{}'", row_type, path),
+        };
+
         tables_config.insert(
             row_table.to_string(),
             ValveTableConfig {
@@ -333,10 +352,10 @@ pub fn read_config_files(
         table_type: &str,
         specials_config: &ValveSpecialConfig,
         tables_config: &HashMap<String, ValveTableConfig>,
-        path: &str,
+        table_table: &str,
         pool: &AnyPool,
     ) -> Vec<SerdeMap> {
-        if path.to_lowercase().ends_with(".tsv") {
+        if table_table.to_lowercase().ends_with(".tsv") {
             let table_name = match table_type {
                 "column" => &specials_config.column,
                 "datatype" => &specials_config.datatype,
@@ -350,7 +369,10 @@ pub fn read_config_files(
                 tables_config
                     .get(table_name)
                     .and_then(|t| Some(t.path.to_string()))
-                    .unwrap(),
+                    .expect(&format!(
+                        "Table '{}' not found in tables config",
+                        table_name
+                    )),
             );
             read_tsv_into_vector(&path)
         } else {
@@ -373,21 +395,25 @@ pub fn read_config_files(
         }
     }
 
-    // Load datatype table
+    // 2. Load the datatype table.
     let mut datatypes_config = HashMap::new();
     let rows = get_special_config("datatype", &specials_config, &tables_config, path, pool);
     for row in rows {
-        for column in vec!["datatype", "parent", "condition", "SQL type"] {
-            if !row.contains_key(column) || row.get(column) == None {
-                panic!("Missing required column '{}' reading '{}'", column, path);
-            }
-        }
-
-        for column in vec!["datatype"] {
-            if row.get(column).and_then(|c| c.as_str()).unwrap() == "" {
-                panic!("Missing required value for '{}' reading '{}'", column, path);
-            }
-        }
+        check_table_requirements(
+            &vec![
+                "datatype",
+                "HTML type",
+                "SQL type",
+                "condition",
+                "description",
+                "parent",
+                "structure",
+                "transform",
+            ],
+            &vec!["datatype"],
+            &row,
+        )
+        .expect("Error while reading from datatype table");
 
         let dt_name = row.get("datatype").and_then(|d| d.as_str()).unwrap();
         let html_type = row.get("HTML type").and_then(|s| s.as_str()).unwrap();
@@ -412,53 +438,47 @@ pub fn read_config_files(
         );
     }
 
+    // Check that all the essential datatypes are now there:
     for dt in vec!["text", "empty", "line", "word"] {
         if !datatypes_config.contains_key(dt) {
             panic!("Missing required datatype: '{}'", dt);
         }
     }
 
-    // Load column table
+    // 3. Load the column table.
     let rows = get_special_config("column", &specials_config, &tables_config, path, pool);
     for row in rows {
-        for column in vec!["table", "column", "label", "nulltype", "datatype"] {
-            if !row.contains_key(column) || row.get(column) == None {
-                panic!("Missing required column '{}' reading '{}'", column, path);
-            }
-        }
-
-        for column in vec!["table", "column", "datatype"] {
-            if row.get(column).and_then(|c| c.as_str()).unwrap() == "" {
-                panic!("Missing required value for '{}' reading '{}'", column, path);
-            }
-        }
+        check_table_requirements(
+            &vec![
+                "table",
+                "nulltype",
+                "datatype",
+                "column",
+                "description",
+                "label",
+                "structure",
+            ],
+            &vec!["table", "column", "datatype"],
+            &row,
+        )
+        .expect("Error while reading from column table");
 
         let row_table = row.get("table").and_then(|t| t.as_str()).unwrap();
         if !tables_config.contains_key(row_table) {
-            panic!("Undefined table '{}' reading '{}'", row_table, path);
+            panic!("Undefined table '{}'", row_table);
         }
-
-        match row.get("nulltype") {
-            Some(SerdeValue::String(nulltype)) if nulltype != "" => {
-                if !datatypes_config.contains_key(nulltype) {
-                    panic!("Undefined nulltype '{}' reading '{}'", nulltype, path);
-                }
-            }
-            _ => (),
-        };
-
+        let nulltype = row.get("nulltype").and_then(|t| t.as_str()).unwrap();
+        if nulltype != "" && !datatypes_config.contains_key(nulltype) {
+            panic!("Undefined nulltype '{}'", nulltype);
+        }
         let datatype = row.get("datatype").and_then(|d| d.as_str()).unwrap();
         if !datatypes_config.contains_key(datatype) {
-            panic!("Undefined datatype '{}' reading '{}'", datatype, path);
+            panic!("Undefined datatype '{}'", datatype);
         }
-
-        let row_table = row.get("table").and_then(|t| t.as_str()).unwrap();
         let column_name = row.get("column").and_then(|c| c.as_str()).unwrap();
-        let datatype = row.get("datatype").and_then(|c| c.as_str()).unwrap();
         let description = row.get("description").and_then(|c| c.as_str()).unwrap();
         let label = row.get("label").and_then(|c| c.as_str()).unwrap();
         let structure = row.get("structure").and_then(|c| c.as_str()).unwrap();
-        let nulltype = row.get("nulltype").and_then(|c| c.as_str()).unwrap();
         tables_config.get_mut(row_table).and_then(|t| {
             Some(t.column.insert(
                 column_name.to_string(),
@@ -475,28 +495,34 @@ pub fn read_config_files(
         });
     }
 
-    // Load rule table if it exists
+    // 4. Load rule table if it exists
     let mut rules_config = HashMap::new();
     if specials_config.rule != "" {
         let table_name = &specials_config.rule;
         let rows = get_special_config(table_name, &specials_config, &tables_config, path, pool);
         for row in rows {
-            for column in vec![
-                "table",
-                "when column",
-                "when condition",
-                "then column",
-                "then condition",
-                "level",
-                "description",
-            ] {
-                if !row.contains_key(column) || row.get(column) == None {
-                    panic!("Missing required column '{}' reading '{}'", column, path);
-                }
-                if row.get(column).and_then(|c| c.as_str()).unwrap() == "" {
-                    panic!("Missing required value for '{}' reading '{}'", column, path);
-                }
-            }
+            check_table_requirements(
+                &vec![
+                    "description",
+                    "level",
+                    "table",
+                    "then column",
+                    "then condition",
+                    "when column",
+                    "when condition",
+                ],
+                &vec![
+                    "table",
+                    "when column",
+                    "when condition",
+                    "then column",
+                    "then condition",
+                    "level",
+                    "description",
+                ],
+                &row,
+            )
+            .expect("Error while reading from rule table");
 
             let row_table = row.get("table").and_then(|t| t.as_str()).unwrap();
             if !tables_config.contains_key(row_table) {
@@ -534,7 +560,7 @@ pub fn read_config_files(
         }
     }
 
-    // Initialize the constraints config:
+    // 5. Initialize the constraints config:
     let mut constraints_config = ValveConstraintConfig::default();
 
     for table_name in tables_config.keys().cloned().collect::<Vec<_>>() {
@@ -565,7 +591,10 @@ pub fn read_config_files(
         let this_column_config = tables_config
             .get(&table_name)
             .and_then(|t| Some(t.column.clone()))
-            .unwrap();
+            .expect(&format!(
+                "Table '{}' not found in tables config",
+                table_name
+            ));
         let defined_columns: Vec<String> = this_column_config.keys().cloned().collect::<Vec<_>>();
 
         // We use column_order to explicitly indicate the order in which the columns should appear
@@ -585,7 +614,7 @@ pub fn read_config_files(
             let mut iter = rdr.records();
             if let Some(result) = iter.next() {
                 let actual_columns = result
-                    .unwrap()
+                    .expect(&format!("Unable to read row from '{}'", path))
                     .iter()
                     .map(|c| c.to_string())
                     .collect::<Vec<_>>();
@@ -646,7 +675,7 @@ pub fn read_config_files(
             .insert(table_name.to_string(), unders);
     }
 
-    // Manually add the messsage table config:
+    // 6. Manually add the messsage table config:
     tables_config.insert(
         "message".to_string(),
         ValveTableConfig {
@@ -742,7 +771,7 @@ pub fn read_config_files(
         },
     );
 
-    // Manually add the history table config:
+    // 7. Manually add the history table config:
     tables_config.insert(
         "history".to_string(),
         ValveTableConfig {
@@ -850,7 +879,7 @@ pub fn read_config_files(
         },
     );
 
-    // Sort the tables (aside from the message and history tables) according to their foreign key
+    // 8. Sort the tables (aside from the message and history tables) according to their foreign key
     // dependencies so that tables are always loaded after the tables they depend on.
     let (sorted_tables, table_dependencies_in, table_dependencies_out) = verify_table_deps_and_sort(
         &tables_config
@@ -865,7 +894,7 @@ pub fn read_config_files(
         &constraints_config,
     );
 
-    // Finally, return all the configs:
+    // 9. Finally, return all the configs:
     (
         specials_config,
         tables_config,
