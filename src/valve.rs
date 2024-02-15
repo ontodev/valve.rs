@@ -35,6 +35,7 @@ use std::{collections::HashMap, fmt, fs::File, path::Path};
 // [backed by a BTreeMap by default](https://docs.serde.rs/serde_json/map/index.html)
 pub type ValveRow = serde_json::Map<String, SerdeValue>;
 
+/// Generic enum representing various error types returned by Valve methods
 #[derive(Debug)]
 pub enum ValveError {
     /// An error in the Valve configuration:
@@ -53,6 +54,7 @@ pub enum ValveError {
     SerdeJsonError(serde_json::Error),
 }
 
+/// TODO: Add a docstring here.
 // TODO: Make this struct public; remove unneeded derives.
 #[derive(Debug, Default)]
 struct _ValveMessage {
@@ -63,6 +65,7 @@ struct _ValveMessage {
     pub _message: String,
 }
 
+// TODO: Add a docstring here.
 // TODO: Make this struct public; remove unneeded derives.
 #[derive(Debug, Default)]
 struct _ValveChange {
@@ -73,99 +76,162 @@ struct _ValveChange {
     pub _message: String,
 }
 
+/// Configuration information specific to Valve's special tables
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct ValveSpecialConfig {
+    /// The name of the column table
     pub column: String,
+    /// The name of the datatype table
     pub datatype: String,
+    /// The name of the rule table
     pub rule: String,
+    /// The name of the table table
     pub table: String,
 }
 
+/// Configuration information for a particular table.
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct ValveTableConfig {
+    /// The name of this table
     pub table: String,
+    /// This table's type
     pub table_type: String,
+    /// A description of this table
     pub description: String,
+    /// The location of the TSV file representing this table in the filesystem
     pub path: String,
+    /// This table's column configuration
     pub column: HashMap<String, ValveColumnConfig>,
+    /// The order in which this table's columns should appear in the database and in TSV files.
     pub column_order: Vec<String>,
 }
 
+/// Configuration information for a particular column of a particular table
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct ValveColumnConfig {
+    /// The table that this column belongs to
     pub table: String,
+    /// The column's name
     pub column: String,
+    /// The column's datatype
     pub datatype: String,
+    /// The column's description
     pub description: String,
+    /// The column's label
     pub label: String,
+    /// The structural constraint that should be satisfied by all of the column's values
     pub structure: String,
+    /// The datatype of the column's nulltype (or the empty string if the column has no nulltype)
     pub nulltype: String,
 }
 
+/// Configuration information for a particular datatype
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct ValveDatatypeConfig {
+    /// The datatype's corresponding HTML type
     pub html_type: String,
+    /// The datatype's corresponding SQL type
     pub sql_type: String,
+    /// The regular expression which all data values of this type must match
     pub condition: String,
+    /// The name of this datatype
     pub datatype: String,
+    /// The datatype's description
     pub description: String,
+    /// The parent datatype of this datatype
     pub parent: String,
+    /// The structural constraint that should be satisfied by all data values of this type
     pub structure: String,
+    /// The transform of this datatype
     pub transform: String,
 }
 
+/// Configuration information for a particular table rule
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct ValveRuleConfig {
+    /// The description of the rule
     pub description: String,
+    /// The level of the rule (e.g., 'error')
     pub level: String,
+    /// The table with which the rule is associated
     pub table: String,
-    pub then_column: String,
-    pub then_condition: String,
+    /// The column on which the antecedent of the rule is based
     pub when_column: String,
+    /// The condition that the antecedent column must satisfy for the rule to apply
     pub when_condition: String,
+    /// The column to which the rule applies whenever the antecedent condition is satisfied
+    pub then_column: String,
+    /// The condition that the then_column must satisfy whenever the antecedent condition applies
+    pub then_condition: String,
 }
 
+/// Configuration information for a particular 'tree' constraint
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct ValveTreeConstraint {
+    /// The child node associated with this tree
     pub child: String,
+    /// The tree's parent
     pub parent: String,
 }
 
+/// Configuration information for a particular 'under' constraint
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct ValveUnderConstraint {
+    /// The column whose values should be 'under' the given value in the given tree
     pub column: String,
+    /// The table to which the reference tree belongs
     pub ttable: String,
+    /// The column (i.e., the 'child') on which the reference tree is based
     pub tcolumn: String,
+    /// The value that the values of `column` should be under with respect to the given tree
     pub value: SerdeValue,
 }
 
+/// Configuration information for a particular foreign key constraint
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct ValveForeignConstraint {
+    /// The table to which the column constrained by the key belongs
     pub table: String,
+    /// The column constrained by the key
     pub column: String,
+    /// The table referenced by the foreign key
     pub ftable: String,
+    /// The column referenced by the foreign key
     pub fcolumn: String,
 }
 
+/// Configuration information for the constraints enforced by a particular Valve instance
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct ValveConstraintConfig {
-    // Note that primary would be better as HashMap<String, String>, since it is not possible to
+    /// A map from table names to that table's primary key constraints
+    // TODO: primary would be better as HashMap<String, String>, since it is not possible to
     // have more than one primary key per table, but the below reflects the current implementation
     // which in principle allows for more than one.
-    // TODO: Change it so that more than one primary key is not allowed.
     pub primary: HashMap<String, Vec<String>>,
+    /// A map from table names to each given table's unique key constraints
     pub unique: HashMap<String, Vec<String>>,
+    /// A map from table names to each given table's foreign key constraints
     pub foreign: HashMap<String, Vec<ValveForeignConstraint>>,
+    /// A map from table names to each given table's tree constraints
     pub tree: HashMap<String, Vec<ValveTreeConstraint>>,
+    /// A map from table names to each given table's under constraints
     pub under: HashMap<String, Vec<ValveUnderConstraint>>,
 }
 
+/// Configuration information for a particular Valve instance
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct ValveConfig {
+    /// Configuration specific to Valve's special tables
     pub special: ValveSpecialConfig,
+    /// A map from table names to the configuration information for that table
     pub table: HashMap<String, ValveTableConfig>,
+    /// A map from datatype names to the configuration information for that datatype
     pub datatype: HashMap<String, ValveDatatypeConfig>,
+    /// A map from table names to a further map, for each column in the given table, to the
+    /// conditional 'when-then' rules associated with that column. Note that 'associated with'
+    /// means that the given column is the when-column of some rule defined on the table.
     pub rule: HashMap<String, HashMap<String, Vec<ValveRuleConfig>>>,
+    /// Configuration specific to Valve's database and tree/under constraints
     pub constraint: ValveConstraintConfig,
 }
 
