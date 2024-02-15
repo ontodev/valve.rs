@@ -373,7 +373,7 @@ impl Valve {
             .table
             .get("table")
             .and_then(|t| Some(t.path.as_str()))
-            .unwrap()
+            .expect("Table table is undefined")
             .to_string()
     }
 
@@ -390,7 +390,7 @@ impl Valve {
                 Self::USERNAME_MAX_LEN
             )));
         } else {
-            let user_regex = Regex::new(r#"^\S([^\n]*\S)*$"#).unwrap();
+            let user_regex = Regex::new(r#"^\S([^\n]*\S)*$"#).expect("Invalid regex");
             if !user_regex.is_match(user) {
                 return Err(ValveError::ConfigError(format!(
                     "Username '{}' is not a short, trimmed, string without newlines.",
@@ -525,7 +525,7 @@ impl Valve {
                             .tree
                             .get(table)
                             .and_then(|v| Some(v.iter().map(|t| t.child.to_string())))
-                            .unwrap()
+                            .expect(&format!("Could not determine trees for table '{}'", table))
                             .collect::<Vec<_>>();
                         if !trees.contains(&column.to_string()) {
                             return Ok(true);
@@ -597,7 +597,11 @@ impl Valve {
         };
 
         let (columns_config, configured_column_order) = {
-            let table_config = self.config.table.get(table).unwrap();
+            let table_config = self
+                .config
+                .table
+                .get(table)
+                .expect(&format!("Undefined table '{}'", table));
             let columns_config = &table_config.column;
             let configured_column_order = {
                 let mut configured_column_order = {
@@ -710,7 +714,9 @@ impl Valve {
             {
                 continue;
             }
-            let column_config = columns_config.get(cname).unwrap();
+            let column_config = columns_config
+                .get(cname)
+                .expect(&format!("Undefined column '{}'", cname));
             let sql_type = get_sql_type_from_global_config(&self.config, table, &cname, &self.pool);
 
             // Check the column's SQL type:
@@ -742,7 +748,7 @@ impl Valve {
                     .structure_conditions
                     .get(structure)
                     .and_then(|p| Some(p.parsed.clone()))
-                    .unwrap();
+                    .expect(&format!("Undefined structure '{}'", structure));
                 if structure_has_changed(&parsed_structure, table, &cname, &pk)? {
                     if self.verbose {
                         info!(
@@ -915,32 +921,48 @@ impl Valve {
 
     /// Get all the incoming (tables that depend on it) or outgoing (tables it depends on)
     /// dependencies of the given table.
-    pub fn get_dependencies(&self, table: &str, incoming: bool) -> Vec<String> {
+    pub fn get_dependencies(&self, table: &str, incoming: bool) -> Result<Vec<String>, ValveError> {
         let mut dependent_tables = vec![];
         if table != "message" && table != "history" {
             let direct_deps = {
                 if incoming {
-                    self.table_dependencies_in.get(table).unwrap().to_vec()
+                    self.table_dependencies_in
+                        .get(table)
+                        .ok_or(ValveError::InputError(format!(
+                            "Undefined table '{}'",
+                            table
+                        )))?
+                        .to_vec()
                 } else {
-                    self.table_dependencies_out.get(table).unwrap().to_vec()
+                    self.table_dependencies_out
+                        .get(table)
+                        .ok_or(ValveError::InputError(format!(
+                            "Undefined table '{}'",
+                            table
+                        )))?
+                        .to_vec()
                 }
             };
             for direct_dep in direct_deps {
-                let mut indirect_deps = self.get_dependencies(&direct_dep, incoming);
+                let mut indirect_deps = self.get_dependencies(&direct_dep, incoming)?;
                 dependent_tables.append(&mut indirect_deps);
                 dependent_tables.push(direct_dep);
             }
         }
-        dependent_tables
+        Ok(dependent_tables)
     }
 
     /// Given a list of tables, fill it in with any further tables that are dependent upon tables
     /// in the given list. If deletion_order is true, the tables are sorted as required for
     /// deleting them all sequentially, otherwise they are ordered in reverse.
-    pub fn add_dependencies(&self, tables: &Vec<&str>, deletion_order: bool) -> Vec<String> {
+    pub fn add_dependencies(
+        &self,
+        tables: &Vec<&str>,
+        deletion_order: bool,
+    ) -> Result<Vec<String>, ValveError> {
         let mut with_dups = vec![];
         for table in tables {
-            let dependent_tables = self.get_dependencies(table, true);
+            let dependent_tables = self.get_dependencies(table, true)?;
             for dep_table in dependent_tables {
                 with_dups.push(dep_table.to_string());
             }
@@ -958,7 +980,7 @@ impl Valve {
         for table in with_dups.iter().unique() {
             tables_in_order.push(table.to_string());
         }
-        tables_in_order
+        Ok(tables_in_order)
     }
 
     /// Given a subset of the configured tables, return them in sorted dependency order, or in
@@ -1011,7 +1033,11 @@ impl Valve {
         let tables = self.get_sorted_table_list(false);
         let mut dependencies = IndexMap::new();
         for table in tables {
-            dependencies.insert(table.to_string(), self.get_dependencies(table, incoming));
+            dependencies.insert(
+                table.to_string(),
+                self.get_dependencies(table, incoming)
+                    .expect("Unable to get dependencies"),
+            );
         }
         dependencies
     }
@@ -1025,7 +1051,7 @@ impl Valve {
 
     /// Given a vector of table names, drop those tables, in the given order.
     pub async fn drop_tables(&self, tables: &Vec<&str>) -> Result<&Self, ValveError> {
-        let drop_list = self.add_dependencies(tables, true);
+        let drop_list = self.add_dependencies(tables, true)?;
         for table in &drop_list {
             if *table != "message" && *table != "history" {
                 let sql = format!(r#"DROP VIEW IF EXISTS "{}_text_view""#, table);
@@ -1052,7 +1078,7 @@ impl Valve {
     /// Given a vector of table names, truncate those tables, in the given order.
     pub async fn truncate_tables(&self, tables: &Vec<&str>) -> Result<&Self, ValveError> {
         self.create_all_tables().await?;
-        let truncate_list = self.add_dependencies(tables, true);
+        let truncate_list = self.add_dependencies(tables, true)?;
 
         // We must use CASCADE in the case of PostgreSQL since we cannot truncate a table, T, that
         // depends on another table, T', even in the case where we have previously truncated T'.
@@ -1115,7 +1141,17 @@ impl Valve {
                 continue;
             }
             let table_name = table_name.to_string();
-            let path = String::from(&self.config.table.get(&table_name).unwrap().path);
+            let path = String::from(
+                &self
+                    .config
+                    .table
+                    .get(&table_name)
+                    .ok_or(ValveError::InputError(format!(
+                        "Undefined table '{}'",
+                        table_name
+                    )))?
+                    .path,
+            );
             let mut rdr = {
                 match File::open(path.clone()) {
                     Err(e) => {
@@ -1298,7 +1334,10 @@ impl Valve {
                 .table
                 .get(table)
                 .and_then(|t| Some(t.column_order.iter().map(|i| i.as_str()).collect()))
-                .unwrap();
+                .ok_or(ValveError::InputError(format!(
+                    "Undefined table '{}'",
+                    table
+                )))?;
 
             let path = match save_dir {
                 Some(s) => format!(
@@ -1307,7 +1346,7 @@ impl Valve {
                     Path::new(path)
                         .file_name()
                         .and_then(|n| n.to_str())
-                        .unwrap()
+                        .expect(&format!("Unable to save to '{}'", path))
                 ),
                 None => path.to_string(),
             };
@@ -1344,7 +1383,7 @@ impl Valve {
             .from_path(path)?;
         writer.write_record(columns)?;
         let mut stream = sqlx_query(&sql).fetch(&self.pool);
-        while let Some(row) = block_on(stream.try_next()).unwrap() {
+        while let Some(row) = block_on(stream.try_next())? {
             let mut record: Vec<&str> = vec![];
             for column in columns.iter() {
                 let cell = row.try_get::<&str, &str>(column).ok().unwrap_or_default();
@@ -1748,10 +1787,16 @@ impl Valve {
         let dt_name = &config
             .table
             .get(table_name)
-            .unwrap()
+            .ok_or(ValveError::InputError(format!(
+                "Undefined table '{}'",
+                table_name
+            )))?
             .column
             .get(column_name)
-            .unwrap()
+            .ok_or(ValveError::InputError(format!(
+                "Undefined column '{}.{}'",
+                table_name, column_name
+            )))?
             .datatype;
 
         let dt_condition = datatype_conditions
@@ -1784,10 +1829,16 @@ impl Valve {
                     &config
                         .table
                         .get(table_name)
-                        .unwrap()
+                        .ok_or(ValveError::InputError(format!(
+                            "Undefined table '{}'",
+                            table_name
+                        )))?
                         .column
                         .get(column_name)
-                        .unwrap()
+                        .ok_or(ValveError::InputError(format!(
+                            "Undefined column '{}.{}'",
+                            table_name, column_name
+                        )))?
                         .structure,
                 );
 

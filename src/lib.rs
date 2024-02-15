@@ -206,10 +206,17 @@ pub async fn get_pool_from_connection_string(database: &str) -> Result<AnyPool, 
     Ok(pool)
 }
 
-/// Given the path to a configuration table (either a table.tsv file or a database containing a
+/// Given the path to a table table (either a table.tsv file or a database containing a
 /// table named "table"), load and check the 'table', 'column', and 'datatype' tables, and return
-/// SerdeMaps corresponding to specials, tables, datatypes, rules, constraints, and a vector
-/// containing the names of the tables in the dattatabse in sorted order.
+/// the following items:
+/// - Special table configuration information
+/// - Table configuration information for all managed tables
+/// - Table configuration information for all managed datatypes
+/// - Rule configuration information for every column of every managed table
+/// - Constraint configuration information
+/// - The list of managed tables in dependency order
+/// - A map from table names to the tables that depend on a given table
+/// - A map from table names to the tables that a given table depends on
 pub fn read_config_files(
     path: &str,
     parser: &StartParser,
@@ -225,7 +232,8 @@ pub fn read_config_files(
     HashMap<String, Vec<String>>,
 ) {
     // Given a list of columns that are required for some table, and a list of those columns
-    // that are required to have values, check if those requirements are met by the given row.
+    // that are required to have values, check if both sets of requirements are met by the given
+    // row.
     fn check_table_requirements(
         columns_are_required: &Vec<&str>,
         values_are_required: &Vec<&str>,
@@ -252,12 +260,13 @@ pub fn read_config_files(
     }
 
     // 1. Load the table config for the 'table' table from the given path, and determine the
-    // table names to use for the other special config types: 'column', 'datatype', and 'rule':
+    // table names to use for the other special config types: 'column', 'datatype', and 'rule', then
+    // save those in specials_config. Also begin filling out the more general table configuration
+    // information related to each of those tables, to which further info will be added later.
     let mut specials_config = ValveSpecialConfig::default();
     let mut tables_config = HashMap::new();
     let rows = {
-        // Read in the configuration entry point (the "table table") from either a file or the
-        // database table called "table".
+        // Read in the table table from either a file or the database table called "table".
         if path.to_lowercase().ends_with(".tsv") {
             read_tsv_into_vector(path)
         } else {
@@ -272,6 +281,7 @@ pub fn read_config_files(
             &row,
         )
         .expect(&format!("Error while reading '{}'", path));
+
         let row_table = row.get("table").and_then(|t| t.as_str()).unwrap();
         let row_path = row.get("path").and_then(|t| t.as_str()).unwrap();
         let row_type = row.get("type").and_then(|t| t.as_str()).unwrap();
@@ -438,7 +448,7 @@ pub fn read_config_files(
         );
     }
 
-    // Check that all the essential datatypes are now there:
+    // Check that all the essential datatypes have been configured:
     for dt in vec!["text", "empty", "line", "word"] {
         if !datatypes_config.contains_key(dt) {
             panic!("Missing required datatype: '{}'", dt);
@@ -503,13 +513,13 @@ pub fn read_config_files(
         for row in rows {
             check_table_requirements(
                 &vec![
-                    "description",
-                    "level",
                     "table",
-                    "then column",
-                    "then condition",
                     "when column",
                     "when condition",
+                    "then column",
+                    "then condition",
+                    "level",
+                    "description",
                 ],
                 &vec![
                     "table",
@@ -526,7 +536,10 @@ pub fn read_config_files(
 
             let row_table = row.get("table").and_then(|t| t.as_str()).unwrap();
             if !tables_config.contains_key(row_table) {
-                panic!("Undefined table '{}' reading '{}'", row_table, path);
+                panic!(
+                    "Undefined table '{}' while reading rule configuration",
+                    row_table
+                );
             }
 
             // Add the rule specified in the given row to the list of rules associated with the
@@ -534,7 +547,6 @@ pub fn read_config_files(
             if !rules_config.contains_key(row_table) {
                 rules_config.insert(String::from(row_table), HashMap::new());
             }
-
             let table_rule_config = rules_config.get_mut(row_table).unwrap();
 
             let when_col = row.get("when column").and_then(|c| c.as_str()).unwrap();
@@ -562,7 +574,6 @@ pub fn read_config_files(
 
     // 5. Initialize the constraints config:
     let mut constraints_config = ValveConstraintConfig::default();
-
     for table_name in tables_config.keys().cloned().collect::<Vec<_>>() {
         let optional_path = tables_config
             .get(&table_name)
@@ -641,7 +652,6 @@ pub fn read_config_files(
                 panic!("'{}' is empty", path);
             }
         }
-
         if column_order.is_empty() {
             column_order = defined_columns.clone();
         }
@@ -657,7 +667,6 @@ pub fn read_config_files(
             &table_name,
             &pool,
         );
-
         constraints_config
             .primary
             .insert(table_name.to_string(), primaries);
@@ -907,7 +916,7 @@ pub fn read_config_files(
     )
 }
 
-/// Given the global configuration map and a parser, compile all of the datatype conditions,
+/// Given the global configuration struct and a parser, compile all of the datatype conditions,
 /// add them to a hash map whose keys are the text versions of the conditions and whose values
 /// are the compiled conditions, and then finally return the hash map.
 pub fn get_compiled_datatype_conditions(
@@ -926,7 +935,7 @@ pub fn get_compiled_datatype_conditions(
     compiled_datatype_conditions
 }
 
-/// Given the global config map, a hash map of compiled datatype conditions (indexed by the text
+/// Given the global config struct, a hash map of compiled datatype conditions (indexed by the text
 /// version of the conditions), and a parser, compile all of the rule conditions, add them to a
 /// hash which has the following structure:
 /// ```
@@ -987,7 +996,7 @@ pub fn get_compiled_rule_conditions(
     compiled_rule_conditions
 }
 
-/// Given the global config map and a parser, parse all of the structure conditions, add them to
+/// Given the global config struct and a parser, parse all of the structure conditions, add them to
 /// a hash map whose keys are given by the text versions of the conditions and whose values are
 /// given by the parsed versions, and finally return the hashmap.
 pub fn get_parsed_structure_conditions(
@@ -1152,7 +1161,7 @@ pub fn get_sql_for_text_view(
     let real_columns = &tables_config
         .get(table)
         .and_then(|t| Some(t.column.keys().map(|k| k.to_string()).collect::<Vec<_>>()))
-        .unwrap();
+        .expect(&format!("Undefined table '{}'", table));
 
     // Add a second "text view" such that the datatypes of all values are TEXT and appear
     // directly in their corresponsing columns (rather than as NULLs) even when they have
@@ -1266,7 +1275,7 @@ pub fn query_with_message_values(table: &str, config: &ValveConfig, pool: &AnyPo
     let real_columns = config
         .table
         .get(table)
-        .unwrap()
+        .expect(&format!("Undefined table '{}'", table))
         .column
         .keys()
         .collect::<Vec<_>>();
@@ -1638,12 +1647,20 @@ pub async fn get_rows_to_update(
 
     // Collect the intra-table dependencies:
     // TODO: Consider also the tree intra-table dependencies.
-    let primaries = config.constraint.primary.get(table).unwrap();
-    let uniques = config.constraint.unique.get(table).unwrap();
+    let primaries = config
+        .constraint
+        .primary
+        .get(table)
+        .expect(&format!("Undefined table '{}'", table));
+    let uniques = config
+        .constraint
+        .unique
+        .get(table)
+        .expect(&format!("Undefined table '{}'", table));
     let columns = config
         .table
         .get(table)
-        .unwrap()
+        .expect(&format!("Undefined table '{}'", table))
         .column
         .keys()
         .map(|k| k.to_string())
@@ -1865,7 +1882,9 @@ pub async fn record_row_change(
 
 /// Given a row and a column name, extract the contents of the row as a JSON object and return it.
 pub fn get_json_from_row(row: &AnyRow, column: &str) -> Option<SerdeMap> {
-    let raw_value = row.try_get_raw(column).unwrap();
+    let raw_value = row
+        .try_get_raw(column)
+        .expect("Unable to get raw value from row");
     if !raw_value.is_null() {
         let value: &str = row.get(column);
         match serde_json::from_str::<SerdeValue>(value) {
@@ -1925,15 +1944,23 @@ pub async fn switch_undone_state(
 /// that may potentially result in database conflicts.
 pub fn get_conflict_columns(config: &ValveConfig, table_name: &str) -> Vec<String> {
     let mut conflict_columns = vec![];
-    let primaries = config.constraint.primary.get(table_name).unwrap();
-    let uniques = config.constraint.unique.get(table_name).unwrap();
+    let primaries = config
+        .constraint
+        .primary
+        .get(table_name)
+        .expect(&format!("Undefined table '{}'", table_name));
+    let uniques = config
+        .constraint
+        .unique
+        .get(table_name)
+        .expect(&format!("Undefined table '{}'", table_name));
     // We take tree-children because these imply a unique database constraint on the corresponding
     // column.
     let tree_children = config
         .constraint
         .tree
         .get(table_name)
-        .unwrap()
+        .expect(&format!("Undefined table '{}'", table_name))
         .iter()
         .map(|t| t.child.to_string())
         .collect::<Vec<_>>();
@@ -1941,7 +1968,7 @@ pub fn get_conflict_columns(config: &ValveConfig, table_name: &str) -> Vec<Strin
         .constraint
         .foreign
         .get(table_name)
-        .unwrap()
+        .expect(&format!("Undefined table '{}'", table_name))
         .iter()
         .map(|t| t.column.to_string())
         .collect::<Vec<_>>();
@@ -1949,7 +1976,7 @@ pub fn get_conflict_columns(config: &ValveConfig, table_name: &str) -> Vec<Strin
         .constraint
         .foreign
         .get(table_name)
-        .unwrap()
+        .expect(&format!("Undefined table '{}'", table_name))
         .iter()
         .filter(|t| t.ftable == *table_name)
         .map(|t| t.fcolumn.to_string())
@@ -2461,7 +2488,8 @@ pub fn read_tsv_into_vector(path: &str) -> Vec<ValveRow> {
 /// represented as ValveRows.
 pub fn read_db_table_into_vector(pool: &AnyPool, config_table: &str) -> Vec<ValveRow> {
     let sql = format!("SELECT * FROM \"{}\"", config_table);
-    let rows = block_on(sqlx_query(&sql).fetch_all(pool)).unwrap();
+    let rows = block_on(sqlx_query(&sql).fetch_all(pool))
+        .expect(&format!("Error while executing '{}'", sql));
     let mut table_rows = vec![];
     for row in rows {
         let mut table_row = ValveRow::new();
@@ -2627,7 +2655,7 @@ pub fn get_sql_type(
     let parent_datatype = dt_config
         .get(datatype)
         .and_then(|d| Some(d.parent.to_string()))
-        .unwrap();
+        .expect(&format!("Undefined datatype '{}'", datatype));
 
     return get_sql_type(dt_config, &parent_datatype, pool);
 }
@@ -2646,7 +2674,10 @@ pub fn get_sql_type_from_global_config(
         .get(table)
         .and_then(|t| t.column.get(column))
         .and_then(|c| Some(c.datatype.to_string()))
-        .unwrap();
+        .expect(&format!(
+            "Could not determine datatype for '{}.{}'",
+            table, column
+        ));
     get_sql_type(dt_config, &dt, pool)
 }
 
@@ -2777,7 +2808,9 @@ pub fn verify_table_deps_and_sort(
     let trees = &constraints.tree;
     for table_name in table_list {
         let mut dependency_graph = DiGraphMap::<&str, ()>::new();
-        let table_trees = trees.get(table_name).unwrap();
+        let table_trees = trees
+            .get(table_name)
+            .expect(&format!("Undefined table '{}'", table_name));
         for tree in table_trees {
             let child = &tree.child;
             let parent = &tree.parent;
@@ -2819,14 +2852,18 @@ pub fn verify_table_deps_and_sort(
     let mut dependency_graph = DiGraphMap::<&str, ()>::new();
     for table_name in table_list {
         let t_index = dependency_graph.add_node(table_name);
-        let fkeys = foreign_keys.get(table_name).unwrap();
+        let fkeys = foreign_keys
+            .get(table_name)
+            .expect(&format!("Undefined table '{}'", table_name));
         for fkey in fkeys {
             let ftable = &fkey.ftable;
             let f_index = dependency_graph.add_node(&ftable);
             dependency_graph.add_edge(t_index, f_index, ());
         }
 
-        let ukeys = under_keys.get(table_name).unwrap();
+        let ukeys = under_keys
+            .get(table_name)
+            .expect(&format!("Undefined table '{}'", table_name));
         for ukey in ukeys {
             let ttable = &ukey.ttable;
             let tcolumn = &ukey.tcolumn;
@@ -2943,11 +2980,11 @@ pub fn get_table_constraints(
     let column_names = tables_config
         .get(table_name)
         .and_then(|t| Some(t.column_order.clone()))
-        .unwrap();
+        .expect(&format!("Undefined table '{}'", table_name));
     let columns = tables_config
         .get(table_name)
         .and_then(|t| Some(t.column.clone()))
-        .unwrap();
+        .expect(&format!("Undefined table '{}'", table_name));
 
     let mut colvals: Vec<ValveColumnConfig> = vec![];
     for column_name in &column_names {
@@ -3088,8 +3125,14 @@ pub fn get_table_ddl(
         } else {
             normal_table_name = table_name.to_string();
         }
-        let column_order = &tables_config.get(&normal_table_name).unwrap().column_order;
-        let columns = &tables_config.get(&normal_table_name).unwrap().column;
+        let column_order = &tables_config
+            .get(&normal_table_name)
+            .expect(&format!("Undefined table '{}'", normal_table_name))
+            .column_order;
+        let columns = &tables_config
+            .get(&normal_table_name)
+            .expect(&format!("Undefined table '{}'", normal_table_name))
+            .column;
 
         column_order
             .iter()
@@ -3488,7 +3531,11 @@ pub async fn make_inserts(
 
     // Use the "column_order" field of the table config for this table to retrieve the column names
     // in the correct order:
-    let column_names = &config.table.get(table_name).unwrap().column_order;
+    let column_names = &config
+        .table
+        .get(table_name)
+        .expect(&format!("Undefined table '{}'", table_name))
+        .column_order;
 
     let (main_sql, main_params, conflict_sql, conflict_params, message_sql, message_params) =
         generate_sql(

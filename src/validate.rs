@@ -256,7 +256,11 @@ pub async fn validate_under(
     extra_row: Option<&ResultRow>,
 ) -> Result<Vec<SerdeValue>, ValveError> {
     let mut results = vec![];
-    let ukeys = config.constraint.under.get(table_name).unwrap();
+    let ukeys = config
+        .constraint
+        .under
+        .get(table_name)
+        .expect(&format!("Undefined table '{}'", table_name));
 
     let view_name = format!("{}_view", table_name);
     for ukey in ukeys {
@@ -429,7 +433,11 @@ pub async fn validate_tree_foreign_keys(
     table_name: &String,
     extra_row: Option<&ResultRow>,
 ) -> Result<Vec<SerdeValue>, ValveError> {
-    let tkeys = config.constraint.tree.get(table_name).unwrap();
+    let tkeys = config
+        .constraint
+        .tree
+        .get(table_name)
+        .expect(&format!("Undefined table '{}'", table_name));
 
     let view_name = format!("{}_view", table_name);
     let mut results = vec![];
@@ -524,7 +532,11 @@ pub async fn validate_rows_trees(
     table_name: &String,
     rows: &mut Vec<ResultRow>,
 ) -> Result<(), ValveError> {
-    let column_names = &config.table.get(table_name).unwrap().column_order;
+    let column_names = &config
+        .table
+        .get(table_name)
+        .expect(&format!("Undefined table '{}'", table_name))
+        .column_order;
 
     let mut result_rows = vec![];
     for row in rows {
@@ -575,7 +587,11 @@ pub async fn validate_rows_constraints(
     table_name: &String,
     rows: &mut Vec<ResultRow>,
 ) -> Result<(), ValveError> {
-    let column_names = &config.table.get(table_name).unwrap().column_order;
+    let column_names = &config
+        .table
+        .get(table_name)
+        .expect(&format!("Undefined table '{}'", table_name))
+        .column_order;
 
     let mut result_rows = vec![];
     for row in rows.iter_mut() {
@@ -662,7 +678,11 @@ pub fn validate_rows_intra(
                     result_row.contents.insert(column.to_string(), result_cell);
                 }
 
-                let column_names = &config.table.get(table_name).unwrap().column_order;
+                let column_names = &config
+                    .table
+                    .get(table_name)
+                    .expect(&format!("Undefined table '{}'", table_name))
+                    .column_order;
 
                 // We begin by determining the nulltype of all of the cells, since the rules
                 // validation step requires that all cells have this information.
@@ -887,7 +907,10 @@ pub fn validate_cell_nulltype(
         .table
         .get(table_name)
         .and_then(|t| t.column.get(column_name))
-        .unwrap();
+        .expect(&format!(
+            "Undefined column '{}.{}'",
+            table_name, column_name
+        ));
 
     if column.nulltype != "" {
         let nt_name = &column.nulltype;
@@ -916,7 +939,10 @@ pub fn validate_cell_datatype(
     ) -> Vec<ValveDatatypeConfig> {
         let mut datatypes = vec![];
         if dt_name != "" {
-            let datatype = config.datatype.get(dt_name).unwrap();
+            let datatype = config
+                .datatype
+                .get(dt_name)
+                .expect(&format!("Undefined datatype '{}'", dt_name));
             let dt_name = datatype.datatype.as_str();
             let dt_condition = compiled_datatype_conditions.get(dt_name);
             let dt_parent = datatype.parent.as_str();
@@ -940,9 +966,15 @@ pub fn validate_cell_datatype(
         .table
         .get(table_name)
         .and_then(|t| t.column.get(column_name))
-        .unwrap();
+        .expect(&format!(
+            "Undefined column '{}.{}'",
+            table_name, column_name
+        ));
     let primary_dt_name = &column.datatype;
-    let primary_datatype = &config.datatype.get(primary_dt_name).unwrap();
+    let primary_datatype = &config
+        .datatype
+        .get(primary_dt_name)
+        .expect(&format!("Undefined datatype '{}'", primary_dt_name));
     let primary_dt_description = &primary_datatype.description;
     if let Some(primary_dt_condition_func) = compiled_datatype_conditions.get(primary_dt_name) {
         let primary_dt_condition_func = &primary_dt_condition_func.compiled;
@@ -1208,7 +1240,7 @@ pub async fn validate_cell_foreign_constraints(
         .constraint
         .foreign
         .get(table_name)
-        .unwrap()
+        .expect(&format!("Undefined table '{}'", table_name))
         .iter()
         .filter(|t| t.column == *column_name)
         .collect::<Vec<_>>();
@@ -1340,7 +1372,7 @@ pub async fn validate_cell_trees(
         .constraint
         .tree
         .get(table_name)
-        .unwrap()
+        .expect(&format!("Undefined table '{}'", table_name))
         .iter()
         .filter(|t| t.parent == *column_name)
         .collect::<Vec<_>>();
@@ -1510,13 +1542,21 @@ pub async fn validate_cell_unique_constraints(
     // a tree, then if the value of the cell is a duplicate either of one of the previously
     // validated rows in the batch, or a duplicate of a validated row that has already been inserted
     // into the table, mark it with the corresponding error:
-    let primaries = config.constraint.primary.get(table_name).unwrap();
-    let uniques = config.constraint.unique.get(table_name).unwrap();
+    let primaries = config
+        .constraint
+        .primary
+        .get(table_name)
+        .expect(&format!("Undefined table '{}'", table_name));
+    let uniques = config
+        .constraint
+        .unique
+        .get(table_name)
+        .expect(&format!("Undefined table '{}'", table_name));
     let trees = config
         .constraint
         .tree
         .get(table_name)
-        .unwrap()
+        .expect(&format!("Undefined table '{}'", table_name))
         .iter()
         .map(|t| &t.child)
         .collect::<Vec<_>>();
