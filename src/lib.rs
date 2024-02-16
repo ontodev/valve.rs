@@ -1365,7 +1365,6 @@ pub async fn get_affected_rows(
                 let cell = json!({
                     "value": value,
                     "valid": true,
-                    // TODO: Here?
                     "messages": json!([]),
                 });
                 table_row.insert(cname.to_string(), json!(cell));
@@ -1412,7 +1411,6 @@ pub async fn get_row_from_db(
         if raw_messages.is_null() {
             vec![]
         } else {
-            // TODO: Here?
             let messages: &str = sql_row.get("message");
             match serde_json::from_str::<SerdeValue>(messages) {
                 Err(e) => return Err(ValveError::SerdeJsonError(e.into())),
@@ -1439,7 +1437,6 @@ pub async fn get_row_from_db(
             } else {
                 value = String::from("");
             }
-            // TODO: Here?
             let column_messages = messages
                 .iter()
                 .filter(|m| m.get("column").unwrap().as_str() == Some(cname))
@@ -1554,16 +1551,10 @@ pub async fn get_rows_to_update(
     let foreign_dependencies = {
         let mut foreign_dependencies = vec![];
         let global_fconstraints = &config.constraint.foreign;
-        for (dependent_table, fconstraints) in global_fconstraints {
+        for (_, fconstraints) in global_fconstraints {
             for entry in fconstraints {
-                // TODO: Remove this assert later. If this turns out to always be true, then
-                // there is no need to assign to fdep.table below.
-                assert_eq!(entry.table, *dependent_table);
-                let ftable = &entry.ftable;
-                if ftable == table {
-                    let mut fdep = entry.clone();
-                    fdep.table = dependent_table.to_string();
-                    foreign_dependencies.push(fdep);
+                if entry.ftable == *table {
+                    foreign_dependencies.push(entry);
                 }
             }
         }
@@ -1880,6 +1871,46 @@ pub async fn record_row_change(
     Ok(())
 }
 
+/// Return the next recorded change to the data that can be undone, or None if there isn't any.
+pub async fn get_record_to_undo(pool: &AnyPool) -> Result<Option<AnyRow>, ValveError> {
+    // Look in the history table, get the row with the greatest ID, get the row number,
+    // from, and to, and determine whether the last operation was a delete, insert, or update.
+    let is_clause = if pool.any_kind() == AnyKind::Sqlite {
+        "IS"
+    } else {
+        "IS NOT DISTINCT FROM"
+    };
+    let sql = format!(
+        r#"SELECT * FROM "history"
+               WHERE "undone_by" {} NULL
+               ORDER BY "history_id" DESC LIMIT 1"#,
+        is_clause
+    );
+    let query = sqlx_query(&sql);
+    let result_row = query.fetch_optional(pool).await?;
+    Ok(result_row)
+}
+
+/// Return the next recorded change to the data that can be redone, or None if there isn't any.
+pub async fn get_record_to_redo(pool: &AnyPool) -> Result<Option<AnyRow>, ValveError> {
+    // Look in the history table, get the row with the greatest ID, get the row number,
+    // from, and to, and determine whether the last operation was a delete, insert, or update.
+    let is_not_clause = if pool.any_kind() == AnyKind::Sqlite {
+        "IS NOT"
+    } else {
+        "IS DISTINCT FROM"
+    };
+    let sql = format!(
+        r#"SELECT * FROM "history"
+           WHERE "undone_by" {} NULL
+           ORDER BY "timestamp" DESC LIMIT 1"#,
+        is_not_clause
+    );
+    let query = sqlx_query(&sql);
+    let result_row = query.fetch_optional(pool).await?;
+    Ok(result_row)
+}
+
 /// Given a row and a column name, extract the contents of the row as a JSON object and return it.
 pub fn get_json_from_row(row: &AnyRow, column: &str) -> Option<SerdeMap> {
     let raw_value = row
@@ -2122,7 +2153,6 @@ pub async fn insert_new_row_tx(
             .ok_or(ValveError::InputError(
                 format!("No string named 'value' in {:?}", cell).into(),
             ))?;
-        // TODO: Here?
         let messages = sort_messages(
             &sorted_datatypes,
             cell.get("messages")
@@ -2204,7 +2234,6 @@ pub async fn insert_new_row_tx(
     }
     query.execute(tx.acquire().await?).await?;
 
-    // TODO: Here?
     // Next add any validation messages to the message table:
     for m in all_messages {
         let column = m.get("column").and_then(|c| c.as_str()).unwrap();
@@ -3233,7 +3262,6 @@ pub fn get_table_ddl(
 /// message types, count the various message types encountered in the list and increment the counts
 /// in messages_stats accordingly.
 pub fn add_message_counts(messages: &Vec<SerdeValue>, messages_stats: &mut HashMap<String, usize>) {
-    // TODO: Here.
     for message in messages {
         let message = message.as_object().unwrap();
         let level = message.get("level").unwrap();
@@ -3308,7 +3336,6 @@ pub fn sort_messages(
     let mut datatype_messages = vec![];
     let mut structure_messages = vec![];
     let mut rule_messages = vec![];
-    // TODO: Here.
     for message in cell_messages {
         let rule = message
             .get("rule")
@@ -3432,7 +3459,6 @@ pub async fn make_inserts(
                     add_message_counts(&cell.messages, messages_stats);
                 }
 
-                // TODO: Here.
                 for message in sort_messages(&sorted_datatypes, &cell.messages) {
                     let row = row.row_number.unwrap().to_string();
                     let message_values = vec![

@@ -13,6 +13,7 @@ async fn main() -> Result<(), ValveError> {
     // TODO: Use a more powerful command-line parser library that can automatically take care of
     // things like mutually exclusive options, since argparse doesn't seem to be able to do it.
 
+    let mut ad_hoc = false;
     let mut verbose = false;
     let mut api_test = false;
     let mut dump_config = false;
@@ -34,6 +35,11 @@ async fn main() -> Result<(), ValveError> {
         // this block limits scope of borrows by ap.refer() method
         let mut ap = ArgumentParser::new();
         ap.set_description(r#"Valve is a lightweight validation engine written in rust."#);
+        ap.refer(&mut ad_hoc).add_option(
+            &["--ad_hoc"],
+            StoreTrue,
+            r#"Write informative messages about what Valve is doing to stderr."#,
+        );
         ap.refer(&mut verbose).add_option(
             &["--verbose"],
             StoreTrue,
@@ -174,7 +180,10 @@ async fn main() -> Result<(), ValveError> {
         process::exit(1);
     }
 
-    if api_test {
+    if ad_hoc {
+        let valve = Valve::build(&source, &destination, verbose, initial_load).await?;
+        valve.get_change_to_undo().await?;
+    } else if api_test {
         run_api_tests(&source, &destination).await?;
     } else if save_all || save != "" {
         let valve = Valve::build(&source, &destination, verbose, initial_load).await?;

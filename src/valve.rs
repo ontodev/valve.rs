@@ -5,10 +5,10 @@ use crate::{
     ast::Expression,
     cast_column_sql_to_text, delete_row_tx, get_column_value, get_compiled_datatype_conditions,
     get_compiled_rule_conditions, get_json_from_row, get_parsed_structure_conditions,
-    get_pool_from_connection_string, get_row_from_db, get_sql_for_standard_view,
-    get_sql_for_text_view, get_sql_type, get_sql_type_from_global_config, get_table_ddl, info,
-    insert_chunks, insert_new_row_tx, local_sql_syntax, read_config_files, record_row_change,
-    switch_undone_state, update_row_tx,
+    get_pool_from_connection_string, get_record_to_redo, get_record_to_undo, get_row_from_db,
+    get_sql_for_standard_view, get_sql_for_text_view, get_sql_type,
+    get_sql_type_from_global_config, get_table_ddl, info, insert_chunks, insert_new_row_tx,
+    local_sql_syntax, read_config_files, record_row_change, switch_undone_state, update_row_tx,
     validate::{validate_row_tx, validate_tree_foreign_keys, validate_under, with_tree_sql},
     valve_grammar::StartParser,
     verify_table_deps_and_sort, warn, ColumnRule, CompiledCondition, ParsedStructure, CHUNK_SIZE,
@@ -30,6 +30,10 @@ use sqlx::{
 };
 use std::{collections::HashMap, fmt, fs::File, path::Path};
 
+// TODO (maybe): Change ValveRow to a HashMap with three keys:
+// "data": A SerdeMap
+// "message": A vector of ValveMessage structs
+// "history": A vector of ValveChange structs
 /// Alias for [serde_json::Map](..//serde_json/struct.Map.html)<String, [serde_json::Value](../serde_json/enum.Value.html)>.
 // Note: serde_json::Map is
 // [backed by a BTreeMap by default](https://docs.serde.rs/serde_json/map/index.html)
@@ -54,26 +58,26 @@ pub enum ValveError {
     SerdeJsonError(serde_json::Error),
 }
 
-/// TODO: Add a docstring here.
-// TODO: Make this struct public; remove unneeded derives.
+/// Represents a message associated with a particular value of a particular table column.
 #[derive(Debug, Default)]
-struct _ValveMessage {
-    pub _column: String,
-    pub _value: String,
-    pub _rule: String,
-    pub _level: String,
-    pub _message: String,
+pub struct ValveMessage {
+    pub table: String,
+    pub column: String,
+    pub value: String,
+    pub rule: String,
+    pub level: String,
+    pub message: String,
 }
 
-// TODO: Add a docstring here.
-// TODO: Make this struct public; remove unneeded derives.
+/// Represents a change to a value in a database table.
 #[derive(Debug, Default)]
-struct _ValveChange {
-    pub _column: String,
-    pub _level: String,
-    pub _old_value: String,
-    pub _value: String,
-    pub _message: String,
+pub struct ValveChange {
+    pub table: String,
+    pub column: String,
+    pub level: String,
+    pub old_value: String,
+    pub value: String,
+    pub message: String,
 }
 
 /// Configuration information specific to Valve's special tables
@@ -1546,49 +1550,112 @@ impl Valve {
         Ok(())
     }
 
-    /// Return the next change that can be undone, or None if there isn't any.
-    pub async fn get_record_to_undo(&self) -> Result<Option<AnyRow>, ValveError> {
-        // Look in the history table, get the row with the greatest ID, get the row number,
-        // from, and to, and determine whether the last operation was a delete, insert, or update.
-        let is_clause = if self.pool.any_kind() == AnyKind::Sqlite {
-            "IS"
-        } else {
-            "IS NOT DISTINCT FROM"
+    /// Given a database record representing either an undo or a redo from the history table,
+    /// convert it to a vector of [ValveChange] structs.
+    pub fn convert_undo_or_redo_record_to_change(
+        &self,
+        record: &AnyRow,
+    ) -> Result<Option<Vec<ValveChange>>, ValveError> {
+        let table: &str = record.get("table");
+        let from = get_json_from_row(&record, "from");
+        let to = get_json_from_row(&record, "to");
+        let summary = {
+            let summary = record.try_get_raw("summary")?;
+            if !summary.is_null() {
+                let summary: &str = record.get("summary");
+                match serde_json::from_str::<SerdeValue>(summary) {
+                    Ok(SerdeValue::Array(summary_entries)) => Some(summary_entries),
+                    _ => panic!("{} is not an array.", summary),
+                }
+            } else {
+                None
+            }
         };
-        let sql = format!(
-            r#"SELECT * FROM "history"
-               WHERE "undone_by" {} NULL
-               ORDER BY "history_id" DESC LIMIT 1"#,
-            is_clause
-        );
-        let query = sqlx_query(&sql);
-        let result_row = query.fetch_optional(&self.pool).await?;
-        Ok(result_row)
+
+        // If the `summary` part of the record is present, then just use it to populate the fields
+        // of the ValveChange structs representing the changes to each column in the table row.
+        if let Some(summary) = summary {
+            let mut column_changes = vec![];
+            for entry in summary {
+                let column = entry.get("column").and_then(|s| s.as_str()).unwrap();
+                let level = entry.get("level").and_then(|s| s.as_str()).unwrap();
+                let old_value = entry.get("old_value").and_then(|s| s.as_str()).unwrap();
+                let value = entry.get("value").and_then(|s| s.as_str()).unwrap();
+                let message = entry.get("message").and_then(|s| s.as_str()).unwrap();
+                column_changes.push(ValveChange {
+                    table: table.to_string(),
+                    column: column.to_string(),
+                    level: level.to_string(),
+                    old_value: old_value.to_string(),
+                    value: value.to_string(),
+                    message: message.to_string(),
+                });
+            }
+            return Ok(Some(column_changes));
+        }
+
+        // If the `summary` part of the record is not present, then either the `from` or the `to`
+        // parts of the record will be null. If `from` is not null then this is a delete (i.e.,
+        // the row has changed from something to nothing).
+        if let Some(from) = from {
+            let mut column_changes = vec![];
+            for (column, change) in from {
+                let old_value = change.get("value").and_then(|s| s.as_str()).unwrap();
+                column_changes.push(ValveChange {
+                    table: table.to_string(),
+                    column: column.to_string(),
+                    level: "delete".to_string(),
+                    old_value: old_value.to_string(),
+                    value: "".to_string(),
+                    message: "".to_string(),
+                });
+            }
+            return Ok(Some(column_changes));
+        }
+
+        // If `to` is not null then this is an insert (i.e., the row has changed from nothing to
+        // something).
+        if let Some(to) = to {
+            let mut column_changes = vec![];
+            for (column, change) in to {
+                let value = change.get("value").and_then(|s| s.as_str()).unwrap();
+                column_changes.push(ValveChange {
+                    table: table.to_string(),
+                    column: column.to_string(),
+                    level: "insert".to_string(),
+                    old_value: "".to_string(),
+                    value: value.to_string(),
+                    message: "".to_string(),
+                });
+            }
+            return Ok(Some(column_changes));
+        }
+
+        // If we get to here, then `summary`, `from`, and `to` are all null so we return an error.
+        Err(ValveError::InputError(
+            "All of summary, from, and to are NULL in undo/redo record".to_string(),
+        ))
     }
 
-    /// Return the next change that can be redone, or None if there isn't any.
-    pub async fn get_record_to_redo(&self) -> Result<Option<AnyRow>, ValveError> {
-        // Look in the history table, get the row with the greatest ID, get the row number,
-        // from, and to, and determine whether the last operation was a delete, insert, or update.
-        let is_not_clause = if self.pool.any_kind() == AnyKind::Sqlite {
-            "IS NOT"
-        } else {
-            "IS DISTINCT FROM"
-        };
-        let sql = format!(
-            r#"SELECT * FROM "history"
-           WHERE "undone_by" {} NULL
-           ORDER BY "timestamp" DESC LIMIT 1"#,
-            is_not_clause
-        );
-        let query = sqlx_query(&sql);
-        let result_row = query.fetch_optional(&self.pool).await?;
-        Ok(result_row)
+    /// Return the next recorded change to the data that can be redone, or None if there isn't any.
+    pub async fn get_change_to_undo(&self) -> Result<Option<Vec<ValveChange>>, ValveError> {
+        match get_record_to_undo(&self.pool).await? {
+            None => Ok(None),
+            Some(record) => self.convert_undo_or_redo_record_to_change(&record),
+        }
+    }
+
+    /// Return the next recorded change to the data that can be undone, or None if there isn't any.
+    pub async fn get_change_to_redo(&self) -> Result<Option<Vec<ValveChange>>, ValveError> {
+        match get_record_to_redo(&self.pool).await? {
+            None => Ok(None),
+            Some(record) => self.convert_undo_or_redo_record_to_change(&record),
+        }
     }
 
     /// Undo one change and return the change record or None if there was no change to undo.
     pub async fn undo(&self) -> Result<Option<ValveRow>, ValveError> {
-        let last_change = match self.get_record_to_undo().await? {
+        let last_change = match get_record_to_undo(&self.pool).await? {
             None => {
                 warn!("Nothing to undo.");
                 return Ok(None);
@@ -1676,7 +1743,7 @@ impl Valve {
 
     /// Redo one change and return the change record or None if there was no change to redo.
     pub async fn redo(&self) -> Result<Option<ValveRow>, ValveError> {
-        let last_undo = match self.get_record_to_redo().await? {
+        let last_undo = match get_record_to_redo(&self.pool).await? {
             None => {
                 warn!("Nothing to redo.");
                 return Ok(None);
