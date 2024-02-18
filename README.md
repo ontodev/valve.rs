@@ -7,15 +7,15 @@
 ## valve.rs
 A lightweight validation engine written in rust.
 
+### API
+See [valve]
+
 ### Command line usage
 Run:
 ```rust
 valve --help
 ```
 to see command line options.
-
-### API
-See [valve]
 
 ### Python bindings
 See [valve.py](https://github.com/ontodev/valve.py)

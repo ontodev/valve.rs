@@ -5,15 +5,15 @@
 //! # valve.rs
 //! A lightweight validation engine written in rust.
 //!
+//! ## API
+//! See [valve]
+//!
 //! ## Command line usage
 //! Run:
 //! ```
 //! valve --help
 //! ```
 //! to see command line options.
-//!
-//! ## API
-//! See [valve]
 //!
 //! ## Python bindings
 //! See [valve.py](https://github.com/ontodev/valve.py)
@@ -61,8 +61,9 @@ use sqlx::{
     query as sqlx_query, Acquire, Column, Row, Transaction, ValueRef,
 };
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     fs::File,
+    iter::FromIterator,
     path::Path,
     process,
     str::FromStr,
@@ -233,12 +234,23 @@ pub fn read_config_files(
 ) {
     // Given a list of columns that are required for some table, and a list of those columns
     // that are required to have values, check if both sets of requirements are met by the given
-    // row.
+    // row, and return a ValveError if they are not.
     fn check_table_requirements(
         columns_are_required: &Vec<&str>,
         values_are_required: &Vec<&str>,
         row: &ValveRow,
     ) -> Result<(), ValveError> {
+        let columns_are_required: HashSet<&str> =
+            HashSet::from_iter(columns_are_required.iter().cloned());
+        let values_are_required: HashSet<&str> =
+            HashSet::from_iter(values_are_required.iter().cloned());
+        if !values_are_required.is_subset(&columns_are_required) {
+            panic!(
+                "{:?} is not a subset of {:?}",
+                values_are_required, columns_are_required
+            );
+        }
+
         for &column in columns_are_required.iter() {
             match row.get(column).and_then(|c| c.as_str()) {
                 None => {
@@ -369,7 +381,13 @@ pub fn read_config_files(
             let table_name = match table_type {
                 "column" => &specials_config.column,
                 "datatype" => &specials_config.datatype,
-                "rule" => &specials_config.rule,
+                "rule" => {
+                    let rule_table = &specials_config.rule;
+                    if rule_table == "" {
+                        panic!("Tried to get special config for rule table but it is undefined");
+                    }
+                    rule_table
+                }
                 _ => panic!(
                     "In get_special_config(): Table type '{}' not supported for this function.",
                     table_type
@@ -380,8 +398,8 @@ pub fn read_config_files(
                     .get(table_name)
                     .and_then(|t| Some(t.path.to_string()))
                     .expect(&format!(
-                        "Table '{}' not found in tables config",
-                        table_name
+                        "Table '{}', supposedly of type '{}', not found in tables config",
+                        table_name, table_type
                     )),
             );
             read_tsv_into_vector(&path)
@@ -578,7 +596,6 @@ pub fn read_config_files(
         let optional_path = tables_config
             .get(&table_name)
             .and_then(|r| Some(r.path.to_string()));
-
         let mut path = None;
         match optional_path {
             None => {
@@ -614,7 +631,7 @@ pub fn read_config_files(
         let mut column_order = vec![];
         if let Some(path) = path {
             // Get the actual columns from the data itself. Note that we set has_headers to
-            // false(even though the files have header rows) in order to explicitly read the
+            // false (even though the files have header rows) in order to explicitly read the
             // header row.
             let mut rdr = ReaderBuilder::new()
                 .has_headers(false)
@@ -2790,9 +2807,10 @@ pub fn local_sql_syntax(pool: &AnyPool, sql: &String) -> String {
 
 /// Takes as arguments a list of tables and a configuration map describing all of the constraints
 /// between tables. After validating that there are no cycles amongst the foreign, tree, and
-/// under dependencies, returns the list of tables sorted according to their foreign key
+/// under dependencies, returns (i) the list of tables sorted according to their foreign key
 /// dependencies, such that if table_a depends on table_b, then table_b comes before table_a in the
-/// list that is returned.
+/// list; (ii) A map from table names to the lists of tables that depend on a given table, and a map
+/// from table names to the lists of tables that a given table depends on.
 pub fn verify_table_deps_and_sort(
     table_list: &Vec<String>,
     constraints: &ValveConstraintConfig,
@@ -2985,8 +3003,9 @@ pub fn verify_table_deps_and_sort(
     };
 }
 
-/// Given table configuration map and a datatype configuration map, a parser, a table name, and a
-/// database connection pool, return a configuration map representing all of the table constraints.
+/// Given a table configuration map and a datatype configuration map, a parser, a table name, and a
+/// database connection pool, return lists of: primary keys, unique constraints, foreign keys,
+/// trees, and under keys.
 pub fn get_table_constraints(
     tables_config: &HashMap<String, ValveTableConfig>,
     datatypes_config: &HashMap<String, ValveDatatypeConfig>,
@@ -3006,28 +3025,23 @@ pub fn get_table_constraints(
     let mut trees = vec![];
     let mut unders = vec![];
 
-    let column_names = tables_config
-        .get(table_name)
-        .and_then(|t| Some(t.column_order.clone()))
-        .expect(&format!("Undefined table '{}'", table_name));
     let columns = tables_config
         .get(table_name)
         .and_then(|t| Some(t.column.clone()))
         .expect(&format!("Undefined table '{}'", table_name));
-
-    let mut colvals: Vec<ValveColumnConfig> = vec![];
-    for column_name in &column_names {
-        let column = columns.get(column_name).unwrap();
+    let mut colvals = vec![];
+    for (_, column) in columns.iter() {
         colvals.push(column.clone());
     }
-
     for row in colvals {
         let datatype = &row.datatype;
         let sql_type = get_sql_type(datatypes_config, datatype, pool);
         let column_name = &row.column;
         let structure = &row.structure;
         if structure != "" {
-            let parsed_structure = parser.parse(&structure).unwrap();
+            let parsed_structure = parser
+                .parse(&structure)
+                .expect(&format!("Could not parse structure '{}'", structure));
             for expression in parsed_structure {
                 match *expression {
                     Expression::Label(value) if value == "primary" => {

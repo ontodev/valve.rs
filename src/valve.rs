@@ -58,62 +58,74 @@ pub enum ValveError {
     SerdeJsonError(serde_json::Error),
 }
 
-/// Represents a message associated with a particular value of a particular table column.
+/// Represents a message associated with a particular value of a particular column.
 #[derive(Debug, Default)]
 pub struct ValveMessage {
+    /// The name of the table that the column is from
     pub table: String,
+    /// The name of the column
     pub column: String,
+    /// The value of the column
     pub value: String,
+    /// The rule violated by the value
     pub rule: String,
+    /// The severity of the violation
     pub level: String,
+    /// A description of the violation
     pub message: String,
 }
 
 /// Represents a change to a value in a database table.
 #[derive(Debug, Default)]
 pub struct ValveChange {
+    /// The name of the table that the value is from
     pub table: String,
+    /// The name of the column that the value is from
     pub column: String,
+    /// The kind of change (update, insert, delete)
     pub level: String,
+    /// The previous contents of this column value
     pub old_value: String,
+    /// The new contents of this column value
     pub value: String,
+    /// A description of the change
     pub message: String,
 }
 
 /// Configuration information specific to Valve's special tables
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct ValveSpecialConfig {
+    /// The name of the table table
+    pub table: String,
     /// The name of the column table
     pub column: String,
     /// The name of the datatype table
     pub datatype: String,
-    /// The name of the rule table
+    /// The name of the rule table, or an empty string if there isn't any
     pub rule: String,
-    /// The name of the table table
-    pub table: String,
 }
 
 /// Configuration information for a particular table.
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct ValveTableConfig {
-    /// The name of this table
+    /// The name of a table
     pub table: String,
-    /// This table's type
+    /// The table's type
     pub table_type: String,
-    /// A description of this table
+    /// A description of the table
     pub description: String,
-    /// The location of the TSV file representing this table in the filesystem
+    /// The location of the TSV file representing the table in the filesystem
     pub path: String,
-    /// This table's column configuration
+    /// The table's column configuration
     pub column: HashMap<String, ValveColumnConfig>,
-    /// The order in which this table's columns should appear in the database and in TSV files.
+    /// The order in which the table's columns should appear in the database and in TSV files.
     pub column_order: Vec<String>,
 }
 
 /// Configuration information for a particular column of a particular table
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct ValveColumnConfig {
-    /// The table that this column belongs to
+    /// The table that the column belongs to
     pub table: String,
     /// The column's name
     pub column: String,
@@ -125,7 +137,7 @@ pub struct ValveColumnConfig {
     pub label: String,
     /// The structural constraint that should be satisfied by all of the column's values
     pub structure: String,
-    /// The datatype of the column's nulltype (or the empty string if the column has no nulltype)
+    /// The datatype of the column's nulltype (or the empty string if the column has none)
     pub nulltype: String,
 }
 
@@ -138,15 +150,15 @@ pub struct ValveDatatypeConfig {
     pub sql_type: String,
     /// The regular expression which all data values of this type must match
     pub condition: String,
-    /// The name of this datatype
+    /// The name of the datatype
     pub datatype: String,
     /// The datatype's description
     pub description: String,
-    /// The parent datatype of this datatype
+    /// The parent datatype of the datatype
     pub parent: String,
     /// The structural constraint that should be satisfied by all data values of this type
     pub structure: String,
-    /// The transform of this datatype
+    /// The transform of the datatype
     pub transform: String,
 }
 
@@ -155,7 +167,7 @@ pub struct ValveDatatypeConfig {
 pub struct ValveRuleConfig {
     /// The description of the rule
     pub description: String,
-    /// The level of the rule (e.g., 'error')
+    /// The level of the rule (error, warning, info)
     pub level: String,
     /// The table with which the rule is associated
     pub table: String,
@@ -174,7 +186,7 @@ pub struct ValveRuleConfig {
 pub struct ValveTreeConstraint {
     /// The child node associated with this tree
     pub child: String,
-    /// The tree's parent
+    /// The child's parent
     pub parent: String,
 }
 
@@ -406,7 +418,8 @@ impl Valve {
         Ok(self)
     }
 
-    /// Given a SQL string, execute it using the connection pool associated with the Valve instance.
+    /// Given a SQL string, execute it using the connection pool associated with the Valve instance
+    /// (private function).
     async fn execute_sql(&self, sql: &str) -> Result<(), ValveError> {
         sqlx_query(&sql).execute(&self.pool).await?;
         Ok(())
@@ -609,6 +622,7 @@ impl Valve {
             let columns_config = &table_config.column;
             let configured_column_order = {
                 let mut configured_column_order = {
+                    // These special identifier columns must go first:
                     if table == "message" {
                         vec!["message_id".to_string()]
                     } else if table == "history" {
