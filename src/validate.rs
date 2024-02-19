@@ -1,15 +1,14 @@
 //! Low-level validation functions
 
 use crate::{
-    cast_sql_param_from_text, error, get_column_value, get_sql_type_from_global_config,
-    is_sql_type_error, local_sql_syntax,
+    cast_sql_param_from_text, get_column_value, get_sql_type_from_global_config, is_sql_type_error,
+    local_sql_syntax,
     valve::{
         ValveConfig, ValveDatatypeConfig, ValveError, ValveRow, ValveRuleConfig,
         ValveTreeConstraint,
     },
     ColumnRule, CompiledCondition,
 };
-use chrono::Utc;
 use indexmap::IndexMap;
 use serde_json::{json, Value as SerdeValue};
 use sqlx::{any::AnyPool, query as sqlx_query, Acquire, Row, Transaction, ValueRef};
@@ -52,11 +51,11 @@ pub struct QueryAsIf {
 }
 
 /// Given a config map, maps of compiled datatype and rule conditions, a database connection
-/// pool, a table name, a row to validate and a row number in the case where the row already
-/// exists, perform both intra- and inter-row validation and return the validated row.
-/// Optionally, if a transaction is given, use that instead of the pool for database access.
-/// Optionally, if query_as_if is given, validate the row counterfactually according to that
-/// parameter. Note that this function is idempotent.
+/// pool, a table name, a row to validate and a row number in the case where the row already exists,
+/// perform both intra- and inter-row validation and return the validated row. Optionally, if a
+/// transaction is given, use that instead of the pool for database access. Optionally, if
+/// query_as_if is given, validate the row counterfactually according to that parameter. Note that
+/// this function is idempotent.
 pub async fn validate_row_tx(
     config: &ValveConfig,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
@@ -658,9 +657,10 @@ pub fn validate_rows_intra(
     let mut result_rows = vec![];
     for row in rows {
         match row {
-            Err(err) => error!(
+            Err(err) => log::error!(
                 "While processing row for '{}', got error '{}'",
-                table_name, err
+                table_name,
+                err
             ),
             Ok(row) => {
                 let mut result_row = ResultRow {

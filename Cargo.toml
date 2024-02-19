@@ -15,10 +15,10 @@ argparse = "0.2.2"
 async-std = { version = "1", features = [ "attributes" ] }
 async-recursion = "1.0.4"
 async-scoped = { version = "0.7.0", features = [ "use-async-std" ] }
-chrono = "0.4.23"
 crossbeam = "0.8.1"
 csv = "1.1"
 enquote = "1.1.0"
+env_logger = "0.10.2"
 # Futures is not used directly but is needed for the python bindings in github.com/ontodev/valve.py.
 futures = "0.3"
 indexmap = "1.9.3"
@@ -26,6 +26,7 @@ indoc = "1.0"
 itertools = "0.10.3"
 lalrpop-util = { version = "0.19.7", features = ["lexer"] }
 lazy_static = "1.4.0"
+log = "0.4.20"
 num_cpus = "1.13.1"
 petgraph = "0.6.0"
 rand = "0.8.5"

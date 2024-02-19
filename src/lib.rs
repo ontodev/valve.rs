@@ -41,7 +41,6 @@ use crate::{
     valve_grammar::StartParser,
 };
 use async_recursion::async_recursion;
-use chrono::Utc;
 use crossbeam;
 use csv::{ReaderBuilder, StringRecord, StringRecordsIter};
 use futures::executor::block_on;
@@ -76,6 +75,9 @@ static CHUNK_SIZE: usize = 500;
 /// Run valve in multi-threaded mode.
 static MULTI_THREADED: bool = true;
 
+/// Maximum number of database connections.
+static MAX_DB_CONNECTIONS: u32 = 5;
+
 // Note that SQL_PARAM must be a 'word' (from the point of view of regular expressions) since in the
 // local_sql_syntax() function below we are matchng against it using '\b' which represents a word
 // boundary. If you want to use a non-word placeholder then you must also change '\b' in the regex
@@ -87,43 +89,12 @@ lazy_static! {
     static ref SQL_TYPES: Vec<&'static str> = vec!["text", "varchar", "numeric", "integer", "real"];
 }
 
-/// Alias for [serde_json::Map](..//serde_json/struct.Map.html)<String, [serde_json::Value](../serde_json/enum.Value.html)>.
-// Note: serde_json::Map is
-// [backed by a BTreeMap by default](https://docs.serde.rs/serde_json/map/index.html)
+/// Alias for [Map](serde_json::map)<[String], [Value](serde_json::value)>.
 pub type SerdeMap = serde_json::Map<String, SerdeValue>;
-
-// TODO: Possibly replace these with the tracing library (see nanobot.rs).
-/// Write a debugging message to STDERR.
-#[macro_export]
-macro_rules! debug {
-    () => (eprintln!());
-    ($($arg:tt)*) => (eprintln!("{} - DEBUG {}", Utc::now(), format_args!($($arg)*)));
-}
-
-/// Write an information message to STDERR.
-#[macro_export]
-macro_rules! info {
-    () => (eprintln!());
-    ($($arg:tt)*) => (eprintln!("{} - INFO {}", Utc::now(), format_args!($($arg)*)));
-}
-
-/// Write a warning message to STDERR.
-#[macro_export]
-macro_rules! warn {
-    () => (eprintln!());
-    ($($arg:tt)*) => (eprintln!("{} - WARN {}", Utc::now(), format_args!($($arg)*)));
-}
-
-/// Write an error message to STDERR.
-#[macro_export]
-macro_rules! error {
-    () => (eprintln!());
-    ($($arg:tt)*) => (eprintln!("{} - ERROR {}", Utc::now(), format_args!($($arg)*)));
-}
 
 /// Represents a structure such as those found in the `structure` column of the `column` table in
 /// both its parsed format (i.e., as an [Expression](ast/enum.Expression.html)) as well as in its
-/// original format (i.e., as a plain String).
+/// original format (i.e., as a plain [String]).
 #[derive(Clone)]
 pub struct ParsedStructure {
     pub original: String,
@@ -200,8 +171,7 @@ pub async fn get_pool_from_connection_string(database: &str) -> Result<AnyPool, 
     }
 
     let pool = AnyPoolOptions::new()
-        // TODO: Make max_connections configurable.
-        .max_connections(5)
+        .max_connections(MAX_DB_CONNECTIONS)
         .connect_with(connection_options)
         .await?;
     Ok(pool)
@@ -232,9 +202,10 @@ pub fn read_config_files(
     HashMap<String, Vec<String>>,
     HashMap<String, Vec<String>>,
 ) {
-    // Given a list of columns that are required for some table, and a list of those columns
+    // Given a list of columns that are required for some table, and a subset of those columns
     // that are required to have values, check if both sets of requirements are met by the given
-    // row, and return a ValveError if they are not.
+    // row. Returns a ValveError if both sets of requirements are not met, or if values_are_required
+    // is not a subset of columns_are_required.
     fn check_table_requirements(
         columns_are_required: &Vec<&str>,
         values_are_required: &Vec<&str>,
@@ -245,10 +216,10 @@ pub fn read_config_files(
         let values_are_required: HashSet<&str> =
             HashSet::from_iter(values_are_required.iter().cloned());
         if !values_are_required.is_subset(&columns_are_required) {
-            panic!(
+            return Err(ValveError::InputError(format!(
                 "{:?} is not a subset of {:?}",
                 values_are_required, columns_are_required
-            );
+            )));
         }
 
         for &column in columns_are_required.iter() {
@@ -608,10 +579,10 @@ pub fn read_config_files(
                 continue;
             }
             Some(p) if !Path::new(&p).is_file() => {
-                warn!("File does not exist {}", p);
+                log::warn!("File does not exist {}", p);
             }
             Some(p) if Path::new(&p).canonicalize().is_err() => {
-                warn!("File path could not be made canonical {}", p);
+                log::warn!("File path could not be made canonical {}", p);
             }
             Some(p) => path = Some(p),
         };
@@ -953,8 +924,8 @@ pub fn get_compiled_datatype_conditions(
 }
 
 /// Given the global config struct, a hash map of compiled datatype conditions (indexed by the text
-/// version of the conditions), and a parser, compile all of the rule conditions, add them to a
-/// hash which has the following structure:
+/// versions of the conditions), and a parser, compile all of the rule conditions, add them to a
+/// hash which has the following structure and return it:
 /// ```
 /// {
 ///      table_1: {
@@ -1050,9 +1021,7 @@ pub fn get_parsed_structure_conditions(
 /// Given the name of a table and a database connection pool, generate SQL for creating a view
 /// based on the table that provides a unified representation of the normal and conflict versions
 /// of the table, plus columns summarising the information associated with the given table that is
-/// contained in the message and history tables. The SQL generated is in the form of a tuple of
-/// Strings, with the first string being a SQL statement for dropping the view, and the second
-/// string being a SQL statement for creating it.
+/// contained in the message and history tables.
 pub fn get_sql_for_standard_view(table: &str, pool: &AnyPool) -> String {
     let message_t;
     if pool.any_kind() == AnyKind::Postgres {
@@ -1161,9 +1130,7 @@ pub fn get_sql_for_standard_view(table: &str, pool: &AnyPool) -> String {
 /// [get_sql_for_standard_view()]. Unlike the standard view generated by that function, the view
 /// generated by this function (called my_table_text_view) always shows all of the values (which are
 /// all rendered as text) of every column in the table, even when those values contain SQL datatype
-/// errors. Like the function for generating a standard view, the SQL generated by this function is
-/// returned in the form of a tuple of Strings, with the first string being a SQL statement
-/// for dropping the view, and the second string being a SQL statement for creating it.
+/// errors.
 pub fn get_sql_for_text_view(
     tables_config: &HashMap<String, ValveTableConfig>,
     table: &str,
@@ -1534,7 +1501,9 @@ pub async fn get_db_value(
 /// Given a global config map, a database connection pool, a database transaction, a table name,
 /// and a [QueryAsIf] struct representing a custom modification to the query of the table, get
 /// the rows that will potentially be affected by the database change to the row indicated in
-/// query_as_if.
+/// query_as_if. These are divided into three: The rows that must be updated before the current
+/// update, the rows that must be updated after the current update, and the rows from the same
+/// table as the current update that need to be updated.
 pub async fn get_rows_to_update(
     config: &ValveConfig,
     pool: &AnyPool,
@@ -1591,9 +1560,10 @@ pub async fn get_rows_to_update(
         let updates_before = match query_as_if.kind {
             QueryAsIfKind::Add => {
                 if let None = query_as_if.row {
-                    warn!(
+                    log::warn!(
                         "No row in query_as_if: {:?} for {:?}",
-                        query_as_if, query_as_if.kind
+                        query_as_if,
+                        query_as_if.kind
                     );
                 }
                 IndexMap::new()
@@ -1626,9 +1596,10 @@ pub async fn get_rows_to_update(
         let updates_after = match &query_as_if.row {
             None => {
                 if query_as_if.kind != QueryAsIfKind::Remove {
-                    warn!(
+                    log::warn!(
                         "No row in query_as_if: {:?} for {:?}",
-                        query_as_if, query_as_if.kind
+                        query_as_if,
+                        query_as_if.kind
                     );
                 }
                 IndexMap::new()
@@ -1687,9 +1658,10 @@ pub async fn get_rows_to_update(
         let updates = match query_as_if.kind {
             QueryAsIfKind::Add => {
                 if let None = query_as_if.row {
-                    warn!(
+                    log::warn!(
                         "No row in query_as_if: {:?} for {:?}",
-                        query_as_if, query_as_if.kind
+                        query_as_if,
+                        query_as_if.kind
                     );
                 }
                 IndexMap::new()
@@ -1726,9 +1698,10 @@ pub async fn get_rows_to_update(
 }
 
 /// Given a global config map, maps of datatype and rule conditions, a database connection pool,
-/// a database transaction, a number of updates to process, a [QueryAsIf] struct indicating how
-/// we should modify 'in thought' the current state of the database, and a flag indicating whether
-/// we should allow recursive updates, validate and then update each row indicated in `updates`.
+/// a database transaction, some updates to process, a [QueryAsIf] struct indicating how
+/// we should counterfactually modify the current state of the database, and a flag indicating
+/// whether we should allow recursive updates, validate and then update each row indicated in
+/// `updates`.
 pub async fn process_updates(
     config: &ValveConfig,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
@@ -1777,7 +1750,9 @@ pub async fn process_updates(
 /// Given a database transaction, a table name, a row number, optionally: the version of the row we
 /// are going to change it from, optionally: the version of the row we are going to change it to,
 /// and the name of the user making the change, record the change to the history table in the
-/// database. Note that `from` and `to` cannot both be None.
+/// database. Note that `from` and `to` cannot both be None: Either we are changing the row from
+/// something to nothing (i.e., deleting), changing it from nothing to something (i.e., inserting),
+/// or changing it from something to something else (i.e., updating).
 pub async fn record_row_change(
     tx: &mut Transaction<'_, sqlx::Any>,
     table: &str,
@@ -1937,12 +1912,12 @@ pub fn get_json_from_row(row: &AnyRow, column: &str) -> Option<SerdeMap> {
         let value: &str = row.get(column);
         match serde_json::from_str::<SerdeValue>(value) {
             Err(e) => {
-                warn!("{}", e);
+                log::warn!("{}", e);
                 None
             }
             Ok(SerdeValue::Object(value)) => Some(value),
             _ => {
-                warn!("{} is not an object.", value);
+                log::warn!("{} is not an object.", value);
                 None
             }
         }
@@ -1953,9 +1928,9 @@ pub fn get_json_from_row(row: &AnyRow, column: &str) -> Option<SerdeMap> {
 
 /// Given a user, a history_id, a database transaction, and an undone_state indicating whether to
 /// set the associated history record as undone (if undone_state == true) or as not undone
-/// (otherwise). When setting the record to undone, user is used for the 'undone_by' field of the
-/// history table, otherwise undone_by is set to NULL and the user is indicated as the one
-/// responsible for the change (instead of whoever made the change originally).
+/// (otherwise), do the following: When setting the record to undone, `user` is used for the
+/// 'undone_by' field of the history table, otherwise undone_by is set to NULL and the user is
+/// indicated as the one responsible for the change (instead of whoever made the change originally).
 pub async fn switch_undone_state(
     user: &str,
     history_id: u16,
@@ -2367,7 +2342,7 @@ pub async fn delete_row_tx(
 /// Given global config map, maps of compiled datatype and rule conditions, a database connection
 /// pool, a database transaction, a table name, a row, and the row number to update, update the
 /// corresponding row in the database. If skip_validation is set, skip the implicit call to
-/// [validate_row_tx()]. If do_not_recurse, is set, do not look for rows which could be affected by
+/// [validate_row_tx()]. If do_not_recurse is set, do not look for rows which could be affected by
 /// this update.
 #[async_recursion]
 pub async fn update_row_tx(
@@ -2518,9 +2493,13 @@ pub fn read_tsv_into_vector(path: &str) -> Vec<ValveRow> {
             let val = val.as_str().unwrap();
             let trimmed_val = val.trim();
             if trimmed_val != val {
-                error!(
+                log::error!(
                     "Value '{}' of column '{}' in row {} of table '{}' {}",
-                    val, col, i, path, "has leading and/or trailing whitespace."
+                    val,
+                    col,
+                    i,
+                    path,
+                    "has leading and/or trailing whitespace."
                 );
                 process::exit(1);
             }
@@ -2685,6 +2664,7 @@ pub fn compile_condition(
 
 /// Given the config map, the name of a datatype, and a database connection pool used to determine
 /// the database type, climb the datatype tree (as required), and return the first 'SQL type' found.
+/// If there is no SQL type defined for the given datatype, return TEXT.
 pub fn get_sql_type(
     dt_config: &HashMap<String, ValveDatatypeConfig>,
     datatype: &String,
@@ -2706,8 +2686,8 @@ pub fn get_sql_type(
     return get_sql_type(dt_config, &parent_datatype, pool);
 }
 
-/// Given the global config map, a table name, a column name, and a database connection pool
-/// used to determine the database type return the column's SQL type.
+/// Given the global config map, a table name, a column name, and a database connection pool,
+/// return the column's SQL type.
 pub fn get_sql_type_from_global_config(
     config: &ValveConfig,
     table: &str,
@@ -2805,12 +2785,12 @@ pub fn local_sql_syntax(pool: &AnyPool, sql: &String) -> String {
     final_sql
 }
 
-/// Takes as arguments a list of tables and a configuration map describing all of the constraints
+/// Takes as arguments a list of tables and a configuration struct describing all of the constraints
 /// between tables. After validating that there are no cycles amongst the foreign, tree, and
 /// under dependencies, returns (i) the list of tables sorted according to their foreign key
 /// dependencies, such that if table_a depends on table_b, then table_b comes before table_a in the
-/// list; (ii) A map from table names to the lists of tables that depend on a given table, and a map
-/// from table names to the lists of tables that a given table depends on.
+/// list; (ii) A map from table names to the lists of tables that depend on a given table; (iii) a
+/// map from table names to the lists of tables that a given table depends on.
 pub fn verify_table_deps_and_sort(
     table_list: &Vec<String>,
     constraints: &ValveConstraintConfig,
@@ -3145,8 +3125,8 @@ pub fn get_table_constraints(
     return (primaries, uniques, foreigns, trees, unders);
 }
 
-/// Given table configuration map and a datatype configuration map, a parser, a table name, and a
-/// database connection pool, return a list of DDL statements that can be used to create the
+/// Given a table configuration struct, a datatype configuration struct, a parser, a table name,
+/// and a database connection pool, return a list of DDL statements that can be used to create the
 /// database tables.
 pub fn get_table_ddl(
     tables_config: &HashMap<String, ValveTableConfig>,
@@ -3289,13 +3269,13 @@ pub fn add_message_counts(messages: &Vec<SerdeValue>, messages_stats: &mut HashM
             let current_infos = messages_stats.get("info").unwrap();
             messages_stats.insert("info".to_string(), current_infos + 1);
         } else {
-            warn!("Unknown message type: {}", level);
+            log::warn!("Unknown message type: {}", level);
         }
     }
 }
 
-/// Given a global config map, return a list of defined datatype names sorted from the most generic
-/// to the most specific. This function will panic if circular dependencies are encountered.
+/// Given a global config struct, return a list of defined datatype names sorted from the most
+/// generic to the most specific. This function will panic if circular dependencies are encountered.
 pub fn get_sorted_datatypes(config: &ValveConfig) -> Vec<&str> {
     let mut graph = DiGraphMap::<&str, ()>::new();
     let dt_config = &config.datatype;
@@ -3388,14 +3368,13 @@ pub fn sort_messages(
     messages
 }
 
-/// Given a configuration map, a table name, a number of rows, their corresponding chunk number,
-/// and a database connection pool used to determine the database type, return two four-place
-/// tuples, corresponding to the normal and conflict tables, respectively. Each of these contains
-/// (i) a SQL string for an insert statement to the table, (ii) parameters to bind to that SQL
-/// statement, (iii) a SQL string for an insert statement the message table, and (iv) parameters
-/// to bind to that SQL statement. If the verbose flag is set, the number of errors, warnings,
-/// and information messages generated are added to messages_stats, the contents of which will
-/// later be written to stderr.
+/// Given a configuration struct, a table name, some rows, their corresponding chunk number,
+/// a struct used for recording message statistics, a verbose flag, and a database connection pool
+/// used to determine the database type, return (i) an insert statement to the table, (ii)
+/// parameters to bind to that SQL statement, (iii) an insert statement to the conflict version of
+/// the table, (iv) parameters to bind to that SQL statement, (v) an insert statement to the
+/// message table, and (vi) parameters to bind to that SQL statement. If the verbose flag is set,
+/// the number of errors, warnings, and information messages generated are added to messages_stats.
 pub async fn make_inserts(
     config: &ValveConfig,
     table_name: &String,
@@ -3599,10 +3578,11 @@ pub async fn make_inserts(
     ))
 }
 
-/// Given a configuration map, a database connection pool, a table name, some rows to validate,
-/// and the chunk number corresponding to the rows, do inter-row validation on the rows and insert
-/// them to the table. If the verbose flag is set to true, error/warning/info stats will be
-/// collected in messages_stats and later written to stderr.
+/// Given a configuration map, a database connection pool, a table name, some rows to load,
+/// and the chunk number corresponding to the rows, load the rows to the database. If the validate
+/// flag is set, do inter-row validation on the rows before inserting  them to the table. If the
+/// verbose flag is set to true, keep track of the number of error/warning/info statistics and
+/// record them using `messages_stats`.
 pub async fn insert_chunk(
     config: &ValveConfig,
     pool: &AnyPool,
@@ -3735,10 +3715,11 @@ pub async fn insert_chunk(
 }
 
 /// Given a configuration map, a database connection pool, maps for compiled datatype and rule
-/// conditions, a table name, a number of chunks of rows to insert into the table in the database,
-/// and the headers of the rows to be inserted, validate each chunk and insert the validated rows
-/// to the table. If the verbose flag is set to true, error/warning/info stats will be collected in
-/// messages_stats and later written to stderr.
+/// conditions, a table name, some chunks of rows to insert into the table in the database,
+/// and the headers of the rows to be inserted, load the rows to the given table. If the validate
+/// flag is set, do validate the rows before inserting them to the table. If the verbose flag is
+/// set, keep track of the number of error/warning/info statistics and record them using
+/// `messages_stats`.
 pub async fn insert_chunks(
     config: &ValveConfig,
     pool: &AnyPool,
