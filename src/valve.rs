@@ -1132,9 +1132,11 @@ impl Valve {
         self.load_tables(&table_list, validate).await
     }
 
-    /// Given a vector of table names, load those tables in the given order. If `validate` is false,
-    /// just try to insert all rows, irrespective of whether they are valid or not or will possibly
-    /// trigger a db error.
+    /// Given a vector of table names, truncate each table, as well as any that depend on a given
+    /// table via a foreign key dependency, then load the tables in `table_list` in the given order.
+    /// If `validate` is false, just try to insert all rows, irrespective of whether they are valid
+    /// or not or whether they may trigger a db error, otherwise all rows are validated as they are
+    /// inserted to the database.
     pub async fn load_tables(
         &self,
         table_list: &Vec<&str>,
