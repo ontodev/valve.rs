@@ -1,13 +1,13 @@
 //! API tests
 
-use ontodev_valve::{
-    valve::{Valve, ValveError},
-    SerdeMap,
-};
+use ontodev_valve::valve::{Valve, ValveError};
 use rand::distributions::{Alphanumeric, DistString, Distribution, Uniform};
 use rand::{random, thread_rng};
 use serde_json::json;
 use sqlx::{any::AnyPool, query as sqlx_query, Row, ValueRef};
+
+// Alias for [Map](serde_json::map)<[String], [Value](serde_json::value)>.
+type SerdeMap = serde_json::Map<String, serde_json::Value>;
 
 async fn test_matching(valve: &Valve) -> Result<(), ValveError> {
     eprint!("Running test_matching() ... ");

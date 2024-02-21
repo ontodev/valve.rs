@@ -9,7 +9,10 @@ use crate::{
     get_sql_for_standard_view, get_sql_for_text_view, get_sql_type,
     get_sql_type_from_global_config, get_table_ddl, insert_chunks, insert_new_row_tx,
     local_sql_syntax, read_config_files, record_row_change, switch_undone_state, update_row_tx,
-    validate::{validate_row_tx, validate_tree_foreign_keys, validate_under, with_tree_sql},
+    validate::{
+        validate_row_tx, validate_tree_foreign_keys, validate_under, with_tree_sql, ResultCell,
+        ResultRow,
+    },
     valve_grammar::StartParser,
     verify_table_deps_and_sort, ColumnRule, CompiledCondition, ParsedStructure, CHUNK_SIZE,
     SQL_PARAM,
@@ -1416,6 +1419,62 @@ impl Valve {
         writer.flush()?;
 
         Ok(self)
+    }
+
+    /// Static method for converting an [ValveRow] to a [ResultRow].
+    pub fn valve_row_to_result_row(
+        row_number: Option<u32>,
+        row: &ValveRow,
+    ) -> Result<ResultRow, ValveError> {
+        let mut result_row = ResultRow {
+            row_number: row_number,
+            contents: IndexMap::new(),
+        };
+        for (column, cell) in row.iter() {
+            let nulltype = match cell.get("nulltype") {
+                None => None,
+                Some(SerdeValue::String(s)) => Some(s.to_string()),
+                _ => {
+                    return Err(ValveError::InputError(
+                        format!("No string 'nulltype' in cell: {:?}.", cell).into(),
+                    ))
+                }
+            };
+            let value = match cell.get("value") {
+                Some(SerdeValue::String(s)) => s.to_string(),
+                Some(SerdeValue::Number(n)) => format!("{}", n),
+                _ => {
+                    return Err(ValveError::InputError(
+                        format!("No string/number 'value' in cell: {:#?}.", cell).into(),
+                    ))
+                }
+            };
+            let valid = match cell.get("valid").and_then(|v| v.as_bool()) {
+                Some(b) => b,
+                None => {
+                    return Err(ValveError::InputError(
+                        format!("No bool 'valid' in cell: {:?}.", cell).into(),
+                    ))
+                }
+            };
+            let messages = match cell.get("messages").and_then(|m| m.as_array()) {
+                Some(a) => a.to_vec(),
+                None => {
+                    return Err(ValveError::InputError(
+                        format!("No array 'messages' in cell: {:?}.", cell).into(),
+                    ))
+                }
+            };
+            let result_cell = ResultCell {
+                nulltype: nulltype,
+                value: value,
+                valid: valid,
+                messages: messages,
+            };
+            result_row.contents.insert(column.to_string(), result_cell);
+        }
+
+        Ok(result_row)
     }
 
     /// Given a table name and a row, return the validated row.

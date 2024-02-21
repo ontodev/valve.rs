@@ -4,7 +4,7 @@ use crate::{
     cast_sql_param_from_text, get_column_value, get_sql_type_from_global_config, is_sql_type_error,
     local_sql_syntax,
     valve::{
-        ValveConfig, ValveDatatypeConfig, ValveError, ValveRow, ValveRuleConfig,
+        Valve, ValveConfig, ValveDatatypeConfig, ValveError, ValveRow, ValveRuleConfig,
         ValveTreeConstraint,
     },
     ColumnRule, CompiledCondition,
@@ -77,54 +77,7 @@ pub async fn validate_row_tx(
     };
 
     // Initialize the result row with the values from the given row:
-    let mut result_row = ResultRow {
-        row_number: row_number,
-        contents: IndexMap::new(),
-    };
-
-    for (column, cell) in row.iter() {
-        let nulltype = match cell.get("nulltype") {
-            None => None,
-            Some(SerdeValue::String(s)) => Some(s.to_string()),
-            _ => {
-                return Err(ValveError::DataError(
-                    format!("No string 'nulltype' in cell: {:?}.", cell).into(),
-                ))
-            }
-        };
-        let value = match cell.get("value") {
-            Some(SerdeValue::String(s)) => s.to_string(),
-            Some(SerdeValue::Number(n)) => format!("{}", n),
-            _ => {
-                return Err(ValveError::DataError(
-                    format!("No string/number 'value' in cell: {:#?}.", cell).into(),
-                ))
-            }
-        };
-        let valid = match cell.get("valid").and_then(|v| v.as_bool()) {
-            Some(b) => b,
-            None => {
-                return Err(ValveError::DataError(
-                    format!("No bool 'valid' in cell: {:?}.", cell).into(),
-                ))
-            }
-        };
-        let messages = match cell.get("messages").and_then(|m| m.as_array()) {
-            Some(a) => a.to_vec(),
-            None => {
-                return Err(ValveError::DataError(
-                    format!("No array 'messages' in cell: {:?}.", cell).into(),
-                ))
-            }
-        };
-        let result_cell = ResultCell {
-            nulltype: nulltype,
-            value: value,
-            valid: valid,
-            messages: messages,
-        };
-        result_row.contents.insert(column.to_string(), result_cell);
-    }
+    let mut result_row = Valve::valve_row_to_result_row(row_number, row)?;
 
     // We check all the cells for nulltype first, since the rules validation requires that we
     // have this information for all cells.
