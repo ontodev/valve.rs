@@ -99,7 +99,7 @@ lazy_static! {
 }
 
 /// Alias for [Map](serde_json::map)<[String], [Value](serde_json::value)>.
-type SerdeMap = serde_json::Map<String, SerdeValue>;
+pub type SerdeMap = serde_json::Map<String, SerdeValue>;
 
 /// Represents a structure such as those found in the `structure` column of the `column` table in
 /// both its parsed format (i.e., as an [Expression](ast/enum.Expression.html)) as well as in its
