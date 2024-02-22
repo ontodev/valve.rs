@@ -4,51 +4,15 @@ use crate::{
     cast_sql_param_from_text, get_column_value, get_sql_type_from_global_config, is_sql_type_error,
     local_sql_syntax,
     valve::{
-        ValveConfig, ValveDatatypeConfig, ValveError, ValveRow, ValveRuleConfig,
+        ValveCell, ValveConfig, ValveDatatypeConfig, ValveError, ValveRow, ValveRuleConfig,
         ValveTreeConstraint,
     },
-    ColumnRule, CompiledCondition,
+    ColumnRule, CompiledCondition, QueryAsIf, QueryAsIfKind, SerdeMap,
 };
 use indexmap::IndexMap;
 use serde_json::{json, Value as SerdeValue};
 use sqlx::{any::AnyPool, query as sqlx_query, Acquire, Row, Transaction, ValueRef};
 use std::collections::HashMap;
-
-/// Represents a particular cell in a particular row of data with vaildation results.
-#[derive(Clone, Debug)]
-pub struct ResultCell {
-    pub nulltype: Option<String>,
-    pub value: String,
-    pub valid: bool,
-    pub messages: Vec<SerdeValue>,
-}
-
-/// Represents a particular row of data with validation results.
-#[derive(Clone, Debug)]
-pub struct ResultRow {
-    pub row_number: Option<u32>,
-    pub contents: IndexMap<String, ResultCell>,
-}
-
-/// The sense in which a [QueryAsIf] struct should be interpreted.
-#[derive(Clone, Debug, PartialEq)]
-pub enum QueryAsIfKind {
-    Add,
-    Remove,
-    Replace,
-}
-
-/// Used for counterfactual validation.
-#[derive(Clone, Debug)]
-pub struct QueryAsIf {
-    pub kind: QueryAsIfKind,
-    pub table: String,
-    // Although PostgreSQL allows it, SQLite does not allow a CTE named 'foo' to refer to a table
-    // named 'foo' so we need to use an alias:
-    pub alias: String,
-    pub row_number: u32,
-    pub row: Option<ValveRow>,
-}
 
 /// Given a config map, maps of compiled datatype and rule conditions, a database connection
 /// pool, a table name, a row to validate and a row number in the case where the row already exists,
@@ -63,10 +27,10 @@ pub async fn validate_row_tx(
     pool: &AnyPool,
     tx: Option<&mut Transaction<'_, sqlx::Any>>,
     table_name: &str,
-    row: &ValveRow,
+    row: &SerdeMap,
     row_number: Option<u32>,
     query_as_if: Option<&QueryAsIf>,
-) -> Result<ValveRow, ValveError> {
+) -> Result<SerdeMap, ValveError> {
     // Fallback to a default transaction if it is not given. Since we do not commit before it falls
     // out of scope the transaction will be rolled back at the end of this function. And since this
     // function is read-only the rollback is trivial and therefore inconsequential.
@@ -77,7 +41,7 @@ pub async fn validate_row_tx(
     };
 
     // Initialize the result row with the values from the given row:
-    let mut result_row = ResultRow {
+    let mut result_row = ValveRow {
         row_number: row_number,
         contents: IndexMap::new(),
     };
@@ -117,7 +81,7 @@ pub async fn validate_row_tx(
                 ))
             }
         };
-        let result_cell = ResultCell {
+        let result_cell = ValveCell {
             nulltype: nulltype,
             value: value,
             valid: valid,
@@ -252,7 +216,7 @@ pub async fn validate_under(
     pool: &AnyPool,
     mut tx: Option<&mut Transaction<'_, sqlx::Any>>,
     table_name: &String,
-    extra_row: Option<&ResultRow>,
+    extra_row: Option<&ValveRow>,
 ) -> Result<Vec<SerdeValue>, ValveError> {
     let mut results = vec![];
     let ukeys = config
@@ -430,7 +394,7 @@ pub async fn validate_tree_foreign_keys(
     pool: &AnyPool,
     mut tx: Option<&mut Transaction<'_, sqlx::Any>>,
     table_name: &String,
-    extra_row: Option<&ResultRow>,
+    extra_row: Option<&ValveRow>,
 ) -> Result<Vec<SerdeValue>, ValveError> {
     let tkeys = config
         .constraint
@@ -529,7 +493,7 @@ pub async fn validate_rows_trees(
     config: &ValveConfig,
     pool: &AnyPool,
     table_name: &String,
-    rows: &mut Vec<ResultRow>,
+    rows: &mut Vec<ValveRow>,
 ) -> Result<(), ValveError> {
     let column_names = &config
         .table
@@ -539,7 +503,7 @@ pub async fn validate_rows_trees(
 
     let mut result_rows = vec![];
     for row in rows {
-        let mut result_row = ResultRow {
+        let mut result_row = ValveRow {
             row_number: None,
             contents: IndexMap::new(),
         };
@@ -584,7 +548,7 @@ pub async fn validate_rows_constraints(
     config: &ValveConfig,
     pool: &AnyPool,
     table_name: &String,
-    rows: &mut Vec<ResultRow>,
+    rows: &mut Vec<ValveRow>,
 ) -> Result<(), ValveError> {
     let column_names = &config
         .table
@@ -594,7 +558,7 @@ pub async fn validate_rows_constraints(
 
     let mut result_rows = vec![];
     for row in rows.iter_mut() {
-        let mut result_row = ResultRow {
+        let mut result_row = ValveRow {
             row_number: None,
             contents: IndexMap::new(),
         };
@@ -653,7 +617,7 @@ pub fn validate_rows_intra(
     headers: &csv::StringRecord,
     rows: &Vec<Result<csv::StringRecord, csv::Error>>,
     only_nulltype: bool,
-) -> Vec<ResultRow> {
+) -> Vec<ValveRow> {
     let mut result_rows = vec![];
     for row in rows {
         match row {
@@ -663,12 +627,12 @@ pub fn validate_rows_intra(
                 err
             ),
             Ok(row) => {
-                let mut result_row = ResultRow {
+                let mut result_row = ValveRow {
                     row_number: None,
                     contents: IndexMap::new(),
                 };
                 for (i, value) in row.iter().enumerate() {
-                    let result_cell = ResultCell {
+                    let result_cell = ValveCell {
                         nulltype: None,
                         value: String::from(value),
                         valid: true,
@@ -730,10 +694,10 @@ pub fn validate_rows_intra(
     result_rows
 }
 
-/// Given a row represented as a ValveRow, remove any duplicate messages from the row's cells, so
+/// Given a row represented as a [SerdeMap], remove any duplicate messages from the row's cells, so
 /// that no cell has messages with the same level, rule, and message text.
-pub fn remove_duplicate_messages(row: &ValveRow) -> Result<ValveRow, ValveError> {
-    let mut deduped_row = ValveRow::new();
+pub fn remove_duplicate_messages(row: &SerdeMap) -> Result<SerdeMap, ValveError> {
+    let mut deduped_row = SerdeMap::new();
     for (column_name, cell) in row.iter() {
         let mut messages = cell
             .get("messages")
@@ -767,12 +731,12 @@ pub fn remove_duplicate_messages(row: &ValveRow) -> Result<ValveRow, ValveError>
     Ok(deduped_row)
 }
 
-/// Given a result row, convert it to a ValveRow and return it.
+/// Given a result row, convert it to a [SerdeMap] and return it.
 /// Note that if the incoming result row has an associated row_number, this is ignored.
-pub fn result_row_to_config_map(incoming: &ResultRow) -> ValveRow {
-    let mut outgoing = ValveRow::new();
+pub fn result_row_to_config_map(incoming: &ValveRow) -> SerdeMap {
+    let mut outgoing = SerdeMap::new();
     for (column, cell) in incoming.contents.iter() {
-        let mut cell_map = ValveRow::new();
+        let mut cell_map = SerdeMap::new();
         if let Some(nulltype) = &cell.nulltype {
             cell_map.insert(
                 "nulltype".to_string(),
@@ -797,7 +761,7 @@ pub fn result_row_to_config_map(incoming: &ResultRow) -> ValveRow {
 /// and (b) a Select statement over `table_name` of all the fields in the extra row.
 pub fn select_with_extra_row(
     config: &ValveConfig,
-    extra_row: &ResultRow,
+    extra_row: &ValveRow,
     table: &str,
     effective_table: &str,
     pool: &AnyPool,
@@ -901,7 +865,7 @@ pub fn validate_cell_nulltype(
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     table_name: &String,
     column_name: &String,
-    cell: &mut ResultCell,
+    cell: &mut ValveCell,
 ) {
     let column = config
         .table
@@ -929,7 +893,7 @@ pub fn validate_cell_datatype(
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     table_name: &String,
     column_name: &String,
-    cell: &mut ResultCell,
+    cell: &mut ValveCell,
 ) {
     fn get_datatypes_to_check(
         config: &ValveConfig,
@@ -1032,12 +996,12 @@ pub fn validate_cell_rules(
     compiled_rules: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     table_name: &String,
     column_name: &String,
-    context: &ResultRow,
-    cell: &mut ResultCell,
+    context: &ValveRow,
+    cell: &mut ValveCell,
 ) {
     fn check_condition(
         condition_type: &str,
-        cell: &ResultCell,
+        cell: &ValveCell,
         rule: &ValveRuleConfig,
         table_name: &String,
         column_name: &String,
@@ -1233,7 +1197,7 @@ pub async fn validate_cell_foreign_constraints(
     mut tx: Option<&mut Transaction<'_, sqlx::Any>>,
     table_name: &String,
     column_name: &String,
-    cell: &mut ResultCell,
+    cell: &mut ValveCell,
     query_as_if: Option<&QueryAsIf>,
 ) -> Result<(), ValveError> {
     let fkeys = config
@@ -1362,9 +1326,9 @@ pub async fn validate_cell_trees(
     mut tx: Option<&mut Transaction<'_, sqlx::Any>>,
     table_name: &String,
     column_name: &String,
-    cell: &mut ResultCell,
-    context: &ResultRow,
-    prev_results: &Vec<ResultRow>,
+    cell: &mut ValveCell,
+    context: &ValveRow,
+    prev_results: &Vec<ValveRow>,
 ) -> Result<(), ValveError> {
     // If the current column is the parent column of a tree, validate that adding the current value
     // will not result in a cycle between this and the parent column:
@@ -1534,8 +1498,8 @@ pub async fn validate_cell_unique_constraints(
     mut tx: Option<&mut Transaction<'_, sqlx::Any>>,
     table_name: &String,
     column_name: &String,
-    cell: &mut ResultCell,
-    prev_results: &Vec<ResultRow>,
+    cell: &mut ValveCell,
+    prev_results: &Vec<ValveRow>,
     row_number: Option<u32>,
 ) -> Result<(), ValveError> {
     // If the column has a primary or unique key constraint, or if it is the child associated with

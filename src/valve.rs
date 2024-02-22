@@ -29,12 +29,24 @@ use sqlx::{
 };
 use std::{collections::HashMap, fmt, fs::File, path::Path};
 
-// TODO (maybe): Change ValveRow to a HashMap with three keys:
-// "data": A SerdeMap
-// "message": A vector of ValveMessage structs
-// "history": A vector of ValveChange structs
 /// Alias for [Map](serde_json::map)<[String], [Value](serde_json::value)>.
-pub type ValveRow = serde_json::Map<String, SerdeValue>;
+pub type JsonRow = serde_json::Map<String, SerdeValue>;
+
+/// Represents a particular cell in a particular row of data with vaildation results.
+#[derive(Clone, Debug)]
+pub struct ValveCell {
+    pub nulltype: Option<String>,
+    pub value: String,
+    pub valid: bool,
+    pub messages: Vec<SerdeValue>,
+}
+
+/// Represents a particular row of data with validation results.
+#[derive(Clone, Debug)]
+pub struct ValveRow {
+    pub row_number: Option<u32>,
+    pub contents: IndexMap<String, ValveCell>,
+}
 
 /// Generic enum representing various error types returned by Valve methods
 #[derive(Debug)]
@@ -1422,9 +1434,9 @@ impl Valve {
     pub async fn validate_row(
         &self,
         table_name: &str,
-        row: &ValveRow,
+        row: &JsonRow,
         row_number: Option<u32>,
-    ) -> Result<ValveRow, ValveError> {
+    ) -> Result<JsonRow, ValveError> {
         validate_row_tx(
             &self.config,
             &self.datatype_conditions,
@@ -1444,8 +1456,8 @@ impl Valve {
     pub async fn insert_row(
         &self,
         table_name: &str,
-        row: &ValveRow,
-    ) -> Result<(u32, ValveRow), ValveError> {
+        row: &JsonRow,
+    ) -> Result<(u32, JsonRow), ValveError> {
         let mut tx = self.pool.begin().await?;
 
         let row = validate_row_tx(
@@ -1485,8 +1497,8 @@ impl Valve {
         &self,
         table_name: &str,
         row_number: &u32,
-        row: &ValveRow,
-    ) -> Result<ValveRow, ValveError> {
+        row: &JsonRow,
+    ) -> Result<JsonRow, ValveError> {
         let mut tx = self.pool.begin().await?;
 
         // Get the old version of the row from the database so that we can later record it to the
@@ -1672,7 +1684,7 @@ impl Valve {
     }
 
     /// Undo one change and return the change record or None if there was no change to undo.
-    pub async fn undo(&self) -> Result<Option<ValveRow>, ValveError> {
+    pub async fn undo(&self) -> Result<Option<JsonRow>, ValveError> {
         let last_change = match get_record_to_undo(&self.pool).await? {
             None => {
                 log::warn!("Nothing to undo.");
@@ -1760,7 +1772,7 @@ impl Valve {
     }
 
     /// Redo one change and return the change record or None if there was no change to redo.
-    pub async fn redo(&self) -> Result<Option<ValveRow>, ValveError> {
+    pub async fn redo(&self) -> Result<Option<JsonRow>, ValveError> {
         let last_undo = match get_record_to_redo(&self.pool).await? {
             None => {
                 log::warn!("Nothing to redo.");

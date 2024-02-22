@@ -40,7 +40,6 @@ use crate::{
     ast::Expression,
     validate::{
         validate_row_tx, validate_rows_constraints, validate_rows_intra, validate_rows_trees,
-        QueryAsIf, QueryAsIfKind, ResultRow,
     },
     valve::{
         ValveColumnConfig, ValveConfig, ValveConstraintConfig, ValveDatatypeConfig, ValveError,
@@ -164,6 +163,27 @@ impl std::fmt::Debug for ColumnRule {
     }
 }
 
+/// Used for counterfactual queries. Use this struct to specify that a query should be run as if
+/// the row specified in the instance were (depending on `kind`) either added, removed or replaced.
+#[derive(Clone, Debug)]
+pub struct QueryAsIf {
+    pub kind: QueryAsIfKind,
+    pub table: String,
+    // Although PostgreSQL allows it, SQLite does not allow a CTE named 'foo' to refer to a table
+    // named 'foo' so we need to use an alias:
+    pub alias: String,
+    pub row_number: u32,
+    pub row: Option<SerdeMap>,
+}
+
+/// The sense in which a [QueryAsIf] struct should be interpreted.
+#[derive(Clone, Debug, PartialEq)]
+pub enum QueryAsIfKind {
+    Add,
+    Remove,
+    Replace,
+}
+
 /// Given a string representing the location of a database, return a database connection pool.
 pub async fn get_pool_from_connection_string(database: &str) -> Result<AnyPool, ValveError> {
     let connection_options;
@@ -218,7 +238,7 @@ pub fn read_config_files(
     fn check_table_requirements(
         columns_are_required: &Vec<&str>,
         values_are_required: &Vec<&str>,
-        row: &ValveRow,
+        row: &SerdeMap,
     ) -> Result<(), ValveError> {
         let columns_are_required: HashSet<&str> =
             HashSet::from_iter(columns_are_required.iter().cloned());
@@ -1319,7 +1339,7 @@ pub async fn get_affected_rows(
     config: &ValveConfig,
     pool: &AnyPool,
     tx: &mut Transaction<'_, sqlx::Any>,
-) -> Result<IndexMap<u32, ValveRow>, ValveError> {
+) -> Result<IndexMap<u32, SerdeMap>, ValveError> {
     // Since the consequence of an update could involve currently invalid rows
     // (in the conflict table) becoming valid or vice versa, we need to check rows for
     // which the value of the column is the same as `value`
@@ -1341,7 +1361,7 @@ pub async fn get_affected_rows(
     let query = sqlx_query(&sql);
     let mut table_rows = IndexMap::new();
     for row in query.fetch_all(tx.acquire().await?).await? {
-        let mut table_row = ValveRow::new();
+        let mut table_row = SerdeMap::new();
         let mut row_number: Option<u32> = None;
         for column in row.columns() {
             let cname = column.name();
@@ -1380,7 +1400,7 @@ pub async fn get_row_from_db(
     tx: &mut Transaction<'_, sqlx::Any>,
     table: &str,
     row_number: &u32,
-) -> Result<ValveRow, ValveError> {
+) -> Result<SerdeMap, ValveError> {
     let sql = format!(
         "{} WHERE row_number = {}",
         query_with_message_values(table, config, pool),
@@ -1417,7 +1437,7 @@ pub async fn get_row_from_db(
         }
     };
 
-    let mut row = ValveRow::new();
+    let mut row = SerdeMap::new();
     for column in sql_row.columns() {
         let cname = column.name();
         if !vec!["row_number", "message"].contains(&cname) {
@@ -1527,7 +1547,7 @@ pub async fn get_rows_to_update(
     ),
     ValveError,
 > {
-    fn get_cell_value(row: &ValveRow, column: &str) -> Result<String, ValveError> {
+    fn get_cell_value(row: &SerdeMap, column: &str) -> Result<String, ValveError> {
         match row.get(column).and_then(|cell| cell.get("value")) {
             Some(SerdeValue::String(s)) => Ok(format!("{}", s)),
             Some(SerdeValue::Number(n)) => Ok(format!("{}", n)),
@@ -1766,8 +1786,8 @@ pub async fn record_row_change(
     tx: &mut Transaction<'_, sqlx::Any>,
     table: &str,
     row_number: &u32,
-    from: Option<&ValveRow>,
-    to: Option<&ValveRow>,
+    from: Option<&SerdeMap>,
+    to: Option<&SerdeMap>,
     user: &str,
 ) -> Result<(), ValveError> {
     if let (None, None) = (from, to) {
@@ -1776,7 +1796,7 @@ pub async fn record_row_change(
         ));
     }
 
-    fn to_text(row: Option<&ValveRow>, quoted: bool) -> String {
+    fn to_text(row: Option<&SerdeMap>, quoted: bool) -> String {
         match row {
             None => "NULL".to_string(),
             Some(r) => {
@@ -1798,7 +1818,7 @@ pub async fn record_row_change(
         }
     }
 
-    fn summarize(from: Option<&ValveRow>, to: Option<&ValveRow>) -> Result<String, ValveError> {
+    fn summarize(from: Option<&SerdeMap>, to: Option<&SerdeMap>) -> Result<String, ValveError> {
         // Constructs a summary of the form:
         // {
         //   "column":"bar",
@@ -2072,7 +2092,7 @@ pub async fn insert_new_row_tx(
     pool: &AnyPool,
     tx: &mut Transaction<sqlx::Any>,
     table: &str,
-    row: &ValveRow,
+    row: &SerdeMap,
     new_row_number: Option<u32>,
     skip_validation: bool,
 ) -> Result<u32, ValveError> {
@@ -2361,7 +2381,7 @@ pub async fn update_row_tx(
     pool: &AnyPool,
     tx: &mut Transaction<sqlx::Any>,
     table: &str,
-    row: &ValveRow,
+    row: &SerdeMap,
     row_number: &u32,
     skip_validation: bool,
     do_not_recurse: bool,
@@ -2472,10 +2492,10 @@ pub async fn update_row_tx(
     Ok(())
 }
 
-/// Given a path, read a TSV file and return a vector of rows represented as ValveRows.
+/// Given a path, read a TSV file and return a vector of rows represented as [SerdeMaps](SerdeMap).
 /// Note: Use this function to read "small" TSVs only. In particular, use this for the special
 /// configuration tables.
-pub fn read_tsv_into_vector(path: &str) -> Vec<ValveRow> {
+pub fn read_tsv_into_vector(path: &str) -> Vec<SerdeMap> {
     let mut rdr =
         ReaderBuilder::new()
             .delimiter(b'\t')
@@ -2486,7 +2506,7 @@ pub fn read_tsv_into_vector(path: &str) -> Vec<ValveRow> {
     let rows: Vec<_> = rdr
         .deserialize()
         .map(|result| {
-            let row: ValveRow = result.expect(format!("Error reading: {}", path).as_str());
+            let row: SerdeMap = result.expect(format!("Error reading: {}", path).as_str());
             row
         })
         .collect();
@@ -2519,14 +2539,14 @@ pub fn read_tsv_into_vector(path: &str) -> Vec<ValveRow> {
 }
 
 /// Given a database at the specified location, query the given table and return a vector of rows
-/// represented as ValveRows.
-pub fn read_db_table_into_vector(pool: &AnyPool, config_table: &str) -> Vec<ValveRow> {
+/// represented as [SerdeMaps](SerdeMap).
+pub fn read_db_table_into_vector(pool: &AnyPool, config_table: &str) -> Vec<SerdeMap> {
     let sql = format!("SELECT * FROM \"{}\"", config_table);
     let rows = block_on(sqlx_query(&sql).fetch_all(pool))
         .expect(&format!("Error while executing '{}'", sql));
     let mut table_rows = vec![];
     for row in rows {
-        let mut table_row = ValveRow::new();
+        let mut table_row = SerdeMap::new();
         for column in row.columns() {
             let cname = column.name();
             if cname != "row_number" {
@@ -3387,7 +3407,7 @@ pub fn sort_messages(
 pub async fn make_inserts(
     config: &ValveConfig,
     table_name: &String,
-    rows: &mut Vec<ResultRow>,
+    rows: &mut Vec<ValveRow>,
     chunk_number: usize,
     messages_stats: &mut HashMap<String, usize>,
     verbose: bool,
@@ -3403,7 +3423,7 @@ pub async fn make_inserts(
     ),
     ValveError,
 > {
-    fn is_conflict_row(row: &ResultRow, conflict_columns: &Vec<String>) -> bool {
+    fn is_conflict_row(row: &ValveRow, conflict_columns: &Vec<String>) -> bool {
         for (column, cell) in &row.contents {
             if !cell.valid && conflict_columns.contains(&column) {
                 return true;
@@ -3416,7 +3436,7 @@ pub async fn make_inserts(
         config: &ValveConfig,
         main_table: &String,
         columns: &Vec<String>,
-        rows: &mut Vec<ResultRow>,
+        rows: &mut Vec<ValveRow>,
         chunk_number: usize,
         messages_stats: &mut HashMap<String, usize>,
         verbose: bool,
@@ -3596,7 +3616,7 @@ pub async fn insert_chunk(
     config: &ValveConfig,
     pool: &AnyPool,
     table_name: &String,
-    rows: &mut Vec<ResultRow>,
+    rows: &mut Vec<ValveRow>,
     chunk_number: usize,
     messages_stats: &mut HashMap<String, usize>,
     verbose: bool,
