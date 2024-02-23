@@ -9,7 +9,10 @@ use crate::{
     get_sql_for_standard_view, get_sql_for_text_view, get_sql_type,
     get_sql_type_from_global_config, get_table_ddl, insert_chunks, insert_new_row_tx,
     local_sql_syntax, read_config_files, record_row_change, switch_undone_state, update_row_tx,
-    validate::{validate_row_tx, validate_tree_foreign_keys, validate_under, with_tree_sql},
+    validate::{
+        rich_json_to_valve_row, simple_to_rich_json, validate_row_tx, validate_tree_foreign_keys,
+        validate_under, with_tree_sql,
+    },
     valve_grammar::StartParser,
     verify_table_deps_and_sort, ColumnRule, CompiledCondition, ParsedStructure, CHUNK_SIZE,
     SQL_PARAM,
@@ -1458,141 +1461,6 @@ impl Valve {
         Ok(self)
     }
 
-    /// Given a row, represented as a JSON object in the following ('simple') format:
-    /// ```
-    /// {
-    ///     "column_1": value1,
-    ///     "column_2": value2,
-    ///     ...
-    /// },
-    /// ```
-    /// convert it to a JSON with the following ('rich') format:
-    /// ```
-    /// {
-    ///     "column_1": {
-    ///         "valid": true,  // true is the default
-    ///         "messages": [], // defaults to empty
-    ///         "value": value1
-    ///     },
-    ///     "column_2": {
-    ///         "valid": true,  // true is the default
-    ///         "messages": [], // defaults to empty
-    ///         "value": value2
-    ///     },
-    ///     ...
-    /// }
-    /// ```
-    pub fn simple_to_rich_json(json_row: &JsonRow) -> Result<JsonRow, ValveError> {
-        let mut valvified_row = JsonRow::new();
-        for (column, value) in json_row.iter() {
-            let cell = json!({
-                "valid": true,
-                "messages": [],
-                "value": match value {
-                    SerdeValue::String(_) | SerdeValue::Number(_) | SerdeValue::Bool(_) => {
-                        value.clone()
-                    },
-                    _ => {
-                        return Err(
-                            ValveError::InputError(
-                                format!(
-                                    "Value '{}' of column '{}' is not a simple JSON object",
-                                    value, column
-                                )
-                            )
-                        )
-                    }
-                },
-            });
-            valvified_row.insert(column.to_string(), cell);
-        }
-        Ok(valvified_row)
-    }
-
-    /// Given a row, with the given row number, represented as a JSON object in the following
-    /// ('rich') format:
-    /// ```
-    /// {
-    ///     "column_1": {
-    ///         "valid": <true|false>,
-    ///         "messages": [{"level": level, "rule": rule, "message": message}, ...],
-    ///         "value": value1
-    ///     },
-    ///     "column_2": {
-    ///         "valid": <true|false>,
-    ///         "messages": [{"level": level, "rule": rule, "message": message}, ...],
-    ///         "value": value2
-    ///     },
-    ///     ...
-    /// },
-    /// ```
-    /// convert it into a [ValveRow] and return it.
-    pub fn rich_json_to_valve_row(
-        row_number: Option<u32>,
-        row: &JsonRow,
-    ) -> Result<ValveRow, ValveError> {
-        let mut valve_row = ValveRow {
-            row_number: row_number,
-            contents: IndexMap::new(),
-        };
-        for (column, cell) in row.iter() {
-            let nulltype = match cell.get("nulltype") {
-                None => None,
-                Some(SerdeValue::String(s)) => Some(s.to_string()),
-                _ => {
-                    return Err(ValveError::InputError(
-                        format!("No string 'nulltype' in cell: {:?}.", cell).into(),
-                    ))
-                }
-            };
-            let value = match cell.get("value") {
-                Some(SerdeValue::String(s)) => s.to_string(),
-                Some(SerdeValue::Number(n)) => format!("{}", n),
-                _ => {
-                    return Err(ValveError::InputError(
-                        format!("No string/number 'value' in cell: {:#?}.", cell).into(),
-                    ))
-                }
-            };
-            let valid = match cell.get("valid").and_then(|v| v.as_bool()) {
-                Some(b) => b,
-                None => {
-                    return Err(ValveError::InputError(
-                        format!("No bool 'valid' in cell: {:?}.", cell).into(),
-                    ))
-                }
-            };
-            let messages = match cell.get("messages").and_then(|m| m.as_array()) {
-                Some(a) => a.to_vec(),
-                None => {
-                    return Err(ValveError::InputError(
-                        format!("No array 'messages' in cell: {:?}.", cell).into(),
-                    ))
-                }
-            };
-            let valve_cell = ValveCell {
-                nulltype: nulltype,
-                value: value,
-                valid: valid,
-                messages: messages
-                    .iter()
-                    .map(|m| ValveCellMessage {
-                        level: m.get("level").and_then(|s| s.as_str()).unwrap().to_string(),
-                        rule: m.get("rule").and_then(|s| s.as_str()).unwrap().to_string(),
-                        message: m
-                            .get("message")
-                            .and_then(|s| s.as_str())
-                            .unwrap()
-                            .to_string(),
-                    })
-                    .collect::<Vec<_>>(),
-            };
-            valve_row.contents.insert(column.to_string(), valve_cell);
-        }
-
-        Ok(valve_row)
-    }
-
     /// Given a table name and a row, represented as a JSON object in the following ('simple')
     /// format:
     /// ```
@@ -1609,7 +1477,7 @@ impl Valve {
         row: &JsonRow,
         row_number: Option<u32>,
     ) -> Result<ValveRow, ValveError> {
-        let row = Self::simple_to_rich_json(row)?;
+        let row = simple_to_rich_json(row)?;
         let row = validate_row_tx(
             &self.config,
             &self.datatype_conditions,
@@ -1622,7 +1490,7 @@ impl Valve {
             None,
         )
         .await?;
-        Self::rich_json_to_valve_row(row_number, &row)
+        rich_json_to_valve_row(row_number, &row)
     }
 
     /// Given a table name and a row, represented as a JSON object in the following ('simple')
@@ -1642,7 +1510,7 @@ impl Valve {
         row: &JsonRow,
     ) -> Result<(u32, ValveRow), ValveError> {
         let mut tx = self.pool.begin().await?;
-        let row = Self::simple_to_rich_json(row)?;
+        let row = simple_to_rich_json(row)?;
         let row = validate_row_tx(
             &self.config,
             &self.datatype_conditions,
@@ -1672,7 +1540,7 @@ impl Valve {
         record_row_change(&mut tx, table_name, &rn, None, Some(&row), &self.user).await?;
         tx.commit().await?;
 
-        let row = Self::rich_json_to_valve_row(Some(rn), &row)?;
+        let row = rich_json_to_valve_row(Some(rn), &row)?;
         Ok((rn, row))
     }
 
@@ -1699,7 +1567,7 @@ impl Valve {
         let old_row =
             get_row_from_db(&self.config, &self.pool, &mut tx, table_name, &row_number).await?;
 
-        let row = Self::simple_to_rich_json(row)?;
+        let row = simple_to_rich_json(row)?;
         let row = validate_row_tx(
             &self.config,
             &self.datatype_conditions,
@@ -1740,7 +1608,7 @@ impl Valve {
 
         tx.commit().await?;
 
-        let row = Self::rich_json_to_valve_row(Some(*row_number), &row)?;
+        let row = rich_json_to_valve_row(Some(*row_number), &row)?;
         Ok(row)
     }
 
