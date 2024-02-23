@@ -2080,10 +2080,28 @@ pub fn is_sql_type_error(sql_type: &str, value: &str) -> bool {
     }
 }
 
-/// Given a global config map, compiled datatype and rule conditions, a database connection pool, a
-/// database transaction, a table name, and a row, assign the given new row number to the row and
-/// insert it to the database using the given transaction, then return the new row number.
-/// If skip_validation is set to true, omit the implicit call to [validate_row_tx()].
+/// Given a global config struct, compiled datatype and rule conditions, a database connection pool,
+/// a database transaction, a table name, a row in the following ('rich') form:
+/// ```
+/// {
+///     "column_1": {
+///         "valid": <true|false>,
+///         "messages": [{...}, ...],
+///         "value": value1
+///     },
+///     "column_2": {
+///         "valid": <true|false>,
+///         "messages": [{...}, ...],
+///         "value": value2
+///     },
+///     ...
+/// },
+/// ```
+/// insert it to the database using the given transaction, then return the new row number. If
+/// the optional parameter `new_row_number` is given, then that is the row number used when
+/// creating the row, and is the number returned. Otherwise the row number inserted is determined
+/// automatically by Valve. If skip_validation is set to true, omit the implicit call to
+/// [validate_row_tx()].
 #[async_recursion]
 pub async fn insert_new_row_tx(
     config: &ValveConfig,
@@ -2368,11 +2386,26 @@ pub async fn delete_row_tx(
     Ok(())
 }
 
-/// Given global config map, maps of compiled datatype and rule conditions, a database connection
-/// pool, a database transaction, a table name, a row, and the row number to update, update the
-/// corresponding row in the database. If skip_validation is set, skip the implicit call to
-/// [validate_row_tx()]. If do_not_recurse is set, do not look for rows which could be affected by
-/// this update.
+/// Given global config struct, maps of compiled datatype and rule conditions, a database connection
+/// pool, a database transaction, a table name, a row in the following ('rich') form:
+/// ```
+/// {
+///     "column_1": {
+///         "valid": <true|false>,
+///         "messages": [{...}, ...],
+///         "value": value1
+///     },
+///     "column_2": {
+///         "valid": <true|false>,
+///         "messages": [{...}, ...],
+///         "value": value2
+///     },
+///     ...
+/// },
+/// ```
+/// and the row number to update, update the corresponding row in the database. If skip_validation
+/// is set, skip the implicit call to [validate_row_tx()]. If do_not_recurse is set, do not look for
+/// rows which could be affected by this update.
 #[async_recursion]
 pub async fn update_row_tx(
     config: &ValveConfig,

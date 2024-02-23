@@ -4,7 +4,7 @@ use crate::{
     cast_sql_param_from_text, get_column_value, get_sql_type_from_global_config, is_sql_type_error,
     local_sql_syntax,
     valve::{
-        ValveCell, ValveConfig, ValveDatatypeConfig, ValveError, ValveRow, ValveRuleConfig,
+        Valve, ValveCell, ValveConfig, ValveDatatypeConfig, ValveError, ValveRow, ValveRuleConfig,
         ValveTreeConstraint,
     },
     ColumnRule, CompiledCondition, QueryAsIf, QueryAsIfKind, SerdeMap,
@@ -14,8 +14,24 @@ use serde_json::{json, Value as SerdeValue};
 use sqlx::{any::AnyPool, query as sqlx_query, Acquire, Row, Transaction, ValueRef};
 use std::collections::HashMap;
 
-/// Given a config map, maps of compiled datatype and rule conditions, a database connection
-/// pool, a table name, a row to validate and a row number in the case where the row already exists,
+/// Given a config struct, maps of compiled datatype and rule conditions, a database connection
+/// pool, a table name, a row to validate in the following ('rich') form:
+/// ```
+/// {
+///     "column_1": {
+///         "valid": <true|false>,
+///         "messages": [{...}, ...],
+///         "value": value1
+///     },
+///     "column_2": {
+///         "valid": <true|false>,
+///         "messages": [{...}, ...],
+///         "value": value2
+///     },
+///     ...
+/// },
+/// ```
+/// and a row number in the case where the row already exists,
 /// perform both intra- and inter-row validation and return the validated row. Optionally, if a
 /// transaction is given, use that instead of the pool for database access. Optionally, if
 /// query_as_if is given, validate the row counterfactually according to that parameter. Note that
@@ -41,58 +57,11 @@ pub async fn validate_row_tx(
     };
 
     // Initialize the result row with the values from the given row:
-    let mut result_row = ValveRow {
-        row_number: row_number,
-        contents: IndexMap::new(),
-    };
-
-    for (column, cell) in row.iter() {
-        let nulltype = match cell.get("nulltype") {
-            None => None,
-            Some(SerdeValue::String(s)) => Some(s.to_string()),
-            _ => {
-                return Err(ValveError::DataError(
-                    format!("No string 'nulltype' in cell: {:?}.", cell).into(),
-                ))
-            }
-        };
-        let value = match cell.get("value") {
-            Some(SerdeValue::String(s)) => s.to_string(),
-            Some(SerdeValue::Number(n)) => format!("{}", n),
-            _ => {
-                return Err(ValveError::DataError(
-                    format!("No string/number 'value' in cell: {:#?}.", cell).into(),
-                ))
-            }
-        };
-        let valid = match cell.get("valid").and_then(|v| v.as_bool()) {
-            Some(b) => b,
-            None => {
-                return Err(ValveError::DataError(
-                    format!("No bool 'valid' in cell: {:?}.", cell).into(),
-                ))
-            }
-        };
-        let messages = match cell.get("messages").and_then(|m| m.as_array()) {
-            Some(a) => a.to_vec(),
-            None => {
-                return Err(ValveError::DataError(
-                    format!("No array 'messages' in cell: {:?}.", cell).into(),
-                ))
-            }
-        };
-        let result_cell = ValveCell {
-            nulltype: nulltype,
-            value: value,
-            valid: valid,
-            messages: messages,
-        };
-        result_row.contents.insert(column.to_string(), result_cell);
-    }
+    let mut valve_row = Valve::rich_json_to_valve_row(row_number, row)?;
 
     // We check all the cells for nulltype first, since the rules validation requires that we
     // have this information for all cells.
-    for (column_name, cell) in result_row.contents.iter_mut() {
+    for (column_name, cell) in valve_row.contents.iter_mut() {
         validate_cell_nulltype(
             config,
             compiled_datatype_conditions,
@@ -102,8 +71,8 @@ pub async fn validate_row_tx(
         );
     }
 
-    let context = result_row.clone();
-    for (column_name, cell) in result_row.contents.iter_mut() {
+    let context = valve_row.clone();
+    for (column_name, cell) in valve_row.contents.iter_mut() {
         validate_cell_rules(
             config,
             compiled_rule_conditions,
@@ -192,7 +161,7 @@ pub async fn validate_row_tx(
             let level = violation.get("level").and_then(|s| s.as_str()).unwrap();
             let rule = violation.get("rule").and_then(|s| s.as_str()).unwrap();
             let message = violation.get("message").and_then(|s| s.as_str()).unwrap();
-            let result_cell = &mut result_row.contents.get_mut(column).unwrap();
+            let result_cell = &mut valve_row.contents.get_mut(column).unwrap();
             result_cell.messages.push(json!({
                 "level": level,
                 "rule": rule,
@@ -204,8 +173,8 @@ pub async fn validate_row_tx(
         }
     }
 
-    let result_row = remove_duplicate_messages(&result_row_to_config_map(&result_row))?;
-    Ok(result_row)
+    let valve_row = remove_duplicate_messages(&valve_row_to_config_map(&valve_row))?;
+    Ok(valve_row)
 }
 
 /// Given a config map, a db connection pool, a table name, and an optional extra row, validate
@@ -501,9 +470,9 @@ pub async fn validate_rows_trees(
         .expect(&format!("Undefined table '{}'", table_name))
         .column_order;
 
-    let mut result_rows = vec![];
+    let mut valve_rows = vec![];
     for row in rows {
-        let mut result_row = ValveRow {
+        let mut valve_row = ValveRow {
             row_number: None,
             contents: IndexMap::new(),
         };
@@ -523,11 +492,11 @@ pub async fn validate_rows_trees(
                     &column_name,
                     cell,
                     &context,
-                    &result_rows,
+                    &valve_rows,
                 )
                 .await?;
             }
-            result_row
+            valve_row
                 .contents
                 .insert(column_name.to_string(), cell.clone());
         }
@@ -535,7 +504,7 @@ pub async fn validate_rows_trees(
         // still need them because the validate_cell_trees() function needs a list of previous
         // results, and this then requires that we generate the result rows to play that role. The
         // call to cell.clone() above is required to make rust's borrow checker happy.
-        result_rows.push(result_row);
+        valve_rows.push(valve_row);
     }
 
     Ok(())
@@ -556,9 +525,9 @@ pub async fn validate_rows_constraints(
         .expect(&format!("Undefined table '{}'", table_name))
         .column_order;
 
-    let mut result_rows = vec![];
+    let mut valve_rows = vec![];
     for row in rows.iter_mut() {
-        let mut result_row = ValveRow {
+        let mut valve_row = ValveRow {
             row_number: None,
             contents: IndexMap::new(),
         };
@@ -587,12 +556,12 @@ pub async fn validate_rows_constraints(
                     table_name,
                     &column_name,
                     cell,
-                    &result_rows,
+                    &valve_rows,
                     None,
                 )
                 .await?;
             }
-            result_row
+            valve_row
                 .contents
                 .insert(column_name.to_string(), cell.clone());
         }
@@ -600,7 +569,7 @@ pub async fn validate_rows_constraints(
         // still need them because the validate_cell_unique_constraints() function needs a list of
         // previous results, and this then requires that we generate the result rows to play that
         // role. The call to cell.clone() above is required to make rust's borrow checker happy.
-        result_rows.push(result_row);
+        valve_rows.push(valve_row);
     }
 
     Ok(())
@@ -618,7 +587,7 @@ pub fn validate_rows_intra(
     rows: &Vec<Result<csv::StringRecord, csv::Error>>,
     only_nulltype: bool,
 ) -> Vec<ValveRow> {
-    let mut result_rows = vec![];
+    let mut valve_rows = vec![];
     for row in rows {
         match row {
             Err(err) => log::error!(
@@ -627,7 +596,7 @@ pub fn validate_rows_intra(
                 err
             ),
             Ok(row) => {
-                let mut result_row = ValveRow {
+                let mut valve_row = ValveRow {
                     row_number: None,
                     contents: IndexMap::new(),
                 };
@@ -639,7 +608,7 @@ pub fn validate_rows_intra(
                         messages: vec![],
                     };
                     let column = headers.get(i).unwrap();
-                    result_row.contents.insert(column.to_string(), result_cell);
+                    valve_row.contents.insert(column.to_string(), result_cell);
                 }
 
                 let column_names = &config
@@ -651,7 +620,7 @@ pub fn validate_rows_intra(
                 // We begin by determining the nulltype of all of the cells, since the rules
                 // validation step requires that all cells have this information.
                 for column_name in column_names {
-                    let cell = result_row.contents.get_mut(column_name).unwrap();
+                    let cell = valve_row.contents.get_mut(column_name).unwrap();
                     validate_cell_nulltype(
                         config,
                         compiled_datatype_conditions,
@@ -663,8 +632,8 @@ pub fn validate_rows_intra(
 
                 if !only_nulltype {
                     for column_name in column_names {
-                        let context = result_row.clone();
-                        let cell = result_row.contents.get_mut(column_name).unwrap();
+                        let context = valve_row.clone();
+                        let cell = valve_row.contents.get_mut(column_name).unwrap();
                         validate_cell_rules(
                             config,
                             compiled_rule_conditions,
@@ -685,13 +654,13 @@ pub fn validate_rows_intra(
                         }
                     }
                 }
-                result_rows.push(result_row);
+                valve_rows.push(valve_row);
             }
         };
     }
 
     // Finally return the result rows:
-    result_rows
+    valve_rows
 }
 
 /// Given a row represented as a [SerdeMap], remove any duplicate messages from the row's cells, so
@@ -733,7 +702,7 @@ pub fn remove_duplicate_messages(row: &SerdeMap) -> Result<SerdeMap, ValveError>
 
 /// Given a result row, convert it to a [SerdeMap] and return it.
 /// Note that if the incoming result row has an associated row_number, this is ignored.
-pub fn result_row_to_config_map(incoming: &ValveRow) -> SerdeMap {
+pub fn valve_row_to_config_map(incoming: &ValveRow) -> SerdeMap {
     let mut outgoing = SerdeMap::new();
     for (column, cell) in incoming.contents.iter() {
         let mut cell_map = SerdeMap::new();

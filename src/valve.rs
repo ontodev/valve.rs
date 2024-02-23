@@ -1430,22 +1430,76 @@ impl Valve {
         Ok(self)
     }
 
-    /// TODO: Add a docstring here.
-    pub fn valvify_json_row(json_row: &JsonRow) -> JsonRow {
+    /// Given a row, represented as a JSON object in the following ('simple') format:
+    /// ```
+    /// {
+    ///     "column_1": value1,
+    ///     "column_2": value2,
+    ///     ...
+    /// },
+    /// ```
+    /// convert it to a JSON with the following ('rich') format:
+    /// ```
+    /// {
+    ///     "column_1": {
+    ///         "valid": true,  // true is the default
+    ///         "messages": [], // defaults to empty
+    ///         "value": value1
+    ///     },
+    ///     "column_2": {
+    ///         "valid": true,  // true is the default
+    ///         "messages": [], // defaults to empty
+    ///         "value": value2
+    ///     },
+    ///     ...
+    /// }
+    /// ```
+    pub fn simple_to_rich_json(json_row: &JsonRow) -> Result<JsonRow, ValveError> {
         let mut valvified_row = JsonRow::new();
         for (column, value) in json_row.iter() {
             let cell = json!({
                 "valid": true,
                 "messages": [],
-                "value": value.clone(),
+                "value": match value {
+                    SerdeValue::String(_) | SerdeValue::Number(_) | SerdeValue::Bool(_) => {
+                        value.clone()
+                    },
+                    _ => {
+                        return Err(
+                            ValveError::InputError(
+                                format!(
+                                    "Value '{}' of column '{}' is not a simple JSON object",
+                                    value, column
+                                )
+                            )
+                        )
+                    }
+                },
             });
             valvified_row.insert(column.to_string(), cell);
         }
-        valvified_row
+        Ok(valvified_row)
     }
 
-    /// TODO: Add a docstring here.
-    pub fn valvified_json_row_to_valve_row(
+    /// Given a row, with the given row number, represented as a JSON object in the following
+    /// ('rich') format:
+    /// ```
+    /// {
+    ///     "column_1": {
+    ///         "valid": <true|false>,
+    ///         "messages": [{...}, ...],
+    ///         "value": value1
+    ///     },
+    ///     "column_2": {
+    ///         "valid": <true|false>,
+    ///         "messages": [{...}, ...],
+    ///         "value": value2
+    ///     },
+    ///     ...
+    /// },
+    /// ```
+    /// convert it into a [ValveRow] and return it.
+    pub fn rich_json_to_valve_row(
         row_number: Option<u32>,
         row: &JsonRow,
     ) -> Result<ValveRow, ValveError> {
@@ -1500,14 +1554,23 @@ impl Valve {
         Ok(valve_row)
     }
 
-    /// Given a table name and a row, return the validated row.
+    /// Given a table name and a row, represented as a JSON object in the following ('simple')
+    /// format:
+    /// ```
+    /// {
+    ///     "column_1": value1,
+    ///     "column_2": value2,
+    ///     ...
+    /// },
+    /// ```
+    /// validate the row and return the results in the form of a [ValveRow].
     pub async fn validate_row(
         &self,
         table_name: &str,
         row: &JsonRow,
         row_number: Option<u32>,
     ) -> Result<ValveRow, ValveError> {
-        let row = Self::valvify_json_row(row);
+        let row = Self::simple_to_rich_json(row)?;
         let row = validate_row_tx(
             &self.config,
             &self.datatype_conditions,
@@ -1520,18 +1583,27 @@ impl Valve {
             None,
         )
         .await?;
-        Self::valvified_json_row_to_valve_row(row_number, &row)
+        Self::rich_json_to_valve_row(row_number, &row)
     }
 
-    /// Given a table name and a row as JSON, add the row to the table in the database, and return
-    /// the validated row, including its new row_number.
+    /// Given a table name and a row, represented as a JSON object in the following ('simple')
+    /// format:
+    /// ```
+    /// {
+    ///     "column_1": value1,
+    ///     "column_2": value2,
+    ///     ...
+    /// },
+    /// ```
+    /// validate and insert the row to the table and return the row number of the inserted row
+    /// and the row itself in the form of a [ValveRow].
     pub async fn insert_row(
         &self,
         table_name: &str,
         row: &JsonRow,
     ) -> Result<(u32, ValveRow), ValveError> {
         let mut tx = self.pool.begin().await?;
-        let row = Self::valvify_json_row(row);
+        let row = Self::simple_to_rich_json(row)?;
         let row = validate_row_tx(
             &self.config,
             &self.datatype_conditions,
@@ -1561,12 +1633,20 @@ impl Valve {
         record_row_change(&mut tx, table_name, &rn, None, Some(&row), &self.user).await?;
         tx.commit().await?;
 
-        let row = Self::valvified_json_row_to_valve_row(Some(rn), &row)?;
+        let row = Self::rich_json_to_valve_row(Some(rn), &row)?;
         Ok((rn, row))
     }
 
-    /// Given a table name, a row number, and a row, update the row in the database, and return the
-    /// validated row.
+    /// Given a table name, a row number, and a row, represented as a JSON object in the following
+    /// ('simple') format:
+    /// ```
+    /// {
+    ///     "column_1": value1,
+    ///     "column_2": value2,
+    ///     ...
+    /// },
+    /// ```
+    /// validate and update the row in the database, and return it in the form of a [ValveRow].
     pub async fn update_row(
         &self,
         table_name: &str,
@@ -1580,7 +1660,7 @@ impl Valve {
         let old_row =
             get_row_from_db(&self.config, &self.pool, &mut tx, table_name, &row_number).await?;
 
-        let row = Self::valvify_json_row(row);
+        let row = Self::simple_to_rich_json(row)?;
         let row = validate_row_tx(
             &self.config,
             &self.datatype_conditions,
@@ -1621,7 +1701,7 @@ impl Valve {
 
         tx.commit().await?;
 
-        let row = Self::valvified_json_row_to_valve_row(Some(*row_number), &row)?;
+        let row = Self::rich_json_to_valve_row(Some(*row_number), &row)?;
         Ok(row)
     }
 
