@@ -95,7 +95,7 @@ pub async fn validate_row_tx(
             // they can result in database errors when, for instance, we compare a numeric with a
             // non-numeric type.
             let sql_type = get_sql_type_from_global_config(&config, table_name, &column_name, pool);
-            if !is_sql_type_error(&sql_type, &cell.value) {
+            if !is_sql_type_error(&sql_type, &cell.strvalue()) {
                 // TODO: Pass the query_as_if parameter to validate_cell_trees.
                 validate_cell_trees(
                     config,
@@ -440,7 +440,7 @@ pub async fn validate_tree_foreign_keys(
                 .unwrap();
             if !raw_parent_val.is_null() {
                 let parent_val = get_column_value(&row, &parent_col, &parent_sql_type);
-                results.push(json!({
+                let message = json!({
                     "row_number": row_number as u32,
                     "column": parent_col,
                     "value": parent_val,
@@ -448,7 +448,8 @@ pub async fn validate_tree_foreign_keys(
                     "rule": "tree:foreign",
                     "message": format!("Value '{}' of column {} is not in column {}",
                                        parent_val, parent_col, child_col).as_str(),
-                }));
+                });
+                results.push(message);
             }
         }
     }
@@ -483,7 +484,7 @@ pub async fn validate_rows_trees(
             // that have SQL type violations. We exclude the latter because they can result in
             // database errors when, for instance, we compare a numeric with a non-numeric type.
             let sql_type = get_sql_type_from_global_config(config, table_name, &column_name, pool);
-            if cell.nulltype == None && !is_sql_type_error(&sql_type, &cell.value) {
+            if cell.nulltype == None && !is_sql_type_error(&sql_type, &cell.strvalue()) {
                 validate_cell_trees(
                     config,
                     pool,
@@ -537,7 +538,7 @@ pub async fn validate_rows_constraints(
             // that have SQL type violations. We exclude the latter because they can result in
             // database errors when, for instance, we compare a numeric with a non-numeric type.
             let sql_type = get_sql_type_from_global_config(config, table_name, &column_name, pool);
-            if cell.nulltype == None && !is_sql_type_error(&sql_type, &cell.value) {
+            if cell.nulltype == None && !is_sql_type_error(&sql_type, &cell.strvalue()) {
                 validate_cell_foreign_constraints(
                     config,
                     pool,
@@ -603,7 +604,7 @@ pub fn validate_rows_intra(
                 for (i, value) in row.iter().enumerate() {
                     let result_cell = ValveCell {
                         nulltype: None,
-                        value: String::from(value),
+                        value: json!(value),
                         valid: true,
                         messages: vec![],
                     };
@@ -814,7 +815,7 @@ pub fn rich_json_to_valve_row(
         };
         let valve_cell = ValveCell {
             nulltype: nulltype,
-            value: value,
+            value: json!(value),
             valid: valid,
             messages: messages
                 .iter()
@@ -862,10 +863,7 @@ pub fn valve_row_to_rich_json(incoming: &ValveRow) -> SerdeMap {
                 SerdeValue::String(nulltype.to_string()),
             );
         }
-        cell_map.insert(
-            "value".to_string(),
-            SerdeValue::String(cell.value.to_string()),
-        );
+        cell_map.insert("value".to_string(), SerdeValue::String(cell.strvalue()));
         cell_map.insert("valid".to_string(), SerdeValue::Bool(cell.valid));
         cell_map.insert(
             "messages".to_string(),
@@ -911,7 +909,7 @@ pub fn select_with_extra_row(
         // enumerate() begins from 0 but we need to begin at 1:
         let i = i + 1;
         first_select.push_str(format!(r#"{} AS "{}""#, sql_param, key).as_str());
-        params.push(content.value.to_string());
+        params.push(content.strvalue());
         second_select.push_str(format!(r#""{}""#, key).as_str());
         if i < extra_row_len {
             first_select.push_str(", ");
@@ -1009,7 +1007,7 @@ pub fn validate_cell_nulltype(
     if column.nulltype != "" {
         let nt_name = &column.nulltype;
         let nt_condition = &compiled_datatype_conditions.get(nt_name).unwrap().compiled;
-        let value = &cell.value;
+        let value = &cell.strvalue();
         if nt_condition(&value) {
             cell.nulltype = Some(nt_name.to_string());
         }
@@ -1072,7 +1070,7 @@ pub fn validate_cell_datatype(
     let primary_dt_description = &primary_datatype.description;
     if let Some(primary_dt_condition_func) = compiled_datatype_conditions.get(primary_dt_name) {
         let primary_dt_condition_func = &primary_dt_condition_func.compiled;
-        if !primary_dt_condition_func(&cell.value) {
+        if !primary_dt_condition_func(&cell.strvalue()) {
             cell.valid = false;
             let mut parent_datatypes = get_datatypes_to_check(
                 config,
@@ -1088,7 +1086,7 @@ pub fn validate_cell_datatype(
                 let dt_name = &datatype.datatype;
                 let dt_description = &datatype.description;
                 let dt_condition = &compiled_datatype_conditions.get(dt_name).unwrap().compiled;
-                if !dt_condition(&cell.value) {
+                if !dt_condition(&cell.strvalue()) {
                     let message = if dt_description == "" {
                         format!("{} should be of datatype {}", column_name, dt_name)
                     } else {
@@ -1171,7 +1169,7 @@ pub fn validate_cell_rules(
                     }
                 })
                 .unwrap();
-            return compiled_condition(&cell.value);
+            return compiled_condition(&cell.strvalue());
         }
     }
 
@@ -1373,10 +1371,13 @@ pub async fn validate_cell_foreign_constraints(
 
         let frows = {
             if let None = tx {
-                sqlx_query(&fsql).bind(&cell.value).fetch_all(pool).await?
+                sqlx_query(&fsql)
+                    .bind(&cell.strvalue())
+                    .fetch_all(pool)
+                    .await?
             } else {
                 sqlx_query(&fsql)
-                    .bind(&cell.value)
+                    .bind(&cell.strvalue())
                     .fetch_all(tx.as_mut().unwrap().acquire().await?)
                     .await?
             }
@@ -1406,12 +1407,12 @@ pub async fn validate_cell_foreign_constraints(
             let frows = {
                 if let None = tx {
                     sqlx_query(&fsql)
-                        .bind(cell.value.clone())
+                        .bind(cell.strvalue())
                         .fetch_all(pool)
                         .await?
                 } else {
                     sqlx_query(&fsql)
-                        .bind(cell.value.clone())
+                        .bind(cell.strvalue())
                         .fetch_all(tx.as_mut().unwrap().acquire().await?)
                         .await?
                 }
@@ -1420,12 +1421,18 @@ pub async fn validate_cell_foreign_constraints(
             if frows.is_empty() {
                 message.message = format!(
                     "Value '{}' of column {} is not in {}.{}",
-                    cell.value, column_name, ftable, fcolumn
+                    cell.strvalue(),
+                    column_name,
+                    ftable,
+                    fcolumn
                 );
             } else {
                 message.message = format!(
                     "Value '{}' of column {} exists only in {}_conflict.{}",
-                    cell.value, column_name, ftable, fcolumn
+                    cell.strvalue(),
+                    column_name,
+                    ftable,
+                    fcolumn
                 );
             }
             cell.messages.push(message);
@@ -1470,7 +1477,7 @@ pub async fn validate_cell_trees(
     let parent_col = column_name;
     let parent_sql_type = get_sql_type_from_global_config(&config, &table_name, &parent_col, pool);
     let parent_sql_param = cast_sql_param_from_text(&parent_sql_type);
-    let parent_val = cell.value.clone();
+    let parent_val = cell.strvalue();
     let view_name = format!("{}_view", table_name);
     for tkey in tkeys {
         let child_col = &tkey.child;
@@ -1480,7 +1487,7 @@ pub async fn validate_cell_trees(
         let child_val = context
             .contents
             .get(child_col)
-            .and_then(|c| Some(c.value.clone()))
+            .and_then(|c| Some(c.strvalue()))
             .unwrap();
 
         // In order to check if the current row will cause a dependency cycle, we need to query
@@ -1494,8 +1501,8 @@ pub async fn validate_cell_trees(
                     && p.contents.get(parent_col).unwrap().valid
             })
             .map(|p| {
-                params.push(p.contents.get(child_col).unwrap().value.clone());
-                params.push(p.contents.get(parent_col).unwrap().value.clone());
+                params.push(p.contents.get(child_col).unwrap().strvalue());
+                params.push(p.contents.get(parent_col).unwrap().strvalue());
                 format!(
                     r#"SELECT {} AS "{}", {} AS "{}""#,
                     child_sql_param, child_col, parent_sql_param, parent_col
@@ -1689,7 +1696,8 @@ pub async fn validate_cell_unique_constraints(
                 with_sql, query_table, column_name, sql_param
             ),
         );
-        let query = sqlx_query(&sql).bind(&cell.value);
+        let strvalue = cell.strvalue();
+        let query = sqlx_query(&sql).bind(&strvalue);
 
         let contained_in_prev_results = !prev_results
             .iter()

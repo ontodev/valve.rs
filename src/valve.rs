@@ -39,9 +39,41 @@ pub type JsonRow = serde_json::Map<String, SerdeValue>;
 #[derive(Clone, Debug)]
 pub struct ValveCell {
     pub nulltype: Option<String>,
-    pub value: String,
+    pub value: SerdeValue,
     pub valid: bool,
     pub messages: Vec<ValveCellMessage>,
+}
+
+impl ValveCell {
+    pub fn new(value: &SerdeValue) -> Result<Self, ValveError> {
+        let value = match value {
+            SerdeValue::String(_) | SerdeValue::Number(_) | SerdeValue::Bool(_) => value.clone(),
+            _ => {
+                return Err(ValveError::InputError(format!(
+                    "Value '{}' is not a simple JSON type",
+                    value
+                )))
+            }
+        };
+        Ok(Self {
+            nulltype: None,
+            value: value,
+            valid: true,
+            messages: vec![],
+        })
+    }
+
+    pub fn strvalue(&self) -> String {
+        match self.value {
+            SerdeValue::String(_) => self
+                .value
+                .as_str()
+                .expect(&format!("Could not render '{}' as a string", self.value))
+                .to_string(),
+            SerdeValue::Number(_) | SerdeValue::Bool(_) => self.value.to_string(),
+            _ => unreachable!(), // See the definition of new() above.
+        }
+    }
 }
 
 /// Represents one of the messages in a [ValveCell]

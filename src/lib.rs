@@ -3508,11 +3508,11 @@ pub async fn make_inserts(
                 // Insert the value of the cell into the column unless inserting it will cause a db
                 // error or it has the nulltype field set, in which case insert NULL:
                 let sql_type = get_sql_type_from_global_config(config, &main_table, column, pool);
-                if cell.nulltype != None || is_sql_type_error(&sql_type, &cell.value) {
+                if cell.nulltype != None || is_sql_type_error(&sql_type, &cell.strvalue()) {
                     row_values.push(String::from("NULL"));
                 } else {
                     row_values.push(cast_sql_param_from_text(&sql_type));
-                    row_params.push(cell.value.clone());
+                    row_params.push(cell.strvalue());
                 }
 
                 // Generate values and params to be used for the insert to the message table:
@@ -3528,7 +3528,7 @@ pub async fn make_inserts(
 
                     message_params.push(main_table.clone());
                     message_params.push(column.clone());
-                    message_params.push(cell.value.clone());
+                    message_params.push(cell.strvalue());
                     message_params.push(message.level);
                     message_params.push(message.rule);
                     message_params.push(message.message);
