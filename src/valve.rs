@@ -38,7 +38,15 @@ pub struct ValveCell {
     pub nulltype: Option<String>,
     pub value: String,
     pub valid: bool,
-    pub messages: Vec<SerdeValue>,
+    pub messages: Vec<ValveCellMessage>,
+}
+
+/// Represents one of the messages in a [ValveCell]
+#[derive(Clone, Debug, Default)]
+pub struct ValveCellMessage {
+    pub level: String,
+    pub rule: String,
+    pub message: String,
 }
 
 /// Represents a particular row of data with validation results.
@@ -1291,10 +1299,11 @@ impl Valve {
 
                     if self.verbose {
                         // Add the generated message to messages_stats:
-                        let messages = vec![json!({
-                            "message": message,
-                            "level": level,
-                        })];
+                        let messages = vec![ValveCellMessage {
+                            message: message.to_string(),
+                            level: level.to_string(),
+                            ..Default::default()
+                        }];
                         add_message_counts(&messages, &mut messages_stats);
                     }
                 }
@@ -1546,7 +1555,18 @@ impl Valve {
                 nulltype: nulltype,
                 value: value,
                 valid: valid,
-                messages: messages,
+                messages: messages
+                    .iter()
+                    .map(|m| ValveCellMessage {
+                        level: m.get("level").and_then(|s| s.as_str()).unwrap().to_string(),
+                        rule: m.get("rule").and_then(|s| s.as_str()).unwrap().to_string(),
+                        message: m
+                            .get("message")
+                            .and_then(|s| s.as_str())
+                            .unwrap()
+                            .to_string(),
+                    })
+                    .collect::<Vec<_>>(),
             };
             valve_row.contents.insert(column.to_string(), valve_cell);
         }

@@ -4,8 +4,8 @@ use crate::{
     cast_sql_param_from_text, get_column_value, get_sql_type_from_global_config, is_sql_type_error,
     local_sql_syntax,
     valve::{
-        Valve, ValveCell, ValveConfig, ValveDatatypeConfig, ValveError, ValveRow, ValveRuleConfig,
-        ValveTreeConstraint,
+        Valve, ValveCell, ValveCellMessage, ValveConfig, ValveDatatypeConfig, ValveError, ValveRow,
+        ValveRuleConfig, ValveTreeConstraint,
     },
     ColumnRule, CompiledCondition, QueryAsIf, QueryAsIfKind, SerdeMap,
 };
@@ -162,11 +162,11 @@ pub async fn validate_row_tx(
             let rule = violation.get("rule").and_then(|s| s.as_str()).unwrap();
             let message = violation.get("message").and_then(|s| s.as_str()).unwrap();
             let result_cell = &mut valve_row.contents.get_mut(column).unwrap();
-            result_cell.messages.push(json!({
-                "level": level,
-                "rule": rule,
-                "message": message,
-            }));
+            result_cell.messages.push(ValveCellMessage {
+                level: level.to_string(),
+                rule: rule.to_string(),
+                message: message.to_string(),
+            });
             if result_cell.valid {
                 result_cell.valid = false;
             }
@@ -719,7 +719,18 @@ pub fn valve_row_to_config_map(incoming: &ValveRow) -> SerdeMap {
         cell_map.insert("valid".to_string(), SerdeValue::Bool(cell.valid));
         cell_map.insert(
             "messages".to_string(),
-            SerdeValue::Array(cell.messages.clone()),
+            SerdeValue::Array(
+                cell.messages
+                    .iter()
+                    .map(|m| {
+                        json!({
+                            "level": m.level.to_string(),
+                            "rule": m.rule.to_string(),
+                            "message": m.message.to_string(),
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+            ),
         );
         outgoing.insert(column.to_string(), SerdeValue::Object(cell_map));
     }
@@ -933,11 +944,11 @@ pub fn validate_cell_datatype(
                     } else {
                         format!("{} should be {}", column_name, dt_description)
                     };
-                    let message_info = json!({
-                        "rule": format!("datatype:{}", dt_name),
-                        "level": "error",
-                        "message": message,
-                    });
+                    let message_info = ValveCellMessage {
+                        rule: format!("datatype:{}", dt_name),
+                        level: "error".to_string(),
+                        message: message,
+                    };
                     cell.messages.push(message_info);
                 }
             }
@@ -947,11 +958,11 @@ pub fn validate_cell_datatype(
             } else {
                 format!("{} should be {}", column_name, primary_dt_description)
             };
-            let message_info = json!({
-                "rule": format!("datatype:{}", primary_dt_name),
-                "level": "error",
-                "message": message,
-            });
+            let message_info = ValveCellMessage {
+                rule: format!("datatype:{}", primary_dt_name),
+                level: "error".to_string(),
+                message: message,
+            };
             cell.messages.push(message_info);
         }
     }
@@ -1034,11 +1045,11 @@ pub fn validate_cell_rules(
                 compiled_rules,
             ) {
                 cell.valid = false;
-                cell.messages.push(json!({
-                    "rule": format!("rule:{}-{}", column_name, rule_number),
-                    "level": rule.level,
-                    "message": rule.description,
-                }));
+                cell.messages.push(ValveCellMessage {
+                    rule: format!("rule:{}-{}", column_name, rule_number),
+                    level: rule.level.to_string(),
+                    message: rule.description.to_string(),
+                });
             }
         }
     }
@@ -1222,11 +1233,11 @@ pub async fn validate_cell_foreign_constraints(
         };
         if frows.is_empty() {
             cell.valid = false;
-            let mut message = json!({
-                "rule": "key:foreign",
-                "level": "error",
-            });
-
+            let mut message = ValveCellMessage {
+                rule: "key:foreign".to_string(),
+                level: "error".to_string(),
+                ..Default::default()
+            };
             let (as_if_clause_for_conflict, ftable_alias) = match query_as_if {
                 Some(query_as_if) if *ftable == query_as_if.table => (
                     as_if_clause_for_conflict.to_string(),
@@ -1257,25 +1268,15 @@ pub async fn validate_cell_foreign_constraints(
             };
 
             if frows.is_empty() {
-                message.as_object_mut().and_then(|m| {
-                    m.insert(
-                        "message".to_string(),
-                        SerdeValue::String(format!(
-                            "Value '{}' of column {} is not in {}.{}",
-                            cell.value, column_name, ftable, fcolumn
-                        )),
-                    )
-                });
+                message.message = format!(
+                    "Value '{}' of column {} is not in {}.{}",
+                    cell.value, column_name, ftable, fcolumn
+                );
             } else {
-                message.as_object_mut().and_then(|m| {
-                    m.insert(
-                        "message".to_string(),
-                        SerdeValue::String(format!(
-                            "Value '{}' of column {} exists only in {}_conflict.{}",
-                            cell.value, column_name, ftable, fcolumn
-                        )),
-                    )
-                });
+                message.message = format!(
+                    "Value '{}' of column {} exists only in {}_conflict.{}",
+                    cell.value, column_name, ftable, fcolumn
+                );
             }
             cell.messages.push(message);
         }
@@ -1442,12 +1443,14 @@ pub async fn validate_cell_trees(
             }
             let cycle_msg = cycle_msg.join(", ");
             cell.valid = false;
-            cell.messages.push(json!({
-                "rule": "tree:cycle",
-                "level": "error",
-                "message": format!("Cyclic dependency: {} for tree({}) of {}",
-                                   cycle_msg, parent_col, child_col),
-            }));
+            cell.messages.push(ValveCellMessage {
+                rule: "tree:cycle".to_string(),
+                level: "error".to_string(),
+                message: format!(
+                    "Cyclic dependency: {} for tree({}) of {}",
+                    cycle_msg, parent_col, child_col
+                ),
+            });
         }
     }
 
@@ -1498,12 +1501,12 @@ pub async fn validate_cell_unique_constraints(
     let is_unique = !is_primary && uniques.contains(column_name);
     let is_tree_child = trees.contains(&column_name);
 
-    fn make_error(rule: &str, column_name: &String) -> SerdeValue {
-        json!({
-            "rule": rule.to_string(),
-            "level": "error",
-            "message": format!("Values of {} must be unique", column_name.to_string()),
-        })
+    fn make_error(rule: &str, column_name: &String) -> ValveCellMessage {
+        ValveCellMessage {
+            rule: rule.to_string(),
+            level: "error".to_string(),
+            message: format!("Values of {} must be unique", column_name.to_string()),
+        }
     }
 
     if is_primary || is_unique || is_tree_child {

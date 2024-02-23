@@ -42,9 +42,9 @@ use crate::{
         validate_row_tx, validate_rows_constraints, validate_rows_intra, validate_rows_trees,
     },
     valve::{
-        ValveColumnConfig, ValveConfig, ValveConstraintConfig, ValveDatatypeConfig, ValveError,
-        ValveForeignConstraint, ValveRow, ValveRuleConfig, ValveSpecialConfig, ValveTableConfig,
-        ValveTreeConstraint, ValveUnderConstraint,
+        ValveCellMessage, ValveColumnConfig, ValveConfig, ValveConstraintConfig,
+        ValveDatatypeConfig, ValveError, ValveForeignConstraint, ValveRow, ValveRuleConfig,
+        ValveSpecialConfig, ValveTableConfig, ValveTreeConstraint, ValveUnderConstraint,
     },
     valve_grammar::StartParser,
 };
@@ -2194,29 +2194,32 @@ pub async fn insert_new_row_tx(
             ))?;
         let messages = sort_messages(
             &sorted_datatypes,
-            cell.get("messages")
+            &cell
+                .get("messages")
                 .and_then(|m| m.as_array())
                 .ok_or(ValveError::InputError(
                     format!("No array named 'messages' in {:?}", cell).into(),
-                ))?,
+                ))?
+                .iter()
+                .map(|m| ValveCellMessage {
+                    level: m.get("level").and_then(|s| s.as_str()).unwrap().to_string(),
+                    rule: m.get("rule").and_then(|s| s.as_str()).unwrap().to_string(),
+                    message: m
+                        .get("message")
+                        .and_then(|s| s.as_str())
+                        .unwrap()
+                        .to_string(),
+                })
+                .collect::<Vec<_>>(),
         );
 
         for message in messages {
             all_messages.push(json!({
                 "column": column,
                 "value": value,
-                "level": message.get("level").and_then(|s| s.as_str())
-                    .ok_or(
-                        ValveError::InputError(format!("No 'level' in {:?}", message).into())
-                    )?,
-                "rule": message.get("rule").and_then(|s| s.as_str())
-                    .ok_or(
-                        ValveError::InputError(format!("No 'rule' in {:?}", message).into())
-                    )?,
-                "message": message.get("message").and_then(|s| s.as_str())
-                    .ok_or(
-                        ValveError::InputError(format!("No 'message' in {:?}", message).into())
-                    )?,
+                "level": message.level,
+                "rule": message.rule,
+                "message": message.message,
             }));
         }
 
@@ -3317,21 +3320,22 @@ pub fn get_table_ddl(
 /// Given a list of messages and a HashMap, messages_stats, with which to collect counts of
 /// message types, count the various message types encountered in the list and increment the counts
 /// in messages_stats accordingly.
-pub fn add_message_counts(messages: &Vec<SerdeValue>, messages_stats: &mut HashMap<String, usize>) {
+pub fn add_message_counts(
+    messages: &Vec<ValveCellMessage>,
+    messages_stats: &mut HashMap<String, usize>,
+) {
     for message in messages {
-        let message = message.as_object().unwrap();
-        let level = message.get("level").unwrap();
-        if level == "error" {
+        if message.level == "error" {
             let current_errors = messages_stats.get("error").unwrap();
             messages_stats.insert("error".to_string(), current_errors + 1);
-        } else if level == "warning" {
+        } else if message.level == "warning" {
             let current_warnings = messages_stats.get("warning").unwrap();
             messages_stats.insert("warning".to_string(), current_warnings + 1);
-        } else if level == "info" {
+        } else if message.level == "info" {
             let current_infos = messages_stats.get("info").unwrap();
             messages_stats.insert("info".to_string(), current_infos + 1);
         } else {
-            log::warn!("Unknown message type: {}", level);
+            log::warn!("Unknown message type: {}", message.level);
         }
     }
 }
@@ -3387,16 +3391,13 @@ pub fn get_sorted_datatypes(config: &ValveConfig) -> Vec<&str> {
 /// 3. Messages pertaining to structure violations.
 pub fn sort_messages(
     sorted_datatypes: &Vec<&str>,
-    cell_messages: &Vec<SerdeValue>,
-) -> Vec<SerdeValue> {
+    cell_messages: &Vec<ValveCellMessage>,
+) -> Vec<ValveCellMessage> {
     let mut datatype_messages = vec![];
     let mut structure_messages = vec![];
     let mut rule_messages = vec![];
     for message in cell_messages {
-        let rule = message
-            .get("rule")
-            .and_then(|r| Some(r.as_str().unwrap().splitn(2, ":").collect::<Vec<_>>()))
-            .unwrap();
+        let rule = message.rule.splitn(2, ":").collect::<Vec<_>>();
         if rule[0] == "rule" {
             rule_messages.push(message.clone());
         } else if rule[0] == "datatype" {
@@ -3412,10 +3413,7 @@ pub fn sort_messages(
             for datatype in sorted_datatypes {
                 let mut messages = datatype_messages
                     .iter()
-                    .filter(|m| {
-                        m.get("rule").and_then(|r| r.as_str()).unwrap()
-                            == format!("datatype:{}", datatype)
-                    })
+                    .filter(|m| m.rule == format!("datatype:{}", datatype))
                     .map(|m| m.clone())
                     .collect::<Vec<_>>();
                 sorted_messages.append(&mut messages);
@@ -3520,31 +3518,12 @@ pub async fn make_inserts(
                         SQL_PARAM, &row, SQL_PARAM, SQL_PARAM, SQL_PARAM, SQL_PARAM, SQL_PARAM,
                     ];
 
-                    let message = message.as_object().unwrap();
                     message_params.push(main_table.clone());
                     message_params.push(column.clone());
                     message_params.push(cell.value.clone());
-                    message_params.push(
-                        message
-                            .get("level")
-                            .and_then(|s| s.as_str())
-                            .unwrap()
-                            .to_string(),
-                    );
-                    message_params.push(
-                        message
-                            .get("rule")
-                            .and_then(|s| s.as_str())
-                            .unwrap()
-                            .to_string(),
-                    );
-                    message_params.push(
-                        message
-                            .get("message")
-                            .and_then(|s| s.as_str())
-                            .unwrap()
-                            .to_string(),
-                    );
+                    message_params.push(message.level);
+                    message_params.push(message.rule);
+                    message_params.push(message.message);
                     let line = message_values.join(", ");
                     let line = format!("({})", line);
                     message_lines.push(line);
