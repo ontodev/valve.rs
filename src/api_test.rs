@@ -44,35 +44,17 @@ async fn test_matching(valve: &Valve) -> Result<(), ValveError> {
     Ok(())
 }
 
-async fn test_idempotent_validate_and_update(valve: &Valve) -> Result<(), ValveError> {
-    eprint!("Running test_idempotent_validate_and_update() ... ");
+async fn test_update_1(valve: &Valve) -> Result<(), ValveError> {
+    eprint!("Running test_update_1() ... ");
 
-    // We test that validate_row() is idempotent by running it multiple times on the same row:
     let row = json!({
-        "child": {"messages": [], "valid": true, "value": "b"},
-        "parent": {"messages": [], "valid": true, "value": "f"},
-        "xyzzy": {"messages": [], "valid": true, "value": "w"},
-        "foo": {"messages": [], "valid": true, "value": 1},
-        "bar": {
-            "messages": [
-                {"level": "error", "message": "An unrelated error", "rule": "custom:unrelated"}
-            ],
-            "valid": false,
-            "value": "B",
-        },
+        "child": "b",
+        "parent": "f",
+        "xyzzy": "w",
+        "foo": 1,
+        "bar": "B",
     });
 
-    let result_row_1 = valve
-        .validate_row("table2", row.as_object().unwrap(), None)
-        .await?;
-
-    let result_row_2 = valve.validate_row("table2", &result_row_1, None).await?;
-    assert_eq!(result_row_1, result_row_2);
-
-    let result_row = valve.validate_row("table2", &result_row_2, None).await?;
-    assert_eq!(result_row, result_row_2);
-
-    // Update the row we constructed and validated above in the database:
     valve
         .update_row("table2", &1, &row.as_object().unwrap())
         .await?;
@@ -81,85 +63,54 @@ async fn test_idempotent_validate_and_update(valve: &Valve) -> Result<(), ValveE
     Ok(())
 }
 
-async fn test_validate_and_insert_1(valve: &Valve) -> Result<(), ValveError> {
-    eprint!("Running test_validate_and_insert_1() ... ");
+async fn test_insert_1(valve: &Valve) -> Result<(), ValveError> {
+    eprint!("Running test_insert_1() ... ");
 
-    // Validate and insert a new row:
     let row = json!({
-        "id": {"messages": [], "valid": true, "value": "BFO:0000027"},
-        "label": {"messages": [], "valid": true, "value": "bazaar"},
-        "parent": {
-            "messages": [
-                {"level": "error", "message": "An unrelated error", "rule": "custom:unrelated"}
-            ],
-            "valid": false,
-            "value": "barrie",
-        },
-        "source": {"messages": [], "valid": true, "value": "BFOBBER"},
-        "type": {"messages": [], "valid": true, "value": "owl:Class"},
+        "id": "BFO:0000027",
+        "label": "bazaar",
+        "parent": "barrie",
+        "source": "BFOBBER",
+        "type": "owl:Class",
     });
 
-    let result_row = valve
-        .validate_row("table3", row.as_object().unwrap(), None)
-        .await?;
-
-    let (_new_row_num, _new_row) = valve.insert_row("table3", &result_row).await?;
+    let (_new_row_num, _new_row) = valve.insert_row("table3", row.as_object().unwrap()).await?;
 
     eprintln!("done.");
     Ok(())
 }
 
-async fn test_validate_and_update(valve: &Valve) -> Result<(), ValveError> {
-    eprint!("Running test_validate_and_update() ... ");
+async fn test_update_2(valve: &Valve) -> Result<(), ValveError> {
+    eprint!("Running test_update_2() ... ");
 
-    // Validate and update an existing row:
     let row = json!({
-        "child": {"messages": [], "valid": true, "value": 2},
-        "parent": {"messages": [], "valid": true, "value": 6},
-        "xyzzy": {"messages": [], "valid": true, "value": 23},
-        "foo": {"messages": [], "valid": true, "value": 'a'},
-        "bar": {
-            "messages": [
-                {"level": "error", "message": "An unrelated error", "rule": "custom:unrelated"}
-            ],
-            "valid": false,
-            "value": 2,
-        },
+        "child": 2,
+        "parent": 6,
+        "xyzzy": 23,
+        "foo": 'a',
+        "bar": 2,
     });
 
-    let result_row = valve
-        .validate_row("table6", row.as_object().unwrap(), None)
+    valve
+        .update_row("table6", &1, row.as_object().unwrap())
         .await?;
-
-    valve.update_row("table6", &1, &result_row).await?;
 
     eprintln!("done.");
     Ok(())
 }
 
-async fn test_validate_and_insert_2(valve: &Valve) -> Result<(), ValveError> {
-    eprint!("Running test_validate_and_insert_2() ... ");
+async fn test_insert_2(valve: &Valve) -> Result<(), ValveError> {
+    eprint!("Running test_insert_2() ... ");
 
-    // Validate and insert a new row:
     let row = json!({
-        "child": {"messages": [], "valid": true, "value": 2},
-        "parent": {"messages": [], "valid": true, "value": 6},
-        "xyzzy": {"messages": [], "valid": true, "value": 23},
-        "foo": {"messages": [], "valid": true, "value": 'a'},
-        "bar": {
-            "messages": [
-                {"level": "error", "message": "An unrelated error", "rule": "custom:unrelated"}
-            ],
-            "valid": false,
-            "value": 2,
-        },
+        "child": 2,
+        "parent": 6,
+        "xyzzy": 23,
+        "foo": 'a',
+        "bar": 2,
     });
 
-    let result_row = valve
-        .validate_row("table6", row.as_object().unwrap(), None)
-        .await?;
-
-    let (_new_row_num, _new_row) = valve.insert_row("table6", &result_row).await?;
+    let (_new_row_num, _new_row) = valve.insert_row("table6", row.as_object().unwrap()).await?;
 
     eprintln!("done.");
     Ok(())
@@ -170,9 +121,9 @@ async fn test_dependencies(valve: &Valve) -> Result<(), ValveError> {
 
     // Test cases for updates/inserts/deletes with dependencies.
     let row = json!({
-        "foreign_column": {"messages": [], "valid": true, "value": "w"},
-        "other_foreign_column": {"messages": [], "valid": true, "value": "z"},
-        "numeric_foreign_column": {"messages": [], "valid": true, "value": ""},
+        "foreign_column": "w",
+        "other_foreign_column": "z",
+        "numeric_foreign_column": "",
     });
 
     valve
@@ -180,11 +131,11 @@ async fn test_dependencies(valve: &Valve) -> Result<(), ValveError> {
         .await?;
 
     let row = json!({
-        "child": {"messages": [], "valid": true, "value": "b"},
-        "parent": {"messages": [], "valid": true, "value": "c"},
-        "xyzzy": {"messages": [], "valid": true, "value": "d"},
-        "foo": {"messages": [], "valid": true, "value": "d"},
-        "bar": {"messages": [], "valid": true, "value": "f"},
+        "child": "b",
+        "parent": "c",
+        "xyzzy": "d",
+        "foo": "d",
+        "bar": "f",
     });
 
     valve
@@ -194,9 +145,9 @@ async fn test_dependencies(valve: &Valve) -> Result<(), ValveError> {
     valve.delete_row("table11", &4).await?;
 
     let row = json!({
-        "foreign_column": {"messages": [], "valid": true, "value": "i"},
-        "other_foreign_column": {"messages": [], "valid": true, "value": "i"},
-        "numeric_foreign_column": {"messages": [], "valid": true, "value": "9"},
+        "foreign_column": "i",
+        "other_foreign_column": "i",
+        "numeric_foreign_column": "9",
     });
 
     let (_new_row_num, _new_row) = valve
@@ -332,22 +283,10 @@ async fn test_randomized_api_test_with_undo_redo(valve: &Valve) -> Result<(), Va
 
     fn generate_row() -> SerdeMap {
         let mut row = SerdeMap::new();
-        row.insert(
-            "prefix".to_string(),
-            json!({"messages": [], "valid": true, "value": generate_value()}),
-        );
-        row.insert(
-            "base".to_string(),
-            json!({"messages": [], "valid": true, "value": generate_value()}),
-        );
-        row.insert(
-            "ontology IRI".to_string(),
-            json!({"messages": [], "valid": true, "value": generate_value()}),
-        );
-        row.insert(
-            "version IRI".to_string(),
-            json!({"messages": [], "valid": true, "value": generate_value()}),
-        );
+        row.insert("prefix".to_string(), json!(generate_value()));
+        row.insert("base".to_string(), json!(generate_value()));
+        row.insert("ontology IRI".to_string(), json!(generate_value()));
+        row.insert("version IRI".to_string(), json!(generate_value()));
         row
     }
 
@@ -401,14 +340,14 @@ async fn test_undo_redo(valve: &Valve) -> Result<(), ValveError> {
 
     // Undo/redo tests
     let row_1 = json!({
-        "foreign_column": {"messages": [], "valid": true, "value": "j"},
-        "other_foreign_column": {"messages": [], "valid": true, "value": "j"},
-        "numeric_foreign_column": {"messages": [], "valid": true, "value": "10"},
+        "foreign_column": "j",
+        "other_foreign_column": "j",
+        "numeric_foreign_column": "10",
     });
     let row_2 = json!({
-        "foreign_column": {"messages": [], "valid": true, "value": "k"},
-        "other_foreign_column": {"messages": [], "valid": true, "value": "k"},
-        "numeric_foreign_column": {"messages": [], "valid": true, "value": "11"},
+        "foreign_column": "k",
+        "other_foreign_column": "k",
+        "numeric_foreign_column": "11",
     });
 
     // Undo/redo test 1:
@@ -477,15 +416,13 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<(), ValveError
     // NOTE that you must use an external script to fetch the data from the database and run a diff
     // against a known good sample to verify that these tests yield the expected results:
     test_matching(&valve).await?;
-    test_idempotent_validate_and_update(&valve).await?;
-    test_validate_and_insert_1(&valve).await?;
-    test_validate_and_update(&valve).await?;
-    test_validate_and_insert_2(&valve).await?;
+    test_update_1(&valve).await?;
+    test_insert_1(&valve).await?;
+    test_update_2(&valve).await?;
+    test_insert_2(&valve).await?;
     test_dependencies(&valve).await?;
     test_undo_redo(&valve).await?;
     test_randomized_api_test_with_undo_redo(&valve).await?;
-
-    // TODO: Add some tests for the new API functions like save.
 
     Ok(())
 }

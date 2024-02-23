@@ -1444,16 +1444,71 @@ impl Valve {
         valvified_row
     }
 
+    /// TODO: Add a docstring here.
+    pub fn valvified_json_row_to_valve_row(
+        row_number: Option<u32>,
+        row: &JsonRow,
+    ) -> Result<ValveRow, ValveError> {
+        let mut valve_row = ValveRow {
+            row_number: row_number,
+            contents: IndexMap::new(),
+        };
+        for (column, cell) in row.iter() {
+            let nulltype = match cell.get("nulltype") {
+                None => None,
+                Some(SerdeValue::String(s)) => Some(s.to_string()),
+                _ => {
+                    return Err(ValveError::InputError(
+                        format!("No string 'nulltype' in cell: {:?}.", cell).into(),
+                    ))
+                }
+            };
+            let value = match cell.get("value") {
+                Some(SerdeValue::String(s)) => s.to_string(),
+                Some(SerdeValue::Number(n)) => format!("{}", n),
+                _ => {
+                    return Err(ValveError::InputError(
+                        format!("No string/number 'value' in cell: {:#?}.", cell).into(),
+                    ))
+                }
+            };
+            let valid = match cell.get("valid").and_then(|v| v.as_bool()) {
+                Some(b) => b,
+                None => {
+                    return Err(ValveError::InputError(
+                        format!("No bool 'valid' in cell: {:?}.", cell).into(),
+                    ))
+                }
+            };
+            let messages = match cell.get("messages").and_then(|m| m.as_array()) {
+                Some(a) => a.to_vec(),
+                None => {
+                    return Err(ValveError::InputError(
+                        format!("No array 'messages' in cell: {:?}.", cell).into(),
+                    ))
+                }
+            };
+            let valve_cell = ValveCell {
+                nulltype: nulltype,
+                value: value,
+                valid: valid,
+                messages: messages,
+            };
+            valve_row.contents.insert(column.to_string(), valve_cell);
+        }
+
+        Ok(valve_row)
+    }
+
     /// Given a table name and a row, return the validated row.
     pub async fn validate_row(
         &self,
         table_name: &str,
         row: &JsonRow,
         row_number: Option<u32>,
-        // TODO: Return ValveRow instead of JsonRow.
-    ) -> Result<JsonRow, ValveError> {
+    ) -> Result<ValveRow, ValveError> {
         let row = Self::valvify_json_row(row);
-        validate_row_tx(
+        let row = validate_row_tx(
             &self.config,
             &self.datatype_conditions,
             &self.rule_conditions,
@@ -1464,7 +1519,8 @@ impl Valve {
             row_number,
             None,
         )
-        .await
+        .await?;
+        Self::valvified_json_row_to_valve_row(row_number, &row)
     }
 
     /// Given a table name and a row as JSON, add the row to the table in the database, and return
@@ -1473,8 +1529,7 @@ impl Valve {
         &self,
         table_name: &str,
         row: &JsonRow,
-        // TODO: Return ValveRow instead of JsonRow.
-    ) -> Result<(u32, JsonRow), ValveError> {
+    ) -> Result<(u32, ValveRow), ValveError> {
         let mut tx = self.pool.begin().await?;
         let row = Self::valvify_json_row(row);
         let row = validate_row_tx(
@@ -1505,6 +1560,8 @@ impl Valve {
 
         record_row_change(&mut tx, table_name, &rn, None, Some(&row), &self.user).await?;
         tx.commit().await?;
+
+        let row = Self::valvified_json_row_to_valve_row(Some(rn), &row)?;
         Ok((rn, row))
     }
 
@@ -1515,8 +1572,7 @@ impl Valve {
         table_name: &str,
         row_number: &u32,
         row: &JsonRow,
-        // TODO: Return ValveRow instead of JsonRow.
-    ) -> Result<JsonRow, ValveError> {
+    ) -> Result<ValveRow, ValveError> {
         let mut tx = self.pool.begin().await?;
 
         // Get the old version of the row from the database so that we can later record it to the
@@ -1564,6 +1620,8 @@ impl Valve {
         .await?;
 
         tx.commit().await?;
+
+        let row = Self::valvified_json_row_to_valve_row(Some(*row_number), &row)?;
         Ok(row)
     }
 
