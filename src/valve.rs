@@ -73,6 +73,8 @@ pub enum ValveError {
     IOError(std::io::Error),
     /// An error that occurred while serialising or deserialising to/from JSON:
     SerdeJsonError(serde_json::Error),
+    /// An error that occurred because of a user's action
+    UserError(String),
 }
 
 /// Represents a message associated with a particular value of a particular column.
@@ -666,7 +668,8 @@ impl Valve {
                 if rows.len() == 0 {
                     if self.verbose {
                         println!(
-                            "The table '{}' will be recreated as it does not exist in the database",
+                            "The table '{}' will be created as it does not exist in the \
+                             database.",
                             table
                         );
                     }
@@ -699,7 +702,8 @@ impl Valve {
                 if rows.len() == 0 {
                     if self.verbose {
                         println!(
-                            "The table '{}' will be recreated as it does not exist in the database",
+                            "The table '{}' will be created as it does not exist in the \
+                             database.",
                             table
                         );
                     }
@@ -728,11 +732,17 @@ impl Valve {
             .collect::<Vec<_>>();
         if db_column_order != configured_column_order {
             if self.verbose {
-                println!(
-                    "The table '{}' will be recreated since the database columns: {:?} \
-                     and/or their order does not match the configured columns: {:?}",
+                print!(
+                    "The table '{}' needs to be recreated since the database columns: {:?} \
+                     and/or their order does not match the configured columns: {:?}.\n\
+                     Do you want to continue? [y/N] ",
                     table, db_column_order, configured_column_order
                 );
+                if !proceed::proceed() {
+                    return Err(ValveError::UserError(
+                        "Execution aborted by user".to_string(),
+                    ));
+                }
             }
             return Ok(true);
         }
@@ -765,13 +775,16 @@ impl Valve {
                 {
                     if self.verbose {
                         println!(
-                            "The table '{}' will be recreated because the SQL type of column '{}', \
-                             {}, does not match the configured value: {}",
-                            table,
-                            cname,
-                            ctype,
-                            sql_type
+                            "The table '{}' needs to be recreated because the SQL type of column \
+                             '{}', {}, does not match the configured value: {}.\n\
+                             Do you want to continue? [y/N] ",
+                            table, cname, ctype, sql_type
                         );
+                        if !proceed::proceed() {
+                            return Err(ValveError::UserError(
+                                "Execution aborted by user".to_string(),
+                            ));
+                        }
                     }
                     return Ok(true);
                 }
@@ -787,12 +800,18 @@ impl Valve {
                     .expect(&format!("Undefined structure '{}'", structure));
                 if structure_has_changed(&parsed_structure, table, &cname, &pk)? {
                     if self.verbose {
-                        println!(
-                            "The table '{}' will be recreated because the database \
+                        print!(
+                            "The table '{}' needs to be recreated because the database \
                              constraints for column '{}' do not match the configured \
-                             structure, '{}'",
+                             structure, '{}'.\n\
+                             Do you want to continue? [y/N] ",
                             table, cname, structure
                         );
+                        if !proceed::proceed() {
+                            return Err(ValveError::UserError(
+                                "Execution aborted by user".to_string(),
+                            ));
+                        }
                     }
                     return Ok(true);
                 }

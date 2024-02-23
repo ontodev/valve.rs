@@ -1114,6 +1114,7 @@ dependencies = [
  "log",
  "num_cpus",
  "petgraph",
+ "proceed",
  "rand",
  "regex",
  "serde",
@@ -1284,6 +1285,12 @@ checksum = "7b368fba921b0dce7e60f5e04ec15e565b3303972b42bcfde1d0713b881959eb"
 dependencies = [
  "unicode-ident",
 ]
+
+[[package]]
+name = "proceed"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7a44d599a6cb184eb53aef9069de375d2af6b2c9c40723fdaa11d57d64604483"
 
 [[package]]
 name = "quote"

@@ -2802,16 +2802,24 @@ pub fn cast_column_sql_to_text(column: &str, sql_type: &str) -> String {
 pub fn get_column_value(row: &AnyRow, column: &str, sql_type: &str) -> String {
     let s = sql_type.to_lowercase();
     if s == "numeric" {
-        let value: f64 = row.get(format!(r#"{}"#, column).as_str());
+        let value: f64 = row
+            .try_get(format!(r#"{}"#, column).as_str())
+            .unwrap_or_default();
         value.to_string()
     } else if s == "integer" {
-        let value: i32 = row.get(format!(r#"{}"#, column).as_str());
+        let value: i32 = row
+            .try_get(format!(r#"{}"#, column).as_str())
+            .unwrap_or_default();
         value.to_string()
     } else if s == "real" {
-        let value: f64 = row.get(format!(r#"{}"#, column).as_str());
+        let value: f64 = row
+            .try_get(format!(r#"{}"#, column).as_str())
+            .unwrap_or_default();
         value.to_string()
     } else {
-        let value: &str = row.get(format!(r#"{}"#, column).as_str());
+        let value: &str = row
+            .try_get(format!(r#"{}"#, column).as_str())
+            .unwrap_or_default();
         value.to_string()
     }
 }
