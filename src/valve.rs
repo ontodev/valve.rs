@@ -1430,13 +1430,29 @@ impl Valve {
         Ok(self)
     }
 
+    /// TODO: Add a docstring here.
+    pub fn valvify_json_row(json_row: &JsonRow) -> JsonRow {
+        let mut valvified_row = JsonRow::new();
+        for (column, value) in json_row.iter() {
+            let cell = json!({
+                "valid": true,
+                "messages": [],
+                "value": value.clone(),
+            });
+            valvified_row.insert(column.to_string(), cell);
+        }
+        valvified_row
+    }
+
     /// Given a table name and a row, return the validated row.
     pub async fn validate_row(
         &self,
         table_name: &str,
         row: &JsonRow,
         row_number: Option<u32>,
+        // TODO: Return ValveRow instead of JsonRow.
     ) -> Result<JsonRow, ValveError> {
+        let row = Self::valvify_json_row(row);
         validate_row_tx(
             &self.config,
             &self.datatype_conditions,
@@ -1444,7 +1460,7 @@ impl Valve {
             &self.pool,
             None,
             table_name,
-            row,
+            &row,
             row_number,
             None,
         )
@@ -1457,9 +1473,10 @@ impl Valve {
         &self,
         table_name: &str,
         row: &JsonRow,
+        // TODO: Return ValveRow instead of JsonRow.
     ) -> Result<(u32, JsonRow), ValveError> {
         let mut tx = self.pool.begin().await?;
-
+        let row = Self::valvify_json_row(row);
         let row = validate_row_tx(
             &self.config,
             &self.datatype_conditions,
@@ -1467,7 +1484,7 @@ impl Valve {
             &self.pool,
             Some(&mut tx),
             table_name,
-            row,
+            &row,
             None,
             None,
         )
@@ -1498,6 +1515,7 @@ impl Valve {
         table_name: &str,
         row_number: &u32,
         row: &JsonRow,
+        // TODO: Return ValveRow instead of JsonRow.
     ) -> Result<JsonRow, ValveError> {
         let mut tx = self.pool.begin().await?;
 
@@ -1506,6 +1524,7 @@ impl Valve {
         let old_row =
             get_row_from_db(&self.config, &self.pool, &mut tx, table_name, &row_number).await?;
 
+        let row = Self::valvify_json_row(row);
         let row = validate_row_tx(
             &self.config,
             &self.datatype_conditions,
@@ -1513,7 +1532,7 @@ impl Valve {
             &self.pool,
             Some(&mut tx),
             table_name,
-            row,
+            &row,
             Some(*row_number),
             None,
         )
