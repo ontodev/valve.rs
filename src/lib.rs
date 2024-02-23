@@ -2086,12 +2086,12 @@ pub fn is_sql_type_error(sql_type: &str, value: &str) -> bool {
 /// {
 ///     "column_1": {
 ///         "valid": <true|false>,
-///         "messages": [{...}, ...],
+///         "messages": [{"level": level, "rule": rule, "message": message}, ...],
 ///         "value": value1
 ///     },
 ///     "column_2": {
 ///         "valid": <true|false>,
-///         "messages": [{...}, ...],
+///         "messages": [{"level": level, "rule": rule, "message": message}, ...],
 ///         "value": value2
 ///     },
 ///     ...
@@ -2395,12 +2395,12 @@ pub async fn delete_row_tx(
 /// {
 ///     "column_1": {
 ///         "valid": <true|false>,
-///         "messages": [{...}, ...],
+///         "messages": [{"level": level, "rule": rule, "message": message}, ...],
 ///         "value": value1
 ///     },
 ///     "column_2": {
 ///         "valid": <true|false>,
-///         "messages": [{...}, ...],
+///         "messages": [{"level": level, "rule": rule, "message": message}, ...],
 ///         "value": value2
 ///     },
 ///     ...

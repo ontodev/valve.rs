@@ -20,12 +20,12 @@ use std::collections::HashMap;
 /// {
 ///     "column_1": {
 ///         "valid": <true|false>,
-///         "messages": [{...}, ...],
+///         "messages": [{"level": level, "rule": rule, "message": message}, ...],
 ///         "value": value1
 ///     },
 ///     "column_2": {
 ///         "valid": <true|false>,
-///         "messages": [{...}, ...],
+///         "messages": [{"level": level, "rule": rule, "message": message}, ...],
 ///         "value": value2
 ///     },
 ///     ...
