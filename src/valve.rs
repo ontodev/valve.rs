@@ -338,6 +338,9 @@ pub struct Valve {
     pub user: String,
     /// When set to true, the valve instance produces more logging output.
     pub verbose: bool,
+    /// When set to true, valve will prompt for confirmation before performing any destructive
+    /// operations on the database.
+    pub interactive: bool,
 }
 
 impl From<csv::Error> for ValveError {
@@ -365,13 +368,12 @@ impl From<std::io::Error> for ValveError {
 }
 
 impl Valve {
-    /// Given a path to a table table, a path to a database, a flag for verbose output, and a flag
-    /// indicating whether the database should be configured for initial loading: Set up a database
-    /// connection, configure VALVE, and return a new Valve struct.
+    /// Given a path to a table table, a path to a database, and a flag indicating whether the
+    /// database should be configured for initial loading: Set up a database connection, configure
+    /// VALVE, and return a new Valve struct.
     pub async fn build(
         table_path: &str,
         database: &str,
-        verbose: bool,
         initial_load: bool,
     ) -> Result<Self, ValveError> {
         env_logger::init();
@@ -430,7 +432,8 @@ impl Valve {
             structure_conditions: structure_conditions,
             pool: pool,
             user: String::from("VALVE"),
-            verbose: verbose,
+            verbose: false,
+            interactive: false,
         })
     }
 
@@ -468,6 +471,18 @@ impl Valve {
         }
         self.user = user.to_string();
         Ok(self)
+    }
+
+    /// Configure verbosity
+    pub fn set_verbose(&mut self, verbose: bool) -> &mut Self {
+        self.verbose = verbose;
+        self
+    }
+
+    /// Configure interactive mode
+    pub fn set_interactive(&mut self, interactive: bool) -> &mut Self {
+        self.interactive = interactive;
+        self
     }
 
     /// (Private function.) Given a SQL string, execute it using the connection pool associated
@@ -763,14 +778,14 @@ impl Valve {
             .map(|c| c.0.clone())
             .collect::<Vec<_>>();
         if db_column_order != configured_column_order {
-            if self.verbose {
+            if self.verbose || self.interactive {
                 print!(
                     "The table '{}' needs to be recreated since the database columns: {:?} \
                      and/or their order does not match the configured columns: {:?}.\n\
                      Do you want to continue? [y/N] ",
                     table, db_column_order, configured_column_order
                 );
-                if !proceed::proceed() {
+                if self.interactive && !proceed::proceed() {
                     return Err(ValveError::UserError(
                         "Execution aborted by user".to_string(),
                     ));
@@ -805,14 +820,14 @@ impl Valve {
                 if !((s.starts_with("varchar") || s.starts_with("character varying"))
                     && (c.starts_with("varchar") || c.starts_with("character varying")))
                 {
-                    if self.verbose {
+                    if self.verbose || self.interactive {
                         println!(
                             "The table '{}' needs to be recreated because the SQL type of column \
                              '{}', {}, does not match the configured value: {}.\n\
                              Do you want to continue? [y/N] ",
                             table, cname, ctype, sql_type
                         );
-                        if !proceed::proceed() {
+                        if self.interactive && !proceed::proceed() {
                             return Err(ValveError::UserError(
                                 "Execution aborted by user".to_string(),
                             ));
@@ -831,7 +846,7 @@ impl Valve {
                     .and_then(|p| Some(p.parsed.clone()))
                     .expect(&format!("Undefined structure '{}'", structure));
                 if structure_has_changed(&parsed_structure, table, &cname, &pk)? {
-                    if self.verbose {
+                    if self.verbose || self.interactive {
                         print!(
                             "The table '{}' needs to be recreated because the database \
                              constraints for column '{}' do not match the configured \
@@ -839,7 +854,7 @@ impl Valve {
                              Do you want to continue? [y/N] ",
                             table, cname, structure
                         );
-                        if !proceed::proceed() {
+                        if self.interactive && !proceed::proceed() {
                             return Err(ValveError::UserError(
                                 "Execution aborted by user".to_string(),
                             ));

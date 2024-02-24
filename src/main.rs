@@ -2,6 +2,7 @@ mod api_test;
 
 use crate::api_test::run_api_tests;
 use argparse::{ArgumentParser, Store, StoreTrue};
+use futures::executor::block_on;
 use ontodev_valve::{valve::Valve, valve::ValveError};
 use std::{env, process};
 
@@ -13,37 +14,45 @@ async fn main() -> Result<(), ValveError> {
     // TODO: Use a more powerful command-line parser library that can automatically take care of
     // things like mutually exclusive options, since argparse doesn't seem to be able to do it.
 
-    let mut verbose = false;
     let mut api_test = false;
+    let mut create_only = false;
+    let mut destination = String::new();
+    let mut drop_all = false;
     let mut dump_config = false;
     let mut dump_schema = false;
-    let mut table_order = false;
-    let mut show_deps_in = false;
-    let mut show_deps_out = false;
-    let mut drop_all = false;
-    let mut create_only = false;
     let mut initial_load = false;
-    let mut save = String::new();
+    let mut interactive = false;
     let mut save_all = false;
     let mut save_dir = String::new();
+    let mut save = String::new();
+    let mut show_deps_in = false;
+    let mut show_deps_out = false;
     let mut source = String::new();
-    let mut destination = String::new();
+    let mut table_order = false;
+    let mut verbose = false;
     // TODO: Add a "dry_run" parameter.
 
     {
         // this block limits scope of borrows by ap.refer() method
         let mut ap = ArgumentParser::new();
         ap.set_description(r#"Valve is a lightweight validation engine written in rust."#);
+        ap.refer(&mut interactive).add_option(
+            &["--interactive"],
+            StoreTrue,
+            r#"Ask for confirmation before performing destructive operations on the database."#,
+        );
         ap.refer(&mut verbose).add_option(
             &["--verbose"],
             StoreTrue,
             r#"Write informative messages about what Valve is doing to stderr."#,
         );
-        ap.refer(&mut api_test).add_option(
-            &["--api_test"],
+        ap.refer(&mut initial_load).add_option(
+            &["--initial_load"],
             StoreTrue,
-            r#"Read the configuration referred to by SOURCE and run a set of predefined tests on the
-               existing, pre-loaded database indicated by DESTINATION."#,
+            r#"(SQLite only) When this flag is set, the database settings will be tuned for initial
+               loading. Note that these settings are unsafe and should be used for initial loading
+               only, as data integrity will not be guaranteed in the case of an interrupted
+               transaction."#,
         );
         ap.refer(&mut dump_config).add_option(
             &["--dump_config"],
@@ -87,14 +96,6 @@ async fn main() -> Result<(), ValveError> {
             r#"Read the configuration referred to by SOURCE, and create a corresponding database in
                DESTINATION but do not load it."#,
         );
-        ap.refer(&mut initial_load).add_option(
-            &["--initial_load"],
-            StoreTrue,
-            r#"(SQLite only) When this flag is set, the database settings will be tuned for initial
-               loading. Note that these settings are unsafe and should be used for initial loading
-               only, as data integrity will not be guaranteed in the case of an interrupted
-               transaction."#,
-        );
         ap.refer(&mut save).add_option(
             &["--save"],
             Store,
@@ -115,6 +116,12 @@ async fn main() -> Result<(), ValveError> {
             Store,
             r#"Ignored if neither --save nor --save-all has been specified. Saves the tables to the
                given path instead of to their configured paths."#,
+        );
+        ap.refer(&mut api_test).add_option(
+            &["--api_test"],
+            StoreTrue,
+            r#"Read the configuration referred to by SOURCE and run a set of predefined tests on the
+               existing, pre-loaded database indicated by DESTINATION."#,
         );
         ap.refer(&mut source).add_argument(
             "SOURCE",
@@ -174,10 +181,17 @@ async fn main() -> Result<(), ValveError> {
         process::exit(1);
     }
 
+    let build_valve = || -> Result<Valve, ValveError> {
+        let mut valve = block_on(Valve::build(&source, &destination, initial_load))?;
+        valve.set_verbose(verbose);
+        valve.set_interactive(interactive);
+        Ok(valve)
+    };
+
     if api_test {
         run_api_tests(&source, &destination).await?;
     } else if save_all || save != "" {
-        let valve = Valve::build(&source, &destination, verbose, initial_load).await?;
+        let valve = build_valve()?;
         let save_dir = {
             if save_dir == "" {
                 None
@@ -192,18 +206,18 @@ async fn main() -> Result<(), ValveError> {
             valve.save_tables(&tables, &save_dir).unwrap();
         }
     } else if dump_config {
-        let valve = Valve::build(&source, &destination, verbose, initial_load).await?;
+        let valve = build_valve()?;
         println!("{}", valve.config);
     } else if dump_schema {
-        let valve = Valve::build(&source, &destination, verbose, initial_load).await?;
+        let valve = build_valve()?;
         let schema = valve.dump_schema().await?;
         println!("{}", schema);
     } else if table_order {
-        let valve = Valve::build(&source, &destination, verbose, initial_load).await?;
+        let valve = build_valve()?;
         let sorted_table_list = valve.get_sorted_table_list(false);
         println!("{}", sorted_table_list.join(", "));
     } else if show_deps_in || show_deps_out {
-        let valve = Valve::build(&source, &destination, verbose, initial_load).await?;
+        let valve = build_valve()?;
         let dependencies = valve.collect_dependencies(show_deps_in);
         for (table, deps) in dependencies.iter() {
             let deps = {
@@ -224,13 +238,13 @@ async fn main() -> Result<(), ValveError> {
             println!("{}: {}", preamble, deps);
         }
     } else if drop_all {
-        let valve = Valve::build(&source, &destination, verbose, initial_load).await?;
+        let valve = build_valve()?;
         valve.drop_all_tables().await?;
     } else if create_only {
-        let valve = Valve::build(&source, &destination, verbose, initial_load).await?;
+        let valve = build_valve()?;
         valve.create_all_tables().await?;
     } else {
-        let valve = Valve::build(&source, &destination, verbose, initial_load).await?;
+        let valve = build_valve()?;
         valve.load_all_tables(true).await?;
     }
 

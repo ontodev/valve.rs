@@ -157,13 +157,13 @@ perf_test_data: test/generate_random_test_data.py valve confirm_overwrite.sh $(p
 
 $(perf_test_db): valve perf_test_data $(perf_test_dir)/*.tsv | build $(perf_test_dir)/ontology
 	rm -f $@
-	time -p ./$< --verbose $(perf_test_dir)/table.tsv $@
+	time -p ./$< --verbose --interactive $(perf_test_dir)/table.tsv $@
 
 sqlite_perf_test: build/valve_perf.db | test/output
 	time -p scripts/export_messages.py $< $| $(tables_to_test)
 
 pg_perf_test: valve $(perf_test_dir)/ontology | test/output
-	time -p ./$< --verbose $(perf_test_dir)/table.tsv postgresql:///valve_postgres
+	time -p ./$< --verbose --interactive $(perf_test_dir)/table.tsv postgresql:///valve_postgres
 	time -p scripts/export_messages.py postgresql:///valve_postgres $| $(tables_to_test)
 
 perf_test: sqlite_perf_test pg_perf_test

@@ -412,7 +412,7 @@ async fn test_undo_redo(valve: &Valve) -> Result<(), ValveError> {
 }
 
 pub async fn run_api_tests(table: &str, database: &str) -> Result<(), ValveError> {
-    let valve = Valve::build(table, database, false, false).await?;
+    let valve = Valve::build(table, database, false).await?;
     // NOTE that you must use an external script to fetch the data from the database and run a diff
     // against a known good sample to verify that these tests yield the expected results:
     test_matching(&valve).await?;
