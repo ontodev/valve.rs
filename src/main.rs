@@ -182,9 +182,12 @@ async fn main() -> Result<(), ValveError> {
     }
 
     let build_valve = || -> Result<Valve, ValveError> {
-        let mut valve = block_on(Valve::build(&source, &destination, initial_load))?;
+        let mut valve = block_on(Valve::build(&source, &destination))?;
         valve.set_verbose(verbose);
         valve.set_interactive(interactive);
+        if initial_load {
+            block_on(valve.set_initial_load())?;
+        }
         Ok(valve)
     };
 

@@ -339,6 +339,8 @@ pub struct Valve {
     /// When set to true, valve will prompt for confirmation before performing any destructive
     /// operations on the database.
     pub interactive: bool,
+    /// Activates optimizations used for the initial loading of data.
+    pub initial_load: bool,
 }
 
 impl From<csv::Error> for ValveError {
@@ -369,31 +371,13 @@ impl Valve {
     /// Given a path to a table table, a path to a database, and a flag indicating whether the
     /// database should be configured for initial loading: Set up a database connection, configure
     /// VALVE, and return a new Valve struct.
-    pub async fn build(
-        table_path: &str,
-        database: &str,
-        initial_load: bool,
-    ) -> Result<Self, ValveError> {
+    pub async fn build(table_path: &str, database: &str) -> Result<Self, ValveError> {
         env_logger::init();
         let pool = get_pool_from_connection_string(database).await?;
         if pool.any_kind() == AnyKind::Sqlite {
             sqlx_query("PRAGMA foreign_keys = ON")
                 .execute(&pool)
                 .await?;
-            if initial_load {
-                // These pragmas are unsafe but they are used during initial loading since data
-                // integrity is not a priority in this case.
-                sqlx_query("PRAGMA journal_mode = OFF")
-                    .execute(&pool)
-                    .await?;
-                sqlx_query("PRAGMA synchronous = 0").execute(&pool).await?;
-                sqlx_query("PRAGMA cache_size = 1000000")
-                    .execute(&pool)
-                    .await?;
-                sqlx_query("PRAGMA temp_store = MEMORY")
-                    .execute(&pool)
-                    .await?;
-            }
         }
 
         let parser = StartParser::new();
@@ -432,7 +416,25 @@ impl Valve {
             user: String::from("VALVE"),
             verbose: false,
             interactive: false,
+            initial_load: false,
         })
+    }
+
+    pub async fn set_initial_load(&mut self) -> Result<&mut Self, ValveError> {
+        if self.initial_load {
+            Ok(self)
+        } else {
+            self.initial_load = true;
+            if self.pool.any_kind() == AnyKind::Sqlite {
+                // These pragmas are unsafe but they are used during initial loading since data
+                // integrity is not a priority in this case.
+                self.execute_sql("PRAGMA journal_mode = OFF").await?;
+                self.execute_sql("PRAGMA synchronous = 0").await?;
+                self.execute_sql("PRAGMA cache_size = 1000000").await?;
+                self.execute_sql("PRAGMA temp_store = MEMORY").await?;
+            }
+            Ok(self)
+        }
     }
 
     /// Convenience function to retrieve the path to Valve's "table table", the main entrypoint
