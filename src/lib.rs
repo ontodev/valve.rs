@@ -23,6 +23,7 @@
 //! ```
 //! export RUST_LOG="ontodev_valve=info"
 //! ```
+//! For further information see the [Rust Cookbook](https://rust-lang-nursery.github.io/rust-cookbook/development_tools/debugging/config_log.html).
 //!
 //! ## Python bindings
 //! See [valve.py](https://github.com/ontodev/valve.py)
@@ -42,9 +43,10 @@ use crate::{
         validate_row_tx, validate_rows_constraints, validate_rows_intra, validate_rows_trees,
     },
     valve::{
-        ValveCell, ValveCellMessage, ValveColumnConfig, ValveConfig, ValveConstraintConfig,
-        ValveDatatypeConfig, ValveError, ValveForeignConstraint, ValveRow, ValveRuleConfig,
-        ValveSpecialConfig, ValveTableConfig, ValveTreeConstraint, ValveUnderConstraint,
+        ValveCell, ValveCellMessage, ValveChange, ValveColumnConfig, ValveConfig,
+        ValveConstraintConfig, ValveDatatypeConfig, ValveError, ValveForeignConstraint, ValveRow,
+        ValveRuleConfig, ValveSpecialConfig, ValveTableConfig, ValveTreeConstraint,
+        ValveUnderConstraint,
     },
     valve_grammar::StartParser,
 };
@@ -2086,6 +2088,92 @@ pub async fn record_row_change(
     query.execute(tx.acquire().await?).await?;
 
     Ok(())
+}
+
+/// Given a database record representing either an undo or a redo from the history table,
+/// convert it to a vector of [ValveChange] structs.
+pub fn convert_undo_or_redo_record_to_change(
+    record: &AnyRow,
+) -> Result<Option<Vec<ValveChange>>, ValveError> {
+    let table: &str = record.get("table");
+    let from = get_json_from_row(&record, "from");
+    let to = get_json_from_row(&record, "to");
+    let summary = {
+        let summary = record.try_get_raw("summary")?;
+        if !summary.is_null() {
+            let summary: &str = record.get("summary");
+            match serde_json::from_str::<SerdeValue>(summary) {
+                Ok(SerdeValue::Array(v)) => Some(v),
+                _ => panic!("{} is not an array.", summary),
+            }
+        } else {
+            None
+        }
+    };
+
+    // If the `summary` part of the record is present, then just use it to populate the fields
+    // of the ValveChange structs representing the changes to each column in the table row.
+    if let Some(summary) = summary {
+        let mut column_changes = vec![];
+        for entry in summary {
+            let column = entry.get("column").and_then(|s| s.as_str()).unwrap();
+            let level = entry.get("level").and_then(|s| s.as_str()).unwrap();
+            let old_value = entry.get("old_value").and_then(|s| s.as_str()).unwrap();
+            let value = entry.get("value").and_then(|s| s.as_str()).unwrap();
+            let message = entry.get("message").and_then(|s| s.as_str()).unwrap();
+            column_changes.push(ValveChange {
+                table: table.to_string(),
+                column: column.to_string(),
+                level: level.to_string(),
+                old_value: old_value.to_string(),
+                value: value.to_string(),
+                message: message.to_string(),
+            });
+        }
+        return Ok(Some(column_changes));
+    }
+
+    // If the `summary` part of the record is not present, then either the `from` or the `to`
+    // parts of the record will be null. If `from` is not null then this is a delete (i.e.,
+    // the row has changed from something to nothing).
+    if let Some(from) = from {
+        let mut column_changes = vec![];
+        for (column, change) in from {
+            let old_value = change.get("value").and_then(|s| s.as_str()).unwrap();
+            column_changes.push(ValveChange {
+                table: table.to_string(),
+                column: column.to_string(),
+                level: "delete".to_string(),
+                old_value: old_value.to_string(),
+                value: "".to_string(),
+                message: "".to_string(),
+            });
+        }
+        return Ok(Some(column_changes));
+    }
+
+    // If `to` is not null then this is an insert (i.e., the row has changed from nothing to
+    // something).
+    if let Some(to) = to {
+        let mut column_changes = vec![];
+        for (column, change) in to {
+            let value = change.get("value").and_then(|s| s.as_str()).unwrap();
+            column_changes.push(ValveChange {
+                table: table.to_string(),
+                column: column.to_string(),
+                level: "insert".to_string(),
+                old_value: "".to_string(),
+                value: value.to_string(),
+                message: "".to_string(),
+            });
+        }
+        return Ok(Some(column_changes));
+    }
+
+    // If we get to here, then `summary`, `from`, and `to` are all null so we return an error.
+    Err(ValveError::InputError(
+        "All of summary, from, and to are NULL in undo/redo record".to_string(),
+    ))
 }
 
 /// Return the next recorded change to the data that can be undone, or None if there isn't any.

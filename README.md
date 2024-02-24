@@ -25,6 +25,7 @@ For instance:
 ```rust
 export RUST_LOG="ontodev_valve=info"
 ```
+For further information see the [Rust Cookbook](https://rust-lang-nursery.github.io/rust-cookbook/development_tools/debugging/config_log.html).
 
 ### Python bindings
 See [valve.py](https://github.com/ontodev/valve.py)

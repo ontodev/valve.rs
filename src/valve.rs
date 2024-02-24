@@ -3,13 +3,13 @@
 use crate::{
     add_message_counts,
     ast::Expression,
-    cast_column_sql_to_text, delete_row_tx, get_column_value, get_compiled_datatype_conditions,
-    get_compiled_rule_conditions, get_json_from_row, get_parsed_structure_conditions,
-    get_pool_from_connection_string, get_record_to_redo, get_record_to_undo, get_row_from_db,
-    get_sql_for_standard_view, get_sql_for_text_view, get_sql_type,
-    get_sql_type_from_global_config, get_table_ddl, insert_chunks, insert_new_row_tx,
-    local_sql_syntax, read_config_files, record_row_change, rich_json_to_valve_row,
-    switch_undone_state, update_row_tx,
+    cast_column_sql_to_text, convert_undo_or_redo_record_to_change, delete_row_tx,
+    get_column_value, get_compiled_datatype_conditions, get_compiled_rule_conditions,
+    get_json_from_row, get_parsed_structure_conditions, get_pool_from_connection_string,
+    get_record_to_redo, get_record_to_undo, get_row_from_db, get_sql_for_standard_view,
+    get_sql_for_text_view, get_sql_type, get_sql_type_from_global_config, get_table_ddl,
+    insert_chunks, insert_new_row_tx, local_sql_syntax, read_config_files, record_row_change,
+    rich_json_to_valve_row, switch_undone_state, update_row_tx,
     validate::{validate_row_tx, validate_tree_foreign_keys, validate_under, with_tree_sql},
     valve_grammar::StartParser,
     valve_row_to_rich_json, verify_table_deps_and_sort, ColumnRule, CompiledCondition,
@@ -25,7 +25,7 @@ use regex::Regex;
 use serde::Serialize;
 use serde_json::{json, Value as SerdeValue};
 use sqlx::{
-    any::{AnyKind, AnyPool, AnyRow},
+    any::{AnyKind, AnyPool},
     query as sqlx_query, Row, ValueRef,
 };
 use std::{collections::HashMap, fmt, fs::File, path::Path};
@@ -36,19 +36,23 @@ pub type JsonRow = serde_json::Map<String, SerdeValue>;
 /// Represents a particular cell in a particular row of data with vaildation results.
 #[derive(Clone, Debug)]
 pub struct ValveCell {
+    /// If present, indicates that the value of the cell is considered to be a null value of
+    /// the given type. If not present, indicates that the contents of the cell are not empty.
     pub nulltype: Option<String>,
+    /// The value of the cell.
     pub value: SerdeValue,
+    /// Whether the value of the cell is valid or invalid.
     pub valid: bool,
+    /// Any messages associated with the cell value.
     pub messages: Vec<ValveCellMessage>,
 }
 
 impl ValveCell {
+    /// Initializes a new [ValveCell] based on the given [SerdeValue] and returns it.
     pub fn new(value: &SerdeValue) -> Self {
         let value = match value {
             SerdeValue::String(_) | SerdeValue::Number(_) | SerdeValue::Bool(_) => value.clone(),
-            _ => {
-                panic!("Value '{}' is not a simple JSON type", value)
-            }
+            _ => json!(value.to_string()),
         };
         Self {
             nulltype: None,
@@ -58,6 +62,7 @@ impl ValveCell {
         }
     }
 
+    /// Returns the value of the cell as a String.
     pub fn strvalue(&self) -> String {
         match self.value {
             SerdeValue::String(_) => self
@@ -65,8 +70,7 @@ impl ValveCell {
                 .as_str()
                 .expect(&format!("Could not render '{}' as a string", self.value))
                 .to_string(),
-            SerdeValue::Number(_) | SerdeValue::Bool(_) => self.value.to_string(),
-            _ => unreachable!(), // See the definition of new() above.
+            _ => self.value.to_string(),
         }
     }
 }
@@ -74,15 +78,20 @@ impl ValveCell {
 /// Represents one of the messages in a [ValveCell]
 #[derive(Clone, Debug, Default)]
 pub struct ValveCellMessage {
+    /// The severity of the message.
     pub level: String,
+    /// The rule violation that the message is about.
     pub rule: String,
+    /// The contents of the message.
     pub message: String,
 }
 
 /// Represents a particular row of data with validation results.
 #[derive(Clone, Debug)]
 pub struct ValveRow {
+    /// The row number of the row.
     pub row_number: Option<u32>,
+    /// A map from column names to the cells corresponding to each column in the row.
     pub contents: IndexMap<String, ValveCell>,
 }
 
@@ -420,7 +429,7 @@ impl Valve {
         })
     }
 
-    pub async fn set_initial_load(&mut self) -> Result<&mut Self, ValveError> {
+    pub async fn configure_for_initial_load(&mut self) -> Result<&mut Self, ValveError> {
         if self.initial_load {
             Ok(self)
         } else {
@@ -780,15 +789,19 @@ impl Valve {
         if db_column_order != configured_column_order {
             if self.verbose || self.interactive {
                 print!(
-                    "The table '{}' needs to be recreated since the database columns: {:?} \
-                     and/or their order does not match the configured columns: {:?}.\n\
-                     Do you want to continue? [y/N] ",
+                    "The table '{}' needs to be recreated because the database columns: {:?} \
+                     and/or their order do not match the configured columns: {:?}. ",
                     table, db_column_order, configured_column_order
                 );
-                if self.interactive && !proceed::proceed() {
-                    return Err(ValveError::UserError(
-                        "Execution aborted by user".to_string(),
-                    ));
+                if self.interactive {
+                    print!("Do you want to continue? [y/N] ");
+                    if !proceed::proceed() {
+                        return Err(ValveError::UserError(
+                            "Execution aborted by user".to_string(),
+                        ));
+                    }
+                } else {
+                    println!();
                 }
             }
             return Ok(true);
@@ -821,16 +834,20 @@ impl Valve {
                     && (c.starts_with("varchar") || c.starts_with("character varying")))
                 {
                     if self.verbose || self.interactive {
-                        println!(
+                        print!(
                             "The table '{}' needs to be recreated because the SQL type of column \
-                             '{}', {}, does not match the configured value: {}.\n\
-                             Do you want to continue? [y/N] ",
+                             '{}', {}, does not match the configured value: {}. ",
                             table, cname, ctype, sql_type
                         );
-                        if self.interactive && !proceed::proceed() {
-                            return Err(ValveError::UserError(
-                                "Execution aborted by user".to_string(),
-                            ));
+                        if self.interactive {
+                            print!("Do you want to continue? [y/N] ");
+                            if !proceed::proceed() {
+                                return Err(ValveError::UserError(
+                                    "Execution aborted by user".to_string(),
+                                ));
+                            }
+                        } else {
+                            println!();
                         }
                     }
                     return Ok(true);
@@ -850,14 +867,18 @@ impl Valve {
                         print!(
                             "The table '{}' needs to be recreated because the database \
                              constraints for column '{}' do not match the configured \
-                             structure, '{}'.\n\
-                             Do you want to continue? [y/N] ",
+                             structure, '{}'. ",
                             table, cname, structure
                         );
-                        if self.interactive && !proceed::proceed() {
-                            return Err(ValveError::UserError(
-                                "Execution aborted by user".to_string(),
-                            ));
+                        if self.interactive {
+                            print!("Do you want to continue? [y/N] ");
+                            if !proceed::proceed() {
+                                return Err(ValveError::UserError(
+                                    "Execution aborted by user".to_string(),
+                                ));
+                            }
+                        } else {
+                            println!();
                         }
                     }
                     return Ok(true);
@@ -1710,98 +1731,11 @@ impl Valve {
         Ok(())
     }
 
-    /// Given a database record representing either an undo or a redo from the history table,
-    /// convert it to a vector of [ValveChange] structs.
-    pub fn convert_undo_or_redo_record_to_change(
-        &self,
-        record: &AnyRow,
-    ) -> Result<Option<Vec<ValveChange>>, ValveError> {
-        let table: &str = record.get("table");
-        let from = get_json_from_row(&record, "from");
-        let to = get_json_from_row(&record, "to");
-        let summary = {
-            let summary = record.try_get_raw("summary")?;
-            if !summary.is_null() {
-                let summary: &str = record.get("summary");
-                match serde_json::from_str::<SerdeValue>(summary) {
-                    Ok(SerdeValue::Array(v)) => Some(v),
-                    _ => panic!("{} is not an array.", summary),
-                }
-            } else {
-                None
-            }
-        };
-
-        // If the `summary` part of the record is present, then just use it to populate the fields
-        // of the ValveChange structs representing the changes to each column in the table row.
-        if let Some(summary) = summary {
-            let mut column_changes = vec![];
-            for entry in summary {
-                let column = entry.get("column").and_then(|s| s.as_str()).unwrap();
-                let level = entry.get("level").and_then(|s| s.as_str()).unwrap();
-                let old_value = entry.get("old_value").and_then(|s| s.as_str()).unwrap();
-                let value = entry.get("value").and_then(|s| s.as_str()).unwrap();
-                let message = entry.get("message").and_then(|s| s.as_str()).unwrap();
-                column_changes.push(ValveChange {
-                    table: table.to_string(),
-                    column: column.to_string(),
-                    level: level.to_string(),
-                    old_value: old_value.to_string(),
-                    value: value.to_string(),
-                    message: message.to_string(),
-                });
-            }
-            return Ok(Some(column_changes));
-        }
-
-        // If the `summary` part of the record is not present, then either the `from` or the `to`
-        // parts of the record will be null. If `from` is not null then this is a delete (i.e.,
-        // the row has changed from something to nothing).
-        if let Some(from) = from {
-            let mut column_changes = vec![];
-            for (column, change) in from {
-                let old_value = change.get("value").and_then(|s| s.as_str()).unwrap();
-                column_changes.push(ValveChange {
-                    table: table.to_string(),
-                    column: column.to_string(),
-                    level: "delete".to_string(),
-                    old_value: old_value.to_string(),
-                    value: "".to_string(),
-                    message: "".to_string(),
-                });
-            }
-            return Ok(Some(column_changes));
-        }
-
-        // If `to` is not null then this is an insert (i.e., the row has changed from nothing to
-        // something).
-        if let Some(to) = to {
-            let mut column_changes = vec![];
-            for (column, change) in to {
-                let value = change.get("value").and_then(|s| s.as_str()).unwrap();
-                column_changes.push(ValveChange {
-                    table: table.to_string(),
-                    column: column.to_string(),
-                    level: "insert".to_string(),
-                    old_value: "".to_string(),
-                    value: value.to_string(),
-                    message: "".to_string(),
-                });
-            }
-            return Ok(Some(column_changes));
-        }
-
-        // If we get to here, then `summary`, `from`, and `to` are all null so we return an error.
-        Err(ValveError::InputError(
-            "All of summary, from, and to are NULL in undo/redo record".to_string(),
-        ))
-    }
-
     /// Return the next recorded change to the data that can be undone, or None if there isn't any.
     pub async fn get_change_to_undo(&self) -> Result<Option<Vec<ValveChange>>, ValveError> {
         match get_record_to_undo(&self.pool).await? {
             None => Ok(None),
-            Some(record) => self.convert_undo_or_redo_record_to_change(&record),
+            Some(record) => convert_undo_or_redo_record_to_change(&record),
         }
     }
 
@@ -1809,7 +1743,7 @@ impl Valve {
     pub async fn get_change_to_redo(&self) -> Result<Option<Vec<ValveChange>>, ValveError> {
         match get_record_to_redo(&self.pool).await? {
             None => Ok(None),
-            Some(record) => self.convert_undo_or_redo_record_to_change(&record),
+            Some(record) => convert_undo_or_redo_record_to_change(&record),
         }
     }
 

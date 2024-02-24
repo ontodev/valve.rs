@@ -186,7 +186,7 @@ async fn main() -> Result<(), ValveError> {
         valve.set_verbose(verbose);
         valve.set_interactive(interactive);
         if initial_load {
-            block_on(valve.set_initial_load())?;
+            block_on(valve.configure_for_initial_load())?;
         }
         Ok(valve)
     };
