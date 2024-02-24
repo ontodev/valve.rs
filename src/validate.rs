@@ -43,10 +43,10 @@ pub async fn validate_row_tx(
     pool: &AnyPool,
     tx: Option<&mut Transaction<'_, sqlx::Any>>,
     table_name: &str,
-    row: &SerdeMap,
+    row: &ValveRow,
     row_number: Option<u32>,
     query_as_if: Option<&QueryAsIf>,
-) -> Result<SerdeMap, ValveError> {
+) -> Result<ValveRow, ValveError> {
     // Fallback to a default transaction if it is not given. Since we do not commit before it falls
     // out of scope the transaction will be rolled back at the end of this function. And since this
     // function is read-only the rollback is trivial and therefore inconsequential.
@@ -57,7 +57,7 @@ pub async fn validate_row_tx(
     };
 
     // Initialize the result row with the values from the given row:
-    let mut valve_row = rich_json_to_valve_row(row_number, row)?;
+    let mut valve_row = row.clone();
 
     // We check all the cells for nulltype first, since the rules validation requires that we
     // have this information for all cells.
@@ -173,7 +173,7 @@ pub async fn validate_row_tx(
         }
     }
 
-    let valve_row = remove_duplicate_messages(&valve_row_to_rich_json(&valve_row))?;
+    remove_duplicate_messages(&mut valve_row)?;
     Ok(valve_row)
 }
 
@@ -664,41 +664,20 @@ pub fn validate_rows_intra(
     valve_rows
 }
 
-/// Given a row represented as a [SerdeMap], remove any duplicate messages from the row's cells, so
+/// Given a row represented as a [ValveRow], remove any duplicate messages from the row's cells, so
 /// that no cell has messages with the same level, rule, and message text.
-pub fn remove_duplicate_messages(row: &SerdeMap) -> Result<SerdeMap, ValveError> {
-    let mut deduped_row = SerdeMap::new();
-    for (column_name, cell) in row.iter() {
-        let mut messages = cell
-            .get("messages")
-            .and_then(|m| m.as_array())
-            .unwrap_or(&vec![])
-            .clone();
+fn remove_duplicate_messages(row: &mut ValveRow) -> Result<(), ValveError> {
+    for (_column_name, cell) in row.contents.iter_mut() {
+        let mut messages = cell.messages.clone();
         messages.sort_by(|a, b| {
-            let a = format!(
-                "{}{}{}",
-                a.get("level").unwrap(),
-                a.get("rule").unwrap(),
-                a.get("message").unwrap()
-            );
-            let b = format!(
-                "{}{}{}",
-                b.get("level").unwrap(),
-                b.get("rule").unwrap(),
-                b.get("message").unwrap()
-            );
+            let a = format!("{}{}{}", a.level, a.rule, a.message);
+            let b = format!("{}{}{}", b.level, b.rule, b.message,);
             a.partial_cmp(&b).unwrap()
         });
-        messages.dedup_by(|a, b| {
-            a.get("level").unwrap() == b.get("level").unwrap()
-                && a.get("rule").unwrap() == b.get("rule").unwrap()
-                && a.get("message").unwrap() == b.get("message").unwrap()
-        });
-        let mut cell = cell.as_object().unwrap().clone();
-        cell.insert("messages".to_string(), json!(messages));
-        deduped_row.insert(column_name.to_string(), json!(cell));
+        messages.dedup_by(|a, b| a.level == b.level && a.rule == b.rule && a.message == b.message);
+        cell.messages = messages;
     }
-    Ok(deduped_row)
+    Ok(())
 }
 
 /// Given a row, represented as a JSON object in the following ('simple') format:
@@ -1234,29 +1213,23 @@ pub fn as_if_to_sql(
             }
             QueryAsIfKind::Add | QueryAsIfKind::Replace => {
                 let row = as_if.row.as_ref().unwrap();
-                let columns = row.keys().cloned().collect::<Vec<_>>();
+                let columns = row.contents.keys().cloned().collect::<Vec<_>>();
                 let values = {
                     let mut values = vec![];
                     for column in &columns {
                         let valid = row
+                            .contents
                             .get(column)
-                            .and_then(|c| c.get("valid"))
-                            .and_then(|v| v.as_bool())
+                            .and_then(|c| Some(c.valid))
                             .unwrap();
 
                         let value = {
                             if valid == true {
-                                let value = match row.get(column).and_then(|c| c.get("value")) {
-                                    Some(SerdeValue::String(s)) => Ok(format!("{}", s)),
-                                    Some(SerdeValue::Number(n)) => Ok(format!("{}", n)),
-                                    Some(SerdeValue::Bool(b)) => Ok(format!("{}", b)),
-                                    _ => Err(format!(
-                                        "Value missing or of unknown type in column {} of row to \
-                                         update: {:?}",
-                                        column, row
-                                    )),
-                                }
-                                .unwrap();
+                                let value = row
+                                    .contents
+                                    .get(column)
+                                    .and_then(|c| Some(c.strvalue()))
+                                    .unwrap();
                                 if value == "" {
                                     "NULL".to_string()
                                 } else {

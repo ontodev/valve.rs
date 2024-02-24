@@ -10,8 +10,8 @@ use crate::{
     get_sql_type_from_global_config, get_table_ddl, insert_chunks, insert_new_row_tx,
     local_sql_syntax, read_config_files, record_row_change, switch_undone_state, update_row_tx,
     validate::{
-        rich_json_to_valve_row, simple_to_rich_json, validate_row_tx, validate_tree_foreign_keys,
-        validate_under, with_tree_sql,
+        rich_json_to_valve_row, validate_row_tx, validate_tree_foreign_keys, validate_under,
+        valve_row_to_rich_json, with_tree_sql,
     },
     valve_grammar::StartParser,
     verify_table_deps_and_sort, ColumnRule, CompiledCondition, ParsedStructure, CHUNK_SIZE,
@@ -45,22 +45,19 @@ pub struct ValveCell {
 }
 
 impl ValveCell {
-    pub fn new(value: &SerdeValue) -> Result<Self, ValveError> {
+    pub fn new(value: &SerdeValue) -> Self {
         let value = match value {
             SerdeValue::String(_) | SerdeValue::Number(_) | SerdeValue::Bool(_) => value.clone(),
             _ => {
-                return Err(ValveError::InputError(format!(
-                    "Value '{}' is not a simple JSON type",
-                    value
-                )))
+                panic!("Value '{}' is not a simple JSON type", value)
             }
         };
-        Ok(Self {
+        Self {
             nulltype: None,
             value: value,
             valid: true,
             messages: vec![],
-        })
+        }
     }
 
     pub fn strvalue(&self) -> String {
@@ -1493,6 +1490,21 @@ impl Valve {
         Ok(self)
     }
 
+    /// TODO: Add a docstring here.
+    pub fn simple_json_to_valve_row(
+        row: &JsonRow,
+        row_number: Option<u32>,
+    ) -> Result<ValveRow, ValveError> {
+        let mut valve_cells = IndexMap::new();
+        for (column, value) in row.iter() {
+            valve_cells.insert(column.to_string(), ValveCell::new(value));
+        }
+        Ok(ValveRow {
+            row_number: row_number,
+            contents: valve_cells,
+        })
+    }
+
     /// Given a table name and a row, represented as a JSON object in the following ('simple')
     /// format:
     /// ```
@@ -1509,8 +1521,8 @@ impl Valve {
         row: &JsonRow,
         row_number: Option<u32>,
     ) -> Result<ValveRow, ValveError> {
-        let row = simple_to_rich_json(row)?;
-        let row = validate_row_tx(
+        let row = Self::simple_json_to_valve_row(row, row_number)?;
+        validate_row_tx(
             &self.config,
             &self.datatype_conditions,
             &self.rule_conditions,
@@ -1521,8 +1533,7 @@ impl Valve {
             row_number,
             None,
         )
-        .await?;
-        rich_json_to_valve_row(row_number, &row)
+        .await
     }
 
     /// Given a table name and a row, represented as a JSON object in the following ('simple')
@@ -1542,7 +1553,7 @@ impl Valve {
         row: &JsonRow,
     ) -> Result<(u32, ValveRow), ValveError> {
         let mut tx = self.pool.begin().await?;
-        let row = simple_to_rich_json(row)?;
+        let row = Self::simple_json_to_valve_row(row, None)?;
         let row = validate_row_tx(
             &self.config,
             &self.datatype_conditions,
@@ -1569,10 +1580,12 @@ impl Valve {
         )
         .await?;
 
-        record_row_change(&mut tx, table_name, &rn, None, Some(&row), &self.user).await?;
-        tx.commit().await?;
+        // TODO: Instead of calling result_row_to_config_map() here, change record_row_change()
+        // so that it accepts a ValveRow instead of a SerdeMap.
+        let serde_row = valve_row_to_rich_json(&row);
+        record_row_change(&mut tx, table_name, &rn, None, Some(&serde_row), &self.user).await?;
 
-        let row = rich_json_to_valve_row(Some(rn), &row)?;
+        tx.commit().await?;
         Ok((rn, row))
     }
 
@@ -1599,7 +1612,7 @@ impl Valve {
         let old_row =
             get_row_from_db(&self.config, &self.pool, &mut tx, table_name, &row_number).await?;
 
-        let row = simple_to_rich_json(row)?;
+        let row = Self::simple_json_to_valve_row(row, Some(*row_number))?;
         let row = validate_row_tx(
             &self.config,
             &self.datatype_conditions,
@@ -1628,19 +1641,20 @@ impl Valve {
         .await?;
 
         // Record the row update in the history table:
+        // TODO: Instead of calling result_row_to_config_map() here, change record_row_change()
+        // so that it accepts a ValveRow instead of a SerdeMap.
+        let serde_row = valve_row_to_rich_json(&row);
         record_row_change(
             &mut tx,
             table_name,
             row_number,
             Some(&old_row),
-            Some(&row),
+            Some(&serde_row),
             &self.user,
         )
         .await?;
 
         tx.commit().await?;
-
-        let row = rich_json_to_valve_row(Some(*row_number), &row)?;
         Ok(row)
     }
 
@@ -1780,7 +1794,7 @@ impl Valve {
     }
 
     /// Undo one change and return the change record or None if there was no change to undo.
-    pub async fn undo(&self) -> Result<Option<JsonRow>, ValveError> {
+    pub async fn undo(&self) -> Result<Option<ValveRow>, ValveError> {
         let last_change = match get_record_to_undo(&self.pool).await? {
             None => {
                 log::warn!("Nothing to undo.");
@@ -1825,6 +1839,10 @@ impl Valve {
                 // Undo a delete:
                 let mut tx = self.pool.begin().await?;
 
+                // TODO: Instead of calling result_row_to_config_map() here, change record_row_change()
+                // so that it accepts a ValveRow instead of a SerdeMap.
+                let from = rich_json_to_valve_row(Some(row_number), &from)?;
+
                 insert_new_row_tx(
                     &self.config,
                     &self.datatype_conditions,
@@ -1845,6 +1863,10 @@ impl Valve {
             (Some(from), Some(_)) => {
                 // Undo an an update:
                 let mut tx = self.pool.begin().await?;
+
+                // TODO: Instead of calling result_row_to_config_map() here, change record_row_change()
+                // so that it accepts a ValveRow instead of a SerdeMap.
+                let from = rich_json_to_valve_row(Some(row_number), &from)?;
 
                 update_row_tx(
                     &self.config,
@@ -1868,7 +1890,7 @@ impl Valve {
     }
 
     /// Redo one change and return the change record or None if there was no change to redo.
-    pub async fn redo(&self) -> Result<Option<JsonRow>, ValveError> {
+    pub async fn redo(&self) -> Result<Option<ValveRow>, ValveError> {
         let last_undo = match get_record_to_redo(&self.pool).await? {
             None => {
                 log::warn!("Nothing to redo.");
@@ -1900,6 +1922,10 @@ impl Valve {
             (None, Some(to)) => {
                 // Redo an insert:
                 let mut tx = self.pool.begin().await?;
+
+                // TODO: Instead of calling result_row_to_config_map() here, change record_row_change()
+                // so that it accepts a ValveRow instead of a SerdeMap.
+                let to = rich_json_to_valve_row(Some(row_number), &to)?;
 
                 insert_new_row_tx(
                     &self.config,
@@ -1941,6 +1967,7 @@ impl Valve {
                 // Redo an an update:
                 let mut tx = self.pool.begin().await?;
 
+                let to = rich_json_to_valve_row(Some(row_number), &to)?;
                 update_row_tx(
                     &self.config,
                     &self.datatype_conditions,
