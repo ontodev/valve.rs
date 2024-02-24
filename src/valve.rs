@@ -8,14 +8,12 @@ use crate::{
     get_pool_from_connection_string, get_record_to_redo, get_record_to_undo, get_row_from_db,
     get_sql_for_standard_view, get_sql_for_text_view, get_sql_type,
     get_sql_type_from_global_config, get_table_ddl, insert_chunks, insert_new_row_tx,
-    local_sql_syntax, read_config_files, record_row_change, switch_undone_state, update_row_tx,
-    validate::{
-        rich_json_to_valve_row, validate_row_tx, validate_tree_foreign_keys, validate_under,
-        valve_row_to_rich_json, with_tree_sql,
-    },
+    local_sql_syntax, read_config_files, record_row_change, rich_json_to_valve_row,
+    switch_undone_state, update_row_tx,
+    validate::{validate_row_tx, validate_tree_foreign_keys, validate_under, with_tree_sql},
     valve_grammar::StartParser,
-    verify_table_deps_and_sort, ColumnRule, CompiledCondition, ParsedStructure, CHUNK_SIZE,
-    SQL_PARAM,
+    valve_row_to_rich_json, verify_table_deps_and_sort, ColumnRule, CompiledCondition,
+    ParsedStructure, CHUNK_SIZE, SQL_PARAM,
 };
 use csv::{QuoteStyle, ReaderBuilder, WriterBuilder};
 use enquote::unquote;
@@ -1505,7 +1503,16 @@ impl Valve {
         Ok(self)
     }
 
-    /// TODO: Add a docstring here.
+    /// Given a row number and a row represented as a JSON object in the following ('simple')
+    /// format:
+    /// ```
+    /// {
+    ///     "column_1": value1,
+    ///     "column_2": value2,
+    ///     ...
+    /// },
+    /// ```
+    /// convert it to a [ValveRow] and return it.
     pub fn simple_json_to_valve_row(
         row: &JsonRow,
         row_number: Option<u32>,
@@ -1595,8 +1602,6 @@ impl Valve {
         )
         .await?;
 
-        // TODO: Instead of calling result_row_to_config_map() here, change record_row_change()
-        // so that it accepts a ValveRow instead of a SerdeMap.
         let serde_row = valve_row_to_rich_json(&row);
         record_row_change(&mut tx, table_name, &rn, None, Some(&serde_row), &self.user).await?;
 
@@ -1656,8 +1661,6 @@ impl Valve {
         .await?;
 
         // Record the row update in the history table:
-        // TODO: Instead of calling result_row_to_config_map() here, change record_row_change()
-        // so that it accepts a ValveRow instead of a SerdeMap.
         let serde_row = valve_row_to_rich_json(&row);
         record_row_change(
             &mut tx,
@@ -1854,10 +1857,7 @@ impl Valve {
                 // Undo a delete:
                 let mut tx = self.pool.begin().await?;
 
-                // TODO: Instead of calling result_row_to_config_map() here, change record_row_change()
-                // so that it accepts a ValveRow instead of a SerdeMap.
                 let from = rich_json_to_valve_row(Some(row_number), &from)?;
-
                 insert_new_row_tx(
                     &self.config,
                     &self.datatype_conditions,
@@ -1879,10 +1879,7 @@ impl Valve {
                 // Undo an an update:
                 let mut tx = self.pool.begin().await?;
 
-                // TODO: Instead of calling result_row_to_config_map() here, change record_row_change()
-                // so that it accepts a ValveRow instead of a SerdeMap.
                 let from = rich_json_to_valve_row(Some(row_number), &from)?;
-
                 update_row_tx(
                     &self.config,
                     &self.datatype_conditions,
@@ -1938,10 +1935,7 @@ impl Valve {
                 // Redo an insert:
                 let mut tx = self.pool.begin().await?;
 
-                // TODO: Instead of calling result_row_to_config_map() here, change record_row_change()
-                // so that it accepts a ValveRow instead of a SerdeMap.
                 let to = rich_json_to_valve_row(Some(row_number), &to)?;
-
                 insert_new_row_tx(
                     &self.config,
                     &self.datatype_conditions,

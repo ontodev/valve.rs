@@ -7,7 +7,7 @@ use crate::{
         ValveCell, ValveCellMessage, ValveConfig, ValveDatatypeConfig, ValveError, ValveRow,
         ValveRuleConfig, ValveTreeConstraint,
     },
-    ColumnRule, CompiledCondition, QueryAsIf, QueryAsIfKind, SerdeMap,
+    ColumnRule, CompiledCondition, QueryAsIf, QueryAsIfKind,
 };
 use indexmap::IndexMap;
 use serde_json::{json, Value as SerdeValue};
@@ -15,27 +15,11 @@ use sqlx::{any::AnyPool, query as sqlx_query, Acquire, Row, Transaction, ValueRe
 use std::collections::HashMap;
 
 /// Given a config struct, maps of compiled datatype and rule conditions, a database connection
-/// pool, a table name, a row to validate in the following ('rich') form:
-/// ```
-/// {
-///     "column_1": {
-///         "valid": <true|false>,
-///         "messages": [{"level": level, "rule": rule, "message": message}, ...],
-///         "value": value1
-///     },
-///     "column_2": {
-///         "valid": <true|false>,
-///         "messages": [{"level": level, "rule": rule, "message": message}, ...],
-///         "value": value2
-///     },
-///     ...
-/// },
-/// ```
-/// and a row number in the case where the row already exists,
-/// perform both intra- and inter-row validation and return the validated row. Optionally, if a
-/// transaction is given, use that instead of the pool for database access. Optionally, if
-/// query_as_if is given, validate the row counterfactually according to that parameter. Note that
-/// this function is idempotent.
+/// pool, a table name, a row to validate represented as a [ValveRow], and a row number in the case
+/// where the row already exists, perform both intra- and inter-row validation and return the
+/// validated row. Optionally, if a transaction is given, use that instead of the pool for database
+/// access. Optionally, if query_as_if is given, validate the row counterfactually according to that
+/// parameter. Note that this function is idempotent.
 pub async fn validate_row_tx(
     config: &ValveConfig,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
@@ -678,190 +662,6 @@ fn remove_duplicate_messages(row: &mut ValveRow) -> Result<(), ValveError> {
         cell.messages = messages;
     }
     Ok(())
-}
-
-/// Given a row, represented as a JSON object in the following ('simple') format:
-/// ```
-/// {
-///     "column_1": value1,
-///     "column_2": value2,
-///     ...
-/// },
-/// ```
-/// convert it to a JSON with the following ('rich') format:
-/// ```
-/// {
-///     "column_1": {
-///         "valid": true,  // true is the default
-///         "messages": [], // defaults to empty
-///         "value": value1
-///     },
-///     "column_2": {
-///         "valid": true,  // true is the default
-///         "messages": [], // defaults to empty
-///         "value": value2
-///     },
-///     ...
-/// }
-/// ```
-pub fn simple_to_rich_json(json_row: &SerdeMap) -> Result<SerdeMap, ValveError> {
-    let mut valvified_row = SerdeMap::new();
-    for (column, value) in json_row.iter() {
-        let cell = json!({
-            "valid": true,
-            "messages": [],
-            "value": match value {
-                SerdeValue::String(_) | SerdeValue::Number(_) | SerdeValue::Bool(_) => {
-                    value.clone()
-                },
-                _ => {
-                    return Err(
-                        ValveError::InputError(
-                            format!(
-                                "Value '{}' of column '{}' is not a simple JSON object",
-                                value, column
-                            )
-                        )
-                    )
-                }
-            },
-        });
-        valvified_row.insert(column.to_string(), cell);
-    }
-    Ok(valvified_row)
-}
-
-/// Given a row, with the given row number, represented as a JSON object in the following
-/// ('rich') format:
-/// ```
-/// {
-///     "column_1": {
-///         "valid": <true|false>,
-///         "messages": [{"level": level, "rule": rule, "message": message}, ...],
-///         "value": value1
-///     },
-///     "column_2": {
-///         "valid": <true|false>,
-///         "messages": [{"level": level, "rule": rule, "message": message}, ...],
-///         "value": value2
-///     },
-///     ...
-/// },
-/// ```
-/// convert it into a [ValveRow] and return it.
-pub fn rich_json_to_valve_row(
-    row_number: Option<u32>,
-    row: &SerdeMap,
-) -> Result<ValveRow, ValveError> {
-    let mut valve_row = ValveRow {
-        row_number: row_number,
-        contents: IndexMap::new(),
-    };
-    for (column, cell) in row.iter() {
-        let nulltype = match cell.get("nulltype") {
-            None => None,
-            Some(SerdeValue::String(s)) => Some(s.to_string()),
-            _ => {
-                return Err(ValveError::InputError(
-                    format!("No string 'nulltype' in cell: {:?}.", cell).into(),
-                ))
-            }
-        };
-        let value = match cell.get("value") {
-            Some(SerdeValue::String(s)) => s.to_string(),
-            Some(SerdeValue::Number(n)) => format!("{}", n),
-            _ => {
-                return Err(ValveError::InputError(
-                    format!("No string/number 'value' in cell: {:#?}.", cell).into(),
-                ))
-            }
-        };
-        let valid = match cell.get("valid").and_then(|v| v.as_bool()) {
-            Some(b) => b,
-            None => {
-                return Err(ValveError::InputError(
-                    format!("No bool 'valid' in cell: {:?}.", cell).into(),
-                ))
-            }
-        };
-        let messages = match cell.get("messages").and_then(|m| m.as_array()) {
-            Some(a) => a.to_vec(),
-            None => {
-                return Err(ValveError::InputError(
-                    format!("No array 'messages' in cell: {:?}.", cell).into(),
-                ))
-            }
-        };
-        let valve_cell = ValveCell {
-            nulltype: nulltype,
-            value: json!(value),
-            valid: valid,
-            messages: messages
-                .iter()
-                .map(|m| ValveCellMessage {
-                    level: m.get("level").and_then(|s| s.as_str()).unwrap().to_string(),
-                    rule: m.get("rule").and_then(|s| s.as_str()).unwrap().to_string(),
-                    message: m
-                        .get("message")
-                        .and_then(|s| s.as_str())
-                        .unwrap()
-                        .to_string(),
-                })
-                .collect::<Vec<_>>(),
-        };
-        valve_row.contents.insert(column.to_string(), valve_cell);
-    }
-
-    Ok(valve_row)
-}
-
-/// Given a result row, convert it to a JSON object in the following ('rich') format:
-/// ```
-/// {
-///     "column_1": {
-///         "valid": <true|false>,
-///         "messages": [{"level": level, "rule": rule, "message": message}, ...],
-///         "value": value1
-///     },
-///     "column_2": {
-///         "valid": <true|false>,
-///         "messages": [{"level": level, "rule": rule, "message": message}, ...],
-///         "value": value2
-///     },
-///     ...
-/// },
-/// ```
-/// return it. Note that if the incoming valve row has an associated row_number, this is ignored.
-pub fn valve_row_to_rich_json(incoming: &ValveRow) -> SerdeMap {
-    let mut outgoing = SerdeMap::new();
-    for (column, cell) in incoming.contents.iter() {
-        let mut cell_map = SerdeMap::new();
-        if let Some(nulltype) = &cell.nulltype {
-            cell_map.insert(
-                "nulltype".to_string(),
-                SerdeValue::String(nulltype.to_string()),
-            );
-        }
-        cell_map.insert("value".to_string(), SerdeValue::String(cell.strvalue()));
-        cell_map.insert("valid".to_string(), SerdeValue::Bool(cell.valid));
-        cell_map.insert(
-            "messages".to_string(),
-            SerdeValue::Array(
-                cell.messages
-                    .iter()
-                    .map(|m| {
-                        json!({
-                            "level": m.level.to_string(),
-                            "rule": m.rule.to_string(),
-                            "message": m.message.to_string(),
-                        })
-                    })
-                    .collect::<Vec<_>>(),
-            ),
-        );
-        outgoing.insert(column.to_string(), SerdeValue::Object(cell_map));
-    }
-    outgoing
 }
 
 /// Generate a SQL Select clause that is a union of: (a) the literal values of the given extra row,

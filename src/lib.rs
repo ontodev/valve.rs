@@ -1772,12 +1772,212 @@ pub async fn process_updates(
     Ok(())
 }
 
+/// Given a row, represented as a JSON object in the following ('simple') format:
+/// ```
+/// {
+///     "column_1": value1,
+///     "column_2": value2,
+///     ...
+/// },
+/// ```
+/// convert it to a JSON with the following ('rich') format:
+/// ```
+/// {
+///     "column_1": {
+///         "valid": true,  // true is the default
+///         "messages": [], // defaults to empty
+///         "value": value1
+///     },
+///     "column_2": {
+///         "valid": true,  // true is the default
+///         "messages": [], // defaults to empty
+///         "value": value2
+///     },
+///     ...
+/// }
+/// ```
+pub fn simple_to_rich_json(json_row: &SerdeMap) -> Result<SerdeMap, ValveError> {
+    let mut valvified_row = SerdeMap::new();
+    for (column, value) in json_row.iter() {
+        let cell = json!({
+            "valid": true,
+            "messages": [],
+            "value": match value {
+                SerdeValue::String(_) | SerdeValue::Number(_) | SerdeValue::Bool(_) => {
+                    value.clone()
+                },
+                _ => {
+                    return Err(
+                        ValveError::InputError(
+                            format!(
+                                "Value '{}' of column '{}' is not a simple JSON object",
+                                value, column
+                            )
+                        )
+                    )
+                }
+            },
+        });
+        valvified_row.insert(column.to_string(), cell);
+    }
+    Ok(valvified_row)
+}
+
+/// Given a row, with the given row number, represented as a JSON object in the following
+/// ('rich') format:
+/// ```
+/// {
+///     "column_1": {
+///         "valid": <true|false>,
+///         "messages": [{"level": level, "rule": rule, "message": message}, ...],
+///         "value": value1
+///     },
+///     "column_2": {
+///         "valid": <true|false>,
+///         "messages": [{"level": level, "rule": rule, "message": message}, ...],
+///         "value": value2
+///     },
+///     ...
+/// },
+/// ```
+/// convert it into a [ValveRow] and return it.
+pub fn rich_json_to_valve_row(
+    row_number: Option<u32>,
+    row: &SerdeMap,
+) -> Result<ValveRow, ValveError> {
+    let mut valve_row = ValveRow {
+        row_number: row_number,
+        contents: IndexMap::new(),
+    };
+    for (column, cell) in row.iter() {
+        let nulltype = match cell.get("nulltype") {
+            None => None,
+            Some(SerdeValue::String(s)) => Some(s.to_string()),
+            _ => {
+                return Err(ValveError::InputError(
+                    format!("No string 'nulltype' in cell: {:?}.", cell).into(),
+                ))
+            }
+        };
+        let value = match cell.get("value") {
+            Some(SerdeValue::String(s)) => s.to_string(),
+            Some(SerdeValue::Number(n)) => format!("{}", n),
+            _ => {
+                return Err(ValveError::InputError(
+                    format!("No string/number 'value' in cell: {:#?}.", cell).into(),
+                ))
+            }
+        };
+        let valid = match cell.get("valid").and_then(|v| v.as_bool()) {
+            Some(b) => b,
+            None => {
+                return Err(ValveError::InputError(
+                    format!("No bool 'valid' in cell: {:?}.", cell).into(),
+                ))
+            }
+        };
+        let messages = match cell.get("messages").and_then(|m| m.as_array()) {
+            Some(a) => a.to_vec(),
+            None => {
+                return Err(ValveError::InputError(
+                    format!("No array 'messages' in cell: {:?}.", cell).into(),
+                ))
+            }
+        };
+        let valve_cell = ValveCell {
+            nulltype: nulltype,
+            value: json!(value),
+            valid: valid,
+            messages: messages
+                .iter()
+                .map(|m| ValveCellMessage {
+                    level: m.get("level").and_then(|s| s.as_str()).unwrap().to_string(),
+                    rule: m.get("rule").and_then(|s| s.as_str()).unwrap().to_string(),
+                    message: m
+                        .get("message")
+                        .and_then(|s| s.as_str())
+                        .unwrap()
+                        .to_string(),
+                })
+                .collect::<Vec<_>>(),
+        };
+        valve_row.contents.insert(column.to_string(), valve_cell);
+    }
+
+    Ok(valve_row)
+}
+
+/// Given a [ValveRow], convert it to a JSON object in the following ('rich') format:
+/// ```
+/// {
+///     "column_1": {
+///         "valid": <true|false>,
+///         "messages": [{"level": level, "rule": rule, "message": message}, ...],
+///         "value": value1
+///     },
+///     "column_2": {
+///         "valid": <true|false>,
+///         "messages": [{"level": level, "rule": rule, "message": message}, ...],
+///         "value": value2
+///     },
+///     ...
+/// },
+/// ```
+/// return it. Note that if the incoming valve row has an associated row_number, this is ignored.
+pub fn valve_row_to_rich_json(incoming: &ValveRow) -> SerdeMap {
+    let mut outgoing = SerdeMap::new();
+    for (column, cell) in incoming.contents.iter() {
+        let mut cell_map = SerdeMap::new();
+        if let Some(nulltype) = &cell.nulltype {
+            cell_map.insert(
+                "nulltype".to_string(),
+                SerdeValue::String(nulltype.to_string()),
+            );
+        }
+        cell_map.insert("value".to_string(), SerdeValue::String(cell.strvalue()));
+        cell_map.insert("valid".to_string(), SerdeValue::Bool(cell.valid));
+        cell_map.insert(
+            "messages".to_string(),
+            SerdeValue::Array(
+                cell.messages
+                    .iter()
+                    .map(|m| {
+                        json!({
+                            "level": m.level.to_string(),
+                            "rule": m.rule.to_string(),
+                            "message": m.message.to_string(),
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+        );
+        outgoing.insert(column.to_string(), SerdeValue::Object(cell_map));
+    }
+    outgoing
+}
+
 /// Given a database transaction, a table name, a row number, optionally: the version of the row we
 /// are going to change it from, optionally: the version of the row we are going to change it to,
 /// and the name of the user making the change, record the change to the history table in the
 /// database. Note that `from` and `to` cannot both be None: Either we are changing the row from
 /// something to nothing (i.e., deleting), changing it from nothing to something (i.e., inserting),
 /// or changing it from something to something else (i.e., updating).
+/// Note that `from` and `to` must both be in the ('rich') format:
+/// ```
+/// {
+///     "column_1": {
+///         "valid": <true|false>,
+///         "messages": [{"level": level, "rule": rule, "message": message}, ...],
+///         "value": value1
+///     },
+///     "column_2": {
+///         "valid": <true|false>,
+///         "messages": [{"level": level, "rule": rule, "message": message}, ...],
+///         "value": value2
+///     },
+///     ...
+/// },
+/// ```
 pub async fn record_row_change(
     tx: &mut Transaction<'_, sqlx::Any>,
     table: &str,
@@ -2077,22 +2277,7 @@ pub fn is_sql_type_error(sql_type: &str, value: &str) -> bool {
 }
 
 /// Given a global config struct, compiled datatype and rule conditions, a database connection pool,
-/// a database transaction, a table name, a row in the following ('rich') form:
-/// ```
-/// {
-///     "column_1": {
-///         "valid": <true|false>,
-///         "messages": [{"level": level, "rule": rule, "message": message}, ...],
-///         "value": value1
-///     },
-///     "column_2": {
-///         "valid": <true|false>,
-///         "messages": [{"level": level, "rule": rule, "message": message}, ...],
-///         "value": value2
-///     },
-///     ...
-/// },
-/// ```
+/// a database transaction, a table name, a row represented as a [ValveRow],
 /// insert it to the database using the given transaction, then return the new row number. If
 /// the optional parameter `new_row_number` is given, then that is the row number used when
 /// creating the row, and is the number returned. Otherwise the row number inserted is determined
@@ -2354,22 +2539,7 @@ pub async fn delete_row_tx(
 }
 
 /// Given global config struct, maps of compiled datatype and rule conditions, a database connection
-/// pool, a database transaction, a table name, a row in the following ('rich') form:
-/// ```
-/// {
-///     "column_1": {
-///         "valid": <true|false>,
-///         "messages": [{"level": level, "rule": rule, "message": message}, ...],
-///         "value": value1
-///     },
-///     "column_2": {
-///         "valid": <true|false>,
-///         "messages": [{"level": level, "rule": rule, "message": message}, ...],
-///         "value": value2
-///     },
-///     ...
-/// },
-/// ```
+/// pool, a database transaction, a table name, a row represented as a [ValveRow],
 /// and the row number to update, update the corresponding row in the database. If skip_validation
 /// is set, skip the implicit call to [validate_row_tx()]. If do_not_recurse is set, do not look for
 /// rows which could be affected by this update.
