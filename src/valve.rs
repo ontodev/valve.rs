@@ -64,12 +64,8 @@ impl ValveCell {
 
     /// Returns the value of the cell as a String.
     pub fn strvalue(&self) -> String {
-        match self.value {
-            SerdeValue::String(_) => self
-                .value
-                .as_str()
-                .expect(&format!("Could not render '{}' as a string", self.value))
-                .to_string(),
+        match &self.value {
+            SerdeValue::String(s) => s.to_string(),
             _ => self.value.to_string(),
         }
     }
@@ -112,8 +108,40 @@ pub enum ValveError {
     IOError(std::io::Error),
     /// An error that occurred while serialising or deserialising to/from JSON:
     SerdeJsonError(serde_json::Error),
+    /// An error that occurred while parsing a regex:
+    RegexError(regex::Error),
     /// An error that occurred because of a user's action
     UserError(String),
+}
+
+impl From<csv::Error> for ValveError {
+    fn from(e: csv::Error) -> Self {
+        Self::CsvError(e)
+    }
+}
+
+impl From<sqlx::Error> for ValveError {
+    fn from(e: sqlx::Error) -> Self {
+        Self::DatabaseError(e)
+    }
+}
+
+impl From<serde_json::Error> for ValveError {
+    fn from(e: serde_json::Error) -> Self {
+        Self::SerdeJsonError(e)
+    }
+}
+
+impl From<std::io::Error> for ValveError {
+    fn from(e: std::io::Error) -> Self {
+        Self::IOError(e)
+    }
+}
+
+impl From<regex::Error> for ValveError {
+    fn from(e: regex::Error) -> Self {
+        Self::RegexError(e)
+    }
 }
 
 /// Represents a message associated with a particular value of a particular column.
@@ -311,11 +339,20 @@ pub struct ValveConfig {
 
 impl fmt::Display for ValveConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let json = serde_json::to_string(&self).expect(&format!(
-            "Unable to render Valve configuration: {:?} as JSON.",
-            self
-        ));
-        write!(f, "{}", json)
+        let json = serde_json::to_string(&self);
+        match json {
+            Ok(json) => {
+                write!(f, "{}", json)
+            }
+            Err(e) => {
+                log::error!(
+                    "Unable to render Valve configuration: {:?} as JSON: '{}'",
+                    self,
+                    e
+                );
+                Err(fmt::Error)
+            }
+        }
     }
 }
 
@@ -345,35 +382,11 @@ pub struct Valve {
     pub user: String,
     /// When set to true, the valve instance produces more logging output.
     pub verbose: bool,
-    /// When set to true, valve will prompt for confirmation before performing any destructive
-    /// operations on the database.
+    /// When set to true, valve will ask for confirmation before automatically dropping/truncating
+    /// database tables in order to satisfy a dependency.
     pub interactive: bool,
     /// Activates optimizations used for the initial loading of data.
     pub initial_load: bool,
-}
-
-impl From<csv::Error> for ValveError {
-    fn from(e: csv::Error) -> Self {
-        Self::CsvError(e)
-    }
-}
-
-impl From<sqlx::Error> for ValveError {
-    fn from(e: sqlx::Error) -> Self {
-        Self::DatabaseError(e)
-    }
-}
-
-impl From<serde_json::Error> for ValveError {
-    fn from(e: serde_json::Error) -> Self {
-        Self::SerdeJsonError(e)
-    }
-}
-
-impl From<std::io::Error> for ValveError {
-    fn from(e: std::io::Error) -> Self {
-        Self::IOError(e)
-    }
 }
 
 impl Valve {
@@ -399,7 +412,7 @@ impl Valve {
             sorted_table_list,
             table_dependencies_in,
             table_dependencies_out,
-        ) = read_config_files(table_path, &parser, &pool);
+        ) = read_config_files(table_path, &parser, &pool)?;
 
         let config = ValveConfig {
             special: specials_config,
@@ -409,9 +422,9 @@ impl Valve {
             constraint: constraints_config,
         };
 
-        let datatype_conditions = get_compiled_datatype_conditions(&config, &parser);
-        let rule_conditions = get_compiled_rule_conditions(&config, &datatype_conditions, &parser);
-        let structure_conditions = get_parsed_structure_conditions(&config, &parser);
+        let datatype_conditions = get_compiled_datatype_conditions(&config, &parser)?;
+        let rule_conditions = get_compiled_rule_conditions(&config, &datatype_conditions, &parser)?;
+        let structure_conditions = get_parsed_structure_conditions(&config, &parser)?;
 
         Ok(Self {
             config: config,
@@ -429,6 +442,10 @@ impl Valve {
         })
     }
 
+    /// Configures a SQLite database for initial loading by setting a number of unsafe PRAGMAs
+    /// that are unsafe in general but suitable when setting up a Valve database for the first
+    /// time. Note that if Valve's managed database is not a SQLite database, calling this function
+    /// has no effect.
     pub async fn configure_for_initial_load(&mut self) -> Result<&mut Self, ValveError> {
         if self.initial_load {
             Ok(self)
@@ -448,20 +465,23 @@ impl Valve {
 
     /// Convenience function to retrieve the path to Valve's "table table", the main entrypoint
     /// to Valve's configuration.
-    pub fn get_path(&self) -> String {
-        self.config
+    pub fn get_path(&self) -> Result<String, ValveError> {
+        Ok(self
+            .config
             .table
             .get("table")
             .and_then(|t| Some(t.path.as_str()))
-            .expect("Table table is undefined")
-            .to_string()
+            .ok_or(ValveError::ConfigError(
+                "Table table is undefined".to_string(),
+            ))?
+            .to_string())
     }
 
-    /// Controls the maximum length of a username.
-    const USERNAME_MAX_LEN: usize = 20;
+    /// The maximum length of a username.
+    pub const USERNAME_MAX_LEN: usize = 20;
 
-    /// Sets the user name, which must be a short, trimmed, string without newlines, for this Valve
-    /// instance.
+    /// Sets the user name, which must be a short (see [USERNAME_MAX_LEN](Self::USERNAME_MAX_LEN)),
+    /// trimmed, string without newlines, for this Valve instance.
     pub fn set_user(&mut self, user: &str) -> Result<&mut Self, ValveError> {
         if user.len() > Self::USERNAME_MAX_LEN {
             return Err(ValveError::InputError(format!(
@@ -470,7 +490,7 @@ impl Valve {
                 Self::USERNAME_MAX_LEN
             )));
         } else {
-            let user_regex = Regex::new(r#"^\S([^\n]*\S)*$"#).expect("Invalid regex");
+            let user_regex = Regex::new(r#"^\S([^\n]*\S)*$"#)?;
             if !user_regex.is_match(user) {
                 return Err(ValveError::InputError(format!(
                     "Username '{}' is not a short, trimmed, string without newlines.",
@@ -618,7 +638,10 @@ impl Valve {
                             .tree
                             .get(table)
                             .and_then(|v| Some(v.iter().map(|t| t.child.to_string())))
-                            .expect(&format!("Could not determine trees for table '{}'", table))
+                            .ok_or(ValveError::ConfigError(format!(
+                                "Could not determine trees for table '{}'",
+                                table
+                            )))?
                             .collect::<Vec<_>>();
                         if !trees.contains(&column.to_string()) {
                             return Ok(true);
@@ -690,11 +713,14 @@ impl Valve {
         };
 
         let (columns_config, configured_column_order) = {
-            let table_config = self
-                .config
-                .table
-                .get(table)
-                .expect(&format!("Undefined table '{}'", table));
+            let table_config =
+                self.config
+                    .table
+                    .get(table)
+                    .ok_or(ValveError::ConfigError(format!(
+                        "Undefined table '{}'",
+                        table
+                    )))?;
             let columns_config = &table_config.column;
             let configured_column_order = {
                 let mut configured_column_order = {
@@ -820,9 +846,13 @@ impl Valve {
             {
                 continue;
             }
-            let column_config = columns_config
-                .get(cname)
-                .expect(&format!("Undefined column '{}'", cname));
+            let column_config =
+                columns_config
+                    .get(cname)
+                    .ok_or(ValveError::ConfigError(format!(
+                        "Undefined column '{}'",
+                        cname
+                    )))?;
             let sql_type = get_sql_type_from_global_config(&self.config, table, &cname, &self.pool);
 
             // Check the column's SQL type:
@@ -861,7 +891,10 @@ impl Valve {
                     .structure_conditions
                     .get(structure)
                     .and_then(|p| Some(p.parsed.clone()))
-                    .expect(&format!("Undefined structure '{}'", structure));
+                    .ok_or(ValveError::ConfigError(format!(
+                        "Undefined structure '{}'",
+                        structure
+                    )))?;
                 if structure_has_changed(&parsed_structure, table, &cname, &pk)? {
                     if self.verbose || self.interactive {
                         print!(
@@ -992,7 +1025,13 @@ impl Valve {
         let setup_statements = self.get_setup_statements().await?;
         let mut output = String::from("");
         for table in self.get_sorted_table_list(false) {
-            let table_statements = setup_statements.get(table).unwrap();
+            let table_statements =
+                setup_statements
+                    .get(table)
+                    .ok_or(ValveError::ConfigError(format!(
+                        "Could not find setup statements for {}",
+                        table
+                    )))?;
             let table_output = String::from(table_statements.join("\n"));
             output.push_str(&table_output);
         }
@@ -1006,7 +1045,13 @@ impl Valve {
         for table in &sorted_table_list {
             if self.table_has_changed(*table).await? {
                 self.drop_tables(&vec![table]).await?;
-                let table_statements = setup_statements.get(*table).unwrap();
+                let table_statements =
+                    setup_statements
+                        .get(*table)
+                        .ok_or(ValveError::ConfigError(format!(
+                            "Could not find setup statements for {}",
+                            table
+                        )))?;
                 for stmt in table_statements {
                     self.execute_sql(stmt).await?;
                 }
@@ -1152,17 +1197,16 @@ impl Valve {
 
     /// Returns an IndexMap, indexed by configured table, containing lists of their dependencies.
     /// If incoming is true, the lists are incoming dependencies, else they are outgoing.
-    pub fn collect_dependencies(&self, incoming: bool) -> IndexMap<String, Vec<String>> {
+    pub fn collect_dependencies(
+        &self,
+        incoming: bool,
+    ) -> Result<IndexMap<String, Vec<String>>, ValveError> {
         let tables = self.get_sorted_table_list(false);
         let mut dependencies = IndexMap::new();
         for table in tables {
-            dependencies.insert(
-                table.to_string(),
-                self.get_dependencies(table, incoming)
-                    .expect("Unable to get dependencies"),
-            );
+            dependencies.insert(table.to_string(), self.get_dependencies(table, incoming)?);
         }
-        dependencies
+        Ok(dependencies)
     }
 
     /// Drop all configured tables, in reverse dependency order.
@@ -1302,15 +1346,15 @@ impl Valve {
             if let Some(result) = records.next() {
                 headers = result.unwrap();
             } else {
-                panic!("'{}' is empty", path);
+                return Err(ValveError::DataError(format!("'{}' is empty", path)));
             }
 
             for header in headers.iter() {
                 if header.trim().is_empty() {
-                    panic!(
+                    return Err(ValveError::DataError(format!(
                         "One or more of the header fields is empty for table '{}'",
                         table_name
-                    );
+                    )));
                 }
             }
 
@@ -1473,10 +1517,9 @@ impl Valve {
                 Some(s) => format!(
                     "{}/{}",
                     s,
-                    Path::new(path)
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .expect(&format!("Unable to save to '{}'", path))
+                    Path::new(path).file_name().and_then(|n| n.to_str()).ok_or(
+                        ValveError::InputError(format!("Unable to save to '{}'", path))
+                    )?,
                 ),
                 None => path.to_string(),
             };
@@ -2064,16 +2107,16 @@ impl Valve {
                                     .constraint
                                     .tree
                                     .get(table_name)
-                                    .expect(&format!(
+                                    .ok_or(ValveError::ConfigError(format!(
                                         "No tree config found for table '{}' found",
                                         table_name
-                                    ))
+                                    )))?
                                     .iter()
                                     .find(|t| t.child == *tree_col)
-                                    .expect(&format!(
+                                    .ok_or(ValveError::ConfigError(format!(
                                         "No tree: '{}.{}' found",
                                         table_name, tree_col
-                                    ));
+                                    )))?;
                                 let child_column = &tree.child;
 
                                 let (tree_sql, mut params) = with_tree_sql(
@@ -2106,7 +2149,12 @@ impl Valve {
                                     values.push(get_column_value(&row, &child_column, &sql_type));
                                 }
                             }
-                            _ => panic!("Unrecognised structure: {}", original),
+                            _ => {
+                                return Err(ValveError::DataError(format!(
+                                    "Unrecognised structure: {}",
+                                    original
+                                )))
+                            }
                         };
                     }
                     None => (),

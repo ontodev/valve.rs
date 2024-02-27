@@ -39,7 +39,8 @@ async fn main() -> Result<(), ValveError> {
         ap.refer(&mut interactive).add_option(
             &["--interactive"],
             StoreTrue,
-            r#"Ask for confirmation before performing destructive operations on the database."#,
+            "Ask for confirmation before automatically dropping or truncating database tables in \
+             order to satisfy a dependency.",
         );
         ap.refer(&mut verbose).add_option(
             &["--verbose"],
@@ -221,7 +222,7 @@ async fn main() -> Result<(), ValveError> {
         println!("{}", sorted_table_list.join(", "));
     } else if show_deps_in || show_deps_out {
         let valve = build_valve()?;
-        let dependencies = valve.collect_dependencies(show_deps_in);
+        let dependencies = valve.collect_dependencies(show_deps_in)?;
         for (table, deps) in dependencies.iter() {
             let deps = {
                 let deps = deps.iter().map(|s| format!("'{}'", s)).collect::<Vec<_>>();

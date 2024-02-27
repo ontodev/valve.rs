@@ -74,7 +74,6 @@ use std::{
     fs::File,
     iter::FromIterator,
     path::Path,
-    process,
     str::FromStr,
     sync::Arc,
 };
@@ -223,16 +222,19 @@ pub fn read_config_files(
     path: &str,
     parser: &StartParser,
     pool: &AnyPool,
-) -> (
-    ValveSpecialConfig,
-    HashMap<String, ValveTableConfig>,
-    HashMap<String, ValveDatatypeConfig>,
-    HashMap<String, HashMap<String, Vec<ValveRuleConfig>>>,
-    ValveConstraintConfig,
-    Vec<String>,
-    HashMap<String, Vec<String>>,
-    HashMap<String, Vec<String>>,
-) {
+) -> Result<
+    (
+        ValveSpecialConfig,
+        HashMap<String, ValveTableConfig>,
+        HashMap<String, ValveDatatypeConfig>,
+        HashMap<String, HashMap<String, Vec<ValveRuleConfig>>>,
+        ValveConstraintConfig,
+        Vec<String>,
+        HashMap<String, Vec<String>>,
+        HashMap<String, Vec<String>>,
+    ),
+    ValveError,
+> {
     // Given a list of columns that are required for some table, and a subset of those columns
     // that are required to have values, check if both sets of requirements are met by the given
     // row. Returns a ValveError if both sets of requirements are not met, or if values_are_required
@@ -259,7 +261,7 @@ pub fn read_config_files(
                     return Err(ValveError::ConfigError(format!(
                         "Missing required column '{}'",
                         column
-                    )))
+                    )));
                 }
                 Some(value) if value == "" && values_are_required.contains(&column) => {
                     return Err(ValveError::ConfigError(format!(
@@ -282,19 +284,23 @@ pub fn read_config_files(
     let rows = {
         // Read in the table table from either a file or the database table called "table".
         if path.to_lowercase().ends_with(".tsv") {
-            read_tsv_into_vector(path)
+            read_tsv_into_vector(path)?
         } else {
-            read_db_table_into_vector(pool, "table")
+            read_db_table_into_vector(pool, "table")?
         }
     };
 
     for row in rows {
-        check_table_requirements(
+        if let Err(e) = check_table_requirements(
             &vec!["table", "path", "type", "description"],
             &vec!["table", "path"],
             &row,
-        )
-        .expect(&format!("Error while reading '{}'", path));
+        ) {
+            return Err(ValveError::ConfigError(format!(
+                "Error while reading '{}': {:?}",
+                path, e
+            )));
+        }
 
         let row_table = row.get("table").and_then(|t| t.as_str()).unwrap();
         let row_path = row.get("path").and_then(|t| t.as_str()).unwrap();
@@ -303,10 +309,10 @@ pub fn read_config_files(
 
         if row_type == "table" {
             if path.to_lowercase().ends_with(".tsv") && row_path != path {
-                panic!(
+                return Err(ValveError::ConfigError(format!(
                     "Special 'table' path '{}' does not match this path '{}'",
                     row_path, path
-                );
+                )));
             }
         }
 
@@ -318,29 +324,34 @@ pub fn read_config_files(
             "" => (), // Tables with no type are ignored.
             "column" => {
                 if specials_config.column != "" {
-                    panic!("{}", duplicate_err_msg);
+                    return Err(ValveError::ConfigError(duplicate_err_msg));
                 }
                 specials_config.column = row_table.to_string();
             }
             "datatype" => {
                 if specials_config.datatype != "" {
-                    panic!("{}", duplicate_err_msg);
+                    return Err(ValveError::ConfigError(duplicate_err_msg));
                 }
                 specials_config.datatype = row_table.to_string();
             }
             "rule" => {
                 if specials_config.rule != "" {
-                    panic!("{}", duplicate_err_msg);
+                    return Err(ValveError::ConfigError(duplicate_err_msg));
                 }
                 specials_config.rule = row_table.to_string();
             }
             "table" => {
                 if specials_config.table != "" {
-                    panic!("{}", duplicate_err_msg);
+                    return Err(ValveError::ConfigError(duplicate_err_msg));
                 }
                 specials_config.table = row_table.to_string();
             }
-            _ => panic!("Unrecognized table type '{}' in '{}'", row_type, path),
+            _ => {
+                return Err(ValveError::ConfigError(format!(
+                    "Unrecognized table type '{}' in '{}'",
+                    row_type, path
+                )))
+            }
         };
 
         tables_config.insert(
@@ -357,13 +368,22 @@ pub fn read_config_files(
 
     // Check that all the required special tables are present
     if specials_config.column == "" {
-        panic!("Missing required 'column' table in '{}'", path);
+        return Err(ValveError::ConfigError(format!(
+            "Missing required 'column' table in '{}'",
+            path
+        )));
     }
     if specials_config.datatype == "" {
-        panic!("Missing required 'datatype' table in '{}'", path);
+        return Err(ValveError::ConfigError(format!(
+            "Missing required 'datatype' table in '{}'",
+            path
+        )));
     }
     if specials_config.table == "" {
-        panic!("Missing required 'table' table in '{}'", path);
+        return Err(ValveError::ConfigError(format!(
+            "Missing required 'table' table in '{}'",
+            path
+        )));
     }
 
     // Helper function for extracting special configuration (other than the main 'table'
@@ -378,7 +398,7 @@ pub fn read_config_files(
         tables_config: &HashMap<String, ValveTableConfig>,
         table_table: &str,
         pool: &AnyPool,
-    ) -> Vec<SerdeMap> {
+    ) -> Result<Vec<SerdeMap>, ValveError> {
         if table_table.to_lowercase().ends_with(".tsv") {
             let table_name = match table_type {
                 "column" => &specials_config.column,
@@ -386,23 +406,27 @@ pub fn read_config_files(
                 "rule" => {
                     let rule_table = &specials_config.rule;
                     if rule_table == "" {
-                        panic!("Tried to get special config for rule table but it is undefined");
+                        return Err(ValveError::ConfigError(format!(
+                            "Tried to get special config for rule table but it is undefined"
+                        )));
                     }
                     rule_table
                 }
-                _ => panic!(
-                    "In get_special_config(): Table type '{}' not supported for this function.",
-                    table_type
-                ),
+                _ => {
+                    return Err(ValveError::InputError(format!(
+                        "In get_special_config(): Table type '{}' not supported for this function.",
+                        table_type
+                    )))
+                }
             };
             let path = String::from(
                 tables_config
                     .get(table_name)
                     .and_then(|t| Some(t.path.to_string()))
-                    .expect(&format!(
+                    .ok_or(ValveError::ConfigError(format!(
                         "Table '{}', supposedly of type '{}', not found in tables config",
                         table_name, table_type
-                    )),
+                    )))?,
             );
             read_tsv_into_vector(&path)
         } else {
@@ -415,10 +439,12 @@ pub fn read_config_files(
                 }
             }
             let db_table = match db_table {
-                None => panic!(
-                    "Could not determine special table name for type '{}'.",
-                    table_type
-                ),
+                None => {
+                    return Err(ValveError::ConfigError(format!(
+                        "Could not determine special table name for type '{}'.",
+                        table_type
+                    )))
+                }
                 Some(table) => table,
             };
             read_db_table_into_vector(pool, db_table)
@@ -427,9 +453,9 @@ pub fn read_config_files(
 
     // 2. Load the datatype table.
     let mut datatypes_config = HashMap::new();
-    let rows = get_special_config("datatype", &specials_config, &tables_config, path, pool);
+    let rows = get_special_config("datatype", &specials_config, &tables_config, path, pool)?;
     for row in rows {
-        check_table_requirements(
+        if let Err(e) = check_table_requirements(
             &vec![
                 "datatype",
                 "HTML type",
@@ -442,8 +468,12 @@ pub fn read_config_files(
             ],
             &vec!["datatype"],
             &row,
-        )
-        .expect("Error while reading from datatype table");
+        ) {
+            return Err(ValveError::ConfigError(format!(
+                "Error while reading from datatype table: {:?}",
+                e
+            )));
+        }
 
         let dt_name = row.get("datatype").and_then(|d| d.as_str()).unwrap();
         let html_type = row.get("HTML type").and_then(|s| s.as_str()).unwrap();
@@ -471,14 +501,17 @@ pub fn read_config_files(
     // Check that all the essential datatypes have been configured:
     for dt in vec!["text", "empty", "line", "word"] {
         if !datatypes_config.contains_key(dt) {
-            panic!("Missing required datatype: '{}'", dt);
+            return Err(ValveError::ConfigError(format!(
+                "Missing required datatype: '{}'",
+                dt
+            )));
         }
     }
 
     // 3. Load the column table.
-    let rows = get_special_config("column", &specials_config, &tables_config, path, pool);
+    let rows = get_special_config("column", &specials_config, &tables_config, path, pool)?;
     for row in rows {
-        check_table_requirements(
+        if let Err(e) = check_table_requirements(
             &vec![
                 "table",
                 "nulltype",
@@ -490,20 +523,33 @@ pub fn read_config_files(
             ],
             &vec!["table", "column", "datatype"],
             &row,
-        )
-        .expect("Error while reading from column table");
+        ) {
+            return Err(ValveError::ConfigError(format!(
+                "Error while reading from column table: {:?}",
+                e
+            )));
+        }
 
         let row_table = row.get("table").and_then(|t| t.as_str()).unwrap();
         if !tables_config.contains_key(row_table) {
-            panic!("Undefined table '{}'", row_table);
+            return Err(ValveError::ConfigError(format!(
+                "Undefined table '{}'",
+                row_table
+            )));
         }
         let nulltype = row.get("nulltype").and_then(|t| t.as_str()).unwrap();
         if nulltype != "" && !datatypes_config.contains_key(nulltype) {
-            panic!("Undefined nulltype '{}'", nulltype);
+            return Err(ValveError::ConfigError(format!(
+                "Undefined nulltype '{}'",
+                nulltype
+            )));
         }
         let datatype = row.get("datatype").and_then(|d| d.as_str()).unwrap();
         if !datatypes_config.contains_key(datatype) {
-            panic!("Undefined datatype '{}'", datatype);
+            return Err(ValveError::ConfigError(format!(
+                "Undefined datatype '{}'",
+                datatype
+            )));
         }
         let column_name = row.get("column").and_then(|c| c.as_str()).unwrap();
         let description = row.get("description").and_then(|c| c.as_str()).unwrap();
@@ -529,9 +575,9 @@ pub fn read_config_files(
     let mut rules_config = HashMap::new();
     if specials_config.rule != "" {
         let table_name = &specials_config.rule;
-        let rows = get_special_config(table_name, &specials_config, &tables_config, path, pool);
+        let rows = get_special_config(table_name, &specials_config, &tables_config, path, pool)?;
         for row in rows {
-            check_table_requirements(
+            if let Err(e) = check_table_requirements(
                 &vec![
                     "table",
                     "when column",
@@ -551,15 +597,19 @@ pub fn read_config_files(
                     "description",
                 ],
                 &row,
-            )
-            .expect("Error while reading from rule table");
+            ) {
+                return Err(ValveError::ConfigError(format!(
+                    "Error while reading from rule table: {:?}",
+                    e
+                )));
+            }
 
             let row_table = row.get("table").and_then(|t| t.as_str()).unwrap();
             if !tables_config.contains_key(row_table) {
-                panic!(
+                return Err(ValveError::ConfigError(format!(
                     "Undefined table '{}' while reading rule configuration",
                     row_table
-                );
+                )));
             }
 
             // Add the rule specified in the given row to the list of rules associated with the
@@ -605,7 +655,10 @@ pub fn read_config_files(
                 // need not be configured explicitly. Currently the only examples are the message
                 // and history tables.
                 if table_name != "message" && table_name != "history" {
-                    panic!("No path defined for table {}", table_name);
+                    return Err(ValveError::ConfigError(format!(
+                        "No path defined for table {}",
+                        table_name
+                    )));
                 }
                 continue;
             }
@@ -621,10 +674,10 @@ pub fn read_config_files(
         let this_column_config = tables_config
             .get(&table_name)
             .and_then(|t| Some(t.column.clone()))
-            .expect(&format!(
+            .ok_or(ValveError::ConfigError(format!(
                 "Table '{}' not found in tables config",
                 table_name
-            ));
+            )))?;
         let defined_columns: Vec<String> = this_column_config.keys().cloned().collect::<Vec<_>>();
 
         // We use column_order to explicitly indicate the order in which the columns should appear
@@ -638,13 +691,18 @@ pub fn read_config_files(
             let mut rdr = ReaderBuilder::new()
                 .has_headers(false)
                 .delimiter(b'\t')
-                .from_reader(File::open(path.clone()).unwrap_or_else(|err| {
-                    panic!("Unable to open '{}': {}", path.clone(), err);
-                }));
+                .from_reader(File::open(path.clone()).map_err(|err| {
+                    ValveError::ConfigError(format!("Unable to open '{}': {}", path.clone(), err))
+                })?);
             let mut iter = rdr.records();
             if let Some(result) = iter.next() {
                 let actual_columns = result
-                    .expect(&format!("Unable to read row from '{}'", path))
+                    .map_err(|e| {
+                        ValveError::ConfigError(format!(
+                            "Unable to read row from '{}': {}",
+                            path, e
+                        ))
+                    })?
                     .iter()
                     .map(|c| c.to_string())
                     .collect::<Vec<_>>();
@@ -653,22 +711,22 @@ pub fn read_config_files(
                 for column_name in &actual_columns {
                     column_order.push(column_name.to_string());
                     if !defined_columns.contains(&&column_name.to_string()) {
-                        panic!(
+                        return Err(ValveError::ConfigError(format!(
                             "Column '{}.{}' not in column config",
                             table_name, column_name
-                        );
+                        )));
                     }
                 }
                 for column_name in &defined_columns {
                     if !actual_columns.contains(&column_name.to_string()) {
-                        panic!(
+                        return Err(ValveError::ConfigError(format!(
                             "Defined column '{}.{}' not found in table",
                             table_name, column_name
-                        );
+                        )));
                     }
                 }
             } else {
-                panic!("'{}' is empty", path);
+                return Err(ValveError::ConfigError(format!("'{}' is empty", path)));
             }
         }
         if column_order.is_empty() {
@@ -923,7 +981,7 @@ pub fn read_config_files(
     );
 
     // 9. Finally, return all the configs:
-    (
+    Ok((
         specials_config,
         tables_config,
         datatypes_config,
@@ -932,7 +990,7 @@ pub fn read_config_files(
         sorted_tables,
         table_dependencies_in,
         table_dependencies_out,
-    )
+    ))
 }
 
 /// Given the global configuration struct and a parser, compile all of the datatype conditions,
@@ -941,17 +999,17 @@ pub fn read_config_files(
 pub fn get_compiled_datatype_conditions(
     config: &ValveConfig,
     parser: &StartParser,
-) -> HashMap<String, CompiledCondition> {
+) -> Result<HashMap<String, CompiledCondition>, ValveError> {
     let mut compiled_datatype_conditions: HashMap<String, CompiledCondition> = HashMap::new();
     for (dt_name, dt_config) in config.datatype.iter() {
         let condition = dt_config.condition.as_str();
         if condition != "" {
             let compiled_condition =
-                compile_condition(condition, parser, &compiled_datatype_conditions);
+                compile_condition(condition, parser, &compiled_datatype_conditions)?;
             compiled_datatype_conditions.insert(dt_name.to_string(), compiled_condition);
         }
     }
-    compiled_datatype_conditions
+    Ok(compiled_datatype_conditions)
 }
 
 /// Given the global config struct, a hash map of compiled datatype conditions (indexed by the text
@@ -970,7 +1028,7 @@ pub fn get_compiled_rule_conditions(
     config: &ValveConfig,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     parser: &StartParser,
-) -> HashMap<String, HashMap<String, Vec<ColumnRule>>> {
+) -> Result<HashMap<String, HashMap<String, Vec<ColumnRule>>>, ValveError> {
     let mut compiled_rule_conditions = HashMap::new();
     let tables_config = &config.table;
     let rules_config = &config.rule;
@@ -985,16 +1043,16 @@ pub fn get_compiled_rule_conditions(
                     .collect::<Vec<_>>();
                 for column in vec![&rule.when_column, &rule.then_column] {
                     if !table_columns.contains(&column) {
-                        panic!(
+                        return Err(ValveError::DataError(format!(
                             "Undefined column '{}.{}' in rules table",
                             rules_table, column
-                        );
+                        )));
                     }
                 }
                 let when_compiled =
-                    compile_condition(&rule.when_condition, parser, &compiled_datatype_conditions);
+                    compile_condition(&rule.when_condition, parser, &compiled_datatype_conditions)?;
                 let then_compiled =
-                    compile_condition(&rule.then_condition, parser, &compiled_datatype_conditions);
+                    compile_condition(&rule.then_condition, parser, &compiled_datatype_conditions)?;
 
                 if !compiled_rule_conditions.contains_key(rules_table) {
                     let table_rules = HashMap::new();
@@ -1012,7 +1070,7 @@ pub fn get_compiled_rule_conditions(
             }
         }
     }
-    compiled_rule_conditions
+    Ok(compiled_rule_conditions)
 }
 
 /// Given the global config struct and a parser, parse all of the structure conditions, add them to
@@ -1021,7 +1079,7 @@ pub fn get_compiled_rule_conditions(
 pub fn get_parsed_structure_conditions(
     config: &ValveConfig,
     parser: &StartParser,
-) -> HashMap<String, ParsedStructure> {
+) -> Result<HashMap<String, ParsedStructure>, ValveError> {
     let mut parsed_structure_conditions = HashMap::new();
     let tables_config = &config.table;
     for (table, table_config) in tables_config.iter() {
@@ -1031,10 +1089,10 @@ pub fn get_parsed_structure_conditions(
             if structure != "" {
                 let parsed_structure = parser.parse(structure);
                 if let Err(e) = parsed_structure {
-                    panic!(
+                    return Err(ValveError::ConfigError(format!(
                         "While parsing structure: '{}' for column: '{}.{}' got error:\n{}",
                         structure, table, column, e
-                    );
+                    )));
                 }
                 let parsed_structure = parsed_structure.unwrap();
                 let parsed_structure = &parsed_structure[0];
@@ -1046,7 +1104,7 @@ pub fn get_parsed_structure_conditions(
             }
         }
     }
-    parsed_structure_conditions
+    Ok(parsed_structure_conditions)
 }
 
 /// Given the name of a table and a database connection pool, generate SQL for creating a view
@@ -2029,7 +2087,7 @@ pub async fn record_row_change(
         match (from, to) {
             (None, _) | (_, None) => Ok("NULL".to_string()),
             (Some(from), Some(to)) => {
-                let numeric_re = Regex::new(r"^[0-9]*\.?[0-9]+$").unwrap();
+                let numeric_re = Regex::new(r"^[0-9]*\.?[0-9]+$")?;
                 for (column, cell) in from.iter() {
                     let old_value = cell
                         .get("value")
@@ -2753,24 +2811,29 @@ pub async fn update_row_tx(
 /// Given a path, read a TSV file and return a vector of rows represented as [SerdeMaps](SerdeMap).
 /// Note: Use this function to read "small" TSVs only. In particular, use this for the special
 /// configuration tables.
-pub fn read_tsv_into_vector(path: &str) -> Vec<SerdeMap> {
+pub fn read_tsv_into_vector(path: &str) -> Result<Vec<SerdeMap>, ValveError> {
     let mut rdr =
         ReaderBuilder::new()
             .delimiter(b'\t')
-            .from_reader(File::open(path).unwrap_or_else(|err| {
-                panic!("Unable to open '{}': {}", path, err);
-            }));
+            .from_reader(File::open(path).map_err(|err| {
+                ValveError::ConfigError(format!("Unable to open '{}': {}", path, err))
+            })?);
 
-    let rows: Vec<_> = rdr
-        .deserialize()
-        .map(|result| {
-            let row: SerdeMap = result.expect(format!("Error reading: {}", path).as_str());
-            row
-        })
-        .collect();
+    let mut rows: Vec<SerdeMap> = vec![];
+    for result in rdr.deserialize() {
+        match result {
+            Err(e) => {
+                return Err(ValveError::InputError(format!(
+                    "Error reading {}: {}",
+                    path, e
+                )))
+            }
+            Ok(row) => rows.push(row),
+        }
+    }
 
     if rows.len() < 1 {
-        panic!("No rows in {}", path);
+        return Err(ValveError::DataError(format!("No rows in {}", path)));
     }
 
     for (i, row) in rows.iter().enumerate() {
@@ -2780,28 +2843,30 @@ pub fn read_tsv_into_vector(path: &str) -> Vec<SerdeMap> {
             let val = val.as_str().unwrap();
             let trimmed_val = val.trim();
             if trimmed_val != val {
-                log::error!(
+                return Err(ValveError::DataError(format!(
                     "Value '{}' of column '{}' in row {} of table '{}' {}",
-                    val,
-                    col,
-                    i,
-                    path,
-                    "has leading and/or trailing whitespace."
-                );
-                process::exit(1);
+                    val, col, i, path, "has leading and/or trailing whitespace."
+                )));
             }
         }
     }
 
-    rows
+    Ok(rows)
 }
 
 /// Given a database at the specified location, query the given table and return a vector of rows
 /// represented as [SerdeMaps](SerdeMap).
-pub fn read_db_table_into_vector(pool: &AnyPool, config_table: &str) -> Vec<SerdeMap> {
+pub fn read_db_table_into_vector(
+    pool: &AnyPool,
+    config_table: &str,
+) -> Result<Vec<SerdeMap>, ValveError> {
     let sql = format!("SELECT * FROM \"{}\"", config_table);
-    let rows = block_on(sqlx_query(&sql).fetch_all(pool))
-        .expect(&format!("Error while executing '{}'", sql));
+    let rows = block_on(sqlx_query(&sql).fetch_all(pool)).map_err(|e| {
+        ValveError::InputError(format!(
+            "Error while reading table '{}' from database: {}",
+            config_table, e
+        ))
+    })?;
     let mut table_rows = vec![];
     for row in rows {
         let mut table_row = SerdeMap::new();
@@ -2819,7 +2884,7 @@ pub fn read_db_table_into_vector(pool: &AnyPool, config_table: &str) -> Vec<Serd
         }
         table_rows.push(table_row);
     }
-    table_rows
+    Ok(table_rows)
 }
 
 /// Given a condition on a datatype, if the condition is a Function, then parse it using
@@ -2830,30 +2895,33 @@ pub fn compile_condition(
     condition: &str,
     parser: &StartParser,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
-) -> CompiledCondition {
+) -> Result<CompiledCondition, ValveError> {
     if condition == "null" || condition == "not null" {
         // The case of a "null" or "not null" condition will be treated specially later during the
         // validation phase in a way that does not utilise the associated closure. Since we still
         // have to assign some closure in these cases, we use a constant closure that always
         // returns true:
-        return CompiledCondition {
+        return Ok(CompiledCondition {
             original: String::from(""),
             parsed: Expression::None,
             compiled: Arc::new(|_| true),
-        };
+        });
     }
 
-    let unquoted_re = Regex::new(r#"^['"](?P<unquoted>.*)['"]$"#).unwrap();
+    let unquoted_re = Regex::new(r#"^['"](?P<unquoted>.*)['"]$"#)?;
     let parsed_condition = parser.parse(condition);
     if let Err(_) = parsed_condition {
-        panic!("ERROR: Could not parse condition: {}", condition);
+        return Err(ValveError::InputError(format!(
+            "Could not parse condition: {}",
+            condition
+        )));
     }
     let parsed_condition = parsed_condition.unwrap();
     if parsed_condition.len() != 1 {
-        panic!(
-            "ERROR: Invalid condition: '{}'. Only one condition per column is allowed.",
+        return Err(ValveError::InputError(format!(
+            "Invalid condition: '{}'. Only one condition per column is allowed.",
             condition
-        );
+        )));
     }
     let parsed_condition = &parsed_condition[0];
     match &**parsed_condition {
@@ -2861,13 +2929,16 @@ pub fn compile_condition(
             if name == "equals" {
                 if let Expression::Label(label) = &*args[0] {
                     let label = String::from(unquoted_re.replace(label, "$unquoted"));
-                    return CompiledCondition {
+                    return Ok(CompiledCondition {
                         original: condition.to_string(),
                         parsed: *parsed_condition.clone(),
                         compiled: Arc::new(move |x| x == label),
-                    };
+                    });
                 } else {
-                    panic!("ERROR: Invalid condition: {}", condition);
+                    return Err(ValveError::InputError(format!(
+                        "ERROR: Invalid condition: {}",
+                        condition
+                    )));
                 }
             } else if vec!["exclude", "match", "search"].contains(&name.as_str()) {
                 if let Expression::RegexMatch(pattern, flags) = &*args[0] {
@@ -2879,38 +2950,43 @@ pub fn compile_condition(
                     match name.as_str() {
                         "exclude" => {
                             pattern = format!("{}{}", flags, pattern);
-                            let re = Regex::new(pattern.as_str()).unwrap();
-                            return CompiledCondition {
+                            let re = Regex::new(pattern.as_str())?;
+                            return Ok(CompiledCondition {
                                 original: condition.to_string(),
                                 parsed: *parsed_condition.clone(),
                                 compiled: Arc::new(move |x| !re.is_match(x)),
-                            };
+                            });
                         }
                         "match" => {
                             pattern = format!("^{}{}$", flags, pattern);
-                            let re = Regex::new(pattern.as_str()).unwrap();
-                            return CompiledCondition {
+                            let re = Regex::new(pattern.as_str())?;
+                            return Ok(CompiledCondition {
                                 original: condition.to_string(),
                                 parsed: *parsed_condition.clone(),
                                 compiled: Arc::new(move |x| re.is_match(x)),
-                            };
+                            });
                         }
                         "search" => {
                             pattern = format!("{}{}", flags, pattern);
-                            let re = Regex::new(pattern.as_str()).unwrap();
-                            return CompiledCondition {
+                            let re = Regex::new(pattern.as_str())?;
+                            return Ok(CompiledCondition {
                                 original: condition.to_string(),
                                 parsed: *parsed_condition.clone(),
                                 compiled: Arc::new(move |x| re.is_match(x)),
-                            };
+                            });
                         }
-                        _ => panic!("Unrecognized function name: {}", name),
+                        _ => {
+                            return Err(ValveError::InputError(format!(
+                                "Unrecognized function name: {}",
+                                name
+                            )))
+                        }
                     };
                 } else {
-                    panic!(
+                    return Err(ValveError::InputError(format!(
                         "Argument to condition: {} is not a regular expression",
                         condition
-                    );
+                    )));
                 }
             } else if name == "in" {
                 let mut alternatives: Vec<String> = vec![];
@@ -2919,16 +2995,22 @@ pub fn compile_condition(
                         let value = unquoted_re.replace(value, "$unquoted");
                         alternatives.push(value.to_string());
                     } else {
-                        panic!("Argument: {:?} to function 'in' is not a label", arg);
+                        return Err(ValveError::InputError(format!(
+                            "Argument: {:?} to function 'in' is not a label",
+                            arg
+                        )));
                     }
                 }
-                return CompiledCondition {
+                return Ok(CompiledCondition {
                     original: condition.to_string(),
                     parsed: *parsed_condition.clone(),
                     compiled: Arc::new(move |x| alternatives.contains(&x.to_string())),
-                };
+                });
             } else {
-                panic!("Unrecognized function name: {}", name);
+                return Err(ValveError::InputError(format!(
+                    "Unrecognized function name: {}",
+                    name
+                )));
             }
         }
         Expression::Label(value)
@@ -2937,14 +3019,17 @@ pub fn compile_condition(
             let compiled_datatype_condition = compiled_datatype_conditions
                 .get(&value.to_string())
                 .unwrap();
-            return CompiledCondition {
+            return Ok(CompiledCondition {
                 original: value.to_string(),
                 parsed: compiled_datatype_condition.parsed.clone(),
                 compiled: compiled_datatype_condition.compiled.clone(),
-            };
+            });
         }
         _ => {
-            panic!("Unrecognized condition: {}", condition);
+            return Err(ValveError::InputError(format!(
+                "Unrecognized condition: {}",
+                condition
+            )));
         }
     };
 }
