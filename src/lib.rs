@@ -290,6 +290,8 @@ pub fn read_config_files(
                     row_type.to_string(),
                     SerdeValue::String(row_table.to_string()),
                 );
+            } else if row_type == "external" {
+                // ignore 'external' tables
             } else {
                 panic!("Unrecognized table type '{}' in '{}'", row_type, path);
             }
@@ -495,6 +497,16 @@ pub fn read_config_files(
     constraints_config.insert(String::from("under"), SerdeValue::Object(SerdeMap::new()));
 
     for table_name in tables_config.keys().cloned().collect::<Vec<_>>() {
+        let table_type = tables_config
+            .get(&table_name)
+            .and_then(|n| n.get("type"))
+            .and_then(|p| p.as_str())
+            .unwrap_or_default();
+        if table_type == "external" {
+            eprintln!("Skipping reading external table {table_name}");
+            continue;
+        }
+
         let optional_path = tables_config
             .get(&table_name)
             .and_then(|r| r.get("path"))
@@ -2789,6 +2801,9 @@ pub fn verify_table_deps_and_sort(
     // Check for intra-table cycles:
     let trees = constraints.get("tree").and_then(|t| t.as_object()).unwrap();
     for table_name in table_list {
+        if !trees.contains_key(table_name) {
+            continue;
+        }
         let mut dependency_graph = DiGraphMap::<&str, ()>::new();
         let table_trees = trees.get(table_name).and_then(|t| t.as_array()).unwrap();
         for tree in table_trees {
@@ -2842,6 +2857,9 @@ pub fn verify_table_deps_and_sort(
         .unwrap();
     let mut dependency_graph = DiGraphMap::<&str, ()>::new();
     for table_name in table_list {
+        if !foreign_keys.contains_key(table_name) {
+            continue;
+        }
         let t_index = dependency_graph.add_node(table_name);
         let fkeys = foreign_keys
             .get(table_name)
