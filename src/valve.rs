@@ -9,11 +9,11 @@ use crate::{
     get_record_to_redo, get_record_to_undo, get_row_from_db, get_sql_for_standard_view,
     get_sql_for_text_view, get_sql_type, get_sql_type_from_global_config, get_table_ddl,
     insert_chunks, insert_new_row_tx, local_sql_syntax, read_config_files, record_row_change,
-    rich_json_to_valve_row, switch_undone_state, update_row_tx,
+    switch_undone_state, update_row_tx,
     validate::{validate_row_tx, validate_tree_foreign_keys, validate_under, with_tree_sql},
     valve_grammar::StartParser,
-    valve_row_to_rich_json, verify_table_deps_and_sort, ColumnRule, CompiledCondition,
-    ParsedStructure, CHUNK_SIZE, SQL_PARAM,
+    verify_table_deps_and_sort, ColumnRule, CompiledCondition, ParsedStructure, CHUNK_SIZE,
+    SQL_PARAM,
 };
 use csv::{QuoteStyle, ReaderBuilder, WriterBuilder};
 use enquote::unquote;
@@ -33,6 +33,214 @@ use std::{collections::HashMap, fmt, fs::File, path::Path};
 /// Alias for [Map](serde_json::map)<[String], [Value](serde_json::value)>.
 pub type JsonRow = serde_json::Map<String, SerdeValue>;
 
+/// Given a row, represented as a JSON object in the following format:
+/// ```
+/// {
+///     "column_1": value1,
+///     "column_2": value2,
+///     "column_3": value3,
+///     ...
+/// },
+/// ```
+/// if a given value happens to be a string, attempt to parse it as a complex type (i.e., as an
+/// [Array](SerdeValue::Array) or [Object](SerdeValue::Object)) and replace the field with the
+/// parsed value if the parsing has been successful. For instance, supppose `value1` above happens
+/// to be a [String](SerdeValue::String) that happens to be parsable as an
+/// [Object](SerdeValue::Object) with the fields "column", "value", "level", "rule",
+/// and "message", suppose `value2` happens to be an array, and suppose `value3` is a number. Then
+/// the JSON object returned from this function will look like:
+/// ```
+/// {
+///     "column_1": {
+///         "column": value1_column,
+///         "value": value1_value,
+///         "level": value1_level,
+///         "rule": value1_rule,
+///         "message": value1_message,
+///     },
+///     "column_2": [value2_a, value2_b, ...],
+///     "column_3": numeric_value_3,
+///     ...
+/// }
+/// ```
+pub fn unfold_json_row(json_row: &JsonRow) -> Result<JsonRow, ValveError> {
+    let mut rich_row = JsonRow::new();
+    for (column, value) in json_row.iter() {
+        let value = match value {
+            SerdeValue::String(strvalue) => match serde_json::from_str::<SerdeValue>(strvalue) {
+                Ok(SerdeValue::Array(v)) => json!(v),
+                Ok(SerdeValue::Object(v)) => json!(v),
+                Err(_) | Ok(_) => value.clone(),
+            },
+            _ => value.clone(),
+        };
+        rich_row.insert(column.to_string(), value);
+    }
+    Ok(rich_row)
+}
+
+/// Represents a particular row of data with validation results.
+#[derive(Clone, Debug)]
+pub struct ValveRow {
+    /// The row number of the row.
+    pub row_number: Option<u32>,
+    /// A map from column names to the cells corresponding to each column in the row.
+    pub contents: IndexMap<String, ValveCell>,
+}
+
+impl ValveRow {
+    /// Given a row number and a row represented as a JSON object in the following ('simple')
+    /// format:
+    /// ```
+    /// {
+    ///     "column_1": value1,
+    ///     "column_2": value2,
+    ///     ...
+    /// },
+    /// ```
+    /// convert it to a [ValveRow] and return it.
+    pub fn from_simple_json(row: &JsonRow, row_number: Option<u32>) -> Result<Self, ValveError> {
+        let mut valve_cells = IndexMap::new();
+        for (column, value) in row.iter() {
+            valve_cells.insert(column.to_string(), ValveCell::new(value));
+        }
+        Ok(Self {
+            row_number: row_number,
+            contents: valve_cells,
+        })
+    }
+
+    /// Given a row, with the given row number, represented as a JSON object in the following
+    /// ('rich') format:
+    /// ```
+    /// {
+    ///     "column_1": {
+    ///         "valid": <true|false>,
+    ///         "messages": [{"level": level, "rule": rule, "message": message}, ...],
+    ///         "value": value1
+    ///     },
+    ///     "column_2": {
+    ///         "valid": <true|false>,
+    ///         "messages": [{"level": level, "rule": rule, "message": message}, ...],
+    ///         "value": value2
+    ///     },
+    ///     ...
+    /// },
+    /// ```
+    /// convert it into a [ValveRow] and return it.
+    pub fn from_rich_json(row_number: Option<u32>, row: &JsonRow) -> Result<Self, ValveError> {
+        let mut valve_row = Self {
+            row_number: row_number,
+            contents: IndexMap::new(),
+        };
+        for (column, cell) in row.iter() {
+            let nulltype = match cell.get("nulltype") {
+                None => None,
+                Some(SerdeValue::String(s)) => Some(s.to_string()),
+                _ => {
+                    return Err(ValveError::InputError(
+                        format!("No string 'nulltype' in cell: {:?}.", cell).into(),
+                    ))
+                }
+            };
+            let value = match cell.get("value") {
+                Some(SerdeValue::String(s)) => s.to_string(),
+                Some(SerdeValue::Number(n)) => format!("{}", n),
+                _ => {
+                    return Err(ValveError::InputError(
+                        format!("No string/number 'value' in cell: {:#?}.", cell).into(),
+                    ))
+                }
+            };
+            let valid = match cell.get("valid").and_then(|v| v.as_bool()) {
+                Some(b) => b,
+                None => {
+                    return Err(ValveError::InputError(
+                        format!("No bool 'valid' in cell: {:?}.", cell).into(),
+                    ))
+                }
+            };
+            let messages = match cell.get("messages").and_then(|m| m.as_array()) {
+                Some(a) => a.to_vec(),
+                None => {
+                    return Err(ValveError::InputError(
+                        format!("No array 'messages' in cell: {:?}.", cell).into(),
+                    ))
+                }
+            };
+            let valve_cell = ValveCell {
+                nulltype: nulltype,
+                value: json!(value),
+                valid: valid,
+                messages: messages
+                    .iter()
+                    .map(|m| ValveCellMessage {
+                        level: m.get("level").and_then(|s| s.as_str()).unwrap().to_string(),
+                        rule: m.get("rule").and_then(|s| s.as_str()).unwrap().to_string(),
+                        message: m
+                            .get("message")
+                            .and_then(|s| s.as_str())
+                            .unwrap()
+                            .to_string(),
+                    })
+                    .collect::<Vec<_>>(),
+            };
+            valve_row.contents.insert(column.to_string(), valve_cell);
+        }
+
+        Ok(valve_row)
+    }
+
+    /// Given a [ValveRow], convert it to a JSON object in the following ('rich') format:
+    /// ```
+    /// {
+    ///     "column_1": {
+    ///         "valid": <true|false>,
+    ///         "messages": [{"level": level, "rule": rule, "message": message}, ...],
+    ///         "value": value1
+    ///     },
+    ///     "column_2": {
+    ///         "valid": <true|false>,
+    ///         "messages": [{"level": level, "rule": rule, "message": message}, ...],
+    ///         "value": value2
+    ///     },
+    ///     ...
+    /// },
+    /// ```
+    /// return it. Note that if the incoming valve row has an associated row_number, this is ignored.
+    pub fn to_rich_json(&self) -> JsonRow {
+        let mut outgoing = JsonRow::new();
+        for (column, cell) in self.contents.iter() {
+            let mut cell_map = JsonRow::new();
+            if let Some(nulltype) = &cell.nulltype {
+                cell_map.insert(
+                    "nulltype".to_string(),
+                    SerdeValue::String(nulltype.to_string()),
+                );
+            }
+            cell_map.insert("value".to_string(), SerdeValue::String(cell.strvalue()));
+            cell_map.insert("valid".to_string(), SerdeValue::Bool(cell.valid));
+            cell_map.insert(
+                "messages".to_string(),
+                SerdeValue::Array(
+                    cell.messages
+                        .iter()
+                        .map(|m| {
+                            json!({
+                                "level": m.level.to_string(),
+                                "rule": m.rule.to_string(),
+                                "message": m.message.to_string(),
+                            })
+                        })
+                        .collect::<Vec<_>>(),
+                ),
+            );
+            outgoing.insert(column.to_string(), SerdeValue::Object(cell_map));
+        }
+        outgoing
+    }
+}
+
 /// Represents a particular cell in a particular row of data with vaildation results.
 #[derive(Clone, Debug)]
 pub struct ValveCell {
@@ -48,7 +256,9 @@ pub struct ValveCell {
 }
 
 impl ValveCell {
-    /// Initializes a new [ValveCell] based on the given [SerdeValue] and returns it.
+    /// Initializes a new [ValveCell] based on the given [SerdeValue] and returns it. Note that
+    /// any value that is not a [String](SerdeValue::String), [Number](SerdeValue::Number), or
+    /// [Bool](SerdeValue::Bool) is converted to a [String](SerdeValue::String).
     pub fn new(value: &SerdeValue) -> Self {
         let value = match value {
             SerdeValue::String(_) | SerdeValue::Number(_) | SerdeValue::Bool(_) => value.clone(),
@@ -80,15 +290,6 @@ pub struct ValveCellMessage {
     pub rule: String,
     /// The contents of the message.
     pub message: String,
-}
-
-/// Represents a particular row of data with validation results.
-#[derive(Clone, Debug)]
-pub struct ValveRow {
-    /// The row number of the row.
-    pub row_number: Option<u32>,
-    /// A map from column names to the cells corresponding to each column in the row.
-    pub contents: IndexMap<String, ValveCell>,
 }
 
 /// Generic enum representing various error types returned by Valve methods
@@ -1569,30 +1770,6 @@ impl Valve {
         Ok(self)
     }
 
-    /// Given a row number and a row represented as a JSON object in the following ('simple')
-    /// format:
-    /// ```
-    /// {
-    ///     "column_1": value1,
-    ///     "column_2": value2,
-    ///     ...
-    /// },
-    /// ```
-    /// convert it to a [ValveRow] and return it.
-    pub fn simple_json_to_valve_row(
-        row: &JsonRow,
-        row_number: Option<u32>,
-    ) -> Result<ValveRow, ValveError> {
-        let mut valve_cells = IndexMap::new();
-        for (column, value) in row.iter() {
-            valve_cells.insert(column.to_string(), ValveCell::new(value));
-        }
-        Ok(ValveRow {
-            row_number: row_number,
-            contents: valve_cells,
-        })
-    }
-
     /// Given a table name and a row, represented as a JSON object in the following ('simple')
     /// format:
     /// ```
@@ -1609,7 +1786,7 @@ impl Valve {
         row: &JsonRow,
         row_number: Option<u32>,
     ) -> Result<ValveRow, ValveError> {
-        let row = Self::simple_json_to_valve_row(row, row_number)?;
+        let row = ValveRow::from_simple_json(row, row_number)?;
         validate_row_tx(
             &self.config,
             &self.datatype_conditions,
@@ -1641,7 +1818,7 @@ impl Valve {
         row: &JsonRow,
     ) -> Result<(u32, ValveRow), ValveError> {
         let mut tx = self.pool.begin().await?;
-        let row = Self::simple_json_to_valve_row(row, None)?;
+        let row = ValveRow::from_simple_json(row, None)?;
         let row = validate_row_tx(
             &self.config,
             &self.datatype_conditions,
@@ -1668,7 +1845,7 @@ impl Valve {
         )
         .await?;
 
-        let serde_row = valve_row_to_rich_json(&row);
+        let serde_row = row.to_rich_json();
         record_row_change(&mut tx, table_name, &rn, None, Some(&serde_row), &self.user).await?;
 
         tx.commit().await?;
@@ -1698,7 +1875,7 @@ impl Valve {
         let old_row =
             get_row_from_db(&self.config, &self.pool, &mut tx, table_name, &row_number).await?;
 
-        let row = Self::simple_json_to_valve_row(row, Some(*row_number))?;
+        let row = ValveRow::from_simple_json(row, Some(*row_number))?;
         let row = validate_row_tx(
             &self.config,
             &self.datatype_conditions,
@@ -1727,7 +1904,7 @@ impl Valve {
         .await?;
 
         // Record the row update in the history table:
-        let serde_row = valve_row_to_rich_json(&row);
+        let serde_row = row.to_rich_json();
         record_row_change(
             &mut tx,
             table_name,
@@ -1836,7 +2013,7 @@ impl Valve {
                 // Undo a delete:
                 let mut tx = self.pool.begin().await?;
 
-                let from = rich_json_to_valve_row(Some(row_number), &from)?;
+                let from = ValveRow::from_rich_json(Some(row_number), &from)?;
                 insert_new_row_tx(
                     &self.config,
                     &self.datatype_conditions,
@@ -1858,7 +2035,7 @@ impl Valve {
                 // Undo an an update:
                 let mut tx = self.pool.begin().await?;
 
-                let from = rich_json_to_valve_row(Some(row_number), &from)?;
+                let from = ValveRow::from_rich_json(Some(row_number), &from)?;
                 update_row_tx(
                     &self.config,
                     &self.datatype_conditions,
@@ -1914,7 +2091,7 @@ impl Valve {
                 // Redo an insert:
                 let mut tx = self.pool.begin().await?;
 
-                let to = rich_json_to_valve_row(Some(row_number), &to)?;
+                let to = ValveRow::from_rich_json(Some(row_number), &to)?;
                 insert_new_row_tx(
                     &self.config,
                     &self.datatype_conditions,
@@ -1955,7 +2132,7 @@ impl Valve {
                 // Redo an an update:
                 let mut tx = self.pool.begin().await?;
 
-                let to = rich_json_to_valve_row(Some(row_number), &to)?;
+                let to = ValveRow::from_rich_json(Some(row_number), &to)?;
                 update_row_tx(
                     &self.config,
                     &self.datatype_conditions,
