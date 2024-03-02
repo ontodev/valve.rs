@@ -744,6 +744,9 @@ impl Valve {
     pub async fn dump_schema(&self) -> Result<(), ValveError> {
         let setup_statements = self.get_setup_statements().await?;
         for table in self.get_sorted_table_list(false) {
+            if !setup_statements.contains_key(table) {
+                continue;
+            }
             let table_statements = setup_statements.get(table).unwrap();
             let output = String::from(table_statements.join("\n"));
             println!("{}\n", output);

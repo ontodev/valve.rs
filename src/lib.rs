@@ -3217,6 +3217,28 @@ pub fn get_table_ddl(
         }
     };
 
+    // Exclude foreign keys that target external tables.
+    let all_foreign_keys = table_constraints
+        .get("foreign")
+        .and_then(|v| v.as_array())
+        .unwrap();
+    let mut foreign_keys: Vec<SerdeValue> = vec![];
+    for fkey in all_foreign_keys.iter() {
+        let ftable = fkey.get("ftable").and_then(|s| s.as_str()).unwrap();
+        let table_type = tables_config
+            .get(ftable)
+            .and_then(|n| n.get("type"))
+            .and_then(|p| p.as_str())
+            .unwrap_or_default();
+        if table_type == "external" {
+            eprintln!(
+                "Skipping foreign key constraint from {table_name} to external table {ftable}"
+            );
+            continue;
+        }
+        foreign_keys.push(fkey.clone());
+    }
+
     let c = colvals.len();
     let mut r = 0;
     for row in colvals {
@@ -3271,23 +3293,13 @@ pub fn get_table_ddl(
 
         // If there are foreign constraints add a column to the end of the statement which we will
         // finish after this for loop is done:
-        if !(r >= c
-            && table_constraints
-                .get("foreign")
-                .and_then(|v| v.as_array())
-                .and_then(|v| Some(v.is_empty()))
-                .unwrap())
-        {
+        if !(r >= c && foreign_keys.is_empty()) {
             line.push_str(",");
         }
         create_lines.push(line);
     }
 
     // Add the SQL to indicate any foreign constraints:
-    let foreign_keys = table_constraints
-        .get("foreign")
-        .and_then(|v| v.as_array())
-        .unwrap();
     let num_fkeys = foreign_keys.len();
     for (i, fkey) in foreign_keys.iter().enumerate() {
         create_lines.push(format!(
