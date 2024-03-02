@@ -21,7 +21,7 @@ enquote = "1.1.0"
 env_logger = "0.10.2"
 # Futures is not used directly but is needed for the python bindings in github.com/ontodev/valve.py.
 futures = "0.3"
-indexmap = "1.9.3"
+indexmap = { version = "1.9.3", features = [ "serde-1" ] }
 indoc = "1.0"
 itertools = "0.10.3"
 lalrpop-util = { version = "0.19.7", features = ["lexer"] }
