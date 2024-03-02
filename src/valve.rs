@@ -639,6 +639,15 @@ impl Valve {
         // constraint information to constrains_config.
         let mut setup_statements = HashMap::new();
         for table_name in tables_config.keys().cloned().collect::<Vec<_>>() {
+            let table_type = tables_config.get(&table_name).and_then(|t| t.get("type"));
+            if let Some(table_type) = table_type {
+                let table_type = table_type.as_str().unwrap();
+                if table_type == "external" {
+                    eprintln!("Skipping creation of external table {table_name}");
+                    continue;
+                }
+            }
+
             // Generate the statements for creating the table and its corresponding conflict table:
             let mut table_statements = vec![];
             for table in vec![table_name.to_string(), format!("{}_conflict", table_name)] {
@@ -735,6 +744,9 @@ impl Valve {
     pub async fn dump_schema(&self) -> Result<(), ValveError> {
         let setup_statements = self.get_setup_statements().await?;
         for table in self.get_sorted_table_list(false) {
+            if !setup_statements.contains_key(table) {
+                continue;
+            }
             let table_statements = setup_statements.get(table).unwrap();
             let output = String::from(table_statements.join("\n"));
             println!("{}\n", output);
@@ -747,6 +759,9 @@ impl Valve {
         let setup_statements = self.get_setup_statements().await?;
         let sorted_table_list = self.get_sorted_table_list(false);
         for table in &sorted_table_list {
+            if !setup_statements.contains_key(*table) {
+                continue;
+            }
             if self.table_has_changed(*table).await? {
                 self.drop_tables(&vec![table]).await?;
                 let table_statements = setup_statements.get(*table).unwrap();
@@ -947,6 +962,19 @@ impl Valve {
         };
 
         for table in &truncate_list {
+            let table_type = self
+                .config
+                .get("table")
+                .and_then(|t| t.as_object())
+                .and_then(|o| o.get(table))
+                .and_then(|n| n.get("type"));
+            if let Some(table_type) = table_type {
+                let table_type = table_type.as_str().unwrap();
+                if table_type == "external" {
+                    eprintln!("Skipping truncating external table {table}");
+                    continue;
+                }
+            }
             let sql = truncate_sql(&table);
             self.execute_sql(&sql).await?;
             if *table != "message" && *table != "history" {
@@ -995,6 +1023,19 @@ impl Valve {
                 continue;
             }
             let table_name = table_name.to_string();
+            let table_type = self
+                .config
+                .get("table")
+                .and_then(|t| t.as_object())
+                .and_then(|o| o.get(&table_name))
+                .and_then(|n| n.get("type"));
+            if let Some(table_type) = table_type {
+                let table_type = table_type.as_str().unwrap();
+                if table_type == "external" {
+                    eprintln!("Skipping loading external table {table_name}");
+                    continue;
+                }
+            }
             let path = String::from(
                 self.config
                     .get("table")

@@ -290,6 +290,8 @@ pub fn read_config_files(
                     row_type.to_string(),
                     SerdeValue::String(row_table.to_string()),
                 );
+            } else if row_type == "external" {
+                // ignore 'external' tables
             } else {
                 panic!("Unrecognized table type '{}' in '{}'", row_type, path);
             }
@@ -495,6 +497,16 @@ pub fn read_config_files(
     constraints_config.insert(String::from("under"), SerdeValue::Object(SerdeMap::new()));
 
     for table_name in tables_config.keys().cloned().collect::<Vec<_>>() {
+        let table_type = tables_config
+            .get(&table_name)
+            .and_then(|n| n.get("type"))
+            .and_then(|p| p.as_str())
+            .unwrap_or_default();
+        if table_type == "external" {
+            eprintln!("Skipping reading external table {table_name}");
+            continue;
+        }
+
         let optional_path = tables_config
             .get(&table_name)
             .and_then(|r| r.get("path"))
@@ -2789,6 +2801,9 @@ pub fn verify_table_deps_and_sort(
     // Check for intra-table cycles:
     let trees = constraints.get("tree").and_then(|t| t.as_object()).unwrap();
     for table_name in table_list {
+        if !trees.contains_key(table_name) {
+            continue;
+        }
         let mut dependency_graph = DiGraphMap::<&str, ()>::new();
         let table_trees = trees.get(table_name).and_then(|t| t.as_array()).unwrap();
         for tree in table_trees {
@@ -2842,6 +2857,9 @@ pub fn verify_table_deps_and_sort(
         .unwrap();
     let mut dependency_graph = DiGraphMap::<&str, ()>::new();
     for table_name in table_list {
+        if !foreign_keys.contains_key(table_name) {
+            continue;
+        }
         let t_index = dependency_graph.add_node(table_name);
         let fkeys = foreign_keys
             .get(table_name)
@@ -3199,6 +3217,28 @@ pub fn get_table_ddl(
         }
     };
 
+    // Exclude foreign keys that target external tables.
+    let all_foreign_keys = table_constraints
+        .get("foreign")
+        .and_then(|v| v.as_array())
+        .unwrap();
+    let mut foreign_keys: Vec<SerdeValue> = vec![];
+    for fkey in all_foreign_keys.iter() {
+        let ftable = fkey.get("ftable").and_then(|s| s.as_str()).unwrap();
+        let table_type = tables_config
+            .get(ftable)
+            .and_then(|n| n.get("type"))
+            .and_then(|p| p.as_str())
+            .unwrap_or_default();
+        if table_type == "external" {
+            eprintln!(
+                "Skipping foreign key constraint from {table_name} to external table {ftable}"
+            );
+            continue;
+        }
+        foreign_keys.push(fkey.clone());
+    }
+
     let c = colvals.len();
     let mut r = 0;
     for row in colvals {
@@ -3253,23 +3293,13 @@ pub fn get_table_ddl(
 
         // If there are foreign constraints add a column to the end of the statement which we will
         // finish after this for loop is done:
-        if !(r >= c
-            && table_constraints
-                .get("foreign")
-                .and_then(|v| v.as_array())
-                .and_then(|v| Some(v.is_empty()))
-                .unwrap())
-        {
+        if !(r >= c && foreign_keys.is_empty()) {
             line.push_str(",");
         }
         create_lines.push(line);
     }
 
     // Add the SQL to indicate any foreign constraints:
-    let foreign_keys = table_constraints
-        .get("foreign")
-        .and_then(|v| v.as_array())
-        .unwrap();
     let num_fkeys = foreign_keys.len();
     for (i, fkey) in foreign_keys.iter().enumerate() {
         create_lines.push(format!(
