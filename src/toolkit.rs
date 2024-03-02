@@ -1,4 +1,4 @@
-//! The Valve Toolkit
+//! The Valve Toolkit - low-level functions useful for working with Valve.
 
 use crate::{
     ast::Expression,
