@@ -1,8 +1,8 @@
 //! API tests
 
 use ontodev_valve::{
+    toolkit::SerdeMap,
     valve::{Valve, ValveError},
-    SerdeMap,
 };
 use rand::distributions::{Alphanumeric, DistString, Distribution, Uniform};
 use rand::{random, thread_rng};
