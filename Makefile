@@ -123,6 +123,15 @@ pg_random_test: valve random_test_data | build test/output
 	test/round_trip.sh postgresql:///valve_postgres $(random_test_dir)/table.tsv
 	@echo "Test succeeded!"
 
+penguin_test_threshold = 200
+penguin_test:
+	cargo build --release
+	cd test/penguins && ./generate.py 1000000
+	cd test/penguins && ln -f -s ../../target/release/ontodev_valve valve
+	cd test/penguins && time -p ./valve --initial_load src/schema/table.tsv penguins.db 2>&1 \
+		| grep "real" \
+		| awk '{ printf "Elapsed time: %.2f seconds.\n", $$2; if ($$2 > $(penguin_test_threshold)) { print "Threshold exceeded."; exit 1 } }'
+
 guess_test_dir = test/guess_test_data
 guess_test_db = build/valve_guess.db
 
