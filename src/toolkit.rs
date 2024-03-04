@@ -8,7 +8,7 @@ use crate::{
     valve::{
         ValveCell, ValveCellMessage, ValveChange, ValveColumnConfig, ValveConfig,
         ValveConstraintConfig, ValveDatatypeConfig, ValveError, ValveForeignConstraint, ValveRow,
-        ValveRuleConfig, ValveSpecialConfig, ValveTableConfig, ValveTreeConstraint,
+        ValveRowChange, ValveRuleConfig, ValveSpecialConfig, ValveTableConfig, ValveTreeConstraint,
         ValveUnderConstraint,
     },
     valve_grammar::StartParser,
@@ -1911,8 +1911,10 @@ pub async fn record_row_change(
 /// convert it to a vector of [ValveChange] structs.
 pub fn convert_undo_or_redo_record_to_change(
     record: &AnyRow,
-) -> Result<Option<Vec<ValveChange>>, ValveError> {
+) -> Result<Option<ValveRowChange>, ValveError> {
     let table: &str = record.get("table");
+    let row_number: i64 = record.get("row");
+    let row_number = row_number as u32;
     let from = get_json_from_row(&record, "from");
     let to = get_json_from_row(&record, "to");
     let summary = {
@@ -1939,7 +1941,6 @@ pub fn convert_undo_or_redo_record_to_change(
             let value = entry.get("value").and_then(|s| s.as_str()).unwrap();
             let message = entry.get("message").and_then(|s| s.as_str()).unwrap();
             column_changes.push(ValveChange {
-                table: table.to_string(),
                 column: column.to_string(),
                 level: level.to_string(),
                 old_value: old_value.to_string(),
@@ -1947,7 +1948,12 @@ pub fn convert_undo_or_redo_record_to_change(
                 message: message.to_string(),
             });
         }
-        return Ok(Some(column_changes));
+        return Ok(Some(ValveRowChange {
+            table: table.to_string(),
+            row: row_number,
+            message: format!("Update row {row_number} of '{table}'"),
+            changes: column_changes,
+        }));
     }
 
     // If the `summary` part of the record is not present, then either the `from` or the `to`
@@ -1958,7 +1964,6 @@ pub fn convert_undo_or_redo_record_to_change(
         for (column, change) in from {
             let old_value = change.get("value").and_then(|s| s.as_str()).unwrap();
             column_changes.push(ValveChange {
-                table: table.to_string(),
                 column: column.to_string(),
                 level: "delete".to_string(),
                 old_value: old_value.to_string(),
@@ -1966,7 +1971,12 @@ pub fn convert_undo_or_redo_record_to_change(
                 message: "".to_string(),
             });
         }
-        return Ok(Some(column_changes));
+        return Ok(Some(ValveRowChange {
+            table: table.to_string(),
+            row: row_number,
+            message: format!("Delete row {} from '{}'", row_number, table),
+            changes: column_changes,
+        }));
     }
 
     // If `to` is not null then this is an insert (i.e., the row has changed from nothing to
@@ -1976,7 +1986,6 @@ pub fn convert_undo_or_redo_record_to_change(
         for (column, change) in to {
             let value = change.get("value").and_then(|s| s.as_str()).unwrap();
             column_changes.push(ValveChange {
-                table: table.to_string(),
                 column: column.to_string(),
                 level: "insert".to_string(),
                 old_value: "".to_string(),
@@ -1984,7 +1993,12 @@ pub fn convert_undo_or_redo_record_to_change(
                 message: "".to_string(),
             });
         }
-        return Ok(Some(column_changes));
+        return Ok(Some(ValveRowChange {
+            table: table.to_string(),
+            row: row_number,
+            message: format!("Add row {} to '{}'", row_number, table),
+            changes: column_changes,
+        }));
     }
 
     // If we get to here, then `summary`, `from`, and `to` are all null so we return an error.

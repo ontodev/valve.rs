@@ -141,36 +141,22 @@ impl ValveRow {
         )?)
     }
 
-    /// Given a [ValveRow], convert it to a [JsonRow] and return it. If `include_rn` is set to true,
-    /// all information is preserved in the conversion and the resulting JSON looks like:
-    /// ```
-    /// {
-    ///     "row_number": ROW_NUMBER,
-    ///     "contents":  {
-    ///         "column_1": {
-    ///             "nulltype": nulltype, // Optional
-    ///             "valid": <true|false>,
-    ///             "messages": [{"level": level, "rule": rule, "message": message}, ...],
-    ///             "value": value1
-    ///         },
-    ///         "column_2": {
-    ///             "nulltype": nulltype, // Optional
-    ///             "valid": <true|false>,
-    ///             "messages": [{"level": level, "rule": rule, "message": message}, ...],
-    ///             "value": value2
-    ///         },
-    ///         ...
-    ///     }
-    /// },
-    /// ```
-    /// If `include_rn` is set to false, only the sub-object indicated by "contents" from the
-    /// above JSON is returned.
-    pub fn to_rich_json(&self, include_rn: bool) -> Result<JsonRow, ValveError> {
-        let value = if include_rn {
-            serde_json::to_value(self)?
-        } else {
-            serde_json::to_value(self.contents.clone())?
-        };
+    /// Given a [ValveRow], convert it to a [JsonRow] using [serde_json::to_value()] and return it.
+    pub fn to_rich_json(&self) -> Result<JsonRow, ValveError> {
+        let value = serde_json::to_value(self)?;
+        value
+            .as_object()
+            .ok_or(ValveError::InputError(format!(
+                "Could not convert {:?} to a rich JSON object",
+                value
+            )))
+            .cloned()
+    }
+
+    /// Given a [ValveRow], convert the `contents` field of the row to a [JsonRow] using
+    /// [serde_json::to_value()] and return it.
+    pub fn contents_to_rich_json(&self) -> Result<JsonRow, ValveError> {
+        let value = serde_json::to_value(self.contents.clone())?;
         value
             .as_object()
             .ok_or(ValveError::InputError(format!(
@@ -287,7 +273,7 @@ impl From<regex::Error> for ValveError {
 }
 
 /// Represents a message associated with a particular value of a particular column.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 pub struct ValveMessage {
     /// The name of the table that the column is from
     pub table: String,
@@ -303,11 +289,22 @@ pub struct ValveMessage {
     pub message: String,
 }
 
-/// Represents a change to a value in a database table.
-#[derive(Debug, Default)]
-pub struct ValveChange {
-    /// The name of the table that the value is from
+/// Represents a change to a row in a database table.
+#[derive(Debug, Default, Deserialize, Serialize)]
+pub struct ValveRowChange {
+    /// The name of the table that the change is from
     pub table: String,
+    /// The row number of the changed row
+    pub row: u32,
+    /// A summary of the change to the row
+    pub message: String,
+    /// The changes to each cell
+    pub changes: Vec<ValveChange>,
+}
+
+/// Represents a change to a value in a row of a database table.
+#[derive(Debug, Default, Deserialize, Serialize)]
+pub struct ValveChange {
     /// The name of the column that the value is from
     pub column: String,
     /// The kind of change (update, insert, delete)
@@ -321,7 +318,7 @@ pub struct ValveChange {
 }
 
 /// Configuration information specific to Valve's special tables
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct ValveSpecialConfig {
     /// The name of the table table
     pub table: String,
@@ -334,7 +331,7 @@ pub struct ValveSpecialConfig {
 }
 
 /// Configuration information for a particular table.
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct ValveTableConfig {
     /// The name of a table
     pub table: String,
@@ -351,7 +348,7 @@ pub struct ValveTableConfig {
 }
 
 /// Configuration information for a particular column of a particular table
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct ValveColumnConfig {
     /// The table that the column belongs to
     pub table: String,
@@ -370,7 +367,7 @@ pub struct ValveColumnConfig {
 }
 
 /// Configuration information for a particular datatype
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct ValveDatatypeConfig {
     /// The datatype's corresponding HTML type
     pub html_type: String,
@@ -391,7 +388,7 @@ pub struct ValveDatatypeConfig {
 }
 
 /// Configuration information for a particular table rule
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct ValveRuleConfig {
     /// The description of the rule
     pub description: String,
@@ -410,7 +407,7 @@ pub struct ValveRuleConfig {
 }
 
 /// Configuration information for a particular 'tree' constraint
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct ValveTreeConstraint {
     /// The child node associated with this tree
     pub child: String,
@@ -419,7 +416,7 @@ pub struct ValveTreeConstraint {
 }
 
 /// Configuration information for a particular 'under' constraint
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct ValveUnderConstraint {
     /// The column whose values should be 'under' the given value in the given tree
     pub column: String,
@@ -432,7 +429,7 @@ pub struct ValveUnderConstraint {
 }
 
 /// Configuration information for a particular foreign key constraint
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct ValveForeignConstraint {
     /// The table to which the column constrained by the key belongs
     pub table: String,
@@ -445,7 +442,7 @@ pub struct ValveForeignConstraint {
 }
 
 /// Configuration information for the constraints enforced by a particular Valve instance
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct ValveConstraintConfig {
     /// A map from table names to that table's primary key constraints
     // TODO: primary would be better as HashMap<String, String>, since it is not possible to
@@ -463,7 +460,7 @@ pub struct ValveConstraintConfig {
 }
 
 /// Configuration information for a particular Valve instance
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct ValveConfig {
     /// Configuration specific to Valve's special tables
     pub special: ValveSpecialConfig,
@@ -1786,7 +1783,7 @@ impl Valve {
         )
         .await?;
 
-        let serde_row = row.to_rich_json(false)?;
+        let serde_row = row.contents_to_rich_json()?;
         record_row_change(&mut tx, table_name, &rn, None, Some(&serde_row), &self.user).await?;
 
         tx.commit().await?;
@@ -1845,7 +1842,7 @@ impl Valve {
         .await?;
 
         // Record the row update in the history table:
-        let serde_row = row.to_rich_json(false)?;
+        let serde_row = row.contents_to_rich_json()?;
         record_row_change(
             &mut tx,
             table_name,
@@ -1893,7 +1890,7 @@ impl Valve {
     }
 
     /// Return the next recorded change to the data that can be undone, or None if there isn't any.
-    pub async fn get_change_to_undo(&self) -> Result<Option<Vec<ValveChange>>, ValveError> {
+    pub async fn get_change_to_undo(&self) -> Result<Option<ValveRowChange>, ValveError> {
         match get_record_to_undo(&self.pool).await? {
             None => Ok(None),
             Some(record) => convert_undo_or_redo_record_to_change(&record),
@@ -1901,7 +1898,7 @@ impl Valve {
     }
 
     /// Return the next recorded change to the data that can be redone, or None if there isn't any.
-    pub async fn get_change_to_redo(&self) -> Result<Option<Vec<ValveChange>>, ValveError> {
+    pub async fn get_change_to_redo(&self) -> Result<Option<ValveRowChange>, ValveError> {
         match get_record_to_redo(&self.pool).await? {
             None => Ok(None),
             Some(record) => convert_undo_or_redo_record_to_change(&record),
