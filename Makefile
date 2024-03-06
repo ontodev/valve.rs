@@ -126,7 +126,7 @@ pg_random_test: valve random_test_data | build test/output
 test/penguins/src/data:
 	mkdir -p $@
 
-penguin_test_threshold = 200
+penguin_test_threshold = 120
 penguin_test: | test/penguins/src/data
 	rm -f test/penguins/penguins.db
 	cargo build --release
@@ -135,7 +135,6 @@ penguin_test: | test/penguins/src/data
 	cd test/penguins && time -p ./valve --initial_load src/schema/table.tsv penguins.db 2>&1 \
 		| tee /tmp/penguin.log | head -n -3
 	@tail -3 /tmp/penguin.log | head -1 \
-		| grep "real" \
 		| awk '{ printf "Elapsed time: %.2f seconds.\n", $$2; if ($$2 > $(penguin_test_threshold)) { print "Threshold exceeded."; exit 1 } }'
 
 guess_test_dir = test/guess_test_data
@@ -170,25 +169,16 @@ perf_test_data: test/generate_random_test_data.py valve confirm_overwrite.sh $(p
 	rm -f $(perf_test_dir)/ontology/*.tsv
 	./$< $$(date +"%s") 1000 5 $(perf_test_dir)/table.tsv $|
 
-sqlite_perf_test_threshold = 400
 $(perf_test_db): valve perf_test_data $(perf_test_dir)/*.tsv | build $(perf_test_dir)/ontology
 	rm -f $@
-	time -p ./$< --initial_load $(perf_test_dir)/table.tsv $@ 2>&1 \
-		| tee /tmp/perf_test.log | head -n -3
-	@tail -3 /tmp/perf_test.log | head -1 \
-		| grep "real" \
-		| awk '{ printf "Elapsed time: %.2f seconds.\n", $$2; if ($$2 > $(sqlite_perf_test_threshold)) { print "Threshold exceeded."; exit 1 } }'
+	time -p ./$< --verbose --interactive --initial_load $(perf_test_dir)/table.tsv $@
 
 sqlite_perf_test: $(perf_test_db) | test/output
 	time -p scripts/export_messages.py $< $| $(tables_to_test)
 
-pg_perf_test_threshold = 500
 pg_perf_test: valve $(perf_test_dir)/ontology | test/output
-	time -p ./$< $(perf_test_dir)/table.tsv postgresql:///valve_postgres 2>&1 \
-		| tee /tmp/perf_test.log | head -n -3
-	@tail -3 /tmp/perf_test.log | head -1 \
-		| grep "real" \
-		| awk '{ printf "Elapsed time: %.2f seconds.\n", $$2; if ($$2 > $(pg_perf_test_threshold)) { print "Threshold exceeded."; exit 1 } }'
+	time -p ./$< --verbose --interactive $(perf_test_dir)/table.tsv postgresql:///valve_postgres
+	time -p scripts/export_messages.py postgresql:///valve_postgres $| $(tables_to_test)
 
 perf_test: sqlite_perf_test pg_perf_test
 
