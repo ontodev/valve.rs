@@ -16,6 +16,7 @@ use crate::{
     valve_grammar::StartParser,
     CHUNK_SIZE, SQL_PARAM,
 };
+use anyhow::Result;
 use csv::{QuoteStyle, ReaderBuilder, WriterBuilder};
 use enquote::unquote;
 use futures::{executor::block_on, TryStreamExt};
@@ -29,7 +30,7 @@ use sqlx::{
     any::{AnyKind, AnyPool},
     query as sqlx_query, Row, ValueRef,
 };
-use std::{collections::HashMap, fmt, fs::File, path::Path};
+use std::{collections::HashMap, error::Error, fmt, fs::File, path::Path};
 
 /// Alias for [Map](serde_json::map)<[String], [Value](serde_json::value)>.
 pub type JsonRow = serde_json::Map<String, SerdeValue>;
@@ -64,7 +65,7 @@ pub type JsonRow = serde_json::Map<String, SerdeValue>;
 ///     ...
 /// }
 /// ```
-pub fn unfold_json_row(json_row: &JsonRow) -> Result<JsonRow, ValveError> {
+pub fn unfold_json_row(json_row: &JsonRow) -> Result<JsonRow> {
     let mut rich_row = JsonRow::new();
     for (column, value) in json_row.iter() {
         let value = match value {
@@ -100,7 +101,7 @@ impl ValveRow {
     /// },
     /// ```
     /// convert it to a [ValveRow] and return it.
-    pub fn from_simple_json(row: &JsonRow, row_number: Option<u32>) -> Result<Self, ValveError> {
+    pub fn from_simple_json(row: &JsonRow, row_number: Option<u32>) -> Result<Self> {
         let mut valve_cells = IndexMap::new();
         for (column, value) in row.iter() {
             valve_cells.insert(column.to_string(), ValveCell::new(value));
@@ -131,7 +132,7 @@ impl ValveRow {
     /// },
     /// ```
     /// convert it into a [ValveRow] and return it.
-    pub fn from_rich_json(row_number: Option<u32>, row: &JsonRow) -> Result<Self, ValveError> {
+    pub fn from_rich_json(row_number: Option<u32>, row: &JsonRow) -> Result<Self> {
         Ok(serde_json::from_str(
             &json!({
                 "row_number": row_number,
@@ -142,27 +143,33 @@ impl ValveRow {
     }
 
     /// Given a [ValveRow], convert it to a [JsonRow] using [serde_json::to_value()] and return it.
-    pub fn to_rich_json(&self) -> Result<JsonRow, ValveError> {
+    pub fn to_rich_json(&self) -> Result<JsonRow> {
         let value = serde_json::to_value(self)?;
         value
             .as_object()
-            .ok_or(ValveError::InputError(format!(
-                "Could not convert {:?} to a rich JSON object",
-                value
-            )))
+            .ok_or(
+                ValveError::InputError(format!(
+                    "Could not convert {:?} to a rich JSON object",
+                    value
+                ))
+                .into(),
+            )
             .cloned()
     }
 
     /// Given a [ValveRow], convert the `contents` field of the row to a [JsonRow] using
     /// [serde_json::to_value()] and return it.
-    pub fn contents_to_rich_json(&self) -> Result<JsonRow, ValveError> {
+    pub fn contents_to_rich_json(&self) -> Result<JsonRow> {
         let value = serde_json::to_value(self.contents.clone())?;
         value
             .as_object()
-            .ok_or(ValveError::InputError(format!(
-                "Could not convert {:?} to a rich JSON object",
-                value
-            )))
+            .ok_or(
+                ValveError::InputError(format!(
+                    "Could not convert {:?} to a rich JSON object",
+                    value
+                ))
+                .into(),
+            )
             .cloned()
     }
 }
@@ -241,6 +248,14 @@ pub enum ValveError {
     /// An error that occurred because of a user's action
     UserError(String),
 }
+
+impl std::fmt::Display for ValveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+impl Error for ValveError {}
 
 impl From<csv::Error> for ValveError {
     fn from(e: csv::Error) -> Self {
@@ -532,7 +547,7 @@ impl Valve {
     /// Given a path to a table table, a path to a database, and a flag indicating whether the
     /// database should be configured for initial loading: Set up a database connection, configure
     /// VALVE, and return a new Valve struct.
-    pub async fn build(table_path: &str, database: &str) -> Result<Self, ValveError> {
+    pub async fn build(table_path: &str, database: &str) -> Result<Self> {
         env_logger::init();
         let pool = get_pool_from_connection_string(database).await?;
         if pool.any_kind() == AnyKind::Sqlite {
@@ -585,7 +600,7 @@ impl Valve {
     /// that are unsafe in general but suitable when setting up a Valve database for the first
     /// time. Note that if Valve's managed database is not a SQLite database, calling this function
     /// has no effect.
-    pub async fn configure_for_initial_load(&mut self) -> Result<&mut Self, ValveError> {
+    pub async fn configure_for_initial_load(&mut self) -> Result<&mut Self> {
         if self.initial_load {
             Ok(self)
         } else {
@@ -604,7 +619,7 @@ impl Valve {
 
     /// Convenience function to retrieve the path to Valve's "table table", the main entrypoint
     /// to Valve's configuration.
-    pub fn get_path(&self) -> Result<String, ValveError> {
+    pub fn get_path(&self) -> Result<String> {
         Ok(self
             .config
             .table
@@ -621,20 +636,22 @@ impl Valve {
 
     /// Sets the user name, which must be a short (see [USERNAME_MAX_LEN](Self::USERNAME_MAX_LEN)),
     /// trimmed, string without newlines, for this Valve instance.
-    pub fn set_user(&mut self, user: &str) -> Result<&mut Self, ValveError> {
+    pub fn set_user(&mut self, user: &str) -> Result<&mut Self> {
         if user.len() > Self::USERNAME_MAX_LEN {
             return Err(ValveError::InputError(format!(
                 "Username '{}' is longer than {} characters.",
                 user,
                 Self::USERNAME_MAX_LEN
-            )));
+            ))
+            .into());
         } else {
             let user_regex = Regex::new(r#"^\S([^\n]*\S)*$"#)?;
             if !user_regex.is_match(user) {
                 return Err(ValveError::InputError(format!(
                     "Username '{}' is not a short, trimmed, string without newlines.",
                     user,
-                )));
+                ))
+                .into());
             }
         }
         self.user = user.to_string();
@@ -655,7 +672,7 @@ impl Valve {
 
     /// (Private function.) Given a SQL string, execute it using the connection pool associated
     /// with the Valve instance.
-    async fn execute_sql(&self, sql: &str) -> Result<(), ValveError> {
+    async fn execute_sql(&self, sql: &str) -> Result<()> {
         sqlx_query(&sql).execute(&self.pool).await?;
         Ok(())
     }
@@ -682,7 +699,7 @@ impl Valve {
     /// 'unique', 'primary', or 'from(table, column)' in its column configuration fails to be
     /// associated, in the database, with a unique constraint, primary key, or foreign key,
     /// respectively; or vice versa; (4) The table does not exist in the database.
-    pub async fn table_has_changed(&self, table: &str) -> Result<bool, ValveError> {
+    pub async fn table_has_changed(&self, table: &str) -> Result<bool> {
         // A clojure that, given a parsed structure condition, a table and column name, and an
         // unsigned integer representing whether the given column, in the case of a SQLite database,
         // is a primary key (in the case of PostgreSQL, the sqlite_pk parameter is ignored):
@@ -693,10 +710,10 @@ impl Valve {
                                      table: &str,
                                      column: &str,
                                      sqlite_pk: &u32|
-         -> Result<bool, ValveError> {
+         -> Result<bool> {
             // A clojure to determine whether the given column has the given constraint type, which
             // can be one of 'UNIQUE', 'PRIMARY KEY', 'FOREIGN KEY':
-            let column_has_constraint_type = |constraint_type: &str| -> Result<bool, ValveError> {
+            let column_has_constraint_type = |constraint_type: &str| -> Result<bool> {
                 if self.pool.any_kind() == AnyKind::Postgres {
                     let sql = format!(
                         r#"SELECT 1
@@ -746,7 +763,8 @@ impl Valve {
                     } else {
                         return Err(ValveError::InputError(
                             format!("Unrecognized constraint type: '{}'", constraint_type).into(),
-                        ));
+                        )
+                        .into());
                     }
                 }
             };
@@ -841,7 +859,8 @@ impl Valve {
                         _ => {
                             return Err(ValveError::InputError(
                                 format!("Unrecognized structure: {:?}", pstruct).into(),
-                            ));
+                            )
+                            .into());
                         }
                     };
                 }
@@ -961,9 +980,9 @@ impl Valve {
                 if self.interactive {
                     print!("Do you want to continue? [y/N] ");
                     if !proceed::proceed() {
-                        return Err(ValveError::UserError(
-                            "Execution aborted by user".to_string(),
-                        ));
+                        return Err(
+                            ValveError::UserError("Execution aborted by user".to_string()).into(),
+                        );
                     }
                 } else {
                     println!();
@@ -1013,7 +1032,8 @@ impl Valve {
                             if !proceed::proceed() {
                                 return Err(ValveError::UserError(
                                     "Execution aborted by user".to_string(),
-                                ));
+                                )
+                                .into());
                             }
                         } else {
                             println!();
@@ -1047,7 +1067,8 @@ impl Valve {
                             if !proceed::proceed() {
                                 return Err(ValveError::UserError(
                                     "Execution aborted by user".to_string(),
-                                ));
+                                )
+                                .into());
                             }
                         } else {
                             println!();
@@ -1062,7 +1083,7 @@ impl Valve {
     }
 
     /// Generates and returns the DDL required to setup the database.
-    pub async fn get_setup_statements(&self) -> Result<HashMap<String, Vec<String>>, ValveError> {
+    pub async fn get_setup_statements(&self) -> Result<HashMap<String, Vec<String>>> {
         let tables_config = &self.config.table;
         let datatypes_config = &self.config.datatype;
         let parser = StartParser::new();
@@ -1160,7 +1181,7 @@ impl Valve {
     }
 
     /// Writes the database schema to stdout.
-    pub async fn dump_schema(&self) -> Result<String, ValveError> {
+    pub async fn dump_schema(&self) -> Result<String> {
         let setup_statements = self.get_setup_statements().await?;
         let mut output = String::from("");
         for table in self.get_sorted_table_list(false) {
@@ -1178,7 +1199,7 @@ impl Valve {
     }
 
     /// Create all configured database tables and views if they do not already exist as configured.
-    pub async fn create_all_tables(&self) -> Result<&Self, ValveError> {
+    pub async fn create_all_tables(&self) -> Result<&Self> {
         let setup_statements = self.get_setup_statements().await?;
         let sorted_table_list = self.get_sorted_table_list(false);
         for table in &sorted_table_list {
@@ -1201,7 +1222,7 @@ impl Valve {
     }
 
     /// Checks whether the given table exists in the database.
-    pub async fn table_exists(&self, table: &str) -> Result<bool, ValveError> {
+    pub async fn table_exists(&self, table: &str) -> Result<bool> {
         let sql = {
             if self.pool.any_kind() == AnyKind::Sqlite {
                 format!(
@@ -1228,7 +1249,7 @@ impl Valve {
 
     /// Get all the incoming (tables that depend on it) or outgoing (tables it depends on)
     /// dependencies of the given table.
-    pub fn get_dependencies(&self, table: &str, incoming: bool) -> Result<Vec<String>, ValveError> {
+    pub fn get_dependencies(&self, table: &str, incoming: bool) -> Result<Vec<String>> {
         let mut dependent_tables = vec![];
         if table != "message" && table != "history" {
             let direct_deps = {
@@ -1266,7 +1287,7 @@ impl Valve {
         &self,
         tables: &Vec<&str>,
         deletion_order: bool,
-    ) -> Result<Vec<String>, ValveError> {
+    ) -> Result<Vec<String>> {
         let mut with_dups = vec![];
         for table in tables {
             let dependent_tables = self.get_dependencies(table, true)?;
@@ -1292,11 +1313,7 @@ impl Valve {
 
     /// Given a subset of the configured tables, return them in sorted dependency order, or in
     /// reverse dependency order if `reverse` is set to true.
-    pub fn sort_tables(
-        &self,
-        table_subset: &Vec<&str>,
-        reverse: bool,
-    ) -> Result<Vec<String>, ValveError> {
+    pub fn sort_tables(&self, table_subset: &Vec<&str>, reverse: bool) -> Result<Vec<String>> {
         let full_table_list = self.get_sorted_table_list(false);
         if !table_subset
             .iter()
@@ -1306,7 +1323,8 @@ impl Valve {
                 "[{}] contains tables that are not in the configured table list: [{}]",
                 table_subset.join(", "),
                 full_table_list.join(", ")
-            )));
+            ))
+            .into());
         }
 
         // Filter out message and history since they are not represented in the constraints config.
@@ -1336,10 +1354,7 @@ impl Valve {
 
     /// Returns an IndexMap, indexed by configured table, containing lists of their dependencies.
     /// If incoming is true, the lists are incoming dependencies, else they are outgoing.
-    pub fn collect_dependencies(
-        &self,
-        incoming: bool,
-    ) -> Result<IndexMap<String, Vec<String>>, ValveError> {
+    pub fn collect_dependencies(&self, incoming: bool) -> Result<IndexMap<String, Vec<String>>> {
         let tables = self.get_sorted_table_list(false);
         let mut dependencies = IndexMap::new();
         for table in tables {
@@ -1349,7 +1364,7 @@ impl Valve {
     }
 
     /// Drop all configured tables, in reverse dependency order.
-    pub async fn drop_all_tables(&self) -> Result<&Self, ValveError> {
+    pub async fn drop_all_tables(&self) -> Result<&Self> {
         // Drop all of the database tables in the reverse of their sorted order:
         self.drop_tables(&self.get_sorted_table_list(true)).await?;
         Ok(self)
@@ -1357,7 +1372,7 @@ impl Valve {
 
     /// Given a vector of table names, drop those tables, in the given order, including any tables
     /// that must be dropped implicitly because of a dependency relationship.
-    pub async fn drop_tables(&self, tables: &Vec<&str>) -> Result<&Self, ValveError> {
+    pub async fn drop_tables(&self, tables: &Vec<&str>) -> Result<&Self> {
         let drop_list = self.add_dependencies(tables, true)?;
         for table in &drop_list {
             if *table != "message" && *table != "history" {
@@ -1376,7 +1391,7 @@ impl Valve {
     }
 
     /// Truncate all configured tables, in reverse dependency order.
-    pub async fn truncate_all_tables(&self) -> Result<&Self, ValveError> {
+    pub async fn truncate_all_tables(&self) -> Result<&Self> {
         self.truncate_tables(&self.get_sorted_table_list(true))
             .await?;
         Ok(self)
@@ -1384,7 +1399,7 @@ impl Valve {
 
     /// Given a vector of table names, truncate those tables, in the given order, including any
     /// tables that must be truncated implicitly because of a dependency relationship.
-    pub async fn truncate_tables(&self, tables: &Vec<&str>) -> Result<&Self, ValveError> {
+    pub async fn truncate_tables(&self, tables: &Vec<&str>) -> Result<&Self> {
         self.create_all_tables().await?;
         let truncate_list = self.add_dependencies(tables, true)?;
 
@@ -1414,7 +1429,7 @@ impl Valve {
 
     /// Load all configured tables in dependency order. If `validate` is false, just try to insert
     /// all rows, irrespective of whether they are valid or not or will possibly trigger a db error.
-    pub async fn load_all_tables(&self, validate: bool) -> Result<&Self, ValveError> {
+    pub async fn load_all_tables(&self, validate: bool) -> Result<&Self> {
         let table_list = self.get_sorted_table_list(false);
         if self.verbose {
             println!("Processing {} tables.", table_list.len());
@@ -1427,11 +1442,7 @@ impl Valve {
     /// If `validate` is false, just try to insert all rows, irrespective of whether they are valid
     /// or not or whether they may trigger a db error, otherwise all rows are validated as they are
     /// inserted to the database.
-    pub async fn load_tables(
-        &self,
-        table_list: &Vec<&str>,
-        validate: bool,
-    ) -> Result<&Self, ValveError> {
+    pub async fn load_tables(&self, table_list: &Vec<&str>, validate: bool) -> Result<&Self> {
         let list_for_truncation = self.sort_tables(table_list, true)?;
         self.truncate_tables(
             &list_for_truncation
@@ -1485,7 +1496,7 @@ impl Valve {
             if let Some(result) = records.next() {
                 headers = result.unwrap();
             } else {
-                return Err(ValveError::DataError(format!("'{}' is empty", path)));
+                return Err(ValveError::DataError(format!("'{}' is empty", path)).into());
             }
 
             for header in headers.iter() {
@@ -1493,7 +1504,8 @@ impl Valve {
                     return Err(ValveError::DataError(format!(
                         "One or more of the header fields is empty for table '{}'",
                         table_name
-                    )));
+                    ))
+                    .into());
                 }
             }
 
@@ -1606,7 +1618,7 @@ impl Valve {
 
     /// Save all configured tables to their configured paths, unless save_dir is specified,
     /// in which case save them there instead.
-    pub fn save_all_tables(&self, save_dir: &Option<String>) -> Result<&Self, ValveError> {
+    pub fn save_all_tables(&self, save_dir: &Option<String>) -> Result<&Self> {
         let tables = self.get_sorted_table_list(false);
         self.save_tables(&tables, save_dir)?;
         Ok(self)
@@ -1614,11 +1626,7 @@ impl Valve {
 
     /// Given a vector of table names, save those tables to their configured path's, unless
     /// save_dir is specified, in which case save them there instead.
-    pub fn save_tables(
-        &self,
-        tables: &Vec<&str>,
-        save_dir: &Option<String>,
-    ) -> Result<&Self, ValveError> {
+    pub fn save_tables(&self, tables: &Vec<&str>, save_dir: &Option<String>) -> Result<&Self> {
         let table_paths: HashMap<String, String> = self
             .config
             .table
@@ -1669,12 +1677,7 @@ impl Valve {
     }
 
     /// Save the given table with the given columns at the given path as a TSV file.
-    pub fn save_table(
-        &self,
-        table: &str,
-        columns: &Vec<&str>,
-        path: &str,
-    ) -> Result<&Self, ValveError> {
+    pub fn save_table(&self, table: &str, columns: &Vec<&str>, path: &str) -> Result<&Self> {
         let mut quoted_columns = vec!["\"row_number\"".to_string()];
         quoted_columns.append(
             &mut columns
@@ -1723,7 +1726,7 @@ impl Valve {
         table_name: &str,
         row: &JsonRow,
         row_number: Option<u32>,
-    ) -> Result<ValveRow, ValveError> {
+    ) -> Result<ValveRow> {
         let row = ValveRow::from_simple_json(row, row_number)?;
         validate_row_tx(
             &self.config,
@@ -1750,11 +1753,7 @@ impl Valve {
     /// ```
     /// validate and insert the row to the table and return the row number of the inserted row
     /// and the row itself in the form of a [ValveRow].
-    pub async fn insert_row(
-        &self,
-        table_name: &str,
-        row: &JsonRow,
-    ) -> Result<(u32, ValveRow), ValveError> {
+    pub async fn insert_row(&self, table_name: &str, row: &JsonRow) -> Result<(u32, ValveRow)> {
         let mut tx = self.pool.begin().await?;
         let row = ValveRow::from_simple_json(row, None)?;
         let row = validate_row_tx(
@@ -1805,7 +1804,7 @@ impl Valve {
         table_name: &str,
         row_number: &u32,
         row: &JsonRow,
-    ) -> Result<ValveRow, ValveError> {
+    ) -> Result<ValveRow> {
         let mut tx = self.pool.begin().await?;
 
         // Get the old version of the row from the database so that we can later record it to the
@@ -1858,7 +1857,7 @@ impl Valve {
     }
 
     /// Given a table name and a row number, delete that row from the table.
-    pub async fn delete_row(&self, table_name: &str, row_number: &u32) -> Result<(), ValveError> {
+    pub async fn delete_row(&self, table_name: &str, row_number: &u32) -> Result<()> {
         let mut tx = self.pool.begin().await?;
 
         let row =
@@ -1890,7 +1889,7 @@ impl Valve {
     }
 
     /// Return the next recorded change to the data that can be undone, or None if there isn't any.
-    pub async fn get_change_to_undo(&self) -> Result<Option<ValveRowChange>, ValveError> {
+    pub async fn get_change_to_undo(&self) -> Result<Option<ValveRowChange>> {
         match get_record_to_undo(&self.pool).await? {
             None => Ok(None),
             Some(record) => convert_undo_or_redo_record_to_change(&record),
@@ -1898,7 +1897,7 @@ impl Valve {
     }
 
     /// Return the next recorded change to the data that can be redone, or None if there isn't any.
-    pub async fn get_change_to_redo(&self) -> Result<Option<ValveRowChange>, ValveError> {
+    pub async fn get_change_to_redo(&self) -> Result<Option<ValveRowChange>> {
         match get_record_to_redo(&self.pool).await? {
             None => Ok(None),
             Some(record) => convert_undo_or_redo_record_to_change(&record),
@@ -1906,7 +1905,7 @@ impl Valve {
     }
 
     /// Undo one change and return the change record or None if there was no change to undo.
-    pub async fn undo(&self) -> Result<Option<ValveRow>, ValveError> {
+    pub async fn undo(&self) -> Result<Option<ValveRow>> {
         let last_change = match get_record_to_undo(&self.pool).await? {
             None => {
                 log::warn!("Nothing to undo.");
@@ -1926,7 +1925,8 @@ impl Valve {
             (None, None) => {
                 return Err(ValveError::DataError(
                     "Cannot redo unknown operation from None to None".into(),
-                ))
+                )
+                .into())
             }
             (None, Some(_)) => {
                 // Undo an insert:
@@ -1996,7 +1996,7 @@ impl Valve {
     }
 
     /// Redo one change and return the change record or None if there was no change to redo.
-    pub async fn redo(&self) -> Result<Option<ValveRow>, ValveError> {
+    pub async fn redo(&self) -> Result<Option<ValveRow>> {
         let last_undo = match get_record_to_redo(&self.pool).await? {
             None => {
                 log::warn!("Nothing to redo.");
@@ -2023,7 +2023,8 @@ impl Valve {
             (None, None) => {
                 return Err(ValveError::DataError(
                     "Cannot redo unknown operation from None to None".into(),
-                ))
+                )
+                .into())
             }
             (None, Some(to)) => {
                 // Redo an insert:
@@ -2102,7 +2103,7 @@ impl Valve {
         table_name: &str,
         column_name: &str,
         matching_string: Option<&str>,
-    ) -> Result<SerdeValue, ValveError> {
+    ) -> Result<SerdeValue> {
         let config = &self.config;
         let datatype_conditions = &self.datatype_conditions;
         let structure_conditions = &self.structure_conditions;
@@ -2268,7 +2269,8 @@ impl Valve {
                                 return Err(ValveError::DataError(format!(
                                     "Unrecognised structure: {}",
                                     original
-                                )))
+                                ))
+                                .into())
                             }
                         };
                     }

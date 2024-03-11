@@ -1,13 +1,14 @@
 mod api_test;
 
 use crate::api_test::run_api_tests;
+use anyhow::Result;
 use argparse::{ArgumentParser, Store, StoreTrue};
 use futures::executor::block_on;
-use ontodev_valve::{valve::Valve, valve::ValveError};
+use ontodev_valve::valve::Valve;
 use std::{env, process};
 
 #[async_std::main]
-async fn main() -> Result<(), ValveError> {
+async fn main() -> Result<()> {
     // Command line parameters and their default values. See below for descriptions. Note that some
     // of these are mutually exclusive. This is accounted for below.
 
@@ -182,20 +183,20 @@ async fn main() -> Result<(), ValveError> {
         process::exit(1);
     }
 
-    let build_valve = || -> Result<Valve, ValveError> {
-        let mut valve = block_on(Valve::build(&source, &destination))?;
+    let build_valve = || -> Result<Valve> {
+        let mut valve = block_on(Valve::build(&source, &destination)).unwrap();
         valve.set_verbose(verbose);
         valve.set_interactive(interactive);
         if initial_load {
-            block_on(valve.configure_for_initial_load())?;
+            block_on(valve.configure_for_initial_load()).unwrap();
         }
         Ok(valve)
     };
 
     if api_test {
-        run_api_tests(&source, &destination).await?;
+        run_api_tests(&source, &destination).await.unwrap();
     } else if save_all || save != "" {
-        let valve = build_valve()?;
+        let valve = build_valve().unwrap();
         let save_dir = {
             if save_dir == "" {
                 None
@@ -210,19 +211,19 @@ async fn main() -> Result<(), ValveError> {
             valve.save_tables(&tables, &save_dir).unwrap();
         }
     } else if dump_config {
-        let valve = build_valve()?;
+        let valve = build_valve().unwrap();
         println!("{}", valve.config);
     } else if dump_schema {
-        let valve = build_valve()?;
-        let schema = valve.dump_schema().await?;
+        let valve = build_valve().unwrap();
+        let schema = valve.dump_schema().await.unwrap();
         println!("{}", schema);
     } else if table_order {
-        let valve = build_valve()?;
+        let valve = build_valve().unwrap();
         let sorted_table_list = valve.get_sorted_table_list(false);
         println!("{}", sorted_table_list.join(", "));
     } else if show_deps_in || show_deps_out {
-        let valve = build_valve()?;
-        let dependencies = valve.collect_dependencies(show_deps_in)?;
+        let valve = build_valve().unwrap();
+        let dependencies = valve.collect_dependencies(show_deps_in).unwrap();
         for (table, deps) in dependencies.iter() {
             let deps = {
                 let deps = deps.iter().map(|s| format!("'{}'", s)).collect::<Vec<_>>();
@@ -242,14 +243,14 @@ async fn main() -> Result<(), ValveError> {
             println!("{}: {}", preamble, deps);
         }
     } else if drop_all {
-        let valve = build_valve()?;
-        valve.drop_all_tables().await?;
+        let valve = build_valve().unwrap();
+        valve.drop_all_tables().await.unwrap();
     } else if create_only {
-        let valve = build_valve()?;
-        valve.create_all_tables().await?;
+        let valve = build_valve().unwrap();
+        valve.create_all_tables().await.unwrap();
     } else {
-        let valve = build_valve()?;
-        valve.load_all_tables(true).await?;
+        let valve = build_valve().unwrap();
+        valve.load_all_tables(true).await.unwrap();
     }
 
     Ok(())

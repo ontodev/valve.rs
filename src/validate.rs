@@ -7,10 +7,11 @@ use crate::{
         QueryAsIfKind,
     },
     valve::{
-        ValveCell, ValveCellMessage, ValveConfig, ValveDatatypeConfig, ValveError, ValveRow,
-        ValveRuleConfig, ValveTreeConstraint,
+        ValveCell, ValveCellMessage, ValveConfig, ValveDatatypeConfig, ValveRow, ValveRuleConfig,
+        ValveTreeConstraint,
     },
 };
+use anyhow::Result;
 use indexmap::IndexMap;
 use serde_json::{json, Value as SerdeValue};
 use sqlx::{any::AnyPool, query as sqlx_query, Acquire, Row, Transaction, ValueRef};
@@ -32,7 +33,7 @@ pub async fn validate_row_tx(
     row: &ValveRow,
     row_number: Option<u32>,
     query_as_if: Option<&QueryAsIf>,
-) -> Result<ValveRow, ValveError> {
+) -> Result<ValveRow> {
     // Fallback to a default transaction if it is not given. Since we do not commit before it falls
     // out of scope the transaction will be rolled back at the end of this function. And since this
     // function is read-only the rollback is trivial and therefore inconsequential.
@@ -172,7 +173,7 @@ pub async fn validate_under(
     mut tx: Option<&mut Transaction<'_, sqlx::Any>>,
     table_name: &String,
     extra_row: Option<&ValveRow>,
-) -> Result<Vec<SerdeValue>, ValveError> {
+) -> Result<Vec<SerdeValue>> {
     let mut results = vec![];
     let ukeys = config
         .constraint
@@ -350,7 +351,7 @@ pub async fn validate_tree_foreign_keys(
     mut tx: Option<&mut Transaction<'_, sqlx::Any>>,
     table_name: &String,
     extra_row: Option<&ValveRow>,
-) -> Result<Vec<SerdeValue>, ValveError> {
+) -> Result<Vec<SerdeValue>> {
     let tkeys = config
         .constraint
         .tree
@@ -450,7 +451,7 @@ pub async fn validate_rows_trees(
     pool: &AnyPool,
     table_name: &String,
     rows: &mut Vec<ValveRow>,
-) -> Result<(), ValveError> {
+) -> Result<()> {
     let column_names = &config
         .table
         .get(table_name)
@@ -505,7 +506,7 @@ pub async fn validate_rows_constraints(
     pool: &AnyPool,
     table_name: &String,
     rows: &mut Vec<ValveRow>,
-) -> Result<(), ValveError> {
+) -> Result<()> {
     let column_names = &config
         .table
         .get(table_name)
@@ -652,7 +653,7 @@ pub fn validate_rows_intra(
 
 /// Given a row represented as a [ValveRow], remove any duplicate messages from the row's cells, so
 /// that no cell has messages with the same level, rule, and message text.
-fn remove_duplicate_messages(row: &mut ValveRow) -> Result<(), ValveError> {
+fn remove_duplicate_messages(row: &mut ValveRow) -> Result<()> {
     for (_column_name, cell) in row.contents.iter_mut() {
         let mut messages = cell.messages.clone();
         messages.sort_by(|a, b| {
@@ -1102,7 +1103,7 @@ pub async fn validate_cell_foreign_constraints(
     column_name: &String,
     cell: &mut ValveCell,
     query_as_if: Option<&QueryAsIf>,
-) -> Result<(), ValveError> {
+) -> Result<()> {
     let fkeys = config
         .constraint
         .foreign
@@ -1231,7 +1232,7 @@ pub async fn validate_cell_trees(
     cell: &mut ValveCell,
     context: &ValveRow,
     prev_results: &Vec<ValveRow>,
-) -> Result<(), ValveError> {
+) -> Result<()> {
     // If the current column is the parent column of a tree, validate that adding the current value
     // will not result in a cycle between this and the parent column:
     let tkeys = config
@@ -1405,7 +1406,7 @@ pub async fn validate_cell_unique_constraints(
     cell: &mut ValveCell,
     prev_results: &Vec<ValveRow>,
     row_number: Option<u32>,
-) -> Result<(), ValveError> {
+) -> Result<()> {
     // If the column has a primary or unique key constraint, or if it is the child associated with
     // a tree, then if the value of the cell is a duplicate either of one of the previously
     // validated rows in the batch, or a duplicate of a validated row that has already been inserted

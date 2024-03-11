@@ -1,5 +1,6 @@
 //! API tests
 
+use anyhow::Result;
 use ontodev_valve::{
     toolkit::SerdeMap,
     valve::{Valve, ValveError},
@@ -9,7 +10,7 @@ use rand::{random, thread_rng};
 use serde_json::json;
 use sqlx::{any::AnyPool, query as sqlx_query, Row, ValueRef};
 
-async fn test_matching(valve: &Valve) -> Result<(), ValveError> {
+async fn test_matching(valve: &Valve) -> Result<()> {
     eprint!("Running test_matching() ... ");
 
     // Test the get_matching_values() function:
@@ -44,7 +45,7 @@ async fn test_matching(valve: &Valve) -> Result<(), ValveError> {
     Ok(())
 }
 
-async fn test_update_1(valve: &Valve) -> Result<(), ValveError> {
+async fn test_update_1(valve: &Valve) -> Result<()> {
     eprint!("Running test_update_1() ... ");
 
     let row = json!({
@@ -63,7 +64,7 @@ async fn test_update_1(valve: &Valve) -> Result<(), ValveError> {
     Ok(())
 }
 
-async fn test_insert_1(valve: &Valve) -> Result<(), ValveError> {
+async fn test_insert_1(valve: &Valve) -> Result<()> {
     eprint!("Running test_insert_1() ... ");
 
     let row = json!({
@@ -80,7 +81,7 @@ async fn test_insert_1(valve: &Valve) -> Result<(), ValveError> {
     Ok(())
 }
 
-async fn test_update_2(valve: &Valve) -> Result<(), ValveError> {
+async fn test_update_2(valve: &Valve) -> Result<()> {
     eprint!("Running test_update_2() ... ");
 
     let row = json!({
@@ -99,7 +100,7 @@ async fn test_update_2(valve: &Valve) -> Result<(), ValveError> {
     Ok(())
 }
 
-async fn test_insert_2(valve: &Valve) -> Result<(), ValveError> {
+async fn test_insert_2(valve: &Valve) -> Result<()> {
     eprint!("Running test_insert_2() ... ");
 
     let row = json!({
@@ -116,7 +117,7 @@ async fn test_insert_2(valve: &Valve) -> Result<(), ValveError> {
     Ok(())
 }
 
-async fn test_dependencies(valve: &Valve) -> Result<(), ValveError> {
+async fn test_dependencies(valve: &Valve) -> Result<()> {
     eprint!("Running test_dependencies() ... ");
 
     // Test cases for updates/inserts/deletes with dependencies.
@@ -167,7 +168,7 @@ enum DbOperation {
     Redo,
 }
 
-async fn generate_operation_sequence(pool: &AnyPool) -> Result<Vec<DbOperation>, ValveError> {
+async fn generate_operation_sequence(pool: &AnyPool) -> Result<Vec<DbOperation>> {
     /*
     Algorithm:
     ----------
@@ -264,7 +265,7 @@ async fn generate_operation_sequence(pool: &AnyPool) -> Result<Vec<DbOperation>,
     Ok(operations)
 }
 
-async fn test_randomized_api_test_with_undo_redo(valve: &Valve) -> Result<(), ValveError> {
+async fn test_randomized_api_test_with_undo_redo(valve: &Valve) -> Result<()> {
     // Randomly generate a number of insert/update/delete operations, possibly followed by undos
     // and/or redos.
     eprint!("Running test_randomized_api_test_with_undo_redo() ... ");
@@ -298,7 +299,7 @@ async fn test_randomized_api_test_with_undo_redo(valve: &Valve) -> Result<(), Va
                 let sql_row = query.fetch_one(&valve.pool).await?;
                 let raw_row_number = sql_row.try_get_raw("row_number")?;
                 if raw_row_number.is_null() {
-                    return Err(ValveError::DataError("No rows in table1_view".into()));
+                    return Err(ValveError::DataError("No rows in table1_view".into()).into());
                 } else {
                     let row_number: i64 = sql_row.get("row_number");
                     let row_number = row_number as u32;
@@ -310,7 +311,7 @@ async fn test_randomized_api_test_with_undo_redo(valve: &Valve) -> Result<(), Va
                 let sql_row = query.fetch_one(&valve.pool).await?;
                 let raw_row_number = sql_row.try_get_raw("row_number")?;
                 if raw_row_number.is_null() {
-                    return Err(ValveError::DataError("No rows in table1_view".into()));
+                    return Err(ValveError::DataError("No rows in table1_view".into()).into());
                 } else {
                     let row_number: i64 = sql_row.get("row_number");
                     let row_number = row_number as u32;
@@ -335,7 +336,7 @@ async fn test_randomized_api_test_with_undo_redo(valve: &Valve) -> Result<(), Va
     Ok(())
 }
 
-async fn test_undo_redo(valve: &Valve) -> Result<(), ValveError> {
+async fn test_undo_redo(valve: &Valve) -> Result<()> {
     eprint!("Running test_undo_redo() ... ");
 
     // Undo/redo tests
@@ -411,7 +412,7 @@ async fn test_undo_redo(valve: &Valve) -> Result<(), ValveError> {
     Ok(())
 }
 
-pub async fn run_api_tests(table: &str, database: &str) -> Result<(), ValveError> {
+pub async fn run_api_tests(table: &str, database: &str) -> Result<()> {
     let valve = Valve::build(table, database).await?;
     // NOTE that you must use an external script to fetch the data from the database and run a diff
     // against a known good sample to verify that these tests yield the expected results:
