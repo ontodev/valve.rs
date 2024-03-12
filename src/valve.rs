@@ -257,36 +257,6 @@ impl std::fmt::Display for ValveError {
 
 impl Error for ValveError {}
 
-impl From<csv::Error> for ValveError {
-    fn from(e: csv::Error) -> Self {
-        Self::CsvError(e)
-    }
-}
-
-impl From<sqlx::Error> for ValveError {
-    fn from(e: sqlx::Error) -> Self {
-        Self::DatabaseError(e)
-    }
-}
-
-impl From<serde_json::Error> for ValveError {
-    fn from(e: serde_json::Error) -> Self {
-        Self::SerdeJsonError(e)
-    }
-}
-
-impl From<std::io::Error> for ValveError {
-    fn from(e: std::io::Error) -> Self {
-        Self::IOError(e)
-    }
-}
-
-impl From<regex::Error> for ValveError {
-    fn from(e: regex::Error) -> Self {
-        Self::RegexError(e)
-    }
-}
-
 /// Represents a message associated with a particular value of a particular column.
 #[derive(Debug, Default, Deserialize, Serialize)]
 pub struct ValveMessage {

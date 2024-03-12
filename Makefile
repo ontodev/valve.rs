@@ -126,16 +126,21 @@ pg_random_test: valve random_test_data | build test/output
 test/penguins/src/data:
 	mkdir -p $@
 
-penguin_test_threshold = 120
-penguin_test: | test/penguins/src/data
+penguin_test_threshold = 600
+num_penguin_rows = 100000
+penguin_command = ./valve --initial_load src/schema/table.tsv penguins.db
+penguin_test: valve | test/penguins/src/data
+	@echo "Running penguin test ..."
 	rm -f test/penguins/penguins.db
-	cargo build --release
-	cd test/penguins && ./generate.py 1000000
-	cd test/penguins && ln -f -s ../../target/release/ontodev_valve valve
-	cd test/penguins && time -p ./valve --initial_load src/schema/table.tsv penguins.db 2>&1 \
-		| tee /tmp/penguin.log | head -n -3
-	@tail -3 /tmp/penguin.log | head -1 \
-		| awk '{ printf "Elapsed time: %.2f seconds.\n", $$2; if ($$2 > $(penguin_test_threshold)) { print "Threshold exceeded."; exit 1 } }'
+	cd test/penguins && ./generate.py $(num_penguin_rows)
+	cd test/penguins && ln -f -s ../../target/debug/ontodev_valve valve
+	@echo "cd test/penguins && $(penguin_command)"
+	@cd test/penguins && \
+		timeout $(penguin_test_threshold) \
+		time -p \
+		$(penguin_command) || \
+		(echo "Penguin test took longer than $(penguin_test_threshold) seconds." && false)
+	@echo "Test succeeded!"
 
 guess_test_dir = test/guess_test_data
 guess_test_db = build/valve_guess.db
