@@ -126,7 +126,7 @@ pg_random_test: valve random_test_data | build test/output
 test/penguins/src/data:
 	mkdir -p $@
 
-penguin_test_threshold = 600
+penguin_test_threshold = 45
 num_penguin_rows = 100000
 penguin_command = ./valve --initial_load src/schema/table.tsv penguins.db
 penguin_test: valve | test/penguins/src/data
