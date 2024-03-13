@@ -2,6 +2,7 @@
 
 use crate::{
     ast::Expression,
+    internal::{generate_internal_table_config, INTERNAL_TABLES},
     validate::{
         validate_row_tx, validate_rows_constraints, validate_rows_intra, validate_rows_trees,
     },
@@ -237,7 +238,7 @@ pub fn read_config_files(
     for row in rows {
         if let Err(e) = check_table_requirements(
             &vec!["table", "path", "type", "description"],
-            &vec!["table", "path"],
+            &vec!["table"],
             &row,
         ) {
             return Err(ValveError::ConfigError(format!(
@@ -250,7 +251,17 @@ pub fn read_config_files(
         let row_table = row.get("table").and_then(|t| t.as_str()).unwrap();
         let row_path = row.get("path").and_then(|t| t.as_str()).unwrap();
         let row_type = row.get("type").and_then(|t| t.as_str()).unwrap();
+        let row_mode = row.get("mode").and_then(|t| t.as_str()).unwrap();
         let row_desc = row.get("description").and_then(|t| t.as_str()).unwrap();
+
+        if row_mode == "internal" {
+            return Err(ValveError::ConfigError(format!(
+                "The mode 'internal' is reserved for internal use and is not allowed to be \
+                 specified as a table mode in '{}'",
+                path
+            ))
+            .into());
+        }
 
         if row_type == "table" {
             if path.to_lowercase().ends_with(".tsv") && row_path != path {
@@ -306,6 +317,7 @@ pub fn read_config_files(
             ValveTableConfig {
                 table: row_table.to_string(),
                 table_type: row_type.to_string(),
+                mode: row_mode.to_string(),
                 description: row_desc.to_string(),
                 path: row_path.to_string(),
                 ..Default::default()
@@ -590,40 +602,39 @@ pub fn read_config_files(
     // 5. Initialize the constraints config:
     let mut constraints_config = ValveConstraintConfig::default();
     for table_name in tables_config.keys().cloned().collect::<Vec<_>>() {
-        let optional_path = tables_config
+        let this_table = tables_config
             .get(&table_name)
-            .and_then(|r| Some(r.path.to_string()));
-        let mut path = None;
-        match optional_path {
-            None => {
-                // If an entry of the tables_config has no path then it is an internal table which
-                // need not be configured explicitly. Currently the only examples are the message
-                // and history tables.
-                if table_name != "message" && table_name != "history" {
-                    return Err(ValveError::ConfigError(format!(
-                        "No path defined for table {}",
-                        table_name
-                    ))
-                    .into());
-                }
-                continue;
-            }
-            Some(p) if !Path::new(&p).is_file() => {
-                log::warn!("File does not exist {}", p);
-            }
-            Some(p) if Path::new(&p).canonicalize().is_err() => {
-                log::warn!("File path could not be made canonical {}", p);
-            }
-            Some(p) => path = Some(p),
-        };
-
-        let this_column_config = tables_config
-            .get(&table_name)
-            .and_then(|t| Some(t.column.clone()))
             .ok_or(ValveError::ConfigError(format!(
                 "Table '{}' not found in tables config",
                 table_name
             )))?;
+
+        let mut path = None;
+        if this_table.path == "" {
+            if !vec!["internal", "view"].contains(&this_table.mode.as_str()) {
+                return Err(ValveError::ConfigError(format!(
+                    "No path defined for table {}",
+                    table_name
+                ))
+                .into());
+            }
+        } else if !Path::new(&this_table.path).is_file() {
+            log::warn!("File does not exist {}", this_table.path);
+        } else if Path::new(&this_table.path).canonicalize().is_err() {
+            log::warn!("File path could not be made canonical {}", this_table.path);
+        } else {
+            path = Some(this_table.path.to_string())
+        }
+
+        // Constraints on internal tables and views do not need to be configured explicitly:
+        if vec!["internal", "view"].contains(&this_table.mode.as_str()) {
+            if this_table.mode == "view" && path != None {
+                log::warn!("Ignoring path '{}' for view '{}", path.unwrap(), table_name);
+            }
+            continue;
+        }
+
+        let this_column_config = &this_table.column;
         let defined_columns: Vec<String> = this_column_config.keys().cloned().collect::<Vec<_>>();
 
         // We use column_order to explicitly indicate the order in which the columns should appear
@@ -709,226 +720,25 @@ pub fn read_config_files(
             .insert(table_name.to_string(), unders);
     }
 
-    // 6. Manually add the messsage table config:
-    tables_config.insert(
-        "message".to_string(),
-        ValveTableConfig {
-            table: "message".to_string(),
-            table_type: "message".to_string(),
-            description: "Validation messages for all of the tables and columns".to_string(),
-            column_order: vec![
-                "table".to_string(),
-                "row".to_string(),
-                "column".to_string(),
-                "value".to_string(),
-                "level".to_string(),
-                "rule".to_string(),
-                "message".to_string(),
-            ],
-            column: {
-                let mut column_configs = HashMap::new();
-                column_configs.insert(
-                    "table".to_string(),
-                    ValveColumnConfig {
-                        table: "message".to_string(),
-                        column: "table".to_string(),
-                        description: "The table referred to by the message".to_string(),
-                        datatype: "table_name".to_string(),
-                        ..Default::default()
-                    },
-                );
-                column_configs.insert(
-                    "row".to_string(),
-                    ValveColumnConfig {
-                        table: "message".to_string(),
-                        column: "row".to_string(),
-                        description: "The row number of the table referred to by the message"
-                            .to_string(),
-                        datatype: "natural_number".to_string(),
-                        ..Default::default()
-                    },
-                );
-                column_configs.insert(
-                    "column".to_string(),
-                    ValveColumnConfig {
-                        table: "message".to_string(),
-                        column: "column".to_string(),
-                        description: "The column of the table referred to by the message"
-                            .to_string(),
-                        datatype: "column_name".to_string(),
-                        ..Default::default()
-                    },
-                );
-                column_configs.insert(
-                    "value".to_string(),
-                    ValveColumnConfig {
-                        table: "message".to_string(),
-                        column: "value".to_string(),
-                        description: "The value that is the reason for the message".to_string(),
-                        datatype: "text".to_string(),
-                        ..Default::default()
-                    },
-                );
-                column_configs.insert(
-                    "level".to_string(),
-                    ValveColumnConfig {
-                        table: "message".to_string(),
-                        column: "level".to_string(),
-                        description: "The severity of the violation".to_string(),
-                        datatype: "word".to_string(),
-                        ..Default::default()
-                    },
-                );
-                column_configs.insert(
-                    "rule".to_string(),
-                    ValveColumnConfig {
-                        table: "message".to_string(),
-                        column: "rule".to_string(),
-                        description: "The rule violated by the value".to_string(),
-                        datatype: "CURIE".to_string(),
-                        ..Default::default()
-                    },
-                );
-                column_configs.insert(
-                    "message".to_string(),
-                    ValveColumnConfig {
-                        table: "message".to_string(),
-                        column: "message".to_string(),
-                        description: "The message".to_string(),
-                        datatype: "line".to_string(),
-                        ..Default::default()
-                    },
-                );
-                column_configs
-            },
-            ..Default::default()
-        },
-    );
+    // 6. Add internal table configuration to the table config:
+    for table in INTERNAL_TABLES.iter() {
+        tables_config.insert(table.to_string(), generate_internal_table_config(table));
+    }
 
-    // 7. Manually add the history table config:
-    tables_config.insert(
-        "history".to_string(),
-        ValveTableConfig {
-            table: "history".to_string(),
-            table_type: "history".to_string(),
-            description: "History of changes to the VALVE database".to_string(),
-            column_order: vec![
-                "table".to_string(),
-                "row".to_string(),
-                "from".to_string(),
-                "to".to_string(),
-                "summary".to_string(),
-                "user".to_string(),
-                "undone_by".to_string(),
-                "timestamp".to_string(),
-            ],
-            column: {
-                let mut column_configs = HashMap::new();
-                column_configs.insert(
-                    "table".to_string(),
-                    ValveColumnConfig {
-                        table: "history".to_string(),
-                        column: "table".to_string(),
-                        description: "The table referred to by the history entry".to_string(),
-                        datatype: "table_name".to_string(),
-                        ..Default::default()
-                    },
-                );
-                column_configs.insert(
-                    "row".to_string(),
-                    ValveColumnConfig {
-                        table: "history".to_string(),
-                        column: "row".to_string(),
-                        description: "The row number of the table referred to by the history entry"
-                            .to_string(),
-                        datatype: "natural_number".to_string(),
-                        ..Default::default()
-                    },
-                );
-                column_configs.insert(
-                    "from".to_string(),
-                    ValveColumnConfig {
-                        table: "history".to_string(),
-                        column: "from".to_string(),
-                        description: "The initial value of the row".to_string(),
-                        datatype: "text".to_string(),
-                        ..Default::default()
-                    },
-                );
-                column_configs.insert(
-                    "to".to_string(),
-                    ValveColumnConfig {
-                        table: "history".to_string(),
-                        column: "to".to_string(),
-                        description: "The final value of the row".to_string(),
-                        datatype: "text".to_string(),
-                        ..Default::default()
-                    },
-                );
-                column_configs.insert(
-                    "summary".to_string(),
-                    ValveColumnConfig {
-                        table: "history".to_string(),
-                        column: "summary".to_string(),
-                        description: "Summarizes the changes to each column of the row".to_string(),
-                        datatype: "text".to_string(),
-                        ..Default::default()
-                    },
-                );
-                column_configs.insert(
-                    "user".to_string(),
-                    ValveColumnConfig {
-                        table: "history".to_string(),
-                        column: "user".to_string(),
-                        description: "User responsible for the change".to_string(),
-                        datatype: "line".to_string(),
-                        ..Default::default()
-                    },
-                );
-                column_configs.insert(
-                    "undone_by".to_string(),
-                    ValveColumnConfig {
-                        table: "history".to_string(),
-                        column: "undone_by".to_string(),
-                        description:
-                            "User who has undone the change. Null if it has not been undone"
-                                .to_string(),
-                        datatype: "line".to_string(),
-                        ..Default::default()
-                    },
-                );
-                column_configs.insert(
-                    "timestamp".to_string(),
-                    ValveColumnConfig {
-                        table: "history".to_string(),
-                        column: "timestamp".to_string(),
-                        description: "The time of the change, or of the undo".to_string(),
-                        datatype: "line".to_string(),
-                        ..Default::default()
-                    },
-                );
-                column_configs
-            },
-            ..Default::default()
-        },
-    );
-
-    // 8. Sort the tables (aside from the message and history tables) according to their foreign key
+    // 7. Sort the tables (other than internal tables) according to their foreign key
     // dependencies so that tables are always loaded after the tables they depend on.
     let (sorted_tables, table_dependencies_in, table_dependencies_out) = verify_table_deps_and_sort(
         &tables_config
             .keys()
             .cloned()
-            // We are filtering out history and message here because the fact that all of the table
-            // views depend on them is not reflected in the constraints configuration. They will be
-            // taken account of within verify_table_deps_and_sort() and manually added to the sorted
-            // table list that is returned.
-            .filter(|m| m != "history" && m != "message")
+            // Internal tables will be taken account of within verify_table_deps_and_sort() and
+            // manually added to the sorted table list that is returned there.
+            .filter(|m| !INTERNAL_TABLES.contains(&m.to_string().as_str()))
             .collect(),
         &constraints_config,
     );
 
-    // 9. Finally, return all the configs:
+    // 8. Finally, return all the configs:
     Ok((
         specials_config,
         tables_config,
@@ -2997,9 +2807,8 @@ pub fn verify_table_deps_and_sort(
     let trees = &constraints.tree;
     for table_name in table_list {
         let mut dependency_graph = DiGraphMap::<&str, ()>::new();
-        let table_trees = trees
-            .get(table_name)
-            .expect(&format!("Undefined table '{}'", table_name));
+        let default_table_trees = vec![];
+        let table_trees = trees.get(table_name).unwrap_or(&default_table_trees);
         for tree in table_trees {
             let child = &tree.child;
             let parent = &tree.parent;
@@ -3039,20 +2848,18 @@ pub fn verify_table_deps_and_sort(
     let foreign_keys = &constraints.foreign;
     let under_keys = &constraints.under;
     let mut dependency_graph = DiGraphMap::<&str, ()>::new();
+    let default_fkeys = vec![];
+    let default_ukeys = vec![];
     for table_name in table_list {
         let t_index = dependency_graph.add_node(table_name);
-        let fkeys = foreign_keys
-            .get(table_name)
-            .expect(&format!("Undefined table '{}'", table_name));
+        let fkeys = foreign_keys.get(table_name).unwrap_or(&default_fkeys);
         for fkey in fkeys {
             let ftable = &fkey.ftable;
             let f_index = dependency_graph.add_node(&ftable);
             dependency_graph.add_edge(t_index, f_index, ());
         }
 
-        let ukeys = under_keys
-            .get(table_name)
-            .expect(&format!("Undefined table '{}'", table_name));
+        let ukeys = under_keys.get(table_name).unwrap_or(&default_ukeys);
         for ukey in ukeys {
             let ttable = &ukey.ttable;
             let tcolumn = &ukey.tcolumn;
@@ -3095,9 +2902,16 @@ pub fn verify_table_deps_and_sort(
                 table_dependencies_out.insert(node.to_string(), neighbors);
             }
             let mut sorted_table_list = sorted_table_list.clone();
-            let mut with_specials = vec!["message".to_string(), "history".to_string()];
-            with_specials.append(&mut sorted_table_list);
-            return (with_specials, table_dependencies_in, table_dependencies_out);
+            let mut with_internals = INTERNAL_TABLES
+                .iter()
+                .map(|t| t.to_string())
+                .collect::<Vec<_>>();
+            with_internals.append(&mut sorted_table_list);
+            return (
+                with_internals,
+                table_dependencies_in,
+                table_dependencies_out,
+            );
         }
         Err(cycles) => {
             let mut message = String::new();

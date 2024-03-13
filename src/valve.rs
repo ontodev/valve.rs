@@ -2,6 +2,7 @@
 
 use crate::{
     ast::Expression,
+    internal::{generate_internal_table_ddl, INTERNAL_TABLES},
     toolkit::{
         add_message_counts, cast_column_sql_to_text, convert_undo_or_redo_record_to_change,
         delete_row_tx, get_column_value, get_compiled_datatype_conditions,
@@ -21,7 +22,6 @@ use csv::{QuoteStyle, ReaderBuilder, WriterBuilder};
 use enquote::unquote;
 use futures::{executor::block_on, TryStreamExt};
 use indexmap::IndexMap;
-use indoc::indoc;
 use itertools::Itertools;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -320,6 +320,8 @@ pub struct ValveTableConfig {
     pub table: String,
     /// The table's type
     pub table_type: String,
+    /// The mode of the table
+    pub mode: String,
     /// A description of the table
     pub description: String,
     /// The location of the TSV file representing the table in the filesystem
@@ -834,15 +836,8 @@ impl Valve {
             Ok(false)
         };
 
+        let table_config = self.get_table_config(table)?;
         let (columns_config, configured_column_order) = {
-            let table_config =
-                self.config
-                    .table
-                    .get(table)
-                    .ok_or(ValveError::ConfigError(format!(
-                        "Undefined table '{}'",
-                        table
-                    )))?;
             let columns_config = &table_config.column;
             let configured_column_order = {
                 let mut configured_column_order = {
@@ -1046,6 +1041,13 @@ impl Valve {
         Ok(false)
     }
 
+    pub fn get_table_config(&self, table: &str) -> Result<ValveTableConfig> {
+        self.config
+            .table
+            .get(table)
+            .ok_or(ValveError::ConfigError(format!("Undefined table '{}'", table)).into())
+            .cloned()
+    }
     /// Generates and returns the DDL required to setup the database.
     pub async fn get_setup_statements(&self) -> Result<HashMap<String, Vec<String>>> {
         let tables_config = &self.config.table;
@@ -1056,89 +1058,34 @@ impl Valve {
         // and use that information to create the associated database tables, while saving
         // constraint information to constrains_config.
         let mut setup_statements = HashMap::new();
-        for table_name in tables_config.keys().cloned().collect::<Vec<_>>() {
-            // Generate the statements for creating the table and its corresponding conflict table:
+        for (table_name, table_config) in tables_config.iter() {
+            // Generate DDL for the table and its corresponding conflict table:
             let mut table_statements = vec![];
-            for table in vec![table_name.to_string(), format!("{}_conflict", table_name)] {
-                let mut statements =
-                    get_table_ddl(tables_config, datatypes_config, &parser, &table, &self.pool);
-                table_statements.append(&mut statements);
+            // Tables with mode 'view' are managed externally:
+            if table_config.mode != "view" {
+                for table in vec![table_name.to_string(), format!("{}_conflict", table_name)] {
+                    let mut statements =
+                        get_table_ddl(tables_config, datatypes_config, &parser, &table, &self.pool);
+                    table_statements.append(&mut statements);
+                }
+
+                let create_view_sql = get_sql_for_standard_view(&table_name, &self.pool);
+                let create_text_view_sql =
+                    get_sql_for_text_view(tables_config, &table_name, &self.pool);
+                table_statements.push(create_view_sql);
+                table_statements.push(create_text_view_sql);
             }
-
-            let create_view_sql = get_sql_for_standard_view(&table_name, &self.pool);
-            let create_text_view_sql =
-                get_sql_for_text_view(tables_config, &table_name, &self.pool);
-            table_statements.push(create_view_sql);
-            table_statements.push(create_text_view_sql);
-
             setup_statements.insert(table_name.to_string(), table_statements);
         }
 
         let text_type = get_sql_type(datatypes_config, &"text".to_string(), &self.pool);
 
-        // Generate DDL for the history table:
-        let mut history_statements = vec![];
-        history_statements.push(format!(
-            indoc! {r#"
-                CREATE TABLE "history" (
-                  {history_id}
-                  "table" {text_type},
-                  "row" BIGINT,
-                  "from" {text_type},
-                  "to" {text_type},
-                  "summary" {text_type},
-                  "user" {text_type},
-                  "undone_by" {text_type},
-                  {timestamp}
-                );
-              "#},
-            history_id = {
-                if self.pool.any_kind() == AnyKind::Sqlite {
-                    "\"history_id\" INTEGER PRIMARY KEY,"
-                } else {
-                    "\"history_id\" SERIAL PRIMARY KEY,"
-                }
-            },
-            text_type = text_type,
-            timestamp = {
-                if self.pool.any_kind() == AnyKind::Sqlite {
-                    "\"timestamp\" TIMESTAMP DEFAULT(STRFTIME('%Y-%m-%d %H:%M:%f', 'NOW'))"
-                } else {
-                    "\"timestamp\" TIMESTAMP DEFAULT CURRENT_TIMESTAMP"
-                }
-            },
-        ));
-        history_statements
-            .push(r#"CREATE INDEX "history_tr_idx" ON "history"("table", "row");"#.to_string());
+        // Generate DDL for the history and message tables:
+        let history_statements =
+            generate_internal_table_ddl("history", &self.pool.any_kind(), &text_type);
         setup_statements.insert("history".to_string(), history_statements);
-
-        // Generate DDL for the message table:
-        let mut message_statements = vec![];
-        message_statements.push(format!(
-            indoc! {r#"
-                CREATE TABLE "message" (
-                  {message_id}
-                  "table" {text_type},
-                  "row" BIGINT,
-                  "column" {text_type},
-                  "value" {text_type},
-                  "level" {text_type},
-                  "rule" {text_type},
-                  "message" {text_type}
-                );
-              "#},
-            message_id = {
-                if self.pool.any_kind() == AnyKind::Sqlite {
-                    "\"message_id\" INTEGER PRIMARY KEY,"
-                } else {
-                    "\"message_id\" SERIAL PRIMARY KEY,"
-                }
-            },
-            text_type = text_type,
-        ));
-        message_statements.push(
-            r#"CREATE INDEX "message_trc_idx" ON "message"("table", "row", "column");"#.to_string(),
-        );
+        let message_statements =
+            generate_internal_table_ddl("message", &self.pool.any_kind(), &text_type);
         setup_statements.insert("message".to_string(), message_statements);
 
         return Ok(setup_statements);
@@ -1158,6 +1105,7 @@ impl Valve {
                     )))?;
             let table_output = String::from(table_statements.join("\n"));
             output.push_str(&table_output);
+            output.push_str("\n\n");
         }
         Ok(output)
     }
@@ -1167,21 +1115,24 @@ impl Valve {
         let setup_statements = self.get_setup_statements().await?;
         let sorted_table_list = self.get_sorted_table_list(false);
         for table in &sorted_table_list {
-            if self.table_has_changed(*table).await? {
-                self.drop_tables(&vec![table]).await?;
-                let table_statements =
-                    setup_statements
-                        .get(*table)
-                        .ok_or(ValveError::ConfigError(format!(
-                            "Could not find setup statements for {}",
-                            table
-                        )))?;
-                for stmt in table_statements {
-                    self.execute_sql(stmt).await?;
+            let table_config = self.get_table_config(table)?;
+            // Tables with mode 'view' are not managed by Valve:
+            if table_config.mode != "view" {
+                if self.table_has_changed(*table).await? {
+                    self.drop_tables(&vec![table]).await?;
+                    let table_statements =
+                        setup_statements
+                            .get(*table)
+                            .ok_or(ValveError::ConfigError(format!(
+                                "Could not find setup statements for {}",
+                                table
+                            )))?;
+                    for stmt in table_statements {
+                        self.execute_sql(stmt).await?;
+                    }
                 }
             }
         }
-
         Ok(self)
     }
 
@@ -1215,7 +1166,7 @@ impl Valve {
     /// dependencies of the given table.
     pub fn get_dependencies(&self, table: &str, incoming: bool) -> Result<Vec<String>> {
         let mut dependent_tables = vec![];
-        if table != "message" && table != "history" {
+        if !INTERNAL_TABLES.contains(&table) {
             let direct_deps = {
                 if incoming {
                     self.table_dependencies_in
@@ -1291,11 +1242,11 @@ impl Valve {
             .into());
         }
 
-        // Filter out message and history since they are not represented in the constraints config.
+        // Filter out internal tables since they are not represented in the constraints config.
         // They will be added implicitly to the list returned by verify_table_deps_and_sort.
         let filtered_subset = table_subset
             .iter()
-            .filter(|m| **m != "history" && **m != "message")
+            .filter(|m| !INTERNAL_TABLES.contains(m))
             .map(|s| s.to_string())
             .collect::<Vec<_>>();
 
@@ -1339,16 +1290,19 @@ impl Valve {
     pub async fn drop_tables(&self, tables: &Vec<&str>) -> Result<&Self> {
         let drop_list = self.add_dependencies(tables, true)?;
         for table in &drop_list {
-            if *table != "message" && *table != "history" {
-                let sql = format!(r#"DROP VIEW IF EXISTS "{}_text_view""#, table);
-                self.execute_sql(&sql).await?;
-                let sql = format!(r#"DROP VIEW IF EXISTS "{}_view""#, table);
-                self.execute_sql(&sql).await?;
-                let sql = format!(r#"DROP TABLE IF EXISTS "{}_conflict""#, table);
+            let table_config = self.get_table_config(table)?;
+            if table_config.mode != "view" {
+                if table_config.mode != "internal" {
+                    let sql = format!(r#"DROP VIEW IF EXISTS "{}_text_view""#, table);
+                    self.execute_sql(&sql).await?;
+                    let sql = format!(r#"DROP VIEW IF EXISTS "{}_view""#, table);
+                    self.execute_sql(&sql).await?;
+                    let sql = format!(r#"DROP TABLE IF EXISTS "{}_conflict""#, table);
+                    self.execute_sql(&sql).await?;
+                }
+                let sql = format!(r#"DROP TABLE IF EXISTS "{}""#, table);
                 self.execute_sql(&sql).await?;
             }
-            let sql = format!(r#"DROP TABLE IF EXISTS "{}""#, table);
-            self.execute_sql(&sql).await?;
         }
 
         Ok(self)
@@ -1380,11 +1334,14 @@ impl Valve {
         };
 
         for table in &truncate_list {
-            let sql = truncate_sql(&table);
-            self.execute_sql(&sql).await?;
-            if *table != "message" && *table != "history" {
-                let sql = truncate_sql(&format!("{}_conflict", table));
+            let table_config = self.get_table_config(table)?;
+            if table_config.mode != "view" {
+                let sql = truncate_sql(&table);
                 self.execute_sql(&sql).await?;
+                if table_config.mode != "internal" {
+                    let sql = truncate_sql(&format!("{}_conflict", table));
+                    self.execute_sql(&sql).await?;
+                }
             }
         }
 
@@ -1422,7 +1379,8 @@ impl Valve {
         let mut total_infos = 0;
         let mut table_num = 1;
         for table_name in table_list {
-            if *table_name == "message" || *table_name == "history" {
+            let table_config = self.get_table_config(&table_name)?;
+            if vec!["view", "internal"].contains(&table_config.mode.as_str()) {
                 continue;
             }
             let table_name = table_name.to_string();
@@ -1596,7 +1554,7 @@ impl Valve {
             .table
             .iter()
             .filter(|(k, v)| {
-                !["message", "history"].contains(&k.as_str())
+                !INTERNAL_TABLES.contains(&k.as_str())
                     && tables.contains(&k.as_str())
                     && v.path != ""
             })
