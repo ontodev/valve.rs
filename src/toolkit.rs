@@ -416,8 +416,6 @@ pub fn read_config_files(
                 "condition",
                 "description",
                 "parent",
-                "structure",
-                "transform",
             ],
             &vec!["datatype"],
             &row,
@@ -435,8 +433,6 @@ pub fn read_config_files(
         let condition = row.get("condition").and_then(|s| s.as_str()).unwrap();
         let description = row.get("description").and_then(|s| s.as_str()).unwrap();
         let parent = row.get("parent").and_then(|s| s.as_str()).unwrap();
-        let structure = row.get("structure").and_then(|s| s.as_str()).unwrap();
-        let transform = row.get("transform").and_then(|s| s.as_str()).unwrap();
         datatypes_config.insert(
             dt_name.to_string(),
             ValveDatatypeConfig {
@@ -446,8 +442,6 @@ pub fn read_config_files(
                 datatype: dt_name.to_string(),
                 description: description.to_string(),
                 parent: parent.to_string(),
-                structure: structure.to_string(),
-                transform: transform.to_string(),
             },
         );
     }

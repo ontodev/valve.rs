@@ -364,10 +364,6 @@ pub struct ValveDatatypeConfig {
     pub description: String,
     /// The parent datatype of the datatype
     pub parent: String,
-    /// The structural constraint that should be satisfied by all data values of this type
-    pub structure: String,
-    /// The transform of the datatype
-    pub transform: String,
 }
 
 /// Configuration information for a particular table rule
