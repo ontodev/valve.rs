@@ -626,12 +626,13 @@ pub fn read_config_files(
             path = Some(this_table.path.to_string())
         }
 
-        // Constraints on internal tables and views do not need to be configured explicitly:
-        if vec!["internal", "view"].contains(&this_table.mode.as_str()) {
-            if this_table.mode == "view" && path != None {
-                log::warn!("Ignoring path '{}' for view '{}", path.unwrap(), table_name);
-            }
+        // Constraints on internal tables do not need to be configured explicitly:
+        if this_table.mode == "internal" {
             continue;
+        }
+        if this_table.mode == "view" && path != None {
+            log::warn!("Ignoring path '{}' for view '{}", path.unwrap(), table_name);
+            path = None;
         }
 
         let this_column_config = &this_table.column;
@@ -2807,8 +2808,9 @@ pub fn verify_table_deps_and_sort(
     let trees = &constraints.tree;
     for table_name in table_list {
         let mut dependency_graph = DiGraphMap::<&str, ()>::new();
-        let default_table_trees = vec![];
-        let table_trees = trees.get(table_name).unwrap_or(&default_table_trees);
+        let table_trees = trees
+            .get(table_name)
+            .expect(&format!("Undefined table '{}'", table_name));
         for tree in table_trees {
             let child = &tree.child;
             let parent = &tree.parent;
@@ -2848,18 +2850,20 @@ pub fn verify_table_deps_and_sort(
     let foreign_keys = &constraints.foreign;
     let under_keys = &constraints.under;
     let mut dependency_graph = DiGraphMap::<&str, ()>::new();
-    let default_fkeys = vec![];
-    let default_ukeys = vec![];
     for table_name in table_list {
         let t_index = dependency_graph.add_node(table_name);
-        let fkeys = foreign_keys.get(table_name).unwrap_or(&default_fkeys);
+        let fkeys = foreign_keys
+            .get(table_name)
+            .expect(&format!("Undefined table '{}'", table_name));
         for fkey in fkeys {
             let ftable = &fkey.ftable;
             let f_index = dependency_graph.add_node(&ftable);
             dependency_graph.add_edge(t_index, f_index, ());
         }
 
-        let ukeys = under_keys.get(table_name).unwrap_or(&default_ukeys);
+        let ukeys = under_keys
+            .get(table_name)
+            .expect(&format!("Undefined table '{}'", table_name));
         for ukey in ukeys {
             let ttable = &ukey.ttable;
             let tcolumn = &ukey.tcolumn;
@@ -3186,7 +3190,16 @@ pub fn get_table_ddl(
 
         // If there are foreign constraints add a column to the end of the statement which we will
         // finish after this for loop is done:
-        if !(r >= c && foreigns.is_empty()) {
+        let applicable_foreigns = foreigns
+            .iter()
+            .filter(|fkey| {
+                let table_config = &tables_config
+                    .get(&fkey.ftable)
+                    .expect(&format!("Undefined table '{}'", fkey.ftable));
+                table_config.mode != "view"
+            })
+            .collect::<Vec<_>>();
+        if !(r >= c && applicable_foreigns.is_empty()) {
             line.push_str(",");
         }
         create_lines.push(line);
@@ -3195,13 +3208,21 @@ pub fn get_table_ddl(
     // Add the SQL to indicate any foreign constraints:
     let num_fkeys = foreigns.len();
     for (i, fkey) in foreigns.iter().enumerate() {
-        create_lines.push(format!(
-            r#"  FOREIGN KEY ("{}") REFERENCES "{}"("{}"){}"#,
-            fkey.column,
-            fkey.ftable,
-            fkey.fcolumn,
-            if i < (num_fkeys - 1) { "," } else { "" }
-        ));
+        let ftable_mode = {
+            let table_config = &tables_config
+                .get(&fkey.ftable)
+                .expect(&format!("Undefined table '{}'", fkey.ftable));
+            table_config.mode.to_string()
+        };
+        if ftable_mode != "view" {
+            create_lines.push(format!(
+                r#"  FOREIGN KEY ("{}") REFERENCES "{}"("{}"){}"#,
+                fkey.column,
+                fkey.ftable,
+                fkey.fcolumn,
+                if i < (num_fkeys - 1) { "," } else { "" }
+            ));
+        }
     }
     create_lines.push(String::from(");"));
     // We are done generating the lines for the 'create table' statement. Join them and add the

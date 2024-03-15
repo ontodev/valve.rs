@@ -37,6 +37,9 @@ valve_debug:
 	ln -s target/debug/ontodev_valve valve
 
 build/valve.db: valve test/src/table.tsv | build
+	sqlite3 $@ "create table valve_test_table (foo text, bar text)"
+	sqlite3 $@ "create view valve_test_view as select * from valve_test_table"
+	sqlite3 $@ "insert into valve_test_table values ('d', 'e'), ('e', 'f'), ('d', 'c'), ('e', 'z'), ('e', 'w')"
 	./$^ $@
 
 test/output:
