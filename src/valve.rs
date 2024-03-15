@@ -260,8 +260,6 @@ impl Error for ValveError {}
 /// Represents a message associated with a particular value of a particular column.
 #[derive(Debug, Default, Deserialize, Serialize)]
 pub struct ValveMessage {
-    /// The name of the table that the column is from
-    pub table: String,
     /// The name of the column
     pub column: String,
     /// The value of the column
