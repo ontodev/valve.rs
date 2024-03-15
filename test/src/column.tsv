@@ -2,7 +2,7 @@ table	column	label	nulltype	datatype	structure	description
 table	table	table_name		table_name	primary	name of this table
 table	path			path		path to the TSV file for this table, relative to the table.tsv file
 table	type		empty	table_type		type of this table, used for tables with special meanings
-table	mode		empty	text		mode of the table
+table	mode		empty	word		mode of the table
 table	description		empty	description		a description of this table
 column	table			table_name	from(table.table)	the table that this column belongs to
 column	column			column_name		the name of this column

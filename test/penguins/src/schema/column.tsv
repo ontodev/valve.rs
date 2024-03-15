@@ -3,6 +3,7 @@ table	table	table		label	unique	name of this table
 table	path	path		line		path to the TSV file for this table, relative to the table.tsv file
 table	type	type	empty	table_type		type of this table, used for tables with special meanings
 table	description	description	empty	text		a description of this table
+table	mode	mode	empty	word		mode of this table
 column	table	table		label	from(table.table)	the table that this column belongs to
 column	column	column		label		the name of this column
 column	label	label		label		the label of this column

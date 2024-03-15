@@ -1041,12 +1041,11 @@ impl Valve {
         Ok(false)
     }
 
-    pub fn get_table_config(&self, table: &str) -> Result<ValveTableConfig> {
+    pub fn get_table_config(&self, table: &str) -> Result<&ValveTableConfig> {
         self.config
             .table
             .get(table)
             .ok_or(ValveError::ConfigError(format!("Undefined table '{}'", table)).into())
-            .cloned()
     }
     /// Generates and returns the DDL required to setup the database.
     pub async fn get_setup_statements(&self) -> Result<HashMap<String, Vec<String>>> {
