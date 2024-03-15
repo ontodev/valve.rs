@@ -1041,12 +1041,14 @@ impl Valve {
         Ok(false)
     }
 
+    /// Given the name of a table, returns its table configuration.
     pub fn get_table_config(&self, table: &str) -> Result<&ValveTableConfig> {
         self.config
             .table
             .get(table)
             .ok_or(ValveError::ConfigError(format!("Undefined table '{}'", table)).into())
     }
+
     /// Generates and returns the DDL required to setup the database.
     pub async fn get_setup_statements(&self) -> Result<HashMap<String, Vec<String>>> {
         let tables_config = &self.config.table;
@@ -1675,6 +1677,15 @@ impl Valve {
     /// validate and insert the row to the table and return the row number of the inserted row
     /// and the row itself in the form of a [ValveRow].
     pub async fn insert_row(&self, table_name: &str, row: &JsonRow) -> Result<(u32, ValveRow)> {
+        let table_mode = &self.get_table_config(table_name)?.mode;
+        if vec!["view", "internal"].contains(&table_mode.as_str()) {
+            return Err(ValveError::InputError(format!(
+                "Inserting to a table of mode '{}' is not allowed",
+                table_mode
+            ))
+            .into());
+        }
+
         let mut tx = self.pool.begin().await?;
         let row = ValveRow::from_simple_json(row, None)?;
         let row = validate_row_tx(
@@ -1726,6 +1737,15 @@ impl Valve {
         row_number: &u32,
         row: &JsonRow,
     ) -> Result<ValveRow> {
+        let table_mode = &self.get_table_config(table_name)?.mode;
+        if vec!["view", "internal"].contains(&table_mode.as_str()) {
+            return Err(ValveError::InputError(format!(
+                "Updating a table of mode '{}' is not allowed",
+                table_mode
+            ))
+            .into());
+        }
+
         let mut tx = self.pool.begin().await?;
 
         // Get the old version of the row from the database so that we can later record it to the
@@ -1779,6 +1799,15 @@ impl Valve {
 
     /// Given a table name and a row number, delete that row from the table.
     pub async fn delete_row(&self, table_name: &str, row_number: &u32) -> Result<()> {
+        let table_mode = &self.get_table_config(table_name)?.mode;
+        if vec!["view", "internal"].contains(&table_mode.as_str()) {
+            return Err(ValveError::InputError(format!(
+                "Deleting from table of mode '{}' is not allowed",
+                table_mode
+            ))
+            .into());
+        }
+
         let mut tx = self.pool.begin().await?;
 
         let row =
