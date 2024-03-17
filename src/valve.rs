@@ -645,10 +645,18 @@ impl Valve {
 
     /// Return the list of configured tables in sorted order, or reverse sorted order if the
     /// reverse flag is set.
-    pub fn get_sorted_table_list(&self, reverse: bool) -> Vec<&str> {
+    pub fn get_sorted_table_list(&self, reverse: bool, include_views: bool) -> Vec<&str> {
         let mut sorted_tables = self
             .sorted_table_list
             .iter()
+            .filter(|t| {
+                include_views
+                    || self
+                        .get_table_config(t)
+                        .expect("Not all tables in sorted_table_list are in the table config.")
+                        .mode
+                        != "view"
+            })
             .map(|i| i.as_str())
             .collect::<Vec<_>>();
         if reverse {
@@ -1096,7 +1104,7 @@ impl Valve {
     pub async fn dump_schema(&self) -> Result<String> {
         let setup_statements = self.get_setup_statements().await?;
         let mut output = String::from("");
-        for table in self.get_sorted_table_list(false) {
+        for table in self.get_sorted_table_list(false, false) {
             let table_statements =
                 setup_statements
                     .get(table)
@@ -1114,7 +1122,7 @@ impl Valve {
     /// Create all configured database tables and views if they do not already exist as configured.
     pub async fn create_all_tables(&self) -> Result<&Self> {
         let setup_statements = self.get_setup_statements().await?;
-        let sorted_table_list = self.get_sorted_table_list(false);
+        let sorted_table_list = self.get_sorted_table_list(false, false);
         for table in &sorted_table_list {
             let table_config = self.get_table_config(table)?;
             // Tables with mode 'view' are not managed by Valve:
@@ -1230,7 +1238,7 @@ impl Valve {
     /// Given a subset of the configured tables, return them in sorted dependency order, or in
     /// reverse dependency order if `reverse` is set to true.
     pub fn sort_tables(&self, table_subset: &Vec<&str>, reverse: bool) -> Result<Vec<String>> {
-        let full_table_list = self.get_sorted_table_list(false);
+        let full_table_list = self.get_sorted_table_list(false, true);
         if !table_subset
             .iter()
             .all(|item| full_table_list.contains(item))
@@ -1271,7 +1279,7 @@ impl Valve {
     /// Returns an IndexMap, indexed by configured table, containing lists of their dependencies.
     /// If incoming is true, the lists are incoming dependencies, else they are outgoing.
     pub fn collect_dependencies(&self, incoming: bool) -> Result<IndexMap<String, Vec<String>>> {
-        let tables = self.get_sorted_table_list(false);
+        let tables = self.get_sorted_table_list(false, true);
         let mut dependencies = IndexMap::new();
         for table in tables {
             dependencies.insert(table.to_string(), self.get_dependencies(table, incoming)?);
@@ -1282,7 +1290,8 @@ impl Valve {
     /// Drop all configured tables, in reverse dependency order.
     pub async fn drop_all_tables(&self) -> Result<&Self> {
         // Drop all of the database tables in the reverse of their sorted order:
-        self.drop_tables(&self.get_sorted_table_list(true)).await?;
+        self.drop_tables(&self.get_sorted_table_list(true, false))
+            .await?;
         Ok(self)
     }
 
@@ -1311,7 +1320,7 @@ impl Valve {
 
     /// Truncate all configured tables, in reverse dependency order.
     pub async fn truncate_all_tables(&self) -> Result<&Self> {
-        self.truncate_tables(&self.get_sorted_table_list(true))
+        self.truncate_tables(&self.get_sorted_table_list(true, false))
             .await?;
         Ok(self)
     }
@@ -1352,7 +1361,7 @@ impl Valve {
     /// Load all configured tables in dependency order. If `validate` is false, just try to insert
     /// all rows, irrespective of whether they are valid or not or will possibly trigger a db error.
     pub async fn load_all_tables(&self, validate: bool) -> Result<&Self> {
-        let table_list = self.get_sorted_table_list(false);
+        let table_list = self.get_sorted_table_list(false, false);
         if self.verbose {
             println!("Processing {} tables.", table_list.len());
         }
@@ -1542,7 +1551,7 @@ impl Valve {
     /// Save all configured tables to their configured paths, unless save_dir is specified,
     /// in which case save them there instead.
     pub fn save_all_tables(&self, save_dir: &Option<String>) -> Result<&Self> {
-        let tables = self.get_sorted_table_list(false);
+        let tables = self.get_sorted_table_list(false, false);
         self.save_tables(&tables, save_dir)?;
         Ok(self)
     }

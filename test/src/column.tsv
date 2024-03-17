@@ -69,6 +69,6 @@ table11	child			text
 table11	parent			text		
 table11	xyzzy			text		
 table11	foo			text	primary	
-table11	bar			text	from(valve_test_view.bar)	
-valve_test_view	foo		empty	trimmed_line		
-valve_test_view	bar		empty	trimmed_line		
+table11	bar			text	from(test_view.bar)	
+test_view	foo		empty	trimmed_line		
+test_view	bar		empty	trimmed_line		

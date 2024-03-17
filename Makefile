@@ -37,9 +37,9 @@ valve_debug:
 	ln -s target/debug/ontodev_valve valve
 
 build/valve.db: valve test/src/table.tsv | build
-	test -f $@ || (sqlite3 $@ "create table valve_test_table (foo text, bar text)" && \
-		sqlite3 $@ "create view valve_test_view as select * from valve_test_table" && \
-		sqlite3 $@ "insert into valve_test_table values ('d', 'e'), ('e', 'f'), ('d', 'c'), ('e', 'z'), ('e', 'w')")
+	test -f $@ || (sqlite3 $@ "create table test_table (foo text, bar text)" && \
+		sqlite3 $@ "create view test_view as select * from test_table" && \
+		sqlite3 $@ "insert into test_table values ('d', 'e'), ('e', 'f'), ('d', 'c'), ('e', 'z'), ('e', 'w')")
 	./$^ $@
 
 test/output:
@@ -63,6 +63,12 @@ sqlite_test: build/valve.db test/src/table.tsv | test/output
 
 pg_test: valve test/src/table.tsv | test/output
 	@echo "Testing valve on postgresql ..."
+	echo "drop table if exists test_table cascade" | psql postgresql:///valve_postgres > /dev/null
+	echo "create table test_table (foo text, bar text)" | psql postgresql:///valve_postgres > /dev/null
+	echo "create view test_view as select * from test_table" \
+		| psql postgresql:///valve_postgres > /dev/null
+	echo "insert into test_table values ('d', 'e'), ('e', 'f'), ('d', 'c'), ('e', 'z'), ('e', 'w')" \
+		| psql postgresql:///valve_postgres > /dev/null
 	./$^ postgresql:///valve_postgres
 	test/round_trip.sh postgresql:///valve_postgres $(word 2,$^)
 	scripts/export_messages.py postgresql:///valve_postgres $| $(tables_to_test)
