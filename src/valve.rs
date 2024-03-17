@@ -1067,24 +1067,28 @@ impl Valve {
         // and use that information to create the associated database tables, while saving
         // constraint information to constrains_config.
         let mut setup_statements = HashMap::new();
-        for (table_name, table_config) in tables_config.iter() {
+        for (table, table_config) in tables_config.iter() {
             // Generate DDL for the table and its corresponding conflict table:
             let mut table_statements = vec![];
             // Tables with mode 'view' are managed externally:
             if table_config.mode != "view" {
-                for table in vec![table_name.to_string(), format!("{}_conflict", table_name)] {
+                let mut statements =
+                    get_table_ddl(tables_config, datatypes_config, &parser, &table, &self.pool);
+                table_statements.append(&mut statements);
+                if table_config.mode != "generated" {
+                    let cable = format!("{}_conflict", table);
                     let mut statements =
-                        get_table_ddl(tables_config, datatypes_config, &parser, &table, &self.pool);
+                        get_table_ddl(tables_config, datatypes_config, &parser, &cable, &self.pool);
                     table_statements.append(&mut statements);
-                }
 
-                let create_view_sql = get_sql_for_standard_view(&table_name, &self.pool);
-                let create_text_view_sql =
-                    get_sql_for_text_view(tables_config, &table_name, &self.pool);
-                table_statements.push(create_view_sql);
-                table_statements.push(create_text_view_sql);
+                    let create_view_sql = get_sql_for_standard_view(&table, &self.pool);
+                    let create_text_view_sql =
+                        get_sql_for_text_view(tables_config, &table, &self.pool);
+                    table_statements.push(create_view_sql);
+                    table_statements.push(create_text_view_sql);
+                }
             }
-            setup_statements.insert(table_name.to_string(), table_statements);
+            setup_statements.insert(table.to_string(), table_statements);
         }
 
         let text_type = get_sql_type(datatypes_config, &"text".to_string(), &self.pool);

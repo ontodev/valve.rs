@@ -72,3 +72,20 @@ table11	foo			text	primary
 table11	bar			text	from(test_view.bar)	
 test_view	foo		empty	trimmed_line		
 test_view	bar		empty	trimmed_line		
+penguin	study_name	studyName		word		the name of the study
+penguin	sample_number	Sample Number		integer	primary	the sample identifier
+penguin	species	Species		label		the species of the measured individual
+penguin	region	Region		label		the region where the measurement took place
+penguin	island	Island		label		the island where the measurement took place
+penguin	stage	Stage		label		the growth stage of the individual
+penguin	individual_id	Individual ID		word	unique	the ID of the measured individual
+penguin	clutch_completion	Clutch Completion		word		whether the measured individual's clutch of eggs was complete
+penguin	date_egg	Date Egg		trimmed_line		the date that an egg in the clutch was observed
+penguin	culmen_length	Culmen Length (mm)		numeric		the length of the culmen of the individual, in millimetres
+penguin	culmen_depth	Culmen Depth (mm)		numeric		the depth of the culmen of the individual, in millimetres
+penguin	flipper_length	Flipper Length (mm)		integer		the length of the individual's flipper, in millimetres
+penguin	body_mass	Body Mass (g)		integer		the body mass of the individual, in grams
+penguin	sex	Sex		word		the sex of the individual
+penguin	delta_15_n	Delta 15 N (o/oo)		numeric		the Delta 15 N measurement
+penguin	delta_13_c	Delta 13 C (o/oo)		numeric		the Delta 13 C measurement
+penguin	comments	Comments	empty	line		comments on the measurement or the individual
