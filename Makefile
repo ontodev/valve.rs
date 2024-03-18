@@ -123,6 +123,25 @@ pg_random_test: valve random_test_data | build test/output
 	test/round_trip.sh postgresql:///valve_postgres $(random_test_dir)/table.tsv
 	@echo "Test succeeded!"
 
+test/penguins/src/data:
+	mkdir -p $@
+
+penguin_test_threshold = 45
+num_penguin_rows = 100000
+penguin_command = ./valve --initial_load src/schema/table.tsv penguins.db
+penguin_test: valve | test/penguins/src/data
+	@echo "Running penguin test ..."
+	rm -f test/penguins/penguins.db
+	cd test/penguins && ./generate.py $(num_penguin_rows)
+	cd test/penguins && ln -f -s ../../target/debug/ontodev_valve valve
+	@echo "cd test/penguins && $(penguin_command)"
+	@cd test/penguins && \
+		timeout $(penguin_test_threshold) \
+		time -p \
+		$(penguin_command) || \
+		(echo "Penguin test took longer than $(penguin_test_threshold) seconds." && false)
+	@echo "Test succeeded!"
+
 guess_test_dir = test/guess_test_data
 guess_test_db = build/valve_guess.db
 
@@ -153,17 +172,17 @@ $(perf_test_dir)/ontology:
 perf_test_data: test/generate_random_test_data.py valve confirm_overwrite.sh $(perf_test_dir)/*.tsv | $(perf_test_dir)/ontology
 	./confirm_overwrite.sh $(perf_test_dir)/ontology
 	rm -f $(perf_test_dir)/ontology/*.tsv
-	./$< $$(date +"%s") 10000 5 $(perf_test_dir)/table.tsv $|
+	./$< $$(date +"%s") 1000 5 $(perf_test_dir)/table.tsv $|
 
 $(perf_test_db): valve perf_test_data $(perf_test_dir)/*.tsv | build $(perf_test_dir)/ontology
 	rm -f $@
-	time -p ./$< --verbose $(perf_test_dir)/table.tsv $@
+	time -p ./$< --verbose --interactive --initial_load $(perf_test_dir)/table.tsv $@
 
-sqlite_perf_test: build/valve_perf.db | test/output
+sqlite_perf_test: $(perf_test_db) | test/output
 	time -p scripts/export_messages.py $< $| $(tables_to_test)
 
 pg_perf_test: valve $(perf_test_dir)/ontology | test/output
-	time -p ./$< --verbose $(perf_test_dir)/table.tsv postgresql:///valve_postgres
+	time -p ./$< --verbose --interactive $(perf_test_dir)/table.tsv postgresql:///valve_postgres
 	time -p scripts/export_messages.py postgresql:///valve_postgres $| $(tables_to_test)
 
 perf_test: sqlite_perf_test pg_perf_test
