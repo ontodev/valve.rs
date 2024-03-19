@@ -219,7 +219,7 @@ async fn main() -> Result<()> {
         println!("{}", schema);
     } else if table_order {
         let valve = build_valve().unwrap();
-        let sorted_table_list = valve.get_sorted_table_list(false, true);
+        let sorted_table_list = valve.get_sorted_table_list(false);
         println!("{}", sorted_table_list.join(", "));
     } else if show_deps_in || show_deps_out {
         let valve = build_valve().unwrap();
