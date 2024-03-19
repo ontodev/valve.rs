@@ -644,13 +644,15 @@ impl Valve {
     }
 
     /// Return the list of configured editable tables in sorted order, or reverse sorted order if
-    /// the reverse flag is set.
+    /// the reverse flag is set. Note that 'editable' refers to the rows in a table. Depending on
+    /// the table's mode, Valve may be allowed to drop and/or create and/or save and/or truncate
+    /// the table even if it is not editable.
     pub fn get_sorted_editable_table_list(&self, reverse: bool) -> Vec<&str> {
         let mut sorted_tables = self
             .sorted_table_list
             .iter()
             .filter(|t| {
-                !vec!["view"].contains(
+                !vec!["generated", "view"].contains(
                     &self
                         .get_table_config(t)
                         .expect("Not all tables in sorted_table_list are in the table config.")
@@ -696,8 +698,8 @@ impl Valve {
             .into());
         }
 
-        // Filter out internal tables since they are not represented in the constraints config.
-        // They will be added implicitly to the list returned by verify_table_deps_and_sort.
+        // Filter out internal tables since they are not represented in the constraints config and
+        // anyway they will be added implicitly later when we call verify_table_deps_and_sort():
         let filtered_subset = table_subset
             .iter()
             .filter(|m| !INTERNAL_TABLES.contains(m))
