@@ -665,6 +665,122 @@ impl Valve {
         sorted_tables
     }
 
+    /// Given a subset of the configured tables, return them in sorted dependency order, or in
+    /// reverse dependency order if `reverse` is set to true.
+    pub fn sort_tables(&self, table_subset: &Vec<&str>, reverse: bool) -> Result<Vec<String>> {
+        let full_table_list = self.get_sorted_table_list(false, true);
+        if !table_subset
+            .iter()
+            .all(|item| full_table_list.contains(item))
+        {
+            return Err(ValveError::InputError(format!(
+                "[{}] contains tables that are not in the configured table list: [{}]",
+                table_subset.join(", "),
+                full_table_list.join(", ")
+            ))
+            .into());
+        }
+
+        // Filter out internal tables since they are not represented in the constraints config.
+        // They will be added implicitly to the list returned by verify_table_deps_and_sort.
+        let filtered_subset = table_subset
+            .iter()
+            .filter(|m| !INTERNAL_TABLES.contains(m))
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>();
+
+        let (sorted_subset, _, _) =
+            verify_table_deps_and_sort(&filtered_subset, &self.config.constraint);
+
+        // Since the result of verify_table_deps_and_sort() will include dependencies of the tables
+        // in its input list, we filter those out here:
+        let mut sorted_subset = sorted_subset
+            .iter()
+            .filter(|m| table_subset.contains(&m.as_str()))
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>();
+
+        if reverse {
+            sorted_subset.reverse();
+        }
+        Ok(sorted_subset)
+    }
+
+    /// Get all the incoming (tables that depend on it) or outgoing (tables it depends on)
+    /// dependencies of the given table.
+    pub fn get_dependencies(&self, table: &str, incoming: bool) -> Result<Vec<String>> {
+        let mut dependent_tables = vec![];
+        if !INTERNAL_TABLES.contains(&table) {
+            let direct_deps = {
+                if incoming {
+                    self.table_dependencies_in
+                        .get(table)
+                        .ok_or(ValveError::InputError(format!(
+                            "Undefined table '{}'",
+                            table
+                        )))?
+                        .to_vec()
+                } else {
+                    self.table_dependencies_out
+                        .get(table)
+                        .ok_or(ValveError::InputError(format!(
+                            "Undefined table '{}'",
+                            table
+                        )))?
+                        .to_vec()
+                }
+            };
+            for direct_dep in direct_deps {
+                let mut indirect_deps = self.get_dependencies(&direct_dep, incoming)?;
+                dependent_tables.append(&mut indirect_deps);
+                dependent_tables.push(direct_dep);
+            }
+        }
+        Ok(dependent_tables)
+    }
+
+    /// Given a list of tables, fill it in with any further tables that are dependent upon tables
+    /// in the given list. If deletion_order is true, the tables are sorted as required for
+    /// deleting them all sequentially, otherwise they are ordered in reverse.
+    pub fn add_dependencies(
+        &self,
+        tables: &Vec<&str>,
+        deletion_order: bool,
+    ) -> Result<Vec<String>> {
+        let mut with_dups = vec![];
+        for table in tables {
+            let dependent_tables = self.get_dependencies(table, true)?;
+            for dep_table in dependent_tables {
+                with_dups.push(dep_table.to_string());
+            }
+            with_dups.push(table.to_string());
+        }
+        // The algorithm above gives the tables in the order needed for deletion. But we want
+        // this function to return the creation order by default so we reverse it unless
+        // the deletion_order flag is set to true.
+        if !deletion_order {
+            with_dups.reverse();
+        }
+
+        // Remove the duplicates from the returned table list:
+        let mut tables_in_order = vec![];
+        for table in with_dups.iter().unique() {
+            tables_in_order.push(table.to_string());
+        }
+        Ok(tables_in_order)
+    }
+
+    /// Returns an IndexMap, indexed by configured table, containing lists of their dependencies.
+    /// If incoming is true, the lists are incoming dependencies, else they are outgoing.
+    pub fn collect_dependencies(&self, incoming: bool) -> Result<IndexMap<String, Vec<String>>> {
+        let tables = self.get_sorted_table_list(false, true);
+        let mut dependencies = IndexMap::new();
+        for table in tables {
+            dependencies.insert(table.to_string(), self.get_dependencies(table, incoming)?);
+        }
+        Ok(dependencies)
+    }
+
     /// Given the name of a table, determine whether its current instantiation in the database
     /// differs from the way it has been configured. The answer to this question is yes whenever
     /// (1) the number of columns or any of their names differs from their configured values, or
@@ -1173,122 +1289,6 @@ impl Valve {
         let query = sqlx_query(&sql);
         let rows = query.fetch_all(&self.pool).await?;
         return Ok(rows.len() > 0);
-    }
-
-    /// Get all the incoming (tables that depend on it) or outgoing (tables it depends on)
-    /// dependencies of the given table.
-    pub fn get_dependencies(&self, table: &str, incoming: bool) -> Result<Vec<String>> {
-        let mut dependent_tables = vec![];
-        if !INTERNAL_TABLES.contains(&table) {
-            let direct_deps = {
-                if incoming {
-                    self.table_dependencies_in
-                        .get(table)
-                        .ok_or(ValveError::InputError(format!(
-                            "Undefined table '{}'",
-                            table
-                        )))?
-                        .to_vec()
-                } else {
-                    self.table_dependencies_out
-                        .get(table)
-                        .ok_or(ValveError::InputError(format!(
-                            "Undefined table '{}'",
-                            table
-                        )))?
-                        .to_vec()
-                }
-            };
-            for direct_dep in direct_deps {
-                let mut indirect_deps = self.get_dependencies(&direct_dep, incoming)?;
-                dependent_tables.append(&mut indirect_deps);
-                dependent_tables.push(direct_dep);
-            }
-        }
-        Ok(dependent_tables)
-    }
-
-    /// Given a list of tables, fill it in with any further tables that are dependent upon tables
-    /// in the given list. If deletion_order is true, the tables are sorted as required for
-    /// deleting them all sequentially, otherwise they are ordered in reverse.
-    pub fn add_dependencies(
-        &self,
-        tables: &Vec<&str>,
-        deletion_order: bool,
-    ) -> Result<Vec<String>> {
-        let mut with_dups = vec![];
-        for table in tables {
-            let dependent_tables = self.get_dependencies(table, true)?;
-            for dep_table in dependent_tables {
-                with_dups.push(dep_table.to_string());
-            }
-            with_dups.push(table.to_string());
-        }
-        // The algorithm above gives the tables in the order needed for deletion. But we want
-        // this function to return the creation order by default so we reverse it unless
-        // the deletion_order flag is set to true.
-        if !deletion_order {
-            with_dups.reverse();
-        }
-
-        // Remove the duplicates from the returned table list:
-        let mut tables_in_order = vec![];
-        for table in with_dups.iter().unique() {
-            tables_in_order.push(table.to_string());
-        }
-        Ok(tables_in_order)
-    }
-
-    /// Given a subset of the configured tables, return them in sorted dependency order, or in
-    /// reverse dependency order if `reverse` is set to true.
-    pub fn sort_tables(&self, table_subset: &Vec<&str>, reverse: bool) -> Result<Vec<String>> {
-        let full_table_list = self.get_sorted_table_list(false, true);
-        if !table_subset
-            .iter()
-            .all(|item| full_table_list.contains(item))
-        {
-            return Err(ValveError::InputError(format!(
-                "[{}] contains tables that are not in the configured table list: [{}]",
-                table_subset.join(", "),
-                full_table_list.join(", ")
-            ))
-            .into());
-        }
-
-        // Filter out internal tables since they are not represented in the constraints config.
-        // They will be added implicitly to the list returned by verify_table_deps_and_sort.
-        let filtered_subset = table_subset
-            .iter()
-            .filter(|m| !INTERNAL_TABLES.contains(m))
-            .map(|s| s.to_string())
-            .collect::<Vec<_>>();
-
-        let (sorted_subset, _, _) =
-            verify_table_deps_and_sort(&filtered_subset, &self.config.constraint);
-
-        // Since the result of verify_table_deps_and_sort() will include dependencies of the tables
-        // in its input list, we filter those out here:
-        let mut sorted_subset = sorted_subset
-            .iter()
-            .filter(|m| table_subset.contains(&m.as_str()))
-            .map(|s| s.to_string())
-            .collect::<Vec<_>>();
-
-        if reverse {
-            sorted_subset.reverse();
-        }
-        Ok(sorted_subset)
-    }
-
-    /// Returns an IndexMap, indexed by configured table, containing lists of their dependencies.
-    /// If incoming is true, the lists are incoming dependencies, else they are outgoing.
-    pub fn collect_dependencies(&self, incoming: bool) -> Result<IndexMap<String, Vec<String>>> {
-        let tables = self.get_sorted_table_list(false, true);
-        let mut dependencies = IndexMap::new();
-        for table in tables {
-            dependencies.insert(table.to_string(), self.get_dependencies(table, incoming)?);
-        }
-        Ok(dependencies)
     }
 
     /// Drop all configured tables, in reverse dependency order.
