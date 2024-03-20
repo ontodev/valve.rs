@@ -2963,6 +2963,18 @@ pub fn verify_table_deps_and_sort(
     };
 }
 
+/// Given a global configuration struct and a table name, returns the mode of the table.
+pub fn get_table_mode(config: &ValveConfig, table: &str) -> Result<String> {
+    Ok(config
+        .table
+        .get(table)
+        .ok_or::<ValveError>(
+            ValveError::InputError(format!("'{}' is not in table config", table)).into(),
+        )?
+        .mode
+        .to_string())
+}
+
 /// Given a table configuration map and a datatype configuration map, a parser, a table name, and a
 /// database connection pool, return lists of: primary keys, unique constraints, foreign keys,
 /// trees, and under keys.

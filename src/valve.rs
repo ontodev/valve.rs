@@ -3,6 +3,7 @@
 use crate::{
     ast::Expression,
     internal::{generate_internal_table_ddl, INTERNAL_TABLES},
+    toolkit,
     toolkit::{
         add_message_counts, cast_column_sql_to_text, convert_undo_or_redo_record_to_change,
         delete_row_tx, get_column_value, get_compiled_datatype_conditions,
@@ -1308,6 +1309,11 @@ impl Valve {
         return Ok(rows.len() > 0);
     }
 
+    /// Given a table name, returns the mode of the table.
+    pub fn get_table_mode(&self, table: &str) -> Result<String> {
+        toolkit::get_table_mode(&self.config, table)
+    }
+
     /// Drop all configured tables, in reverse dependency order.
     pub async fn drop_all_tables(&self) -> Result<&Self> {
         // Drop all of the database tables in the reverse of their sorted order:
@@ -1382,6 +1388,10 @@ impl Valve {
     /// Load all configured tables in dependency order. If `validate` is false, just try to insert
     /// all rows, irrespective of whether they are valid or not or will possibly trigger a db error.
     pub async fn load_all_tables(&self, validate: bool) -> Result<&Self> {
+        // TODO: Remove this comment later. It is correct for us to be getting only the editable
+        // tables here, since even if some non-editable tables are loadable, it doesn't follow
+        // that they should be loaded by default. But we need to make sure that load_tables() below
+        // supports those tables. Same idea for create and truncate and save.
         let table_list = self.get_sorted_editable_table_list(false);
         if self.verbose {
             println!("Processing {} tables.", table_list.len());
@@ -1708,7 +1718,7 @@ impl Valve {
     /// and the row itself in the form of a [ValveRow].
     pub async fn insert_row(&self, table_name: &str, row: &JsonRow) -> Result<(u32, ValveRow)> {
         let table_mode = &self.get_table_config(table_name)?.mode;
-        if vec!["view", "internal"].contains(&table_mode.as_str()) {
+        if vec!["internal", "view", "generated"].contains(&table_mode.as_str()) {
             return Err(ValveError::InputError(format!(
                 "Inserting to a table of mode '{}' is not allowed",
                 table_mode
@@ -1768,7 +1778,7 @@ impl Valve {
         row: &JsonRow,
     ) -> Result<ValveRow> {
         let table_mode = &self.get_table_config(table_name)?.mode;
-        if vec!["view", "internal"].contains(&table_mode.as_str()) {
+        if vec!["internal", "view", "generated"].contains(&table_mode.as_str()) {
             return Err(ValveError::InputError(format!(
                 "Updating a table of mode '{}' is not allowed",
                 table_mode
@@ -1830,7 +1840,7 @@ impl Valve {
     /// Given a table name and a row number, delete that row from the table.
     pub async fn delete_row(&self, table_name: &str, row_number: &u32) -> Result<()> {
         let table_mode = &self.get_table_config(table_name)?.mode;
-        if vec!["view", "internal"].contains(&table_mode.as_str()) {
+        if vec!["internal", "view", "generated"].contains(&table_mode.as_str()) {
             return Err(ValveError::InputError(format!(
                 "Deleting from table of mode '{}' is not allowed",
                 table_mode

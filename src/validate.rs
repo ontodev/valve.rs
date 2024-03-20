@@ -3,8 +3,8 @@
 use crate::{
     toolkit::{
         cast_sql_param_from_text, get_column_value, get_sql_type_from_global_config,
-        is_sql_type_error, local_sql_syntax, ColumnRule, CompiledCondition, QueryAsIf,
-        QueryAsIfKind,
+        get_table_mode, is_sql_type_error, local_sql_syntax, ColumnRule, CompiledCondition,
+        QueryAsIf, QueryAsIfKind,
     },
     valve::{
         ValveCell, ValveCellMessage, ValveConfig, ValveDatatypeConfig, ValveRow, ValveRuleConfig,
@@ -181,7 +181,14 @@ pub async fn validate_under(
         .get(table_name)
         .expect(&format!("Undefined table '{}'", table_name));
 
-    let view_name = format!("{}_view", table_name);
+    let table_mode = get_table_mode(config, table_name)?;
+    let query_table = {
+        if vec!["internal", "generated", "view"].contains(&table_mode.as_str()) {
+            table_name.to_string()
+        } else {
+            format!("{}_view", table_name)
+        }
+    };
     for ukey in ukeys {
         let tree_table = &ukey.ttable;
         let tree_child = &ukey.tcolumn;
@@ -200,7 +207,7 @@ pub async fn validate_under(
         let mut params;
         if let Some(ref extra_row) = extra_row {
             (extra_clause, params) =
-                select_with_extra_row(config, extra_row, table_name, &view_name, pool);
+                select_with_extra_row(config, extra_row, table_name, &query_table, pool);
         } else {
             extra_clause = String::new();
             params = vec![];
@@ -218,9 +225,9 @@ pub async fn validate_under(
         //     understood to be under themselves.
         let effective_table;
         if !extra_clause.is_empty() {
-            effective_table = format!("{}_ext", view_name);
+            effective_table = format!("{}_ext", query_table);
         } else {
-            effective_table = view_name.clone();
+            effective_table = query_table.clone();
         }
 
         let effective_tree;
@@ -358,7 +365,14 @@ pub async fn validate_tree_foreign_keys(
         .get(table_name)
         .expect(&format!("Undefined table '{}'", table_name));
 
-    let view_name = format!("{}_view", table_name);
+    let table_mode = get_table_mode(config, table_name)?;
+    let query_table = {
+        if vec!["internal", "generated", "view"].contains(&table_mode.as_str()) {
+            table_name.to_string()
+        } else {
+            format!("{}_view", table_name)
+        }
+    };
     let mut results = vec![];
     for tkey in tkeys {
         let child_col = &tkey.child;
@@ -369,7 +383,7 @@ pub async fn validate_tree_foreign_keys(
         let params;
         if let Some(ref extra_row) = extra_row {
             (with_clause, params) =
-                select_with_extra_row(&config, extra_row, table_name, &view_name, pool);
+                select_with_extra_row(&config, extra_row, table_name, &query_table, pool);
         } else {
             with_clause = String::new();
             params = vec![];
@@ -377,9 +391,9 @@ pub async fn validate_tree_foreign_keys(
 
         let effective_table_name;
         if !with_clause.is_empty() {
-            effective_table_name = format!("{}_ext", view_name);
+            effective_table_name = format!("{}_ext", query_table);
         } else {
-            effective_table_name = view_name.clone();
+            effective_table_name = query_table.clone();
         }
 
         let sql = local_sql_syntax(
@@ -1163,53 +1177,59 @@ pub async fn validate_cell_foreign_constraints(
             let mut message = ValveCellMessage {
                 rule: "key:foreign".to_string(),
                 level: "error".to_string(),
-                ..Default::default()
-            };
-            let (as_if_clause_for_conflict, ftable_alias) = match query_as_if {
-                Some(query_as_if) if *ftable == query_as_if.table => (
-                    as_if_clause_for_conflict.to_string(),
-                    query_as_if.alias.to_string(),
-                ),
-                _ => ("".to_string(), ftable.to_string()),
-            };
-
-            let fsql = local_sql_syntax(
-                &pool,
-                &format!(
-                    r#"{}SELECT 1 FROM "{}_conflict" WHERE "{}" = {} LIMIT 1"#,
-                    as_if_clause_for_conflict, ftable_alias, fcolumn, sql_param
-                ),
-            );
-            let frows = {
-                if let None = tx {
-                    sqlx_query(&fsql)
-                        .bind(cell.strvalue())
-                        .fetch_all(pool)
-                        .await?
-                } else {
-                    sqlx_query(&fsql)
-                        .bind(cell.strvalue())
-                        .fetch_all(tx.as_mut().unwrap().acquire().await?)
-                        .await?
-                }
-            };
-
-            if frows.is_empty() {
-                message.message = format!(
+                message: format!(
                     "Value '{}' of column {} is not in {}.{}",
                     cell.strvalue(),
                     column_name,
                     ftable,
                     fcolumn
+                ),
+            };
+            let fmode = &config
+                .table
+                .get(ftable)
+                .expect(&format!(
+                    "Foreign table: '{}' is not in table config",
+                    ftable
+                ))
+                .mode;
+            if !vec!["internal", "view", "generated"].contains(&fmode.as_str()) {
+                let (as_if_clause_for_conflict, ftable_alias) = match query_as_if {
+                    Some(query_as_if) if *ftable == query_as_if.table => (
+                        as_if_clause_for_conflict.to_string(),
+                        query_as_if.alias.to_string(),
+                    ),
+                    _ => ("".to_string(), ftable.to_string()),
+                };
+                let fsql = local_sql_syntax(
+                    &pool,
+                    &format!(
+                        r#"{}SELECT 1 FROM "{}_conflict" WHERE "{}" = {} LIMIT 1"#,
+                        as_if_clause_for_conflict, ftable_alias, fcolumn, sql_param
+                    ),
                 );
-            } else {
-                message.message = format!(
-                    "Value '{}' of column {} exists only in {}_conflict.{}",
-                    cell.strvalue(),
-                    column_name,
-                    ftable,
-                    fcolumn
-                );
+                let frows = {
+                    if let None = tx {
+                        sqlx_query(&fsql)
+                            .bind(cell.strvalue())
+                            .fetch_all(pool)
+                            .await?
+                    } else {
+                        sqlx_query(&fsql)
+                            .bind(cell.strvalue())
+                            .fetch_all(tx.as_mut().unwrap().acquire().await?)
+                            .await?
+                    }
+                };
+                if !frows.is_empty() {
+                    message.message = format!(
+                        "Value '{}' of column {} exists only in {}_conflict.{}",
+                        cell.strvalue(),
+                        column_name,
+                        ftable,
+                        fcolumn
+                    );
+                }
             }
             cell.messages.push(message);
         }
@@ -1254,7 +1274,14 @@ pub async fn validate_cell_trees(
     let parent_sql_type = get_sql_type_from_global_config(&config, &table_name, &parent_col, pool);
     let parent_sql_param = cast_sql_param_from_text(&parent_sql_type);
     let parent_val = cell.strvalue();
-    let view_name = format!("{}_view", table_name);
+    let table_mode = get_table_mode(config, table_name)?;
+    let query_table = {
+        if vec!["internal", "generated", "view"].contains(&table_mode.as_str()) {
+            table_name.to_string()
+        } else {
+            format!("{}_view", table_name)
+        }
+    };
     for tkey in tkeys {
         let child_col = &tkey.child;
         let child_sql_type =
@@ -1290,10 +1317,10 @@ pub async fn validate_cell_trees(
         let table_name_ext;
         let extra_clause;
         if prev_selects.is_empty() {
-            table_name_ext = view_name.clone();
+            table_name_ext = query_table.clone();
             extra_clause = String::from("");
         } else {
-            table_name_ext = format!("{}_ext", view_name);
+            table_name_ext = format!("{}_ext", query_table);
             extra_clause = format!(
                 r#"WITH "{}" AS (
                        SELECT "{}", "{}"
@@ -1301,7 +1328,7 @@ pub async fn validate_cell_trees(
                            UNION ALL
                        {}
                    )"#,
-                table_name_ext, child_col, parent_col, view_name, prev_selects
+                table_name_ext, child_col, parent_col, query_table, prev_selects
             );
         }
 
@@ -1443,24 +1470,28 @@ pub async fn validate_cell_unique_constraints(
     }
 
     if is_primary || is_unique || is_tree_child {
-        let view_name = format!("{}_view", table_name);
+        let table_mode = get_table_mode(config, table_name)?;
+        let mut query_table = {
+            if vec!["internal", "generated", "view"].contains(&table_mode.as_str()) {
+                table_name.to_string()
+            } else {
+                format!("{}_view", table_name)
+            }
+        };
         let mut with_sql = String::new();
-        let except_table = format!("{}_exc", view_name);
+        let except_table = format!("{}_exc", query_table);
         if let Some(row_number) = row_number {
             with_sql = format!(
                 r#"WITH "{}" AS (
                        SELECT * FROM "{}"
                        WHERE "row_number" != {}
                    ) "#,
-                except_table, view_name, row_number
+                except_table, query_table, row_number
             );
         }
 
-        let query_table;
         if !with_sql.is_empty() {
             query_table = except_table;
-        } else {
-            query_table = view_name.to_string();
         }
 
         let sql_type = get_sql_type_from_global_config(&config, &table_name, &column_name, pool);
