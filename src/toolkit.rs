@@ -170,6 +170,7 @@ pub fn read_config_files(
 ) -> Result<(
     ValveSpecialConfig,
     HashMap<String, ValveTableConfig>,
+    Vec<String>,
     HashMap<String, ValveDatatypeConfig>,
     HashMap<String, HashMap<String, Vec<ValveRuleConfig>>>,
     ValveConstraintConfig,
@@ -226,6 +227,7 @@ pub fn read_config_files(
     // information related to each of those tables, to which further info will be added later.
     let mut specials_config = ValveSpecialConfig::default();
     let mut tables_config = HashMap::new();
+    let mut table_order = vec![];
     let rows = {
         // Read in the table table from either a file or the database table called "table".
         if path.to_lowercase().ends_with(".tsv") {
@@ -249,6 +251,7 @@ pub fn read_config_files(
         }
 
         let row_table = row.get("table").and_then(|t| t.as_str()).unwrap();
+        table_order.push(row_table.into());
         let row_path = row.get("path").and_then(|t| t.as_str()).unwrap();
         let row_type = row.get("type").and_then(|t| t.as_str()).unwrap();
         let row_mode = row.get("mode").and_then(|t| t.as_str()).unwrap();
@@ -724,6 +727,7 @@ pub fn read_config_files(
     // 6. Add internal table configuration to the table config:
     for table in INTERNAL_TABLES.iter() {
         tables_config.insert(table.to_string(), generate_internal_table_config(table));
+        table_order.push(table.to_string());
     }
 
     // 7. Sort the tables (other than internal tables) according to their foreign key
@@ -743,6 +747,7 @@ pub fn read_config_files(
     Ok((
         specials_config,
         tables_config,
+        table_order,
         datatypes_config,
         rules_config,
         constraints_config,

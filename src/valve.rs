@@ -448,6 +448,8 @@ pub struct ValveConfig {
     pub special: ValveSpecialConfig,
     /// A map from table names to the configuration information for that table
     pub table: HashMap<String, ValveTableConfig>,
+    /// A list of table names in the order they appear in the "table" table.
+    pub table_order: Vec<String>,
     /// A map from datatype names to the configuration information for that datatype
     pub datatype: HashMap<String, ValveDatatypeConfig>,
     /// A map from table names to a further map, for each column in the given table, to the
@@ -527,6 +529,7 @@ impl Valve {
         let (
             specials_config,
             tables_config,
+            table_order,
             datatypes_config,
             rules_config,
             constraints_config,
@@ -538,6 +541,7 @@ impl Valve {
         let config = ValveConfig {
             special: specials_config,
             table: tables_config,
+            table_order: table_order,
             datatype: datatypes_config,
             rule: rules_config,
             constraint: constraints_config,
