@@ -169,6 +169,7 @@ pub fn read_config_files(
 ) -> Result<(
     ValveSpecialConfig,
     HashMap<String, ValveTableConfig>,
+    Vec<String>,
     HashMap<String, ValveDatatypeConfig>,
     HashMap<String, HashMap<String, Vec<ValveRuleConfig>>>,
     ValveConstraintConfig,
@@ -225,6 +226,7 @@ pub fn read_config_files(
     // information related to each of those tables, to which further info will be added later.
     let mut specials_config = ValveSpecialConfig::default();
     let mut tables_config = HashMap::new();
+    let mut table_order = vec![];
     let rows = {
         // Read in the table table from either a file or the database table called "table".
         if path.to_lowercase().ends_with(".tsv") {
@@ -251,6 +253,8 @@ pub fn read_config_files(
         let row_path = row.get("path").and_then(|t| t.as_str()).unwrap();
         let row_type = row.get("type").and_then(|t| t.as_str()).unwrap();
         let row_desc = row.get("description").and_then(|t| t.as_str()).unwrap();
+
+        table_order.push(row_table.into());
 
         if row_type == "table" {
             if path.to_lowercase().ends_with(".tsv") && row_path != path {
@@ -710,6 +714,7 @@ pub fn read_config_files(
     }
 
     // 6. Manually add the messsage table config:
+    table_order.push(String::from("message"));
     tables_config.insert(
         "message".to_string(),
         ValveTableConfig {
@@ -806,6 +811,7 @@ pub fn read_config_files(
     );
 
     // 7. Manually add the history table config:
+    table_order.push(String::from("history"));
     tables_config.insert(
         "history".to_string(),
         ValveTableConfig {
@@ -932,6 +938,7 @@ pub fn read_config_files(
     Ok((
         specials_config,
         tables_config,
+        table_order,
         datatypes_config,
         rules_config,
         constraints_config,
