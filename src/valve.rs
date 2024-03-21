@@ -1318,9 +1318,24 @@ impl Valve {
         toolkit::get_table_mode(&self.config, table)
     }
 
+    /// TODO: Add docstring here.
+    pub fn contains_illegal_tables(
+        &self,
+        table_list: &Vec<&str>,
+        illegal_modes: &Vec<&str>,
+    ) -> Result<bool> {
+        for table in table_list {
+            let mode = self.get_table_mode(table)?;
+            if illegal_modes.contains(&mode.as_str()) {
+                return Ok(true);
+            }
+        }
+        return Ok(false);
+    }
+
     /// Drop all configured tables, in reverse dependency order.
     pub async fn drop_all_tables(&self) -> Result<&Self> {
-        // Drop all of the database tables in the reverse of their sorted order:
+        // Drop all of the editable database tables in the reverse of their sorted order:
         self.drop_tables(&self.get_sorted_editable_table_list(true))
             .await?;
         Ok(self)
@@ -1329,21 +1344,27 @@ impl Valve {
     /// Given a vector of table names, drop those tables, in the given order, including any tables
     /// that must be dropped implicitly because of a dependency relationship.
     pub async fn drop_tables(&self, tables: &Vec<&str>) -> Result<&Self> {
+        // First check to see that we are not being asked to drop tables with the wrong mode:
+        if self.contains_illegal_tables(tables, &vec!["view"])? {
+            return Err(ValveError::InputError(format!(
+                "The list of tables to drop: [{}] contains views",
+                tables.join(", ")
+            ))
+            .into());
+        }
         let drop_list = self.add_dependencies(tables, true)?;
         for table in &drop_list {
             let table_config = self.get_table_config(table)?;
-            if table_config.mode != "view" {
-                if table_config.mode != "internal" {
-                    let sql = format!(r#"DROP VIEW IF EXISTS "{}_text_view""#, table);
-                    self.execute_sql(&sql).await?;
-                    let sql = format!(r#"DROP VIEW IF EXISTS "{}_view""#, table);
-                    self.execute_sql(&sql).await?;
-                    let sql = format!(r#"DROP TABLE IF EXISTS "{}_conflict""#, table);
-                    self.execute_sql(&sql).await?;
-                }
-                let sql = format!(r#"DROP TABLE IF EXISTS "{}""#, table);
+            if !vec!["generated", "internal"].contains(&table_config.mode.as_str()) {
+                let sql = format!(r#"DROP VIEW IF EXISTS "{}_text_view""#, table);
+                self.execute_sql(&sql).await?;
+                let sql = format!(r#"DROP VIEW IF EXISTS "{}_view""#, table);
+                self.execute_sql(&sql).await?;
+                let sql = format!(r#"DROP TABLE IF EXISTS "{}_conflict""#, table);
                 self.execute_sql(&sql).await?;
             }
+            let sql = format!(r#"DROP TABLE IF EXISTS "{}""#, table);
+            self.execute_sql(&sql).await?;
         }
 
         Ok(self)
@@ -1359,6 +1380,15 @@ impl Valve {
     /// Given a vector of table names, truncate those tables, in the given order, including any
     /// tables that must be truncated implicitly because of a dependency relationship.
     pub async fn truncate_tables(&self, tables: &Vec<&str>) -> Result<&Self> {
+        // First check to see that we are not being asked to truncate tables with the wrong mode:
+        if self.contains_illegal_tables(tables, &vec!["view"])? {
+            return Err(ValveError::InputError(format!(
+                "The list of tables to truncate: [{}] contains views",
+                tables.join(", ")
+            ))
+            .into());
+        }
+
         self.create_all_tables().await?;
         let truncate_list = self.add_dependencies(tables, true)?;
 
@@ -1392,10 +1422,6 @@ impl Valve {
     /// Load all configured tables in dependency order. If `validate` is false, just try to insert
     /// all rows, irrespective of whether they are valid or not or will possibly trigger a db error.
     pub async fn load_all_tables(&self, validate: bool) -> Result<&Self> {
-        // TODO: Remove this comment later. It is correct for us to be getting only the editable
-        // tables here, since even if some non-editable tables are loadable, it doesn't follow
-        // that they should be loaded by default. But we need to make sure that load_tables() below
-        // supports those tables. Same idea for create and truncate and save.
         let table_list = self.get_sorted_editable_table_list(false);
         if self.verbose {
             println!("Processing {} tables.", table_list.len());
@@ -1409,6 +1435,15 @@ impl Valve {
     /// or not or whether they may trigger a db error, otherwise all rows are validated as they are
     /// inserted to the database.
     pub async fn load_tables(&self, table_list: &Vec<&str>, validate: bool) -> Result<&Self> {
+        // First check to see that we are not being asked to load tables with the wrong mode:
+        if self.contains_illegal_tables(table_list, &vec!["view"])? {
+            return Err(ValveError::InputError(format!(
+                "The list of tables to load: [{}] contains views",
+                table_list.join(", ")
+            ))
+            .into());
+        }
+
         let list_for_truncation = self.sort_tables(table_list, true)?;
         self.truncate_tables(
             &list_for_truncation
@@ -1583,7 +1618,7 @@ impl Valve {
         Ok(self)
     }
 
-    /// Save all configured tables to their configured paths, unless save_dir is specified,
+    /// Save all configured editable tables to their configured paths, unless save_dir is specified,
     /// in which case save them there instead.
     pub fn save_all_tables(&self, save_dir: &Option<String>) -> Result<&Self> {
         let tables = self.get_sorted_editable_table_list(false);
@@ -1594,6 +1629,14 @@ impl Valve {
     /// Given a vector of table names, save those tables to their configured path's, unless
     /// save_dir is specified, in which case save them there instead.
     pub fn save_tables(&self, tables: &Vec<&str>, save_dir: &Option<String>) -> Result<&Self> {
+        // First check to see that we are not being asked to save tables with the wrong mode:
+        if self.contains_illegal_tables(tables, &vec!["view"])? {
+            return Err(ValveError::InputError(format!(
+                "The list of tables to save: [{}] contains views",
+                tables.join(", ")
+            ))
+            .into());
+        }
         let table_paths: HashMap<String, String> = self
             .config
             .table
@@ -1645,6 +1688,14 @@ impl Valve {
 
     /// Save the given table with the given columns at the given path as a TSV file.
     pub fn save_table(&self, table: &str, columns: &Vec<&str>, path: &str) -> Result<&Self> {
+        let table_mode = self.get_table_mode(table)?;
+        if table_mode == "view" {
+            return Err(ValveError::InputError(format!(
+                "Unable to save '{}': Saving views is not supported",
+                table
+            ))
+            .into());
+        }
         let mut quoted_columns = vec!["\"row_number\"".to_string()];
         quoted_columns.append(
             &mut columns
@@ -1652,11 +1703,17 @@ impl Valve {
                 .map(|v| enquote::enquote('"', v))
                 .collect::<Vec<_>>(),
         );
-        let text_view = format!("\"{}_text_view\"", table);
+        let query_table = {
+            if table_mode == "generated" {
+                table.to_string()
+            } else {
+                format!("\"{}_text_view\"", table)
+            }
+        };
         let sql = format!(
             r#"SELECT {} from {} ORDER BY "row_number""#,
             quoted_columns.join(", "),
-            text_view
+            query_table
         );
 
         let mut writer = WriterBuilder::new()
