@@ -1264,7 +1264,7 @@ impl Valve {
     /// Create all configured database tables and views if they do not already exist as configured.
     pub async fn create_all_tables(&self) -> Result<&Self> {
         let setup_statements = self.get_setup_statements().await?;
-        let sorted_table_list = self.get_sorted_editable_table_list(false);
+        let sorted_table_list = self.get_sorted_table_list(false);
         for table in &sorted_table_list {
             let table_config = self.get_table_config(table)?;
             // Tables with mode 'view' are not managed by Valve:
@@ -1700,7 +1700,7 @@ impl Valve {
         quoted_columns.append(
             &mut columns
                 .iter()
-                .map(|v| enquote::enquote('"', v))
+                .map(|v| format!(r#"CAST("{}" AS TEXT) AS "{}""#, v, v))
                 .collect::<Vec<_>>(),
         );
         let query_table = {
