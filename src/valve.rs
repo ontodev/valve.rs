@@ -2,6 +2,8 @@
 
 use crate::{
     ast::Expression,
+    internal::{generate_internal_table_ddl, INTERNAL_TABLES},
+    toolkit,
     toolkit::{
         add_message_counts, cast_column_sql_to_text, convert_undo_or_redo_record_to_change,
         delete_row_tx, get_column_value, get_compiled_datatype_conditions,
@@ -21,7 +23,6 @@ use csv::{QuoteStyle, ReaderBuilder, WriterBuilder};
 use enquote::unquote;
 use futures::{executor::block_on, TryStreamExt};
 use indexmap::IndexMap;
-use indoc::indoc;
 use itertools::Itertools;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -320,6 +321,8 @@ pub struct ValveTableConfig {
     pub table: String,
     /// The table's type
     pub table_type: String,
+    /// The mode of the table
+    pub mode: String,
     /// A description of the table
     pub description: String,
     /// The location of the TSV file representing the table in the filesystem
@@ -445,6 +448,8 @@ pub struct ValveConfig {
     pub special: ValveSpecialConfig,
     /// A map from table names to the configuration information for that table
     pub table: HashMap<String, ValveTableConfig>,
+    /// A list of table names in the order they appear in the "table" table.
+    pub table_order: Vec<String>,
     /// A map from datatype names to the configuration information for that datatype
     pub datatype: HashMap<String, ValveDatatypeConfig>,
     /// A map from table names to a further map, for each column in the given table, to the
@@ -524,6 +529,7 @@ impl Valve {
         let (
             specials_config,
             tables_config,
+            table_order,
             datatypes_config,
             rules_config,
             constraints_config,
@@ -535,6 +541,7 @@ impl Valve {
         let config = ValveConfig {
             special: specials_config,
             table: tables_config,
+            table_order: table_order,
             datatype: datatypes_config,
             rule: rules_config,
             constraint: constraints_config,
@@ -641,6 +648,30 @@ impl Valve {
         Ok(())
     }
 
+    /// Return the list of configured editable tables in sorted order, or reverse sorted order if
+    /// the reverse flag is set. Note that 'editable' refers to the rows in a table. Depending on
+    /// the table's mode, Valve may be allowed to drop and/or create and/or save and/or truncate
+    /// the table even if it is not editable.
+    pub fn get_sorted_editable_table_list(&self, reverse: bool) -> Vec<&str> {
+        let mut sorted_tables = self
+            .sorted_table_list
+            .iter()
+            .filter(|t| {
+                !vec!["generated", "readonly", "view"].contains(
+                    &self
+                        .get_table_mode(t)
+                        .expect(&format!("Error getting mode for table '{}'", t))
+                        .as_str(),
+                )
+            })
+            .map(|i| i.as_str())
+            .collect::<Vec<_>>();
+        if reverse {
+            sorted_tables.reverse();
+        }
+        sorted_tables
+    }
+
     /// Return the list of configured tables in sorted order, or reverse sorted order if the
     /// reverse flag is set.
     pub fn get_sorted_table_list(&self, reverse: bool) -> Vec<&str> {
@@ -653,6 +684,122 @@ impl Valve {
             sorted_tables.reverse();
         }
         sorted_tables
+    }
+
+    /// Given a subset of the configured tables, return them in sorted dependency order, or in
+    /// reverse dependency order if `reverse` is set to true.
+    pub fn sort_tables(&self, table_subset: &Vec<&str>, reverse: bool) -> Result<Vec<String>> {
+        let full_table_list = self.get_sorted_table_list(false);
+        if !table_subset
+            .iter()
+            .all(|item| full_table_list.contains(item))
+        {
+            return Err(ValveError::InputError(format!(
+                "[{}] contains tables that are not in the configured table list: [{}]",
+                table_subset.join(", "),
+                full_table_list.join(", ")
+            ))
+            .into());
+        }
+
+        // Filter out internal tables since they are not represented in the constraints config and
+        // anyway they will be added implicitly later when we call verify_table_deps_and_sort():
+        let filtered_subset = table_subset
+            .iter()
+            .filter(|m| !INTERNAL_TABLES.contains(m))
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>();
+
+        let (sorted_subset, _, _) =
+            verify_table_deps_and_sort(&filtered_subset, &self.config.constraint);
+
+        // Since the result of verify_table_deps_and_sort() will include dependencies of the tables
+        // in its input list, we filter those out here:
+        let mut sorted_subset = sorted_subset
+            .iter()
+            .filter(|m| table_subset.contains(&m.as_str()))
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>();
+
+        if reverse {
+            sorted_subset.reverse();
+        }
+        Ok(sorted_subset)
+    }
+
+    /// Get all the incoming (tables that depend on it) or outgoing (tables it depends on)
+    /// dependencies of the given table.
+    pub fn get_dependencies(&self, table: &str, incoming: bool) -> Result<Vec<String>> {
+        let mut dependent_tables = vec![];
+        if !INTERNAL_TABLES.contains(&table) {
+            let direct_deps = {
+                if incoming {
+                    self.table_dependencies_in
+                        .get(table)
+                        .ok_or(ValveError::InputError(format!(
+                            "Undefined table '{}'",
+                            table
+                        )))?
+                        .to_vec()
+                } else {
+                    self.table_dependencies_out
+                        .get(table)
+                        .ok_or(ValveError::InputError(format!(
+                            "Undefined table '{}'",
+                            table
+                        )))?
+                        .to_vec()
+                }
+            };
+            for direct_dep in direct_deps {
+                let mut indirect_deps = self.get_dependencies(&direct_dep, incoming)?;
+                dependent_tables.append(&mut indirect_deps);
+                dependent_tables.push(direct_dep);
+            }
+        }
+        Ok(dependent_tables)
+    }
+
+    /// Given a list of tables, fill it in with any further tables that are dependent upon tables
+    /// in the given list. If deletion_order is true, the tables are sorted as required for
+    /// deleting them all sequentially, otherwise they are ordered in reverse.
+    pub fn add_dependencies(
+        &self,
+        tables: &Vec<&str>,
+        deletion_order: bool,
+    ) -> Result<Vec<String>> {
+        let mut with_dups = vec![];
+        for table in tables {
+            let dependent_tables = self.get_dependencies(table, true)?;
+            for dep_table in dependent_tables {
+                with_dups.push(dep_table.to_string());
+            }
+            with_dups.push(table.to_string());
+        }
+        // The algorithm above gives the tables in the order needed for deletion. But we want
+        // this function to return the creation order by default so we reverse it unless
+        // the deletion_order flag is set to true.
+        if !deletion_order {
+            with_dups.reverse();
+        }
+
+        // Remove the duplicates from the returned table list:
+        let mut tables_in_order = vec![];
+        for table in with_dups.iter().unique() {
+            tables_in_order.push(table.to_string());
+        }
+        Ok(tables_in_order)
+    }
+
+    /// Returns an IndexMap, indexed by configured table, containing lists of their dependencies.
+    /// If incoming is true, the lists are incoming dependencies, else they are outgoing.
+    pub fn collect_dependencies(&self, incoming: bool) -> Result<IndexMap<String, Vec<String>>> {
+        let tables = self.get_sorted_table_list(false);
+        let mut dependencies = IndexMap::new();
+        for table in tables {
+            dependencies.insert(table.to_string(), self.get_dependencies(table, incoming)?);
+        }
+        Ok(dependencies)
     }
 
     /// Given the name of a table, determine whether its current instantiation in the database
@@ -834,15 +981,8 @@ impl Valve {
             Ok(false)
         };
 
+        let table_config = self.get_table_config(table)?;
         let (columns_config, configured_column_order) = {
-            let table_config =
-                self.config
-                    .table
-                    .get(table)
-                    .ok_or(ValveError::ConfigError(format!(
-                        "Undefined table '{}'",
-                        table
-                    )))?;
             let columns_config = &table_config.column;
             let configured_column_order = {
                 let mut configured_column_order = {
@@ -1046,6 +1186,14 @@ impl Valve {
         Ok(false)
     }
 
+    /// Given the name of a table, returns its table configuration.
+    pub fn get_table_config(&self, table: &str) -> Result<&ValveTableConfig> {
+        self.config
+            .table
+            .get(table)
+            .ok_or(ValveError::ConfigError(format!("Undefined table '{}'", table)).into())
+    }
+
     /// Generates and returns the DDL required to setup the database.
     pub async fn get_setup_statements(&self) -> Result<HashMap<String, Vec<String>>> {
         let tables_config = &self.config.table;
@@ -1056,89 +1204,38 @@ impl Valve {
         // and use that information to create the associated database tables, while saving
         // constraint information to constrains_config.
         let mut setup_statements = HashMap::new();
-        for table_name in tables_config.keys().cloned().collect::<Vec<_>>() {
-            // Generate the statements for creating the table and its corresponding conflict table:
+        for (table, table_config) in tables_config.iter() {
+            // Generate DDL for the table and its corresponding conflict table:
             let mut table_statements = vec![];
-            for table in vec![table_name.to_string(), format!("{}_conflict", table_name)] {
+            // Tables with mode 'view' are managed externally:
+            if table_config.mode != "view" {
                 let mut statements =
                     get_table_ddl(tables_config, datatypes_config, &parser, &table, &self.pool);
                 table_statements.append(&mut statements);
+                if !vec!["generated", "readonly"].contains(&table_config.mode.as_str()) {
+                    let cable = format!("{}_conflict", table);
+                    let mut statements =
+                        get_table_ddl(tables_config, datatypes_config, &parser, &cable, &self.pool);
+                    table_statements.append(&mut statements);
+
+                    let create_view_sql = get_sql_for_standard_view(&table, &self.pool);
+                    let create_text_view_sql =
+                        get_sql_for_text_view(tables_config, &table, &self.pool);
+                    table_statements.push(create_view_sql);
+                    table_statements.push(create_text_view_sql);
+                }
             }
-
-            let create_view_sql = get_sql_for_standard_view(&table_name, &self.pool);
-            let create_text_view_sql =
-                get_sql_for_text_view(tables_config, &table_name, &self.pool);
-            table_statements.push(create_view_sql);
-            table_statements.push(create_text_view_sql);
-
-            setup_statements.insert(table_name.to_string(), table_statements);
+            setup_statements.insert(table.to_string(), table_statements);
         }
 
         let text_type = get_sql_type(datatypes_config, &"text".to_string(), &self.pool);
 
-        // Generate DDL for the history table:
-        let mut history_statements = vec![];
-        history_statements.push(format!(
-            indoc! {r#"
-                CREATE TABLE "history" (
-                  {history_id}
-                  "table" {text_type},
-                  "row" BIGINT,
-                  "from" {text_type},
-                  "to" {text_type},
-                  "summary" {text_type},
-                  "user" {text_type},
-                  "undone_by" {text_type},
-                  {timestamp}
-                );
-              "#},
-            history_id = {
-                if self.pool.any_kind() == AnyKind::Sqlite {
-                    "\"history_id\" INTEGER PRIMARY KEY,"
-                } else {
-                    "\"history_id\" SERIAL PRIMARY KEY,"
-                }
-            },
-            text_type = text_type,
-            timestamp = {
-                if self.pool.any_kind() == AnyKind::Sqlite {
-                    "\"timestamp\" TIMESTAMP DEFAULT(STRFTIME('%Y-%m-%d %H:%M:%f', 'NOW'))"
-                } else {
-                    "\"timestamp\" TIMESTAMP DEFAULT CURRENT_TIMESTAMP"
-                }
-            },
-        ));
-        history_statements
-            .push(r#"CREATE INDEX "history_tr_idx" ON "history"("table", "row");"#.to_string());
+        // Generate DDL for the history and message tables:
+        let history_statements =
+            generate_internal_table_ddl("history", &self.pool.any_kind(), &text_type);
         setup_statements.insert("history".to_string(), history_statements);
-
-        // Generate DDL for the message table:
-        let mut message_statements = vec![];
-        message_statements.push(format!(
-            indoc! {r#"
-                CREATE TABLE "message" (
-                  {message_id}
-                  "table" {text_type},
-                  "row" BIGINT,
-                  "column" {text_type},
-                  "value" {text_type},
-                  "level" {text_type},
-                  "rule" {text_type},
-                  "message" {text_type}
-                );
-              "#},
-            message_id = {
-                if self.pool.any_kind() == AnyKind::Sqlite {
-                    "\"message_id\" INTEGER PRIMARY KEY,"
-                } else {
-                    "\"message_id\" SERIAL PRIMARY KEY,"
-                }
-            },
-            text_type = text_type,
-        ));
-        message_statements.push(
-            r#"CREATE INDEX "message_trc_idx" ON "message"("table", "row", "column");"#.to_string(),
-        );
+        let message_statements =
+            generate_internal_table_ddl("message", &self.pool.any_kind(), &text_type);
         setup_statements.insert("message".to_string(), message_statements);
 
         return Ok(setup_statements);
@@ -1148,7 +1245,7 @@ impl Valve {
     pub async fn dump_schema(&self) -> Result<String> {
         let setup_statements = self.get_setup_statements().await?;
         let mut output = String::from("");
-        for table in self.get_sorted_table_list(false) {
+        for table in self.get_sorted_editable_table_list(false) {
             let table_statements =
                 setup_statements
                     .get(table)
@@ -1158,6 +1255,7 @@ impl Valve {
                     )))?;
             let table_output = String::from(table_statements.join("\n"));
             output.push_str(&table_output);
+            output.push_str("\n\n");
         }
         Ok(output)
     }
@@ -1167,21 +1265,26 @@ impl Valve {
         let setup_statements = self.get_setup_statements().await?;
         let sorted_table_list = self.get_sorted_table_list(false);
         for table in &sorted_table_list {
-            if self.table_has_changed(*table).await? {
-                self.drop_tables(&vec![table]).await?;
-                let table_statements =
-                    setup_statements
-                        .get(*table)
-                        .ok_or(ValveError::ConfigError(format!(
-                            "Could not find setup statements for {}",
-                            table
-                        )))?;
-                for stmt in table_statements {
-                    self.execute_sql(stmt).await?;
+            let table_mode = self.get_table_mode(table)?;
+            // Tables with mode 'view' are not managed by Valve:
+            if vec!["view", "generated", "readonly"].contains(&table_mode.as_str()) {
+                // TODO: Implement this case.
+            } else {
+                if self.table_has_changed(*table).await? {
+                    self.drop_tables(&vec![table]).await?;
+                    let table_statements =
+                        setup_statements
+                            .get(*table)
+                            .ok_or(ValveError::ConfigError(format!(
+                                "Could not find setup statements for {}",
+                                table
+                            )))?;
+                    for stmt in table_statements {
+                        self.execute_sql(stmt).await?;
+                    }
                 }
             }
         }
-
         Ok(self)
     }
 
@@ -1211,125 +1314,14 @@ impl Valve {
         return Ok(rows.len() > 0);
     }
 
-    /// Get all the incoming (tables that depend on it) or outgoing (tables it depends on)
-    /// dependencies of the given table.
-    pub fn get_dependencies(&self, table: &str, incoming: bool) -> Result<Vec<String>> {
-        let mut dependent_tables = vec![];
-        if table != "message" && table != "history" {
-            let direct_deps = {
-                if incoming {
-                    self.table_dependencies_in
-                        .get(table)
-                        .ok_or(ValveError::InputError(format!(
-                            "Undefined table '{}'",
-                            table
-                        )))?
-                        .to_vec()
-                } else {
-                    self.table_dependencies_out
-                        .get(table)
-                        .ok_or(ValveError::InputError(format!(
-                            "Undefined table '{}'",
-                            table
-                        )))?
-                        .to_vec()
-                }
-            };
-            for direct_dep in direct_deps {
-                let mut indirect_deps = self.get_dependencies(&direct_dep, incoming)?;
-                dependent_tables.append(&mut indirect_deps);
-                dependent_tables.push(direct_dep);
-            }
-        }
-        Ok(dependent_tables)
-    }
-
-    /// Given a list of tables, fill it in with any further tables that are dependent upon tables
-    /// in the given list. If deletion_order is true, the tables are sorted as required for
-    /// deleting them all sequentially, otherwise they are ordered in reverse.
-    pub fn add_dependencies(
-        &self,
-        tables: &Vec<&str>,
-        deletion_order: bool,
-    ) -> Result<Vec<String>> {
-        let mut with_dups = vec![];
-        for table in tables {
-            let dependent_tables = self.get_dependencies(table, true)?;
-            for dep_table in dependent_tables {
-                with_dups.push(dep_table.to_string());
-            }
-            with_dups.push(table.to_string());
-        }
-        // The algorithm above gives the tables in the order needed for deletion. But we want
-        // this function to return the creation order by default so we reverse it unless
-        // the deletion_order flag is set to true.
-        if !deletion_order {
-            with_dups.reverse();
-        }
-
-        // Remove the duplicates from the returned table list:
-        let mut tables_in_order = vec![];
-        for table in with_dups.iter().unique() {
-            tables_in_order.push(table.to_string());
-        }
-        Ok(tables_in_order)
-    }
-
-    /// Given a subset of the configured tables, return them in sorted dependency order, or in
-    /// reverse dependency order if `reverse` is set to true.
-    pub fn sort_tables(&self, table_subset: &Vec<&str>, reverse: bool) -> Result<Vec<String>> {
-        let full_table_list = self.get_sorted_table_list(false);
-        if !table_subset
-            .iter()
-            .all(|item| full_table_list.contains(item))
-        {
-            return Err(ValveError::InputError(format!(
-                "[{}] contains tables that are not in the configured table list: [{}]",
-                table_subset.join(", "),
-                full_table_list.join(", ")
-            ))
-            .into());
-        }
-
-        // Filter out message and history since they are not represented in the constraints config.
-        // They will be added implicitly to the list returned by verify_table_deps_and_sort.
-        let filtered_subset = table_subset
-            .iter()
-            .filter(|m| **m != "history" && **m != "message")
-            .map(|s| s.to_string())
-            .collect::<Vec<_>>();
-
-        let (sorted_subset, _, _) =
-            verify_table_deps_and_sort(&filtered_subset, &self.config.constraint);
-
-        // Since the result of verify_table_deps_and_sort() will include dependencies of the tables
-        // in its input list, we filter those out here:
-        let mut sorted_subset = sorted_subset
-            .iter()
-            .filter(|m| table_subset.contains(&m.as_str()))
-            .map(|s| s.to_string())
-            .collect::<Vec<_>>();
-
-        if reverse {
-            sorted_subset.reverse();
-        }
-        Ok(sorted_subset)
-    }
-
-    /// Returns an IndexMap, indexed by configured table, containing lists of their dependencies.
-    /// If incoming is true, the lists are incoming dependencies, else they are outgoing.
-    pub fn collect_dependencies(&self, incoming: bool) -> Result<IndexMap<String, Vec<String>>> {
-        let tables = self.get_sorted_table_list(false);
-        let mut dependencies = IndexMap::new();
-        for table in tables {
-            dependencies.insert(table.to_string(), self.get_dependencies(table, incoming)?);
-        }
-        Ok(dependencies)
+    /// Given a table name, returns the mode of the table.
+    pub fn get_table_mode(&self, table: &str) -> Result<String> {
+        toolkit::get_table_mode(&self.config, table)
     }
 
     /// Drop all configured tables, in reverse dependency order.
     pub async fn drop_all_tables(&self) -> Result<&Self> {
-        // Drop all of the database tables in the reverse of their sorted order:
+        // Drop all of the editable database tables in the reverse of their sorted order:
         self.drop_tables(&self.get_sorted_table_list(true)).await?;
         Ok(self)
     }
@@ -1339,16 +1331,28 @@ impl Valve {
     pub async fn drop_tables(&self, tables: &Vec<&str>) -> Result<&Self> {
         let drop_list = self.add_dependencies(tables, true)?;
         for table in &drop_list {
-            if *table != "message" && *table != "history" {
-                let sql = format!(r#"DROP VIEW IF EXISTS "{}_text_view""#, table);
-                self.execute_sql(&sql).await?;
-                let sql = format!(r#"DROP VIEW IF EXISTS "{}_view""#, table);
-                self.execute_sql(&sql).await?;
-                let sql = format!(r#"DROP TABLE IF EXISTS "{}_conflict""#, table);
+            let table_config = self.get_table_config(table)?;
+            if table_config.mode != "view" || table_config.path != "" {
+                if !vec!["view", "generated", "readonly", "internal"]
+                    .contains(&table_config.mode.as_str())
+                {
+                    let sql = format!(r#"DROP VIEW IF EXISTS "{}_text_view""#, table);
+                    self.execute_sql(&sql).await?;
+                    let sql = format!(r#"DROP VIEW IF EXISTS "{}_view""#, table);
+                    self.execute_sql(&sql).await?;
+                    let sql = format!(r#"DROP TABLE IF EXISTS "{}_conflict""#, table);
+                    self.execute_sql(&sql).await?;
+                }
+                let type_to_drop = {
+                    if table_config.mode == "view" {
+                        "VIEW"
+                    } else {
+                        "TABLE"
+                    }
+                };
+                let sql = format!(r#"DROP {} IF EXISTS "{}""#, type_to_drop, table);
                 self.execute_sql(&sql).await?;
             }
-            let sql = format!(r#"DROP TABLE IF EXISTS "{}""#, table);
-            self.execute_sql(&sql).await?;
         }
 
         Ok(self)
@@ -1356,7 +1360,7 @@ impl Valve {
 
     /// Truncate all configured tables, in reverse dependency order.
     pub async fn truncate_all_tables(&self) -> Result<&Self> {
-        self.truncate_tables(&self.get_sorted_table_list(true))
+        self.truncate_tables(&self.get_sorted_editable_table_list(true))
             .await?;
         Ok(self)
     }
@@ -1380,11 +1384,14 @@ impl Valve {
         };
 
         for table in &truncate_list {
-            let sql = truncate_sql(&table);
-            self.execute_sql(&sql).await?;
-            if *table != "message" && *table != "history" {
-                let sql = truncate_sql(&format!("{}_conflict", table));
+            let table_mode = self.get_table_mode(table)?;
+            if table_mode != "view" {
+                let sql = truncate_sql(&table);
                 self.execute_sql(&sql).await?;
+                if table_mode != "internal" {
+                    let sql = truncate_sql(&format!("{}_conflict", table));
+                    self.execute_sql(&sql).await?;
+                }
             }
         }
 
@@ -1422,8 +1429,12 @@ impl Valve {
         let mut total_infos = 0;
         let mut table_num = 1;
         for table_name in table_list {
-            if *table_name == "message" || *table_name == "history" {
+            let table_mode = self.get_table_mode(&table_name)?;
+            if vec!["view", "internal"].contains(&table_mode.as_str()) {
                 continue;
+            }
+            if vec!["generated", "readonly"].contains(&table_mode.as_str()) {
+                // TODO: Implement this.
             }
             let table_name = table_name.to_string();
             let path = String::from(
@@ -1580,10 +1591,10 @@ impl Valve {
         Ok(self)
     }
 
-    /// Save all configured tables to their configured paths, unless save_dir is specified,
+    /// Save all configured editable tables to their configured paths, unless save_dir is specified,
     /// in which case save them there instead.
     pub fn save_all_tables(&self, save_dir: &Option<String>) -> Result<&Self> {
-        let tables = self.get_sorted_table_list(false);
+        let tables = self.get_sorted_editable_table_list(false);
         self.save_tables(&tables, save_dir)?;
         Ok(self)
     }
@@ -1596,7 +1607,7 @@ impl Valve {
             .table
             .iter()
             .filter(|(k, v)| {
-                !["message", "history"].contains(&k.as_str())
+                !INTERNAL_TABLES.contains(&k.as_str())
                     && tables.contains(&k.as_str())
                     && v.path != ""
             })
@@ -1614,6 +1625,11 @@ impl Valve {
             );
         }
         for (table, path) in table_paths.iter() {
+            let mode = self.get_table_mode(table)?;
+            if vec!["view", "generated", "readonly"].contains(&mode.as_str()) {
+                log::warn!("Not saving table '{table}' because it has mode '{mode}'");
+                continue;
+            }
             let columns: Vec<&str> = self
                 .config
                 .table
@@ -1642,18 +1658,26 @@ impl Valve {
 
     /// Save the given table with the given columns at the given path as a TSV file.
     pub fn save_table(&self, table: &str, columns: &Vec<&str>, path: &str) -> Result<&Self> {
-        let mut quoted_columns = vec!["\"row_number\"".to_string()];
-        quoted_columns.append(
+        let table_mode = self.get_table_mode(table)?;
+        if table_mode == "view" {
+            return Err(ValveError::InputError(format!(
+                "Unable to save '{}': Saving views is not supported",
+                table
+            ))
+            .into());
+        }
+        let mut casted_columns = vec!["\"row_number\"".to_string()];
+        casted_columns.append(
             &mut columns
                 .iter()
-                .map(|v| enquote::enquote('"', v))
+                .map(|v| format!(r#"CAST("{}" AS TEXT) AS "{}""#, v, v))
                 .collect::<Vec<_>>(),
         );
-        let text_view = format!("\"{}_text_view\"", table);
+        let query_table = format!("\"{}_text_view\"", table);
         let sql = format!(
             r#"SELECT {} from {} ORDER BY "row_number""#,
-            quoted_columns.join(", "),
-            text_view
+            casted_columns.join(", "),
+            query_table
         );
 
         let mut writer = WriterBuilder::new()
@@ -1718,6 +1742,15 @@ impl Valve {
     /// validate and insert the row to the table and return the row number of the inserted row
     /// and the row itself in the form of a [ValveRow].
     pub async fn insert_row(&self, table_name: &str, row: &JsonRow) -> Result<(u32, ValveRow)> {
+        let table_mode = &self.get_table_mode(table_name)?;
+        if vec!["internal", "view", "generated"].contains(&table_mode.as_str()) {
+            return Err(ValveError::InputError(format!(
+                "Inserting to a table of mode '{}' is not allowed",
+                table_mode
+            ))
+            .into());
+        }
+
         let mut tx = self.pool.begin().await?;
         let row = ValveRow::from_simple_json(row, None)?;
         let row = validate_row_tx(
@@ -1769,6 +1802,15 @@ impl Valve {
         row_number: &u32,
         row: &JsonRow,
     ) -> Result<ValveRow> {
+        let table_mode = &self.get_table_mode(table_name)?;
+        if vec!["internal", "view", "generated"].contains(&table_mode.as_str()) {
+            return Err(ValveError::InputError(format!(
+                "Updating a table of mode '{}' is not allowed",
+                table_mode
+            ))
+            .into());
+        }
+
         let mut tx = self.pool.begin().await?;
 
         // Get the old version of the row from the database so that we can later record it to the
@@ -1822,6 +1864,15 @@ impl Valve {
 
     /// Given a table name and a row number, delete that row from the table.
     pub async fn delete_row(&self, table_name: &str, row_number: &u32) -> Result<()> {
+        let table_mode = &self.get_table_mode(table_name)?;
+        if vec!["internal", "view", "generated"].contains(&table_mode.as_str()) {
+            return Err(ValveError::InputError(format!(
+                "Deleting from table of mode '{}' is not allowed",
+                table_mode
+            ))
+            .into());
+        }
+
         let mut tx = self.pool.begin().await?;
 
         let row =

@@ -32,11 +32,15 @@
 extern crate lalrpop_util;
 
 pub mod ast;
+pub mod internal;
 pub mod toolkit;
 pub mod validate;
 pub mod valve;
 
-lalrpop_mod!(pub valve_grammar);
+lalrpop_mod!(
+    /// Valve expression grammar
+    pub valve_grammar
+);
 
 use lazy_static::lazy_static;
 

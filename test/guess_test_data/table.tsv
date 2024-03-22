@@ -1,6 +1,6 @@
-table	path	description	type
-column	test/guess_test_data/column.tsv	Columns for all of the tables.	column
-datatype	test/guess_test_data/datatype.tsv	Datatypes for all of the columns	datatype
-rule	test/guess_test_data/rule.tsv	More complex "when" rules	rule
-table	test/guess_test_data/table.tsv	All of the user-editable tables in this project.	table
-table1	test/guess_test_data/table1.tsv	The first data table	
+table	path	description	type	mode
+column	test/guess_test_data/column.tsv	Columns for all of the tables.	column	
+datatype	test/guess_test_data/datatype.tsv	Datatypes for all of the columns	datatype	
+rule	test/guess_test_data/rule.tsv	More complex "when" rules	rule	
+table	test/guess_test_data/table.tsv	All of the user-editable tables in this project.	table	
+table1	test/guess_test_data/table1.tsv	The first data table		
