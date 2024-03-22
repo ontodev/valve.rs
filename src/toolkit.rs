@@ -633,10 +633,6 @@ pub fn read_config_files(
         if this_table.mode == "internal" {
             continue;
         }
-        if this_table.mode == "view" && path != None {
-            log::warn!("Ignoring path '{}' for view '{}", path.unwrap(), table_name);
-            path = None;
-        }
 
         let this_column_config = &this_table.column;
         let defined_columns: Vec<String> = this_column_config.keys().cloned().collect::<Vec<_>>();
@@ -645,7 +641,8 @@ pub fn read_config_files(
         // in the table, for later reference. The default is to preserve the order from the actual
         // table file. If that does not exist, we use the ordering in defined_columns.
         let mut column_order = vec![];
-        if let Some(path) = path {
+        if this_table.mode != "view" && path != None {
+            let path = path.unwrap();
             // Get the actual columns from the data itself. Note that we set has_headers to
             // false (even though the files have header rows) in order to explicitly read the
             // header row.

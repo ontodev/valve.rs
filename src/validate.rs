@@ -183,7 +183,7 @@ pub async fn validate_under(
 
     let table_mode = get_table_mode(config, table_name)?;
     let query_table = {
-        if vec!["internal", "generated", "view"].contains(&table_mode.as_str()) {
+        if vec!["internal", "generated", "readonly", "view"].contains(&table_mode.as_str()) {
             table_name.to_string()
         } else {
             format!("{}_view", table_name)
@@ -367,7 +367,7 @@ pub async fn validate_tree_foreign_keys(
 
     let table_mode = get_table_mode(config, table_name)?;
     let query_table = {
-        if vec!["internal", "generated", "view"].contains(&table_mode.as_str()) {
+        if vec!["internal", "generated", "readonly", "view"].contains(&table_mode.as_str()) {
             table_name.to_string()
         } else {
             format!("{}_view", table_name)
@@ -1193,7 +1193,7 @@ pub async fn validate_cell_foreign_constraints(
                     ftable
                 ))
                 .mode;
-            if !vec!["internal", "view", "generated"].contains(&fmode.as_str()) {
+            if !vec!["internal", "view", "generated", "readonly"].contains(&fmode.as_str()) {
                 let (as_if_clause_for_conflict, ftable_alias) = match query_as_if {
                     Some(query_as_if) if *ftable == query_as_if.table => (
                         as_if_clause_for_conflict.to_string(),
@@ -1276,7 +1276,7 @@ pub async fn validate_cell_trees(
     let parent_val = cell.strvalue();
     let table_mode = get_table_mode(config, table_name)?;
     let query_table = {
-        if vec!["internal", "generated", "view"].contains(&table_mode.as_str()) {
+        if vec!["internal", "generated", "view", "readonly"].contains(&table_mode.as_str()) {
             table_name.to_string()
         } else {
             format!("{}_view", table_name)
@@ -1472,7 +1472,7 @@ pub async fn validate_cell_unique_constraints(
     if is_primary || is_unique || is_tree_child {
         let table_mode = get_table_mode(config, table_name)?;
         let mut query_table = {
-            if vec!["internal", "generated", "view"].contains(&table_mode.as_str()) {
+            if vec!["internal", "generated", "readonly", "view"].contains(&table_mode.as_str()) {
                 table_name.to_string()
             } else {
                 format!("{}_view", table_name)

@@ -657,11 +657,10 @@ impl Valve {
             .sorted_table_list
             .iter()
             .filter(|t| {
-                !vec!["generated", "view"].contains(
+                !vec!["generated", "readonly", "view"].contains(
                     &self
-                        .get_table_config(t)
-                        .expect("Not all tables in sorted_table_list are in the table config.")
-                        .mode
+                        .get_table_mode(t)
+                        .expect(&format!("Error getting mode for table '{}'", t))
                         .as_str(),
                 )
             })
@@ -1213,7 +1212,7 @@ impl Valve {
                 let mut statements =
                     get_table_ddl(tables_config, datatypes_config, &parser, &table, &self.pool);
                 table_statements.append(&mut statements);
-                if table_config.mode != "generated" {
+                if !vec!["generated", "readonly"].contains(&table_config.mode.as_str()) {
                     let cable = format!("{}_conflict", table);
                     let mut statements =
                         get_table_ddl(tables_config, datatypes_config, &parser, &cable, &self.pool);
@@ -1266,9 +1265,11 @@ impl Valve {
         let setup_statements = self.get_setup_statements().await?;
         let sorted_table_list = self.get_sorted_table_list(false);
         for table in &sorted_table_list {
-            let table_config = self.get_table_config(table)?;
+            let table_mode = self.get_table_mode(table)?;
             // Tables with mode 'view' are not managed by Valve:
-            if table_config.mode != "view" {
+            if vec!["view", "generated", "readonly"].contains(&table_mode.as_str()) {
+                // TODO: Implement this case.
+            } else {
                 if self.table_has_changed(*table).await? {
                     self.drop_tables(&vec![table]).await?;
                     let table_statements =
@@ -1318,53 +1319,40 @@ impl Valve {
         toolkit::get_table_mode(&self.config, table)
     }
 
-    /// TODO: Add docstring here.
-    pub fn contains_illegal_tables(
-        &self,
-        table_list: &Vec<&str>,
-        illegal_modes: &Vec<&str>,
-    ) -> Result<bool> {
-        for table in table_list {
-            let mode = self.get_table_mode(table)?;
-            if illegal_modes.contains(&mode.as_str()) {
-                return Ok(true);
-            }
-        }
-        return Ok(false);
-    }
-
     /// Drop all configured tables, in reverse dependency order.
     pub async fn drop_all_tables(&self) -> Result<&Self> {
         // Drop all of the editable database tables in the reverse of their sorted order:
-        self.drop_tables(&self.get_sorted_editable_table_list(true))
-            .await?;
+        self.drop_tables(&self.get_sorted_table_list(true)).await?;
         Ok(self)
     }
 
     /// Given a vector of table names, drop those tables, in the given order, including any tables
     /// that must be dropped implicitly because of a dependency relationship.
     pub async fn drop_tables(&self, tables: &Vec<&str>) -> Result<&Self> {
-        // First check to see that we are not being asked to drop tables with the wrong mode:
-        if self.contains_illegal_tables(tables, &vec!["view"])? {
-            return Err(ValveError::InputError(format!(
-                "The list of tables to drop: [{}] contains views",
-                tables.join(", ")
-            ))
-            .into());
-        }
         let drop_list = self.add_dependencies(tables, true)?;
         for table in &drop_list {
             let table_config = self.get_table_config(table)?;
-            if !vec!["generated", "internal"].contains(&table_config.mode.as_str()) {
-                let sql = format!(r#"DROP VIEW IF EXISTS "{}_text_view""#, table);
-                self.execute_sql(&sql).await?;
-                let sql = format!(r#"DROP VIEW IF EXISTS "{}_view""#, table);
-                self.execute_sql(&sql).await?;
-                let sql = format!(r#"DROP TABLE IF EXISTS "{}_conflict""#, table);
+            if table_config.mode != "view" || table_config.path != "" {
+                if !vec!["view", "generated", "readonly", "internal"]
+                    .contains(&table_config.mode.as_str())
+                {
+                    let sql = format!(r#"DROP VIEW IF EXISTS "{}_text_view""#, table);
+                    self.execute_sql(&sql).await?;
+                    let sql = format!(r#"DROP VIEW IF EXISTS "{}_view""#, table);
+                    self.execute_sql(&sql).await?;
+                    let sql = format!(r#"DROP TABLE IF EXISTS "{}_conflict""#, table);
+                    self.execute_sql(&sql).await?;
+                }
+                let type_to_drop = {
+                    if table_config.mode == "view" {
+                        "VIEW"
+                    } else {
+                        "TABLE"
+                    }
+                };
+                let sql = format!(r#"DROP {} IF EXISTS "{}""#, type_to_drop, table);
                 self.execute_sql(&sql).await?;
             }
-            let sql = format!(r#"DROP TABLE IF EXISTS "{}""#, table);
-            self.execute_sql(&sql).await?;
         }
 
         Ok(self)
@@ -1380,15 +1368,6 @@ impl Valve {
     /// Given a vector of table names, truncate those tables, in the given order, including any
     /// tables that must be truncated implicitly because of a dependency relationship.
     pub async fn truncate_tables(&self, tables: &Vec<&str>) -> Result<&Self> {
-        // First check to see that we are not being asked to truncate tables with the wrong mode:
-        if self.contains_illegal_tables(tables, &vec!["view"])? {
-            return Err(ValveError::InputError(format!(
-                "The list of tables to truncate: [{}] contains views",
-                tables.join(", ")
-            ))
-            .into());
-        }
-
         self.create_all_tables().await?;
         let truncate_list = self.add_dependencies(tables, true)?;
 
@@ -1405,11 +1384,11 @@ impl Valve {
         };
 
         for table in &truncate_list {
-            let table_config = self.get_table_config(table)?;
-            if table_config.mode != "view" {
+            let table_mode = self.get_table_mode(table)?;
+            if table_mode != "view" {
                 let sql = truncate_sql(&table);
                 self.execute_sql(&sql).await?;
-                if table_config.mode != "internal" {
+                if table_mode != "internal" {
                     let sql = truncate_sql(&format!("{}_conflict", table));
                     self.execute_sql(&sql).await?;
                 }
@@ -1422,7 +1401,7 @@ impl Valve {
     /// Load all configured tables in dependency order. If `validate` is false, just try to insert
     /// all rows, irrespective of whether they are valid or not or will possibly trigger a db error.
     pub async fn load_all_tables(&self, validate: bool) -> Result<&Self> {
-        let table_list = self.get_sorted_editable_table_list(false);
+        let table_list = self.get_sorted_table_list(false);
         if self.verbose {
             println!("Processing {} tables.", table_list.len());
         }
@@ -1435,15 +1414,6 @@ impl Valve {
     /// or not or whether they may trigger a db error, otherwise all rows are validated as they are
     /// inserted to the database.
     pub async fn load_tables(&self, table_list: &Vec<&str>, validate: bool) -> Result<&Self> {
-        // First check to see that we are not being asked to load tables with the wrong mode:
-        if self.contains_illegal_tables(table_list, &vec!["view"])? {
-            return Err(ValveError::InputError(format!(
-                "The list of tables to load: [{}] contains views",
-                table_list.join(", ")
-            ))
-            .into());
-        }
-
         let list_for_truncation = self.sort_tables(table_list, true)?;
         self.truncate_tables(
             &list_for_truncation
@@ -1459,9 +1429,12 @@ impl Valve {
         let mut total_infos = 0;
         let mut table_num = 1;
         for table_name in table_list {
-            let table_config = self.get_table_config(&table_name)?;
-            if vec!["view", "internal"].contains(&table_config.mode.as_str()) {
+            let table_mode = self.get_table_mode(&table_name)?;
+            if vec!["view", "internal"].contains(&table_mode.as_str()) {
                 continue;
+            }
+            if vec!["generated", "readonly"].contains(&table_mode.as_str()) {
+                // TODO: Implement this.
             }
             let table_name = table_name.to_string();
             let path = String::from(
@@ -1629,14 +1602,6 @@ impl Valve {
     /// Given a vector of table names, save those tables to their configured path's, unless
     /// save_dir is specified, in which case save them there instead.
     pub fn save_tables(&self, tables: &Vec<&str>, save_dir: &Option<String>) -> Result<&Self> {
-        // First check to see that we are not being asked to save tables with the wrong mode:
-        if self.contains_illegal_tables(tables, &vec!["view"])? {
-            return Err(ValveError::InputError(format!(
-                "The list of tables to save: [{}] contains views",
-                tables.join(", ")
-            ))
-            .into());
-        }
         let table_paths: HashMap<String, String> = self
             .config
             .table
@@ -1660,6 +1625,11 @@ impl Valve {
             );
         }
         for (table, path) in table_paths.iter() {
+            let mode = self.get_table_mode(table)?;
+            if vec!["view", "generated", "readonly"].contains(&mode.as_str()) {
+                log::warn!("Not saving table '{table}' because it has mode '{mode}'");
+                continue;
+            }
             let columns: Vec<&str> = self
                 .config
                 .table
@@ -1696,23 +1666,17 @@ impl Valve {
             ))
             .into());
         }
-        let mut quoted_columns = vec!["\"row_number\"".to_string()];
-        quoted_columns.append(
+        let mut casted_columns = vec!["\"row_number\"".to_string()];
+        casted_columns.append(
             &mut columns
                 .iter()
                 .map(|v| format!(r#"CAST("{}" AS TEXT) AS "{}""#, v, v))
                 .collect::<Vec<_>>(),
         );
-        let query_table = {
-            if table_mode == "generated" {
-                table.to_string()
-            } else {
-                format!("\"{}_text_view\"", table)
-            }
-        };
+        let query_table = format!("\"{}_text_view\"", table);
         let sql = format!(
             r#"SELECT {} from {} ORDER BY "row_number""#,
-            quoted_columns.join(", "),
+            casted_columns.join(", "),
             query_table
         );
 
@@ -1778,7 +1742,7 @@ impl Valve {
     /// validate and insert the row to the table and return the row number of the inserted row
     /// and the row itself in the form of a [ValveRow].
     pub async fn insert_row(&self, table_name: &str, row: &JsonRow) -> Result<(u32, ValveRow)> {
-        let table_mode = &self.get_table_config(table_name)?.mode;
+        let table_mode = &self.get_table_mode(table_name)?;
         if vec!["internal", "view", "generated"].contains(&table_mode.as_str()) {
             return Err(ValveError::InputError(format!(
                 "Inserting to a table of mode '{}' is not allowed",
@@ -1838,7 +1802,7 @@ impl Valve {
         row_number: &u32,
         row: &JsonRow,
     ) -> Result<ValveRow> {
-        let table_mode = &self.get_table_config(table_name)?.mode;
+        let table_mode = &self.get_table_mode(table_name)?;
         if vec!["internal", "view", "generated"].contains(&table_mode.as_str()) {
             return Err(ValveError::InputError(format!(
                 "Updating a table of mode '{}' is not allowed",
@@ -1900,7 +1864,7 @@ impl Valve {
 
     /// Given a table name and a row number, delete that row from the table.
     pub async fn delete_row(&self, table_name: &str, row_number: &u32) -> Result<()> {
-        let table_mode = &self.get_table_config(table_name)?.mode;
+        let table_mode = &self.get_table_mode(table_name)?;
         if vec!["internal", "view", "generated"].contains(&table_mode.as_str()) {
             return Err(ValveError::InputError(format!(
                 "Deleting from table of mode '{}' is not allowed",
