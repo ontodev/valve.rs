@@ -1265,8 +1265,23 @@ impl Valve {
         let setup_statements = self.get_setup_statements().await?;
         let sorted_table_list = self.get_sorted_table_list(false);
         for table in &sorted_table_list {
-            match self.get_table_mode(table)?.as_str() {
-                "view" => todo!(),
+            let table_config = self.get_table_config(table)?;
+            match table_config.mode.as_str() {
+                "view" => {
+                    if table_config.path == "" {
+                        // If the view does not have a path, then it must have been set up by the
+                        // user prior to running valve, so here we check to make sure:
+                        if !self.view_exists(table).await? {
+                            return Err(ValveError::DataError(format!(
+                                "No view named '{}' exists in the database",
+                                table
+                            ))
+                            .into());
+                        }
+                    } else {
+                        todo!();
+                    }
+                }
                 "generated" => todo!(),
                 "readonly" => todo!(),
                 _ => {
@@ -1302,8 +1317,36 @@ impl Valve {
                     r#"SELECT 1
                        FROM "information_schema"."tables"
                        WHERE "table_schema" = 'public'
-                         AND "table_name" = '{}'"#,
+                         AND "table_name" = '{}'
+                         AND "table_type" LIKE '%TABLE'"#,
                     table
+                )
+            }
+        };
+        let query = sqlx_query(&sql);
+        let rows = query.fetch_all(&self.pool).await?;
+        return Ok(rows.len() > 0);
+    }
+
+    /// Checks whether the given view exists in the database.
+    pub async fn view_exists(&self, view: &str) -> Result<bool> {
+        let sql = {
+            if self.pool.any_kind() == AnyKind::Sqlite {
+                format!(
+                    r#"SELECT 1
+                       FROM "sqlite_master"
+                       WHERE "type" = 'view' AND name = '{}'
+                       LIMIT 1"#,
+                    view
+                )
+            } else {
+                format!(
+                    r#"SELECT 1
+                       FROM "information_schema"."tables"
+                       WHERE "table_schema" = 'public'
+                         AND "table_name" = '{}'
+                         AND "table_type" = 'VIEW'"#,
+                    view
                 )
             }
         };
