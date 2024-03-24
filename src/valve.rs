@@ -1265,25 +1265,23 @@ impl Valve {
         let setup_statements = self.get_setup_statements().await?;
         let sorted_table_list = self.get_sorted_table_list(false);
         for table in &sorted_table_list {
-            let table_mode = self.get_table_mode(table)?;
-            // Tables with mode 'view' are not managed by Valve:
-            if vec!["view", "generated", "readonly"].contains(&table_mode.as_str()) {
-                // TODO: Implement this case.
-            } else {
-                if self.table_has_changed(*table).await? {
-                    self.drop_tables(&vec![table]).await?;
-                    let table_statements =
-                        setup_statements
-                            .get(*table)
-                            .ok_or(ValveError::ConfigError(format!(
-                                "Could not find setup statements for {}",
-                                table
-                            )))?;
-                    for stmt in table_statements {
-                        self.execute_sql(stmt).await?;
+            match self.get_table_mode(table)?.as_str() {
+                "view" => todo!(),
+                "generated" => todo!(),
+                "readonly" => todo!(),
+                _ => {
+                    if self.table_has_changed(*table).await? {
+                        self.drop_tables(&vec![table]).await?;
+                        let table_statements =
+                            setup_statements.get(*table).ok_or(ValveError::ConfigError(
+                                format!("Could not find setup statements for {}", table),
+                            ))?;
+                        for stmt in table_statements {
+                            self.execute_sql(stmt).await?;
+                        }
                     }
                 }
-            }
+            };
         }
         Ok(self)
     }
@@ -1428,14 +1426,8 @@ impl Valve {
         let mut total_warnings = 0;
         let mut total_infos = 0;
         let mut table_num = 1;
-        for table_name in table_list {
-            let table_mode = self.get_table_mode(&table_name)?;
-            if vec!["view", "internal"].contains(&table_mode.as_str()) {
-                continue;
-            }
-            if vec!["generated", "readonly"].contains(&table_mode.as_str()) {
-                // TODO: Implement this.
-            }
+
+        let mut load_normal_table = |table_name: &str| -> Result<()> {
             let table_name = table_name.to_string();
             let path = String::from(
                 &self
@@ -1452,7 +1444,7 @@ impl Valve {
                 match File::open(path.clone()) {
                     Err(e) => {
                         log::warn!("Unable to open '{}': {}", path.clone(), e);
-                        continue;
+                        return Ok(());
                     }
                     Ok(table_file) => ReaderBuilder::new()
                         .has_headers(false)
@@ -1494,7 +1486,7 @@ impl Valve {
             // Split the data into chunks of size CHUNK_SIZE before passing them to the validation
             // logic:
             let chunks = records.chunks(CHUNK_SIZE);
-            insert_chunks(
+            block_on(insert_chunks(
                 &self.config,
                 &self.pool,
                 &self.datatype_conditions,
@@ -1505,22 +1497,29 @@ impl Valve {
                 &mut messages_stats,
                 self.verbose,
                 validate,
-            )
-            .await?;
+            ))?;
 
             if validate {
                 // We need to wait until all of the rows for a table have been loaded before
-                // validating the "foreign" constraints on a table's trees, since this checks if the
-                // values of one column (the tree's parent) are all contained in another column (the
-                // tree's child). We also need to wait before validating a table's "under"
-                // constraints. Although the tree associated with such a constraint need not be
-                // defined on the same table, it can be.
-                let mut recs_to_update =
-                    validate_tree_foreign_keys(&self.config, &self.pool, None, &table_name, None)
-                        .await?;
-                recs_to_update.append(
-                    &mut validate_under(&self.config, &self.pool, None, &table_name, None).await?,
-                );
+                // validating the "foreign" constraints on a table's trees, since this checks if
+                // the values of one column (the tree's parent) are all contained in another column
+                // (the tree's child). We also need to wait before validating a table's "under"
+                // constraints, because lthough the tree associated with such a constraint need not
+                // be defined on the same table, it can be.
+                let mut recs_to_update = block_on(validate_tree_foreign_keys(
+                    &self.config,
+                    &self.pool,
+                    None,
+                    &table_name,
+                    None,
+                ))?;
+                recs_to_update.append(&mut block_on(validate_under(
+                    &self.config,
+                    &self.pool,
+                    None,
+                    &table_name,
+                    None,
+                ))?);
 
                 for record in recs_to_update {
                     let row_number = record.get("row_number").unwrap();
@@ -1552,7 +1551,7 @@ impl Valve {
                     query = query.bind(&level);
                     query = query.bind(&rule);
                     query = query.bind(&message);
-                    query.execute(&self.pool).await?;
+                    block_on(query.execute(&self.pool))?;
 
                     if self.verbose {
                         // Add the generated message to messages_stats:
@@ -1580,6 +1579,17 @@ impl Valve {
                 total_warnings += warnings;
                 total_infos += infos;
             }
+
+            Ok(())
+        };
+
+        for table_name in table_list {
+            match self.get_table_mode(&table_name)?.as_str() {
+                // Views and internal tables are never loaded:
+                "view" | "internal" => continue,
+                "generated" | "readonly" => todo!(),
+                _ => load_normal_table(table_name)?,
+            };
         }
 
         if self.verbose {
