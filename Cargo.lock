@@ -1127,6 +1127,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "sql_split",
  "sqlx",
 ]
 
@@ -1577,6 +1578,12 @@ checksum = "7f6002a767bff9e83f8eeecf883ecb8011875a21ae8da43bffb817a57e78cc09"
 dependencies = [
  "lock_api",
 ]
+
+[[package]]
+name = "sql_split"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4455debf3b2a88ea42fa7712dc1b4894aaef1fead535b2e18018626257c87595"
 
 [[package]]
 name = "sqlformat"

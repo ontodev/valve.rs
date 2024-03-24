@@ -1268,18 +1268,29 @@ impl Valve {
             let table_config = self.get_table_config(table)?;
             match table_config.mode.as_str() {
                 "view" => {
-                    if table_config.path == "" {
-                        // If the view does not have a path, then it must have been set up by the
-                        // user prior to running valve, so here we check to make sure:
-                        if !self.view_exists(table).await? {
-                            return Err(ValveError::DataError(format!(
-                                "No view named '{}' exists in the database",
-                                table
-                            ))
-                            .into());
+                    if !table_config.path.to_lowercase().ends_with(".sql") {
+                        return Err(ValveError::ConfigError(format!(
+                            "Path '{}' of view '{}' does not end in .sql",
+                            table_config.path, table
+                        ))
+                        .into());
+                    } else if table_config.path != "" {
+                        // If the path points to a .sql file, try and execute it, trusting that the
+                        // user has specified the script correctly. Note that the SQL script is
+                        // responsible for deciding whether the view needs to be recreated.
+                        let sql = std::fs::read_to_string(&table_config.path)?;
+                        let sql_lines = sql_split::split(&sql);
+                        for line in &sql_lines {
+                            self.execute_sql(&line).await?;
                         }
-                    } else {
-                        todo!();
+                    }
+                    // Check to make sure that the view now exists:
+                    if !self.view_exists(table).await? {
+                        return Err(ValveError::DataError(format!(
+                            "No view named '{}' exists in the database",
+                            table
+                        ))
+                        .into());
                     }
                 }
                 "generated" => todo!(),
