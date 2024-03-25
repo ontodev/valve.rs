@@ -69,23 +69,46 @@ table11	child			text
 table11	parent			text		
 table11	xyzzy			text		
 table11	foo			text	primary	
-table11	bar			text	from(test_view.bar)	
-test_view	foo		empty	trimmed_line		
-test_view	bar		empty	trimmed_line		
-penguin	study_name	studyName		word		the name of the study
-penguin	sample_number	Sample Number		integer	primary	the sample identifier
-penguin	species	Species		label		the species of the measured individual
-penguin	region	Region		label		the region where the measurement took place
-penguin	island	Island		label		the island where the measurement took place
-penguin	stage	Stage		label		the growth stage of the individual
-penguin	individual_id	Individual ID		word	unique	the ID of the measured individual
-penguin	clutch_completion	Clutch Completion		word		whether the measured individual's clutch of eggs was complete
-penguin	date_egg	Date Egg		trimmed_line		the date that an egg in the clutch was observed
-penguin	culmen_length	Culmen Length (mm)		numeric		the length of the culmen of the individual, in millimetres
-penguin	culmen_depth	Culmen Depth (mm)		numeric		the depth of the culmen of the individual, in millimetres
-penguin	flipper_length	Flipper Length (mm)		integer		the length of the individual's flipper, in millimetres
-penguin	body_mass	Body Mass (g)		integer		the body mass of the individual, in grams
-penguin	sex	Sex		word		the sex of the individual
-penguin	delta_15_n	Delta 15 N (o/oo)		numeric		the Delta 15 N measurement
-penguin	delta_13_c	Delta 13 C (o/oo)		numeric		the Delta 13 C measurement
-penguin	comments	Comments	empty	line		comments on the measurement or the individual
+table11	bar			text	from(view1.bar)	
+view1	foo		empty	trimmed_line		
+view1	bar		empty	trimmed_line		
+view2	foo		empty	trimmed_line		
+view2	bar		empty	trimmed_line		
+view3	foo		empty	trimmed_line		
+view3	bar		empty	trimmed_line		
+readonly1	study_name	studyName		word		the name of the study
+readonly1	sample_number	Sample Number		integer	primary	the sample identifier
+readonly1	species	Species		label		the species of the measured individual
+readonly1	region	Region		label		the region where the measurement took place
+readonly1	island	Island		label		the island where the measurement took place
+readonly1	stage	Stage		label		the growth stage of the individual
+readonly1	individual_id	Individual ID		word	unique	the ID of the measured individual
+readonly1	clutch_completion	Clutch Completion		word		whether the measured individual's clutch of eggs was complete
+readonly1	date_egg	Date Egg		trimmed_line		the date that an egg in the clutch was observed
+readonly1	culmen_length	Culmen Length (mm)		numeric		the length of the culmen of the individual, in millimetres
+readonly1	culmen_depth	Culmen Depth (mm)		numeric		the depth of the culmen of the individual, in millimetres
+readonly1	flipper_length	Flipper Length (mm)		integer		the length of the individual's flipper, in millimetres
+readonly1	body_mass	Body Mass (g)		integer		the body mass of the individual, in grams
+readonly1	sex	Sex		word		the sex of the individual
+readonly1	delta_15_n	Delta 15 N (o/oo)		numeric		the Delta 15 N measurement
+readonly1	delta_13_c	Delta 13 C (o/oo)		numeric		the Delta 13 C measurement
+readonly1	comments	Comments	empty	line		comments on the measurement or the individual
+readonly2	study_name	studyName		word		the name of the study
+readonly2	sample_number	Sample Number		integer	primary	the sample identifier
+readonly2	species	Species		label		the species of the measured individual
+readonly2	region	Region		label		the region where the measurement took place
+readonly2	island	Island		label		the island where the measurement took place
+readonly2	stage	Stage		label		the growth stage of the individual
+readonly2	individual_id	Individual ID		word	unique	the ID of the measured individual
+readonly2	clutch_completion	Clutch Completion		word		whether the measured individual's clutch of eggs was complete
+readonly2	date_egg	Date Egg		trimmed_line		the date that an egg in the clutch was observed
+readonly2	culmen_length	Culmen Length (mm)		numeric		the length of the culmen of the individual, in millimetres
+readonly2	culmen_depth	Culmen Depth (mm)		numeric		the depth of the culmen of the individual, in millimetres
+readonly2	flipper_length	Flipper Length (mm)		integer		the length of the individual's flipper, in millimetres
+readonly2	body_mass	Body Mass (g)		integer		the body mass of the individual, in grams
+readonly2	sex	Sex		word		the sex of the individual
+readonly2	delta_15_n	Delta 15 N (o/oo)		numeric		the Delta 15 N measurement
+readonly2	delta_13_c	Delta 13 C (o/oo)		numeric		the Delta 13 C measurement
+readonly2	comments	Comments	empty	line		comments on the measurement or the individual
+readonly3	foo		empty	trimmed_line		
+readonly3	bar		empty	trimmed_line		

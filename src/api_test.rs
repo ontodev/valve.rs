@@ -425,5 +425,36 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<()> {
     test_undo_redo(&valve).await?;
     test_randomized_api_test_with_undo_redo(&valve).await?;
 
+    // TODO: Add tests for:
+    // 1. Verify that editing a row in a view returns an error.
+    // 2. Verify that we can validate a row in a view.
+    // 3. Verify that get_matching_values() works against a view.
+
+    //let matching_values = valve.get_matching_values("table11", "bar", None).await?;
+    //println!("MATCHING VALUES: {:#?}", matching_values);
+
+    // let row = json!({
+    //     "study_name": "FAKE123",
+    //     "sample_number": "",
+    //     "species": "Adelie Penguin (Pygoscelis adeliae)",
+    //     "region": "Anvers",
+    //     "island": "Briscoe",
+    //     "stage": "Adult, 1 Egg Stage",
+    //     "individual_id": "ZH64",
+    //     "clutch_completion": "Yes",
+    //     "date_egg": "2024-01-01",
+    //     "culmen_length": 38.7,
+    //     "culmen_depth": 20.4,
+    //     "flipper_length": 215,
+    //     "body_mass": 2401,
+    //     "sex": "FEMALE",
+    //     "delta_15_n": 8.233,
+    //     "delta_13_c": -23.2,
+    //     "comments": "",
+    // });
+    // let row = row.as_object().unwrap();
+    // let vrow = valve.validate_row("penguin", &row, None).await?;
+    // println!("VROW: {:#?}", vrow);
+
     Ok(())
 }

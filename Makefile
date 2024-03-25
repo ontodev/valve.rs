@@ -36,9 +36,16 @@ valve_debug:
 	cargo build
 	ln -s target/debug/ontodev_valve valve
 
-build/valve.db: valve test/src/table.tsv | build test/output
-	cp -f test/src/ontology/test_view_sqlite.sql test/output/test_view.sql
-	./$^ $@
+build/valve.db: valve | build test/output
+	cp -f test/src/ontology/view1_sqlite.sql test/output/view1.sql
+	cp -f test/src/ontology/view2_sqlite.sql test/output/view2.sql
+	cp -f test/src/ontology/view2_sqlite.sh test/output/view2.sh
+	cp -f test/src/ontology/readonly1_sqlite_load.sh test/output/readonly1.sh
+	cp -f test/src/ontology/readonly3_sqlite_load.sql test/output/readonly3.sql
+	chmod u+x test/output/readonly1.sh
+	test/src/ontology/readonly1_sqlite_create.sh $@ "readonly1"
+	sqlite3 $@ < test/src/ontology/readonly3_sqlite_create.sql
+	sqlite3 $@ < test/src/ontology/view3_sqlite.sql
 
 test/output:
 	mkdir -p test/output
@@ -46,9 +53,11 @@ test/output:
 test: clean_test_db sqlite_test pg_test api_test random_test
 
 tables_to_test := $(shell cut -f 1 test/src/table.tsv)
+pg_connect_string := postgresql:///valve_postgres
 
 sqlite_test: build/valve.db test/src/table.tsv | test/output
 	@echo "Testing valve on sqlite ..."
+	./valve test/src/table.tsv build/valve.db
 	test/round_trip.sh $^
 	scripts/export_messages.py $< $| $(tables_to_test)
 	diff --strip-trailing-cr -q test/expected/messages.tsv test/output/messages.tsv
@@ -61,15 +70,23 @@ sqlite_test: build/valve.db test/src/table.tsv | test/output
 
 pg_test: valve test/src/table.tsv | test/output
 	@echo "Testing valve on postgresql ..."
-	cp -f test/src/ontology/test_view_postgresql.sql test/output/test_view.sql
-	./$^ postgresql:///valve_postgres
-	test/round_trip.sh postgresql:///valve_postgres $(word 2,$^)
-	scripts/export_messages.py postgresql:///valve_postgres $| $(tables_to_test)
+	cp -f test/src/ontology/view1_postgresql.sql test/output/view1.sql
+	cp -f test/src/ontology/view2_postgresql.sql test/output/view2.sql
+	cp -f test/src/ontology/view2_postgresql.sh test/output/view2.sh
+	cp -f test/src/ontology/readonly1_postgresql_load.sh test/output/readonly1.sh
+	cp -f test/src/ontology/readonly3_postgresql_load.sql test/output/readonly3.sql
+	chmod u+x test/output/readonly1.sh
+	test/src/ontology/readonly1_postgresql_create.sh $(pg_connect_string) "readonly1"
+	psql $(pg_connect_string) < test/src/ontology/readonly3_postgresql_create.sql
+	psql $(pg_connect_string) < test/src/ontology/view3_postgresql.sql
+	./$^ $(pg_connect_string)
+	test/round_trip.sh $(pg_connect_string) $(word 2,$^)
+	scripts/export_messages.py $(pg_connect_string) $| $(tables_to_test)
 	diff --strip-trailing-cr -q test/expected/messages.tsv test/output/messages.tsv
-	scripts/export_messages.py --a1 postgresql:///valve_postgres $| $(tables_to_test)
+	scripts/export_messages.py --a1 $(pg_connect_string) $| $(tables_to_test)
 	diff --strip-trailing-cr -q test/expected/messages_a1.tsv test/output/messages.tsv
 	# The "pk" test is run on table7 only since it is the only table whose primary keys are all valid:
-	scripts/export_messages.py --pk postgresql:///valve_postgres $| table7
+	scripts/export_messages.py --pk $(pg_connect_string) $| table7
 	diff --strip-trailing-cr -q test/expected/messages_pk.tsv test/output/messages.tsv
 	@echo "Test succeeded!"
 
@@ -90,16 +107,16 @@ sqlite_api_test: valve test/src/table.tsv build/valve.db test/insert_update.sh |
 
 pg_api_test: valve test/src/table.tsv test/insert_update.sh | test/output
 	@echo "Testing API functions on postgresql ..."
-	./$< $(word 2,$^) postgresql:///valve_postgres
-	./$< --api_test $(word 2,$^) postgresql:///valve_postgres
-	$(word 3,$^) postgresql:///valve_postgres $(word 2,$^)
-	scripts/export_messages.py postgresql:///valve_postgres $| $(tables_to_test)
+	./$< $(word 2,$^) $(pg_connect_string)
+	./$< --api_test $(word 2,$^) $(pg_connect_string)
+	$(word 3,$^) $(pg_connect_string) $(word 2,$^)
+	scripts/export_messages.py $(pg_connect_string) $| $(tables_to_test)
 	diff --strip-trailing-cr -q test/expected/messages_after_api_test.tsv test/output/messages.tsv
-	psql postgresql:///valve_postgres -c "COPY (select \"history_id\", \"table\", \"row\", \"from\", \"to\", \"summary\", \"user\", \"undone_by\" from history where history_id < 15 order by history_id) TO STDOUT WITH NULL AS ''" > test/output/history.tsv
+	psql $(pg_connect_string) -c "COPY (select \"history_id\", \"table\", \"row\", \"from\", \"to\", \"summary\", \"user\", \"undone_by\" from history where history_id < 15 order by history_id) TO STDOUT WITH NULL AS ''" > test/output/history.tsv
 	tail -n +2 test/expected/history.tsv | diff --strip-trailing-cr -q test/output/history.tsv -
 	# We drop all of the db tables because the schema for the next test (random test) is different
 	# from the schema used for this test.
-	./$< --drop_all $(word 2,$^) postgresql:///valve_postgres
+	./$< --drop_all $(word 2,$^) $(pg_connect_string)
 	@echo "Test succeeded!"
 
 sqlite_random_db = build/valve_random.db
@@ -121,8 +138,8 @@ sqlite_random_test: valve random_test_data | build test/output
 
 pg_random_test: valve random_test_data | build test/output
 	@echo "Testing with random data on postgresql ..."
-	./$< $(random_test_dir)/table.tsv postgresql:///valve_postgres
-	test/round_trip.sh postgresql:///valve_postgres $(random_test_dir)/table.tsv
+	./$< $(random_test_dir)/table.tsv $(pg_connect_string)
+	test/round_trip.sh $(pg_connect_string) $(random_test_dir)/table.tsv
 	@echo "Test succeeded!"
 
 test/penguins/src/data:
@@ -184,8 +201,8 @@ sqlite_perf_test: $(perf_test_db) | test/output
 	time -p scripts/export_messages.py $< $| $(tables_to_test)
 
 pg_perf_test: valve $(perf_test_dir)/ontology | test/output
-	time -p ./$< --verbose --interactive $(perf_test_dir)/table.tsv postgresql:///valve_postgres
-	time -p scripts/export_messages.py postgresql:///valve_postgres $| $(tables_to_test)
+	time -p ./$< --verbose --interactive $(perf_test_dir)/table.tsv $(pg_connect_string)
+	time -p scripts/export_messages.py $(pg_connect_string) $| $(tables_to_test)
 
 perf_test: sqlite_perf_test pg_perf_test
 

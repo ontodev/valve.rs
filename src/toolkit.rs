@@ -22,6 +22,7 @@ use csv::{ReaderBuilder, StringRecord, StringRecordsIter};
 use futures::executor::block_on;
 use indexmap::IndexMap;
 use indoc::indoc;
+use is_executable::IsExecutable;
 use itertools::{IntoChunks, Itertools};
 use petgraph::{
     algo::{all_simple_paths, toposort},
@@ -253,8 +254,13 @@ pub fn read_config_files(
         let row_table = row.get("table").and_then(|t| t.as_str()).unwrap();
         table_order.push(row_table.into());
         let row_path = row.get("path").and_then(|t| t.as_str()).unwrap();
+        let row_path_info = Path::new(&row_path);
         let row_type = row.get("type").and_then(|t| t.as_str()).unwrap();
+        let row_type = row_type.to_lowercase();
+        let row_type = row_type.as_str();
         let row_mode = row.get("mode").and_then(|t| t.as_str()).unwrap();
+        let row_mode = row_mode.to_lowercase();
+        let row_mode = row_mode.as_str();
         let row_desc = row.get("description").and_then(|t| t.as_str()).unwrap();
 
         if row_mode == "internal" {
@@ -266,10 +272,47 @@ pub fn read_config_files(
             .into());
         }
 
+        // Here is a summary of the allowed table configurations for the various table modes:
+        // - A table of mode 'view' is allowed to have an empty path. If the path is non-empty then
+        //   it must either end (case insensitively) in '.sql' or be an executable file. It must not
+        //   end (case insensitively) in '.tsv'.
+        // - A 'readonly' table is allowed to have an empty path. If the path is non-empty then it
+        //   can be a file ending (case insensitively) with '.tsv', a file ending (case
+        //   insensitively) with '.sql', or an executable file.
+        // - All other tables must have a path and it must end (case insensitively) in '.tsv'.
+        if vec!["view", "readonly"].contains(&row_mode) {
+            if row_mode == "view" && row_path.ends_with(".tsv") {
+                return Err(ValveError::ConfigError(format!(
+                    "Invalid path '{}' for view '{}'. TSV files are not supported for views.",
+                    row_path, row_table,
+                ))
+                .into());
+            }
+            if row_path != "" && !row_path.ends_with(".tsv") && !row_path.ends_with(".sql") {
+                if !row_path_info.is_executable() {
+                    return Err(ValveError::ConfigError(format!(
+                        "The generic script '{}' associated with the view or readonly table '{}' \
+                         is not executable (assuming that it even exists at all)",
+                        row_path, row_table
+                    ))
+                    .into());
+                }
+            }
+        } else if !row_path.to_lowercase().ends_with(".tsv") {
+            return Err(ValveError::ConfigError(format!(
+                "Illegal path for table '{}'. Tables of mode '{}' require a path that ends in \
+                 '.tsv'",
+                row_table, row_mode
+            ))
+            .into());
+        }
+
+        // Check that the table table path is the same as the path that was input as an argument to
+        // this function:
         if row_type == "table" {
             if path.to_lowercase().ends_with(".tsv") && row_path != path {
                 return Err(ValveError::ConfigError(format!(
-                    "Special 'table' path '{}' does not match this path '{}'",
+                    "The \"table\" table path '{}' is not the expected '{}'",
                     row_path, path
                 ))
                 .into());
@@ -641,54 +684,60 @@ pub fn read_config_files(
         // in the table, for later reference. The default is to preserve the order from the actual
         // table file. If that does not exist, we use the ordering in defined_columns.
         let mut column_order = vec![];
-        if this_table.mode != "view" && path != None {
-            let path = path.unwrap();
-            // Get the actual columns from the data itself. Note that we set has_headers to
-            // false (even though the files have header rows) in order to explicitly read the
-            // header row.
-            let mut rdr = ReaderBuilder::new()
-                .has_headers(false)
-                .delimiter(b'\t')
-                .from_reader(File::open(path.clone()).map_err(|err| {
-                    ValveError::ConfigError(format!("Unable to open '{}': {}", path.clone(), err))
-                })?);
-            let mut iter = rdr.records();
-            if let Some(result) = iter.next() {
-                let actual_columns = result
-                    .map_err(|e| {
+        match path {
+            Some(path) if path.to_lowercase().ends_with(".tsv") => {
+                // Get the actual columns from the data itself. Note that we set has_headers to
+                // false (even though the files have header rows) in order to explicitly read the
+                // header row.
+                let mut rdr = ReaderBuilder::new()
+                    .has_headers(false)
+                    .delimiter(b'\t')
+                    .from_reader(File::open(path.clone()).map_err(|err| {
                         ValveError::ConfigError(format!(
-                            "Unable to read row from '{}': {}",
-                            path, e
+                            "Unable to open '{}': {}",
+                            path.clone(),
+                            err
                         ))
-                    })?
-                    .iter()
-                    .map(|c| c.to_string())
-                    .collect::<Vec<_>>();
-                // Make sure that the actual columns found in the table file, and the columns
-                // defined in the column config, exactly match in terms of their content:
-                for column_name in &actual_columns {
-                    column_order.push(column_name.to_string());
-                    if !defined_columns.contains(&&column_name.to_string()) {
-                        return Err(ValveError::ConfigError(format!(
-                            "Column '{}.{}' not in column config",
-                            table_name, column_name
-                        ))
-                        .into());
+                    })?);
+                let mut iter = rdr.records();
+                if let Some(result) = iter.next() {
+                    let actual_columns = result
+                        .map_err(|e| {
+                            ValveError::ConfigError(format!(
+                                "Unable to read row from '{}': {}",
+                                path, e
+                            ))
+                        })?
+                        .iter()
+                        .map(|c| c.to_string())
+                        .collect::<Vec<_>>();
+                    // Make sure that the actual columns found in the table file, and the columns
+                    // defined in the column config, exactly match in terms of their content:
+                    for column_name in &actual_columns {
+                        column_order.push(column_name.to_string());
+                        if !defined_columns.contains(&&column_name.to_string()) {
+                            return Err(ValveError::ConfigError(format!(
+                                "Column '{}.{}' not in column config",
+                                table_name, column_name
+                            ))
+                            .into());
+                        }
                     }
-                }
-                for column_name in &defined_columns {
-                    if !actual_columns.contains(&column_name.to_string()) {
-                        return Err(ValveError::ConfigError(format!(
-                            "Defined column '{}.{}' not found in table",
-                            table_name, column_name
-                        ))
-                        .into());
+                    for column_name in &defined_columns {
+                        if !actual_columns.contains(&column_name.to_string()) {
+                            return Err(ValveError::ConfigError(format!(
+                                "Defined column '{}.{}' not found in table",
+                                table_name, column_name
+                            ))
+                            .into());
+                        }
                     }
+                } else {
+                    return Err(ValveError::ConfigError(format!("'{}' is empty", path)).into());
                 }
-            } else {
-                return Err(ValveError::ConfigError(format!("'{}' is empty", path)).into());
             }
-        }
+            _ => (),
+        };
         if column_order.is_empty() {
             column_order = defined_columns.clone();
         }

@@ -31,7 +31,7 @@ use sqlx::{
     any::{AnyKind, AnyPool},
     query as sqlx_query, Row, ValueRef,
 };
-use std::{collections::HashMap, error::Error, fmt, fs::File, path::Path};
+use std::{collections::HashMap, error::Error, fmt, fs::File, path::Path, process::Command};
 
 /// Alias for [Map](serde_json::map)<[String], [Value](serde_json::value)>.
 pub type JsonRow = serde_json::Map<String, SerdeValue>;
@@ -499,6 +499,8 @@ pub struct Valve {
     /// A map from string representations of structure conditions to the parsed versions
     /// associated with them.
     pub structure_conditions: HashMap<String, ParsedStructure>,
+    /// The string used to connect to the database:
+    pub db_path: String,
     /// The database connection pool.
     pub pool: AnyPool,
     /// The user associated with this valve instance.
@@ -559,6 +561,7 @@ impl Valve {
             datatype_conditions: datatype_conditions,
             rule_conditions: rule_conditions,
             structure_conditions: structure_conditions,
+            db_path: database.to_string(),
             pool: pool,
             user: String::from("VALVE"),
             verbose: false,
@@ -648,6 +651,49 @@ impl Valve {
         Ok(())
     }
 
+    /// (Private function.) Given a filename containing SQL statements, execute the statements
+    /// contained in the file.
+    async fn execute_sql_file(&self, path: &str) -> Result<()> {
+        let sql = std::fs::read_to_string(path)?;
+        let sql_lines = sql_split::split(&sql);
+        for line in &sql_lines {
+            self.execute_sql(&line).await?;
+        }
+        Ok(())
+    }
+
+    /// (Private function.) Given the filename of an executable script, execute it and return the
+    /// result.
+    pub fn execute_script(&self, path: &str, args: &Vec<&str>) -> Result<()> {
+        let mut command = Command::new(path);
+        if !args.is_empty() {
+            command.args(args);
+        }
+        let output = command.output()?;
+        let exit_code = output.status.code();
+        match exit_code {
+            None => {
+                let stdout = std::str::from_utf8(&output.stdout)?;
+                let stderr = std::str::from_utf8(&output.stdout)?;
+                Err(ValveError::DataError(format!(
+                    "Execution of '{}' was interrupted. STDOUT: '{}', STDERR: '{}'.",
+                    path, stdout, stderr
+                ))
+                .into())
+            }
+            Some(exit_code) if exit_code != 0 => {
+                let stdout = std::str::from_utf8(&output.stdout)?;
+                let stderr = std::str::from_utf8(&output.stdout)?;
+                Err(ValveError::DataError(format!(
+                    "Execution of '{}' failed with exit code {}. STDOUT: '{}', STDERR: '{}'.",
+                    path, exit_code, stdout, stderr
+                ))
+                .into())
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// Return the list of configured editable tables in sorted order, or reverse sorted order if
     /// the reverse flag is set. Note that 'editable' refers to the rows in a table. Depending on
     /// the table's mode, Valve may be allowed to drop and/or create and/or save and/or truncate
@@ -657,7 +703,7 @@ impl Valve {
             .sorted_table_list
             .iter()
             .filter(|t| {
-                !vec!["generated", "readonly", "view"].contains(
+                !vec!["readonly", "view"].contains(
                     &self
                         .get_table_mode(t)
                         .expect(&format!("Error getting mode for table '{}'", t))
@@ -1207,12 +1253,12 @@ impl Valve {
         for (table, table_config) in tables_config.iter() {
             // Generate DDL for the table and its corresponding conflict table:
             let mut table_statements = vec![];
-            // Tables with mode 'view' are managed externally:
-            if table_config.mode != "view" {
+            // Tables without TSV paths are necessarily managed externally:
+            if table_config.path.to_lowercase().ends_with(".tsv") {
                 let mut statements =
                     get_table_ddl(tables_config, datatypes_config, &parser, &table, &self.pool);
                 table_statements.append(&mut statements);
-                if !vec!["generated", "readonly"].contains(&table_config.mode.as_str()) {
+                if table_config.mode != "readonly" {
                     let cable = format!("{}_conflict", table);
                     let mut statements =
                         get_table_ddl(tables_config, datatypes_config, &parser, &cable, &self.pool);
@@ -1266,48 +1312,44 @@ impl Valve {
         let sorted_table_list = self.get_sorted_table_list(false);
         for table in &sorted_table_list {
             let table_config = self.get_table_config(table)?;
-            match table_config.mode.as_str() {
-                "view" => {
-                    if !table_config.path.to_lowercase().ends_with(".sql") {
-                        return Err(ValveError::ConfigError(format!(
-                            "Path '{}' of view '{}' does not end in .sql",
-                            table_config.path, table
-                        ))
-                        .into());
-                    } else if table_config.path != "" {
-                        // If the path points to a .sql file, try and execute it, trusting that the
-                        // user has specified the script correctly. Note that the SQL script is
-                        // responsible for deciding whether the view needs to be recreated.
-                        let sql = std::fs::read_to_string(&table_config.path)?;
-                        let sql_lines = sql_split::split(&sql);
-                        for line in &sql_lines {
-                            self.execute_sql(&line).await?;
-                        }
-                    }
-                    // Check to make sure that the view now exists:
-                    if !self.view_exists(table).await? {
-                        return Err(ValveError::DataError(format!(
-                            "No view named '{}' exists in the database",
-                            table
-                        ))
-                        .into());
+            if table_config.mode == "view" {
+                // If the path points to a .sql file, execute the statements that are contained in
+                // it against the database, trusting that the user has written the script correctly.
+                // Note that the SQL script, not Valve, is responsible for deciding whether the
+                // view actually needs to be recreated. In any case, once any specified scripts have
+                // been run (if the path is empty then Valve assumes that the view has already been
+                // set up in the database), Valve checks to make sure that the view now exists and
+                // returns an error if it does not.
+                if table_config.path.to_lowercase().ends_with(".sql") {
+                    self.execute_sql_file(&table_config.path).await?;
+                } else if table_config.path != "" {
+                    self.execute_script(&table_config.path, &vec![&self.db_path, table])?;
+                }
+                // Check to make sure that the view now exists:
+                if !self.view_exists(table).await? {
+                    return Err(ValveError::DataError(format!(
+                        "No view named '{}' exists in the database",
+                        table
+                    ))
+                    .into());
+                }
+            } else if table_config.path.to_lowercase().ends_with(".tsv")
+                || table_config.mode == "internal"
+            {
+                if self.table_has_changed(*table).await? {
+                    self.drop_tables(&vec![table]).await?;
+                    let table_statements =
+                        setup_statements
+                            .get(*table)
+                            .ok_or(ValveError::ConfigError(format!(
+                                "Could not find setup statements for {}",
+                                table
+                            )))?;
+                    for stmt in table_statements {
+                        self.execute_sql(stmt).await?;
                     }
                 }
-                "generated" => todo!(),
-                "readonly" => todo!(),
-                _ => {
-                    if self.table_has_changed(*table).await? {
-                        self.drop_tables(&vec![table]).await?;
-                        let table_statements =
-                            setup_statements.get(*table).ok_or(ValveError::ConfigError(
-                                format!("Could not find setup statements for {}", table),
-                            ))?;
-                        for stmt in table_statements {
-                            self.execute_sql(stmt).await?;
-                        }
-                    }
-                }
-            };
+            }
         }
         Ok(self)
     }
@@ -1384,10 +1426,8 @@ impl Valve {
         let drop_list = self.add_dependencies(tables, true)?;
         for table in &drop_list {
             let table_config = self.get_table_config(table)?;
-            if table_config.mode != "view" || table_config.path != "" {
-                if !vec!["view", "generated", "readonly", "internal"]
-                    .contains(&table_config.mode.as_str())
-                {
+            if table_config.path != "" {
+                if !vec!["view", "readonly", "internal"].contains(&table_config.mode.as_str()) {
                     let sql = format!(r#"DROP VIEW IF EXISTS "{}_text_view""#, table);
                     self.execute_sql(&sql).await?;
                     let sql = format!(r#"DROP VIEW IF EXISTS "{}_view""#, table);
@@ -1440,7 +1480,7 @@ impl Valve {
             if table_mode != "view" {
                 let sql = truncate_sql(&table);
                 self.execute_sql(&sql).await?;
-                if table_mode != "internal" {
+                if !vec!["readonly", "internal"].contains(&table_mode.as_str()) {
                     let sql = truncate_sql(&format!("{}_conflict", table));
                     self.execute_sql(&sql).await?;
                 }
@@ -1637,13 +1677,24 @@ impl Valve {
             Ok(())
         };
 
-        for table_name in table_list {
-            match self.get_table_mode(&table_name)?.as_str() {
-                // Views and internal tables are never loaded:
-                "view" | "internal" => continue,
-                "generated" | "readonly" => todo!(),
-                _ => load_normal_table(table_name)?,
-            };
+        for table in table_list {
+            let table_config = self.get_table_config(&table)?;
+            // Views and internal tables are never loaded:
+            if vec!["view", "internal"].contains(&table_config.mode.as_str()) {
+                continue;
+            }
+            // For all other modes, how they are loaded depends on the path, such that an empty
+            // path implies that the table in question is not loaded by Valve at all.
+            if table_config.path.to_lowercase().ends_with(".sql") {
+                // SQL files:
+                self.execute_sql_file(&table_config.path).await?;
+            } else if table_config.path.to_lowercase().ends_with(".tsv") {
+                // TSV files:
+                load_normal_table(table)?;
+            } else if table_config.path != "" {
+                // Other types of scripts:
+                self.execute_script(&table_config.path, &vec![&self.db_path, table])?;
+            }
         }
 
         if self.verbose {
@@ -1690,7 +1741,7 @@ impl Valve {
         }
         for (table, path) in table_paths.iter() {
             let mode = self.get_table_mode(table)?;
-            if vec!["view", "generated", "readonly"].contains(&mode.as_str()) {
+            if vec!["view", "readonly"].contains(&mode.as_str()) {
                 log::warn!("Not saving table '{table}' because it has mode '{mode}'");
                 continue;
             }
@@ -1807,7 +1858,7 @@ impl Valve {
     /// and the row itself in the form of a [ValveRow].
     pub async fn insert_row(&self, table_name: &str, row: &JsonRow) -> Result<(u32, ValveRow)> {
         let table_mode = &self.get_table_mode(table_name)?;
-        if vec!["internal", "view", "generated"].contains(&table_mode.as_str()) {
+        if vec!["internal", "view", "readonly"].contains(&table_mode.as_str()) {
             return Err(ValveError::InputError(format!(
                 "Inserting to a table of mode '{}' is not allowed",
                 table_mode
@@ -1867,7 +1918,7 @@ impl Valve {
         row: &JsonRow,
     ) -> Result<ValveRow> {
         let table_mode = &self.get_table_mode(table_name)?;
-        if vec!["internal", "view", "generated"].contains(&table_mode.as_str()) {
+        if vec!["internal", "view", "readonly"].contains(&table_mode.as_str()) {
             return Err(ValveError::InputError(format!(
                 "Updating a table of mode '{}' is not allowed",
                 table_mode
@@ -1929,7 +1980,7 @@ impl Valve {
     /// Given a table name and a row number, delete that row from the table.
     pub async fn delete_row(&self, table_name: &str, row_number: &u32) -> Result<()> {
         let table_mode = &self.get_table_mode(table_name)?;
-        if vec!["internal", "view", "generated"].contains(&table_mode.as_str()) {
+        if vec!["internal", "view", "readonly"].contains(&table_mode.as_str()) {
             return Err(ValveError::InputError(format!(
                 "Deleting from table of mode '{}' is not allowed",
                 table_mode
