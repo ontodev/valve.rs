@@ -1982,7 +1982,7 @@ impl Valve {
         let table_mode = &self.get_table_mode(table_name)?;
         if vec!["internal", "view", "readonly"].contains(&table_mode.as_str()) {
             return Err(ValveError::InputError(format!(
-                "Deleting from table of mode '{}' is not allowed",
+                "Deleting from a table of mode '{}' is not allowed",
                 table_mode
             ))
             .into());

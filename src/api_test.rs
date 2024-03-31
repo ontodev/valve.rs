@@ -1,6 +1,7 @@
 //! API tests
 
 use anyhow::Result;
+use indoc::indoc;
 use ontodev_valve::{
     toolkit::SerdeMap,
     valve::{Valve, ValveError},
@@ -412,6 +413,221 @@ async fn test_undo_redo(valve: &Valve) -> Result<()> {
     Ok(())
 }
 
+async fn test_modes(valve: &Valve) -> Result<()> {
+    let readonly_row = json!({
+        "study_name": "FAKE123",
+        "sample_number": 100,
+        "species": "Adelie Penguin (Pygoscelis adeliae)",
+        "region": "Anvers",
+        "island": "Briscoe",
+        "stage": "Adult, 1 Egg Stage",
+        "individual_id": "ZH64",
+        "clutch_completion": "Yes",
+        "date_egg": "2024-01-01",
+        "culmen_length": 38.7,
+        "culmen_depth": 20.4,
+        "flipper_length": 215,
+        "body_mass": 2401,
+        "sex": "FEMALE",
+        "delta_15_n": 8.233,
+        "delta_13_c": -23.2,
+        "comments": "",
+    });
+    let readonly_row = readonly_row.as_object().unwrap();
+    let expected_vrow = indoc! {r#"ValveRow {
+                                       row_number: None,
+                                       contents: {
+                                           "body_mass": ValveCell {
+                                               nulltype: None,
+                                               value: Number(2401),
+                                               valid: true,
+                                               messages: [],
+                                           },
+                                           "clutch_completion": ValveCell {
+                                               nulltype: None,
+                                               value: String("Yes"),
+                                               valid: true,
+                                               messages: [],
+                                           },
+                                           "comments": ValveCell {
+                                               nulltype: Some(
+                                                   "empty",
+                                               ),
+                                               value: String(""),
+                                               valid: true,
+                                               messages: [],
+                                           },
+                                           "culmen_depth": ValveCell {
+                                               nulltype: None,
+                                               value: Number(20.4),
+                                               valid: true,
+                                               messages: [],
+                                           },
+                                           "culmen_length": ValveCell {
+                                               nulltype: None,
+                                               value: Number(38.7),
+                                               valid: true,
+                                               messages: [],
+                                           },
+                                           "date_egg": ValveCell {
+                                               nulltype: None,
+                                               value: String("2024-01-01"),
+                                               valid: true,
+                                               messages: [],
+                                           },
+                                           "delta_13_c": ValveCell {
+                                               nulltype: None,
+                                               value: Number(-23.2),
+                                               valid: true,
+                                               messages: [],
+                                           },
+                                           "delta_15_n": ValveCell {
+                                               nulltype: None,
+                                               value: Number(8.233),
+                                               valid: true,
+                                               messages: [],
+                                           },
+                                           "flipper_length": ValveCell {
+                                               nulltype: None,
+                                               value: Number(215),
+                                               valid: true,
+                                               messages: [],
+                                           },
+                                           "individual_id": ValveCell {
+                                               nulltype: None,
+                                               value: String("ZH64"),
+                                               valid: true,
+                                               messages: [],
+                                           },
+                                           "island": ValveCell {
+                                               nulltype: None,
+                                               value: String("Briscoe"),
+                                               valid: true,
+                                               messages: [],
+                                           },
+                                           "region": ValveCell {
+                                               nulltype: None,
+                                               value: String("Anvers"),
+                                               valid: true,
+                                               messages: [],
+                                           },
+                                           "sample_number": ValveCell {
+                                               nulltype: None,
+                                               value: Number(100),
+                                               valid: true,
+                                               messages: [],
+                                           },
+                                           "sex": ValveCell {
+                                               nulltype: None,
+                                               value: String("FEMALE"),
+                                               valid: true,
+                                               messages: [],
+                                           },
+                                           "species": ValveCell {
+                                               nulltype: None,
+                                               value: String("Adelie Penguin (Pygoscelis adeliae)"),
+                                               valid: true,
+                                               messages: [],
+                                           },
+                                           "stage": ValveCell {
+                                               nulltype: None,
+                                               value: String("Adult, 1 Egg Stage"),
+                                               valid: true,
+                                               messages: [],
+                                           },
+                                           "study_name": ValveCell {
+                                               nulltype: None,
+                                               value: String("FAKE123"),
+                                               valid: true,
+                                               messages: [],
+                                           },
+                                       },
+                                   }"#};
+    let vrow = valve.validate_row("readonly1", &readonly_row, None).await?;
+    assert_eq!(format!("{:#?}", vrow), expected_vrow);
+
+    let view_row = json!({
+        "foo": "a",
+        "bar": "b",
+    });
+    let view_row = view_row.as_object().unwrap();
+    let expected_vrow = indoc! {r#"ValveRow {
+                                       row_number: None,
+                                       contents: {
+                                           "bar": ValveCell {
+                                               nulltype: None,
+                                               value: String("b"),
+                                               valid: true,
+                                               messages: [],
+                                           },
+                                           "foo": ValveCell {
+                                               nulltype: None,
+                                               value: String("a"),
+                                               valid: true,
+                                               messages: [],
+                                           },
+                                       },
+                                   }"#};
+    let vrow = valve.validate_row("view1", &view_row, None).await?;
+    assert_eq!(format!("{:#?}", vrow), expected_vrow);
+
+    let result = valve.insert_row("readonly1", &readonly_row).await;
+    match result {
+        Err(e) => assert_eq!(
+            format!("{:?}", e),
+            r#"InputError("Inserting to a table of mode 'readonly' is not allowed")"#,
+        ),
+        _ => assert!(false, "Expected an error result but got an OK result"),
+    };
+
+    let result = valve.insert_row("view1", &view_row).await;
+    match result {
+        Err(e) => assert_eq!(
+            format!("{:?}", e),
+            r#"InputError("Inserting to a table of mode 'view' is not allowed")"#,
+        ),
+        _ => assert!(false, "Expected an error result but got an OK result"),
+    };
+
+    let result = valve.update_row("readonly1", &1, &readonly_row).await;
+    match result {
+        Err(e) => assert_eq!(
+            format!("{:?}", e),
+            r#"InputError("Updating a table of mode 'readonly' is not allowed")"#,
+        ),
+        _ => assert!(false, "Expected an error result but got an OK result"),
+    };
+
+    let result = valve.update_row("view1", &1, &view_row).await;
+    match result {
+        Err(e) => assert_eq!(
+            format!("{:?}", e),
+            r#"InputError("Updating a table of mode 'view' is not allowed")"#,
+        ),
+        _ => assert!(false, "Expected an error result but got an OK result"),
+    };
+
+    let result = valve.delete_row("readonly1", &1).await;
+    match result {
+        Err(e) => assert_eq!(
+            format!("{:?}", e),
+            r#"InputError("Deleting from a table of mode 'readonly' is not allowed")"#,
+        ),
+        _ => assert!(false, "Expected an error result but got an OK result"),
+    };
+
+    let result = valve.delete_row("view1", &1).await;
+    match result {
+        Err(e) => assert_eq!(
+            format!("{:?}", e),
+            r#"InputError("Deleting from a table of mode 'view' is not allowed")"#,
+        ),
+        _ => assert!(false, "Expected an error result but got an OK result"),
+    };
+
+    Ok(())
+}
+
 pub async fn run_api_tests(table: &str, database: &str) -> Result<()> {
     let valve = Valve::build(table, database).await?;
     // NOTE that you must use an external script to fetch the data from the database and run a diff
@@ -424,37 +640,7 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<()> {
     test_dependencies(&valve).await?;
     test_undo_redo(&valve).await?;
     test_randomized_api_test_with_undo_redo(&valve).await?;
-
-    // TODO: Add tests for:
-    // 1. Verify that editing a row in a view returns an error.
-    // 2. Verify that we can validate a row in a view.
-    // 3. Verify that get_matching_values() works against a view.
-
-    //let matching_values = valve.get_matching_values("table11", "bar", None).await?;
-    //println!("MATCHING VALUES: {:#?}", matching_values);
-
-    // let row = json!({
-    //     "study_name": "FAKE123",
-    //     "sample_number": "",
-    //     "species": "Adelie Penguin (Pygoscelis adeliae)",
-    //     "region": "Anvers",
-    //     "island": "Briscoe",
-    //     "stage": "Adult, 1 Egg Stage",
-    //     "individual_id": "ZH64",
-    //     "clutch_completion": "Yes",
-    //     "date_egg": "2024-01-01",
-    //     "culmen_length": 38.7,
-    //     "culmen_depth": 20.4,
-    //     "flipper_length": 215,
-    //     "body_mass": 2401,
-    //     "sex": "FEMALE",
-    //     "delta_15_n": 8.233,
-    //     "delta_13_c": -23.2,
-    //     "comments": "",
-    // });
-    // let row = row.as_object().unwrap();
-    // let vrow = valve.validate_row("penguin", &row, None).await?;
-    // println!("VROW: {:#?}", vrow);
+    test_modes(&valve).await?;
 
     Ok(())
 }
