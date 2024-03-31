@@ -291,14 +291,14 @@ pub fn read_config_files(
             if row_path != "" && !row_path.ends_with(".tsv") && !row_path.ends_with(".sql") {
                 if !row_path_info.is_executable() {
                     return Err(ValveError::ConfigError(format!(
-                        "The generic script '{}' associated with the view or readonly table '{}' \
+                        "The generic program '{}' associated with the view or readonly table '{}' \
                          is not executable (assuming that it even exists at all)",
                         row_path, row_table
                     ))
                     .into());
                 }
             }
-        } else if !row_path.to_lowercase().ends_with(".tsv") {
+        } else if row_mode != "internal" && !row_path.to_lowercase().ends_with(".tsv") {
             return Err(ValveError::ConfigError(format!(
                 "Illegal path for table '{}'. Tables of mode '{}' require a path that ends in \
                  '.tsv'",
@@ -656,15 +656,7 @@ pub fn read_config_files(
             )))?;
 
         let mut path = None;
-        if this_table.path == "" {
-            if !vec!["internal", "view"].contains(&this_table.mode.as_str()) {
-                return Err(ValveError::ConfigError(format!(
-                    "No path defined for table {}",
-                    table_name
-                ))
-                .into());
-            }
-        } else if !Path::new(&this_table.path).is_file() {
+        if !Path::new(&this_table.path).is_file() {
             log::warn!("File does not exist {}", this_table.path);
         } else if Path::new(&this_table.path).canonicalize().is_err() {
             log::warn!("File path could not be made canonical {}", this_table.path);
