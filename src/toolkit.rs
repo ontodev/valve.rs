@@ -18,7 +18,7 @@ use crate::{
 use anyhow::Result;
 use async_recursion::async_recursion;
 use crossbeam;
-use csv::{ReaderBuilder, StringRecord, StringRecordsIter};
+use csv::{ReaderBuilder, StringRecordsIter};
 use futures::executor::block_on;
 use indexmap::IndexMap;
 use indoc::indoc;
@@ -151,6 +151,70 @@ pub async fn get_pool_from_connection_string(database: &str) -> Result<AnyPool> 
         .connect_with(connection_options)
         .await?;
     Ok(pool)
+}
+
+/// TODO: Add a docstring here
+pub fn get_column_for_label(
+    column_config_map: &HashMap<String, ValveColumnConfig>,
+    label: &str,
+    table: &str,
+) -> Result<String> {
+    let column_name = column_config_map
+        .iter()
+        .filter(|(_, v)| v.label == *label)
+        .map(|(k, _)| k)
+        .collect::<Vec<_>>();
+    let number_of_matches = column_name.len();
+
+    if number_of_matches == 1 {
+        Ok(column_name[0].to_string())
+    } else if number_of_matches > 1 {
+        Err(ValveError::ConfigError(format!(
+            "Error while reading column configuration for '{}': \
+             Labels must be unique.",
+            table,
+        ))
+        .into())
+    } else {
+        // If we cannot find the column corresponding to the label, then we conclude that the label
+        // name we received was fact the column name, for a column that has no label:
+        Ok(label.to_string())
+    }
+}
+
+/// TODO: Add a docstring here
+pub fn get_label_for_column(
+    column_config_map: &HashMap<String, ValveColumnConfig>,
+    column: &str,
+    table: &str,
+) -> Result<String> {
+    let label_name = column_config_map
+        .iter()
+        .filter(|(k, _)| *k == column)
+        .map(|(_, v)| v.label.to_string())
+        .collect::<Vec<_>>();
+    let num_matches = label_name.len();
+
+    if num_matches > 1 {
+        Err(ValveError::ConfigError(format!(
+            "Error while reading column configuration for '{}': \
+             Columns must be unique.",
+            table,
+        ))
+        .into())
+    } else if num_matches == 0 {
+        Err(ValveError::ConfigError(format!(
+            "Error while reading column configuration for '{}': \
+             Column not found.",
+            table,
+        ))
+        .into())
+    } else if label_name[0] != "" {
+        Ok(label_name[0].to_string())
+    } else {
+        // If the label is empty then just return the column name:
+        Ok(column.to_string())
+    }
 }
 
 /// Given the path to a table table (either a table.tsv file or a database containing a
@@ -670,11 +734,21 @@ pub fn read_config_files(
         }
 
         let this_column_config = &this_table.column;
-        let defined_columns: Vec<String> = this_column_config.keys().cloned().collect::<Vec<_>>();
+        let defined_columns = this_column_config.keys().cloned().collect::<Vec<_>>();
+        let defined_labels = this_column_config
+            .iter()
+            .map(|(k, v)| {
+                if v.label != "" {
+                    v.label.to_string()
+                } else {
+                    k.to_string()
+                }
+            })
+            .collect::<Vec<_>>();
 
         // We use column_order to explicitly indicate the order in which the columns should appear
         // in the table, for later reference. The default is to preserve the order from the actual
-        // table file. If that does not exist, we use the ordering in defined_columns.
+        // table file. If that does not exist, we use the ordering in defined_labels.
         let mut column_order = vec![];
         match path {
             Some(path) if path.to_lowercase().ends_with(".tsv") => {
@@ -693,7 +767,7 @@ pub fn read_config_files(
                     })?);
                 let mut iter = rdr.records();
                 if let Some(result) = iter.next() {
-                    let actual_columns = result
+                    let actual_labels = result
                         .map_err(|e| {
                             ValveError::ConfigError(format!(
                                 "Unable to read row from '{}': {}",
@@ -705,21 +779,27 @@ pub fn read_config_files(
                         .collect::<Vec<_>>();
                     // Make sure that the actual columns found in the table file, and the columns
                     // defined in the column config, exactly match in terms of their content:
-                    for column_name in &actual_columns {
-                        column_order.push(column_name.to_string());
-                        if !defined_columns.contains(&&column_name.to_string()) {
+                    for label_name in &actual_labels {
+                        if !defined_labels.contains(&&label_name.to_string())
+                            && !defined_columns.contains(&&label_name.to_string())
+                        {
                             return Err(ValveError::ConfigError(format!(
-                                "Column '{}.{}' not in column config",
-                                table_name, column_name
+                                "Label '{}' of table '{}' not in column config",
+                                label_name, table_name
                             ))
                             .into());
                         }
+                        let column_name =
+                            get_column_for_label(&this_column_config, label_name, &table_name)?;
+                        if !column_name.is_empty() {
+                            column_order.push(column_name);
+                        }
                     }
-                    for column_name in &defined_columns {
-                        if !actual_columns.contains(&column_name.to_string()) {
+                    for label_name in &defined_labels {
+                        if !actual_labels.contains(&label_name.to_string()) {
                             return Err(ValveError::ConfigError(format!(
-                                "Defined column '{}.{}' not found in table",
-                                table_name, column_name
+                                "Defined label '{}.{}' not found in table",
+                                table_name, label_name
                             ))
                             .into());
                         }
@@ -731,7 +811,7 @@ pub fn read_config_files(
             _ => (),
         };
         if column_order.is_empty() {
-            column_order = defined_columns.clone();
+            column_order = this_column_config.keys().cloned().collect::<Vec<_>>();
         }
         tables_config
             .get_mut(&table_name)
@@ -3752,7 +3832,7 @@ pub async fn insert_chunks(
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     table_name: &String,
     chunks: &IntoChunks<StringRecordsIter<'_, std::fs::File>>,
-    headers: &StringRecord,
+    headers: &Vec<String>,
     messages_stats: &mut HashMap<String, usize>,
     verbose: bool,
     validate: bool,

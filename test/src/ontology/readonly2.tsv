@@ -1,4 +1,4 @@
-study_name	sample_number	species	region	island	stage	individual_id	clutch_completion	date_egg	culmen_length	culmen_depth	flipper_length	body_mass	sex	delta_15_n	delta_13_c	comments
+studyName	Sample Number	Species	Region	Island	Stage	Individual ID	Clutch Completion	Date Egg	Culmen Length (mm)	Culmen Depth (mm)	Flipper Length (mm)	Body Mass (g)	Sex	Delta 15 N (o/oo)	Delta 13 C (o/oo)	Comments
 FAKE123	1	Adelie Penguin (Pygoscelis adeliae)	Anvers	Biscoe	Adult, 1 Egg Stage	N1A2	No	2008-07-30	50.1	18.8	221	2466	FEMALE	8.14526	-24.35399	
 FAKE123	2	Adelie Penguin (Pygoscelis adeliae)	Anvers	Biscoe	Adult, 1 Egg Stage	N2A1	Yes	2008-09-23	45.4	16.8	199	1404	FEMALE	8.73118	-24.52462	
 FAKE123	3	Adelie Penguin (Pygoscelis adeliae)	Anvers	Dream	Adult, 1 Egg Stage	N2A2	Yes	2007-09-16	41.3	21.6	193	1255	FEMALE	9.87676	-26.92639	

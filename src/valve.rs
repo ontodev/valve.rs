@@ -6,13 +6,14 @@ use crate::{
     toolkit,
     toolkit::{
         add_message_counts, cast_column_sql_to_text, convert_undo_or_redo_record_to_change,
-        delete_row_tx, get_column_value, get_compiled_datatype_conditions,
-        get_compiled_rule_conditions, get_json_from_row, get_parsed_structure_conditions,
-        get_pool_from_connection_string, get_record_to_redo, get_record_to_undo, get_row_from_db,
-        get_sql_for_standard_view, get_sql_for_text_view, get_sql_type,
-        get_sql_type_from_global_config, get_table_ddl, insert_chunks, insert_new_row_tx,
-        local_sql_syntax, read_config_files, record_row_change, switch_undone_state, update_row_tx,
-        verify_table_deps_and_sort, ColumnRule, CompiledCondition, ParsedStructure,
+        delete_row_tx, get_column_for_label, get_column_value, get_compiled_datatype_conditions,
+        get_compiled_rule_conditions, get_json_from_row, get_label_for_column,
+        get_parsed_structure_conditions, get_pool_from_connection_string, get_record_to_redo,
+        get_record_to_undo, get_row_from_db, get_sql_for_standard_view, get_sql_for_text_view,
+        get_sql_type, get_sql_type_from_global_config, get_table_ddl, insert_chunks,
+        insert_new_row_tx, local_sql_syntax, read_config_files, record_row_change,
+        switch_undone_state, update_row_tx, verify_table_deps_and_sort, ColumnRule,
+        CompiledCondition, ParsedStructure,
     },
     validate::{validate_row_tx, validate_tree_foreign_keys, validate_under, with_tree_sql},
     valve_grammar::StartParser,
@@ -1553,13 +1554,21 @@ impl Valve {
 
             // Extract the headers, which we will need later:
             let mut records = rdr.records();
-            let headers;
-            if let Some(result) = records.next() {
-                headers = result.unwrap();
-            } else {
-                return Err(ValveError::DataError(format!("'{}' is empty", path)).into());
-            }
-
+            let headers = {
+                let labels = {
+                    if let Some(result) = records.next() {
+                        result.unwrap()
+                    } else {
+                        return Err(ValveError::DataError(format!("'{}' is empty", path)).into());
+                    }
+                };
+                let column_config = &self.get_table_config(&table_name)?.column;
+                let mut headers = vec![];
+                for label in &labels {
+                    headers.push(get_column_for_label(&column_config, label, &table_name)?);
+                }
+                headers
+            };
             for header in headers.iter() {
                 if header.trim().is_empty() {
                     return Err(ValveError::DataError(format!(
@@ -1739,21 +1748,27 @@ impl Valve {
                     .join(", ")
             );
         }
+
         for (table, path) in table_paths.iter() {
             let mode = self.get_table_mode(table)?;
             if vec!["view", "readonly"].contains(&mode.as_str()) {
                 log::warn!("Not saving table '{table}' because it has mode '{mode}'");
                 continue;
             }
-            let columns: Vec<&str> = self
-                .config
-                .table
-                .get(table)
-                .and_then(|t| Some(t.column_order.iter().map(|i| i.as_str()).collect()))
-                .ok_or(ValveError::InputError(format!(
-                    "Undefined table '{}'",
-                    table
-                )))?;
+
+            let table_config = self.get_table_config(table)?;
+            let column_config = &table_config.column;
+            let mut labels = vec![];
+            let columns: Vec<&str> = table_config
+                .column_order
+                .iter()
+                .map(|i| i.as_str())
+                .collect();
+            for column in &columns {
+                let label = get_label_for_column(&column_config, column, table)?;
+                labels.push(label);
+            }
+            let labels = labels.iter().map(|i| i.as_str()).collect();
 
             let path = match save_dir {
                 Some(s) => format!(
@@ -1765,14 +1780,28 @@ impl Valve {
                 ),
                 None => path.to_string(),
             };
-            self.save_table(table, &columns, &path)?;
+            self.save_table(table, &columns, &labels, &path)?;
         }
 
         Ok(self)
     }
 
     /// Save the given table with the given columns at the given path as a TSV file.
-    pub fn save_table(&self, table: &str, columns: &Vec<&str>, path: &str) -> Result<&Self> {
+    pub fn save_table(
+        &self,
+        table: &str,
+        columns: &Vec<&str>,
+        labels: &Vec<&str>,
+        path: &str,
+    ) -> Result<&Self> {
+        if columns.len() != labels.len() {
+            return Err(ValveError::InputError(format!(
+                "The column list: {:?} and label list: {:?} differ in length.",
+                columns, labels,
+            ))
+            .into());
+        }
+
         let table_mode = self.get_table_mode(table)?;
         if table_mode == "view" {
             return Err(ValveError::InputError(format!(
@@ -1781,6 +1810,7 @@ impl Valve {
             ))
             .into());
         }
+
         let mut casted_columns = vec!["\"row_number\"".to_string()];
         casted_columns.append(
             &mut columns
@@ -1799,7 +1829,7 @@ impl Valve {
             .delimiter(b'\t')
             .quote_style(QuoteStyle::Never)
             .from_path(path)?;
-        writer.write_record(columns)?;
+        writer.write_record(labels)?;
         let mut stream = sqlx_query(&sql).fetch(&self.pool);
         while let Some(row) = block_on(stream.try_next())? {
             let mut record: Vec<&str> = vec![];

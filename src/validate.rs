@@ -585,7 +585,7 @@ pub fn validate_rows_intra(
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     table_name: &String,
-    headers: &csv::StringRecord,
+    headers: &Vec<String>,
     rows: &Vec<Result<csv::StringRecord, csv::Error>>,
     only_nulltype: bool,
 ) -> Vec<ValveRow> {

@@ -1,5 +1,5 @@
 table	column	label	nulltype	datatype	structure	description
-table	table	table_name		table_name	primary	name of this table
+table	table			table_name	primary	name of this table
 table	path			path		path to the TSV file for this table, relative to the table.tsv file
 table	type		empty	table_type		type of this table, used for tables with special meanings
 table	mode		empty	word		mode of this table
