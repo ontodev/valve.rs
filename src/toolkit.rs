@@ -286,6 +286,8 @@ pub fn read_config_files(
         Ok(())
     }
 
+    // TODO: Possibly support column labels for special tables.
+
     // 1. Load the table config for the 'table' table from the given path, and determine the
     // table names to use for the other special config types: 'column', 'datatype', and 'rule', then
     // save those in specials_config. Also begin filling out the more general table configuration
@@ -579,6 +581,7 @@ pub fn read_config_files(
 
     // 3. Load the column table.
     let rows = get_special_config("column", &specials_config, &tables_config, path, pool)?;
+    let mut default_column_order = IndexMap::new();
     for row in rows {
         if let Err(e) = check_table_requirements(
             &vec![
@@ -616,10 +619,34 @@ pub fn read_config_files(
                 ValveError::ConfigError(format!("Undefined datatype '{}'", datatype)).into(),
             );
         }
+
         let column_name = row.get("column").and_then(|c| c.as_str()).unwrap();
         let description = row.get("description").and_then(|c| c.as_str()).unwrap();
         let label = row.get("label").and_then(|c| c.as_str()).unwrap();
         let structure = row.get("structure").and_then(|c| c.as_str()).unwrap();
+
+        if default_column_order
+            .keys()
+            .filter(|k| *k == row_table)
+            .collect::<Vec<_>>()
+            .is_empty()
+        {
+            default_column_order.insert(row_table.to_string(), vec![]);
+        }
+        match default_column_order
+            .get_mut(row_table)
+            .and_then(|t| Some(t.push(column_name.to_string())))
+        {
+            None => {
+                return Err(ValveError::DataError(format!(
+                    "Could not insert column '{}'",
+                    column_name
+                ))
+                .into());
+            }
+            _ => (),
+        };
+
         tables_config.get_mut(row_table).and_then(|t| {
             Some(t.column.insert(
                 column_name.to_string(),
@@ -811,7 +838,16 @@ pub fn read_config_files(
             _ => (),
         };
         if column_order.is_empty() {
-            column_order = this_column_config.keys().cloned().collect::<Vec<_>>();
+            match default_column_order.get(&table_name) {
+                Some(order) => column_order = order.to_vec(),
+                _ => {
+                    return Err(ValveError::DataError(format!(
+                        "Table {} not found in {:?}",
+                        table_name, default_column_order
+                    ))
+                    .into());
+                }
+            };
         }
         tables_config
             .get_mut(&table_name)
