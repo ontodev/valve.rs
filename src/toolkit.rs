@@ -302,6 +302,7 @@ pub fn read_config_files(
         }
     };
 
+    let default_options = "".to_string();
     for row in rows {
         if let Err(e) = check_table_requirements(
             &vec!["table", "path", "type", "description"],
@@ -324,7 +325,12 @@ pub fn read_config_files(
         let row_type = row_type.as_str();
         let row_options = row.get("options").and_then(|t| t.as_str()).unwrap();
         let row_options = row_options.to_lowercase();
-        let row_options = row_options.as_str();
+        // TODO: We need to save all of the options, not just the first one:
+        let row_options = row_options.as_str().split(",").collect::<Vec<_>>();
+        let row_options = row_options
+            .get(0)
+            .unwrap_or(&default_options.as_str())
+            .to_string();
         if row_options == "internal" {
             return Err(ValveError::ConfigError(format!(
                 "The option 'internal' is reserved for internal use and is not allowed to be \
@@ -343,7 +349,7 @@ pub fn read_config_files(
         //   can be a file ending (case insensitively) with '.tsv', a file ending (case
         //   insensitively) with '.sql', or an executable file.
         // - All other tables must have a path and it must end (case insensitively) in '.tsv'.
-        if vec!["view", "readonly"].contains(&row_options) {
+        if vec!["view", "readonly"].contains(&row_options.as_str()) {
             if row_options == "view" && row_path.ends_with(".tsv") {
                 return Err(ValveError::ConfigError(format!(
                     "Invalid path '{}' for view '{}'. TSV files are not supported for views.",
@@ -426,7 +432,7 @@ pub fn read_config_files(
             ValveTableConfig {
                 table: row_table.to_string(),
                 table_type: row_type.to_string(),
-                options: row_options.to_string(),
+                options: vec![row_options.to_string()],
                 description: row_desc.to_string(),
                 path: row_path.to_string(),
                 ..Default::default()
@@ -788,7 +794,10 @@ pub fn read_config_files(
         }
 
         // Constraints on internal tables do not need to be configured explicitly:
-        if this_table.options == "internal" {
+        // TODO: We need to check all of the options, not just the first one:
+        let default_options = "".to_string();
+        let options = this_table.options.get(0).unwrap_or(&default_options);
+        if options == "internal" {
             continue;
         }
 
@@ -3157,7 +3166,7 @@ pub fn verify_table_deps_and_sort(
 }
 
 /// Given a global configuration struct and a table name, returns the options for the table.
-pub fn get_table_options(config: &ValveConfig, table: &str) -> Result<String> {
+pub fn get_table_options(config: &ValveConfig, table: &str) -> Result<Vec<String>> {
     Ok(config
         .table
         .get(table)
@@ -3165,7 +3174,7 @@ pub fn get_table_options(config: &ValveConfig, table: &str) -> Result<String> {
             ValveError::InputError(format!("'{}' is not in table config", table)).into(),
         )?
         .options
-        .to_string())
+        .to_vec())
 }
 
 /// Given a table configuration map and a datatype configuration map, a parser, a table name, and a
@@ -3401,7 +3410,10 @@ pub fn get_table_ddl(
                 let table_config = &tables_config
                     .get(&fkey.ftable)
                     .expect(&format!("Undefined table '{}'", fkey.ftable));
-                table_config.options != "view"
+                // TODO: We need to check all of the options, not just the first one:
+                let default_options = "".to_string();
+                let options = table_config.options.get(0).unwrap_or(&default_options);
+                options != "view"
             })
             .collect::<Vec<_>>();
         if !(r >= c && applicable_foreigns.is_empty()) {
@@ -3412,12 +3424,15 @@ pub fn get_table_ddl(
 
     // Add the SQL to indicate any foreign constraints:
     let num_fkeys = foreigns.len();
+    let default_options = "".to_string();
     for (i, fkey) in foreigns.iter().enumerate() {
         let ftable_options = {
             let table_config = &tables_config
                 .get(&fkey.ftable)
                 .expect(&format!("Undefined table '{}'", fkey.ftable));
-            table_config.options.to_string()
+            // TODO: We need to check all of the options, not just the first one:
+            let options = table_config.options.get(0).unwrap_or(&default_options);
+            options
         };
         if ftable_options != "view" {
             create_lines.push(format!(
