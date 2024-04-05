@@ -1,5 +1,5 @@
 table	column	label	nulltype	datatype	structure	description
-table	table			table_name	primary	name of this table
+table	table	ignore_me		table_name	primary	name of this table
 table	path			path		path to the TSV file for this table, relative to the table.tsv file
 table	type		empty	table_type		type of this table, used for tables with special meanings
 table	mode		empty	word		mode of the table
@@ -12,7 +12,7 @@ column	datatype			datatype_name	from(datatype.datatype)	the datatype for this co
 column	structure		empty	trimmed_line		schema information for this column
 column	description		empty	description		a description of this column
 datatype	datatype			datatype_name	primary	the name of this datatype
-datatype	parent		empty	datatype_name	tree(datatype)	the parent datatype
+datatype	parent	ignore_me	empty	datatype_name	tree(datatype)	the parent datatype
 datatype	condition		empty	datatype_condition		
 datatype	description		empty	trimmed_text		
 datatype	SQL type		empty	trimmed_line		

@@ -286,8 +286,6 @@ pub fn read_config_files(
         Ok(())
     }
 
-    // TODO: Possibly support column labels for special tables.
-
     // 1. Load the table config for the 'table' table from the given path, and determine the
     // table names to use for the other special config types: 'column', 'datatype', and 'rule', then
     // save those in specials_config. Also begin filling out the more general table configuration
@@ -327,8 +325,6 @@ pub fn read_config_files(
         let row_mode = row.get("mode").and_then(|t| t.as_str()).unwrap();
         let row_mode = row_mode.to_lowercase();
         let row_mode = row_mode.as_str();
-        let row_desc = row.get("description").and_then(|t| t.as_str()).unwrap();
-
         if row_mode == "internal" {
             return Err(ValveError::ConfigError(format!(
                 "The mode 'internal' is reserved for internal use and is not allowed to be \
@@ -337,6 +333,7 @@ pub fn read_config_files(
             ))
             .into());
         }
+        let row_desc = row.get("description").and_then(|t| t.as_str()).unwrap();
 
         // Here is a summary of the allowed table configurations for the various table modes:
         // - A table of mode 'view' is allowed to have an empty path. If the path is non-empty then
@@ -581,7 +578,17 @@ pub fn read_config_files(
 
     // 3. Load the column table.
     let rows = get_special_config("column", &specials_config, &tables_config, path, pool)?;
-    let mut default_column_order = IndexMap::new();
+    let special_tables = vec![
+        specials_config.table.to_string(),
+        specials_config.column.to_string(),
+        specials_config.datatype.to_string(),
+        specials_config.rule.to_string(),
+    ];
+    // The defined_column_orderings map, which contains the columns of a given table in the order in
+    // which they have been defined in the column table, is used as a default in the determination
+    // of the [ValveTableConfig::column_order] field, in the case where there no .TSV file
+    // representing the table has been configured in valve.
+    let mut defined_column_orderings = IndexMap::new();
     for row in rows {
         if let Err(e) = check_table_requirements(
             &vec![
@@ -619,21 +626,37 @@ pub fn read_config_files(
                 ValveError::ConfigError(format!("Undefined datatype '{}'", datatype)).into(),
             );
         }
-
         let column_name = row.get("column").and_then(|c| c.as_str()).unwrap();
         let description = row.get("description").and_then(|c| c.as_str()).unwrap();
-        let label = row.get("label").and_then(|c| c.as_str()).unwrap();
+        let mut label = row
+            .get("label")
+            .and_then(|c| c.as_str())
+            .unwrap()
+            .to_string();
+        if !label.is_empty() && special_tables.contains(&row_table.to_string()) {
+            log::warn!(
+                "Label '{}' for column '{}' of special table '{}' will be ignored.",
+                label,
+                column_name,
+                row_table
+            );
+            label = String::from("");
+        }
         let structure = row.get("structure").and_then(|c| c.as_str()).unwrap();
 
-        if default_column_order
+        // If an entry in the defined_column_orderings map for this table doesn't already exist,
+        // create one:
+        if defined_column_orderings
             .keys()
             .filter(|k| *k == row_table)
             .collect::<Vec<_>>()
             .is_empty()
         {
-            default_column_order.insert(row_table.to_string(), vec![]);
+            defined_column_orderings.insert(row_table.to_string(), vec![]);
         }
-        match default_column_order
+
+        // Add the column name to the ordered list of columns for this table:
+        match defined_column_orderings
             .get_mut(row_table)
             .and_then(|t| Some(t.push(column_name.to_string())))
         {
@@ -655,7 +678,7 @@ pub fn read_config_files(
                     column: column_name.to_string(),
                     datatype: datatype.to_string(),
                     description: description.to_string(),
-                    label: label.to_string(),
+                    label: label,
                     structure: structure.to_string(),
                     nulltype: nulltype.to_string(),
                 },
@@ -738,7 +761,8 @@ pub fn read_config_files(
 
     // 5. Initialize the constraints config:
     let mut constraints_config = ValveConstraintConfig::default();
-    for table_name in tables_config.keys().cloned().collect::<Vec<_>>() {
+    for (table_name, defined_columns) in defined_column_orderings.iter() {
+        let table_name = table_name.to_string();
         let this_table = tables_config
             .get(&table_name)
             .ok_or(ValveError::ConfigError(format!(
@@ -748,9 +772,17 @@ pub fn read_config_files(
 
         let mut path = None;
         if !Path::new(&this_table.path).is_file() {
-            log::warn!("File does not exist {}", this_table.path);
+            log::warn!(
+                "Path '{}' of table '{}' does not exist",
+                this_table.path,
+                table_name
+            );
         } else if Path::new(&this_table.path).canonicalize().is_err() {
-            log::warn!("File path could not be made canonical {}", this_table.path);
+            log::warn!(
+                "Path '{}' of table '{}' could not be made canonical",
+                this_table.path,
+                table_name
+            );
         } else {
             path = Some(this_table.path.to_string())
         }
@@ -761,7 +793,6 @@ pub fn read_config_files(
         }
 
         let this_column_config = &this_table.column;
-        let defined_columns = this_column_config.keys().cloned().collect::<Vec<_>>();
         let defined_labels = this_column_config
             .iter()
             .map(|(k, v)| {
@@ -837,13 +868,16 @@ pub fn read_config_files(
             }
             _ => (),
         };
+
+        // If for some reason we were unable to determine the column order, then use the order
+        // defined in the column table:
         if column_order.is_empty() {
-            match default_column_order.get(&table_name) {
+            match defined_column_orderings.get(&table_name) {
                 Some(order) => column_order = order.to_vec(),
                 _ => {
                     return Err(ValveError::DataError(format!(
                         "Table {} not found in {:?}",
-                        table_name, default_column_order
+                        table_name, defined_column_orderings
                     ))
                     .into());
                 }
