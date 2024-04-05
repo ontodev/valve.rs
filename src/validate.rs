@@ -3,7 +3,7 @@
 use crate::{
     toolkit::{
         cast_sql_param_from_text, get_column_value, get_sql_type_from_global_config,
-        get_table_mode, is_sql_type_error, local_sql_syntax, ColumnRule, CompiledCondition,
+        get_table_options, is_sql_type_error, local_sql_syntax, ColumnRule, CompiledCondition,
         QueryAsIf, QueryAsIfKind,
     },
     valve::{
@@ -181,9 +181,9 @@ pub async fn validate_under(
         .get(table_name)
         .expect(&format!("Undefined table '{}'", table_name));
 
-    let table_mode = get_table_mode(config, table_name)?;
+    let table_options = get_table_options(config, table_name)?;
     let query_table = {
-        if vec!["internal", "readonly", "view"].contains(&table_mode.as_str()) {
+        if vec!["internal", "readonly", "view"].contains(&table_options.as_str()) {
             table_name.to_string()
         } else {
             format!("{}_view", table_name)
@@ -365,9 +365,9 @@ pub async fn validate_tree_foreign_keys(
         .get(table_name)
         .expect(&format!("Undefined table '{}'", table_name));
 
-    let table_mode = get_table_mode(config, table_name)?;
+    let table_options = get_table_options(config, table_name)?;
     let query_table = {
-        if vec!["internal", "readonly", "view"].contains(&table_mode.as_str()) {
+        if vec!["internal", "readonly", "view"].contains(&table_options.as_str()) {
             table_name.to_string()
         } else {
             format!("{}_view", table_name)
@@ -1185,15 +1185,15 @@ pub async fn validate_cell_foreign_constraints(
                     fcolumn
                 ),
             };
-            let fmode = &config
+            let foptions = &config
                 .table
                 .get(ftable)
                 .expect(&format!(
                     "Foreign table: '{}' is not in table config",
                     ftable
                 ))
-                .mode;
-            if !vec!["internal", "view", "readonly"].contains(&fmode.as_str()) {
+                .options;
+            if !vec!["internal", "view", "readonly"].contains(&foptions.as_str()) {
                 let (as_if_clause_for_conflict, ftable_alias) = match query_as_if {
                     Some(query_as_if) if *ftable == query_as_if.table => (
                         as_if_clause_for_conflict.to_string(),
@@ -1274,9 +1274,9 @@ pub async fn validate_cell_trees(
     let parent_sql_type = get_sql_type_from_global_config(&config, &table_name, &parent_col, pool);
     let parent_sql_param = cast_sql_param_from_text(&parent_sql_type);
     let parent_val = cell.strvalue();
-    let table_mode = get_table_mode(config, table_name)?;
+    let table_options = get_table_options(config, table_name)?;
     let query_table = {
-        if vec!["internal", "view", "readonly"].contains(&table_mode.as_str()) {
+        if vec!["internal", "view", "readonly"].contains(&table_options.as_str()) {
             table_name.to_string()
         } else {
             format!("{}_view", table_name)
@@ -1470,9 +1470,9 @@ pub async fn validate_cell_unique_constraints(
     }
 
     if is_primary || is_unique || is_tree_child {
-        let table_mode = get_table_mode(config, table_name)?;
+        let table_options = get_table_options(config, table_name)?;
         let mut query_table = {
-            if vec!["internal", "readonly", "view"].contains(&table_mode.as_str()) {
+            if vec!["internal", "readonly", "view"].contains(&table_options.as_str()) {
                 table_name.to_string()
             } else {
                 format!("{}_view", table_name)

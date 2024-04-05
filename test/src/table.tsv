@@ -1,4 +1,4 @@
-table	path	description	type	mode
+table	path	description	type	options
 column	test/src/column.tsv	Columns for all of the tables.	column	
 datatype	test/src/datatype.tsv	Datatypes for all of the columns	datatype	
 rule	test/src/rule.tsv	More complex "when" rules	rule	

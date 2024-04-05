@@ -322,13 +322,13 @@ pub fn read_config_files(
         let row_type = row.get("type").and_then(|t| t.as_str()).unwrap();
         let row_type = row_type.to_lowercase();
         let row_type = row_type.as_str();
-        let row_mode = row.get("mode").and_then(|t| t.as_str()).unwrap();
-        let row_mode = row_mode.to_lowercase();
-        let row_mode = row_mode.as_str();
-        if row_mode == "internal" {
+        let row_options = row.get("options").and_then(|t| t.as_str()).unwrap();
+        let row_options = row_options.to_lowercase();
+        let row_options = row_options.as_str();
+        if row_options == "internal" {
             return Err(ValveError::ConfigError(format!(
-                "The mode 'internal' is reserved for internal use and is not allowed to be \
-                 specified as a table mode in '{}'",
+                "The option 'internal' is reserved for internal use and is not allowed to be \
+                 specified as a table option in '{}'",
                 path
             ))
             .into());
@@ -343,8 +343,8 @@ pub fn read_config_files(
         //   can be a file ending (case insensitively) with '.tsv', a file ending (case
         //   insensitively) with '.sql', or an executable file.
         // - All other tables must have a path and it must end (case insensitively) in '.tsv'.
-        if vec!["view", "readonly"].contains(&row_mode) {
-            if row_mode == "view" && row_path.ends_with(".tsv") {
+        if vec!["view", "readonly"].contains(&row_options) {
+            if row_options == "view" && row_path.ends_with(".tsv") {
                 return Err(ValveError::ConfigError(format!(
                     "Invalid path '{}' for view '{}'. TSV files are not supported for views.",
                     row_path, row_table,
@@ -361,11 +361,11 @@ pub fn read_config_files(
                     .into());
                 }
             }
-        } else if row_mode != "internal" && !row_path.to_lowercase().ends_with(".tsv") {
+        } else if row_options != "internal" && !row_path.to_lowercase().ends_with(".tsv") {
             return Err(ValveError::ConfigError(format!(
-                "Illegal path for table '{}'. Tables of mode '{}' require a path that ends in \
+                "Illegal path for table '{}'. Tables with option '{}' require a path that ends in \
                  '.tsv'",
-                row_table, row_mode
+                row_table, row_options
             ))
             .into());
         }
@@ -426,7 +426,7 @@ pub fn read_config_files(
             ValveTableConfig {
                 table: row_table.to_string(),
                 table_type: row_type.to_string(),
-                mode: row_mode.to_string(),
+                options: row_options.to_string(),
                 description: row_desc.to_string(),
                 path: row_path.to_string(),
                 ..Default::default()
@@ -788,7 +788,7 @@ pub fn read_config_files(
         }
 
         // Constraints on internal tables do not need to be configured explicitly:
-        if this_table.mode == "internal" {
+        if this_table.options == "internal" {
             continue;
         }
 
@@ -3156,15 +3156,15 @@ pub fn verify_table_deps_and_sort(
     };
 }
 
-/// Given a global configuration struct and a table name, returns the mode of the table.
-pub fn get_table_mode(config: &ValveConfig, table: &str) -> Result<String> {
+/// Given a global configuration struct and a table name, returns the options for the table.
+pub fn get_table_options(config: &ValveConfig, table: &str) -> Result<String> {
     Ok(config
         .table
         .get(table)
         .ok_or::<ValveError>(
             ValveError::InputError(format!("'{}' is not in table config", table)).into(),
         )?
-        .mode
+        .options
         .to_string())
 }
 
@@ -3401,7 +3401,7 @@ pub fn get_table_ddl(
                 let table_config = &tables_config
                     .get(&fkey.ftable)
                     .expect(&format!("Undefined table '{}'", fkey.ftable));
-                table_config.mode != "view"
+                table_config.options != "view"
             })
             .collect::<Vec<_>>();
         if !(r >= c && applicable_foreigns.is_empty()) {
@@ -3413,13 +3413,13 @@ pub fn get_table_ddl(
     // Add the SQL to indicate any foreign constraints:
     let num_fkeys = foreigns.len();
     for (i, fkey) in foreigns.iter().enumerate() {
-        let ftable_mode = {
+        let ftable_options = {
             let table_config = &tables_config
                 .get(&fkey.ftable)
                 .expect(&format!("Undefined table '{}'", fkey.ftable));
-            table_config.mode.to_string()
+            table_config.options.to_string()
         };
-        if ftable_mode != "view" {
+        if ftable_options != "view" {
             create_lines.push(format!(
                 r#"  FOREIGN KEY ("{}") REFERENCES "{}"("{}"){}"#,
                 fkey.column,

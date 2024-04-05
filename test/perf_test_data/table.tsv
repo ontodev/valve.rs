@@ -1,4 +1,4 @@
-table	path	description	type	mode
+table	path	description	type	options
 column	test/perf_test_data/column.tsv	Columns for all of the tables.	column	
 datatype	test/perf_test_data/datatype.tsv	Datatypes for all of the columns	datatype	
 rule	test/perf_test_data/rule.tsv	More complex "when" rules	rule	

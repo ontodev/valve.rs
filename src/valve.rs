@@ -322,8 +322,8 @@ pub struct ValveTableConfig {
     pub table: String,
     /// The table's type
     pub table_type: String,
-    /// The mode of the table
-    pub mode: String,
+    /// TODO: Make this a vector of enums rather a string: The options for this table
+    pub options: String,
     /// A description of the table
     pub description: String,
     /// The location of the TSV file representing the table in the filesystem
@@ -697,7 +697,7 @@ impl Valve {
 
     /// Return the list of configured editable tables in sorted order, or reverse sorted order if
     /// the reverse flag is set. Note that 'editable' refers to the rows in a table. Depending on
-    /// the table's mode, Valve may be allowed to drop and/or create and/or save and/or truncate
+    /// the table's options, Valve may be allowed to drop and/or create and/or save and/or truncate
     /// the table even if it is not editable.
     pub fn get_sorted_editable_table_list(&self, reverse: bool) -> Vec<&str> {
         let mut sorted_tables = self
@@ -706,8 +706,8 @@ impl Valve {
             .filter(|t| {
                 !vec!["readonly", "view"].contains(
                     &self
-                        .get_table_mode(t)
-                        .expect(&format!("Error getting mode for table '{}'", t))
+                        .get_table_options(t)
+                        .expect(&format!("Error getting options for table '{}'", t))
                         .as_str(),
                 )
             })
@@ -1259,7 +1259,7 @@ impl Valve {
                 let mut statements =
                     get_table_ddl(tables_config, datatypes_config, &parser, &table, &self.pool);
                 table_statements.append(&mut statements);
-                if table_config.mode != "readonly" {
+                if table_config.options != "readonly" {
                     let cable = format!("{}_conflict", table);
                     let mut statements =
                         get_table_ddl(tables_config, datatypes_config, &parser, &cable, &self.pool);
@@ -1313,7 +1313,7 @@ impl Valve {
         let sorted_table_list = self.get_sorted_table_list(false);
         for table in &sorted_table_list {
             let table_config = self.get_table_config(table)?;
-            if table_config.mode == "view" {
+            if table_config.options == "view" {
                 // If the path points to a .sql file, execute the statements that are contained in
                 // it against the database, trusting that the user has written the script correctly.
                 // Note that the SQL script, not Valve, is responsible for deciding whether the
@@ -1335,7 +1335,7 @@ impl Valve {
                     .into());
                 }
             } else if table_config.path.to_lowercase().ends_with(".tsv")
-                || table_config.mode == "internal"
+                || table_config.options == "internal"
             {
                 if self.table_has_changed(*table).await? {
                     self.drop_tables(&vec![table]).await?;
@@ -1409,9 +1409,9 @@ impl Valve {
         return Ok(rows.len() > 0);
     }
 
-    /// Given a table name, returns the mode of the table.
-    pub fn get_table_mode(&self, table: &str) -> Result<String> {
-        toolkit::get_table_mode(&self.config, table)
+    /// Given a table name, returns the options of the table.
+    pub fn get_table_options(&self, table: &str) -> Result<String> {
+        toolkit::get_table_options(&self.config, table)
     }
 
     /// Drop all configured tables, in reverse dependency order.
@@ -1428,7 +1428,7 @@ impl Valve {
         for table in &drop_list {
             let table_config = self.get_table_config(table)?;
             if table_config.path != "" {
-                if !vec!["view", "readonly", "internal"].contains(&table_config.mode.as_str()) {
+                if !vec!["view", "readonly", "internal"].contains(&table_config.options.as_str()) {
                     let sql = format!(r#"DROP VIEW IF EXISTS "{}_text_view""#, table);
                     self.execute_sql(&sql).await?;
                     let sql = format!(r#"DROP VIEW IF EXISTS "{}_view""#, table);
@@ -1437,7 +1437,7 @@ impl Valve {
                     self.execute_sql(&sql).await?;
                 }
                 let type_to_drop = {
-                    if table_config.mode == "view" {
+                    if table_config.options == "view" {
                         "VIEW"
                     } else {
                         "TABLE"
@@ -1477,11 +1477,11 @@ impl Valve {
         };
 
         for table in &truncate_list {
-            let table_mode = self.get_table_mode(table)?;
-            if table_mode != "view" {
+            let table_options = self.get_table_options(table)?;
+            if table_options != "view" {
                 let sql = truncate_sql(&table);
                 self.execute_sql(&sql).await?;
-                if !vec!["readonly", "internal"].contains(&table_mode.as_str()) {
+                if !vec!["readonly", "internal"].contains(&table_options.as_str()) {
                     let sql = truncate_sql(&format!("{}_conflict", table));
                     self.execute_sql(&sql).await?;
                 }
@@ -1689,10 +1689,10 @@ impl Valve {
         for table in table_list {
             let table_config = self.get_table_config(&table)?;
             // Views and internal tables are never loaded:
-            if vec!["view", "internal"].contains(&table_config.mode.as_str()) {
+            if vec!["view", "internal"].contains(&table_config.options.as_str()) {
                 continue;
             }
-            // For all other modes, how they are loaded depends on the path, such that an empty
+            // For all others, how they are loaded depends on the path, such that an empty
             // path implies that the table in question is not loaded by Valve at all.
             if table_config.path.to_lowercase().ends_with(".sql") {
                 // SQL files:
@@ -1750,9 +1750,9 @@ impl Valve {
         }
 
         for (table, path) in table_paths.iter() {
-            let mode = self.get_table_mode(table)?;
-            if vec!["view", "readonly"].contains(&mode.as_str()) {
-                log::warn!("Not saving table '{table}' because it has mode '{mode}'");
+            let options = self.get_table_options(table)?;
+            if vec!["view", "readonly"].contains(&options.as_str()) {
+                log::warn!("Not saving table '{table}' because it has options '{options}'");
                 continue;
             }
 
@@ -1802,8 +1802,8 @@ impl Valve {
             .into());
         }
 
-        let table_mode = self.get_table_mode(table)?;
-        if table_mode == "view" {
+        let table_options = self.get_table_options(table)?;
+        if table_options == "view" {
             return Err(ValveError::InputError(format!(
                 "Unable to save '{}': Saving views is not supported",
                 table
@@ -1887,11 +1887,11 @@ impl Valve {
     /// validate and insert the row to the table and return the row number of the inserted row
     /// and the row itself in the form of a [ValveRow].
     pub async fn insert_row(&self, table_name: &str, row: &JsonRow) -> Result<(u32, ValveRow)> {
-        let table_mode = &self.get_table_mode(table_name)?;
-        if vec!["internal", "view", "readonly"].contains(&table_mode.as_str()) {
+        let table_options = &self.get_table_options(table_name)?;
+        if vec!["internal", "view", "readonly"].contains(&table_options.as_str()) {
             return Err(ValveError::InputError(format!(
-                "Inserting to a table of mode '{}' is not allowed",
-                table_mode
+                "Inserting to a table with options '{}' is not allowed",
+                table_options
             ))
             .into());
         }
@@ -1947,11 +1947,11 @@ impl Valve {
         row_number: &u32,
         row: &JsonRow,
     ) -> Result<ValveRow> {
-        let table_mode = &self.get_table_mode(table_name)?;
-        if vec!["internal", "view", "readonly"].contains(&table_mode.as_str()) {
+        let table_options = &self.get_table_options(table_name)?;
+        if vec!["internal", "view", "readonly"].contains(&table_options.as_str()) {
             return Err(ValveError::InputError(format!(
-                "Updating a table of mode '{}' is not allowed",
-                table_mode
+                "Updating a table with options '{}' is not allowed",
+                table_options
             ))
             .into());
         }
@@ -2009,11 +2009,11 @@ impl Valve {
 
     /// Given a table name and a row number, delete that row from the table.
     pub async fn delete_row(&self, table_name: &str, row_number: &u32) -> Result<()> {
-        let table_mode = &self.get_table_mode(table_name)?;
-        if vec!["internal", "view", "readonly"].contains(&table_mode.as_str()) {
+        let table_options = &self.get_table_options(table_name)?;
+        if vec!["internal", "view", "readonly"].contains(&table_options.as_str()) {
             return Err(ValveError::InputError(format!(
-                "Deleting from a table of mode '{}' is not allowed",
-                table_mode
+                "Deleting from a table with options '{}' is not allowed",
+                table_options
             ))
             .into());
         }

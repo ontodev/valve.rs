@@ -18,7 +18,7 @@ pub fn generate_internal_table_config(table_name: &str) -> ValveTableConfig {
         "message" => ValveTableConfig {
             table: "message".to_string(),
             table_type: "message".to_string(),
-            mode: "internal".to_string(),
+            options: "internal".to_string(),
             description: "Validation messages for all of the tables and columns".to_string(),
             column_order: vec![
                 "table".to_string(),
@@ -110,7 +110,7 @@ pub fn generate_internal_table_config(table_name: &str) -> ValveTableConfig {
         "history" => ValveTableConfig {
             table: "history".to_string(),
             table_type: "history".to_string(),
-            mode: "internal".to_string(),
+            options: "internal".to_string(),
             description: "History of changes to the VALVE database".to_string(),
             column_order: vec![
                 "table".to_string(),
