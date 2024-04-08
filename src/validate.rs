@@ -186,7 +186,7 @@ pub async fn validate_under(
     let default_options = "".to_string();
     let table_options = table_options.get(0).unwrap_or(&default_options);
     let query_table = {
-        if vec!["internal", "readonly", "view"].contains(&table_options.as_str()) {
+        if vec!["internal", "readonly", "db_view"].contains(&table_options.as_str()) {
             table_name.to_string()
         } else {
             format!("{}_view", table_name)
@@ -373,7 +373,7 @@ pub async fn validate_tree_foreign_keys(
     let default_options = "".to_string();
     let table_options = table_options.get(0).unwrap_or(&default_options);
     let query_table = {
-        if vec!["internal", "readonly", "view"].contains(&table_options.as_str()) {
+        if vec!["internal", "readonly", "db_view"].contains(&table_options.as_str()) {
             table_name.to_string()
         } else {
             format!("{}_view", table_name)
@@ -1204,7 +1204,7 @@ pub async fn validate_cell_foreign_constraints(
                 Some(foptions) => foptions.to_string(),
                 None => "".to_string(),
             };
-            if !vec!["internal", "view", "readonly"].contains(&foptions.as_str()) {
+            if !vec!["internal", "db_view", "readonly"].contains(&foptions.as_str()) {
                 let (as_if_clause_for_conflict, ftable_alias) = match query_as_if {
                     Some(query_as_if) if *ftable == query_as_if.table => (
                         as_if_clause_for_conflict.to_string(),
@@ -1290,7 +1290,7 @@ pub async fn validate_cell_trees(
     let default_options = "".to_string();
     let table_options = table_options.get(0).unwrap_or(&default_options);
     let query_table = {
-        if vec!["internal", "view", "readonly"].contains(&table_options.as_str()) {
+        if vec!["internal", "db_view", "readonly"].contains(&table_options.as_str()) {
             table_name.to_string()
         } else {
             format!("{}_view", table_name)
@@ -1489,7 +1489,7 @@ pub async fn validate_cell_unique_constraints(
         let default_options = "".to_string();
         let table_options = table_options.get(0).unwrap_or(&default_options);
         let mut query_table = {
-            if vec!["internal", "readonly", "view"].contains(&table_options.as_str()) {
+            if vec!["internal", "readonly", "db_view"].contains(&table_options.as_str()) {
                 table_name.to_string()
             } else {
                 format!("{}_view", table_name)

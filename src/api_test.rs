@@ -584,7 +584,7 @@ async fn test_modes(valve: &Valve) -> Result<()> {
     match result {
         Err(e) => assert_eq!(
             format!("{:?}", e),
-            r#"InputError("Inserting to a table with options 'view' is not allowed")"#,
+            r#"InputError("Inserting to a table with options 'db_view' is not allowed")"#,
         ),
         _ => assert!(false, "Expected an error result but got an OK result"),
     };
@@ -602,7 +602,7 @@ async fn test_modes(valve: &Valve) -> Result<()> {
     match result {
         Err(e) => assert_eq!(
             format!("{:?}", e),
-            r#"InputError("Updating a table with options 'view' is not allowed")"#,
+            r#"InputError("Updating a table with options 'db_view' is not allowed")"#,
         ),
         _ => assert!(false, "Expected an error result but got an OK result"),
     };
@@ -620,7 +620,7 @@ async fn test_modes(valve: &Valve) -> Result<()> {
     match result {
         Err(e) => assert_eq!(
             format!("{:?}", e),
-            r#"InputError("Deleting from a table with options 'view' is not allowed")"#,
+            r#"InputError("Deleting from a table with options 'db_view' is not allowed")"#,
         ),
         _ => assert!(false, "Expected an error result but got an OK result"),
     };

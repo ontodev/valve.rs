@@ -710,7 +710,7 @@ impl Valve {
                 // TODO: We need to check all of the options, not just the first one:
                 let default_options = "".to_string();
                 let table_options = table_options.get(0).unwrap_or(&default_options);
-                !vec!["readonly", "view"].contains(&table_options.as_str())
+                !vec!["readonly", "db_view"].contains(&table_options.as_str())
             })
             .map(|i| i.as_str())
             .collect::<Vec<_>>();
@@ -1319,7 +1319,7 @@ impl Valve {
             let table_config = self.get_table_config(table)?;
             // TODO: We need to check all of the options, not just the first one:
             let options = table_config.options.get(0).unwrap_or(&default_options);
-            if options == "view" {
+            if options == "db_view" {
                 // If the path points to a .sql file, execute the statements that are contained in
                 // it against the database, trusting that the user has written the script correctly.
                 // Note that the SQL script, not Valve, is responsible for deciding whether the
@@ -1435,7 +1435,7 @@ impl Valve {
             if table_config.path != "" {
                 // TODO: We need to check all of the options, not just the first one:
                 let options = table_config.options.get(0).unwrap_or(&default_options);
-                if !vec!["view", "readonly", "internal"].contains(&options.as_str()) {
+                if !vec!["db_view", "readonly", "internal"].contains(&options.as_str()) {
                     let sql = format!(r#"DROP VIEW IF EXISTS "{}_text_view""#, table);
                     self.execute_sql(&sql).await?;
                     let sql = format!(r#"DROP VIEW IF EXISTS "{}_view""#, table);
@@ -1444,7 +1444,7 @@ impl Valve {
                     self.execute_sql(&sql).await?;
                 }
                 let type_to_drop = {
-                    if options == "view" {
+                    if options == "db_view" {
                         "VIEW"
                     } else {
                         "TABLE"
@@ -1488,7 +1488,7 @@ impl Valve {
             // TODO: We need to check all of the options, not just the first one:
             let default_options = "".to_string();
             let table_options = table_options.get(0).unwrap_or(&default_options);
-            if table_options != "view" {
+            if table_options != "db_view" {
                 let sql = truncate_sql(&table);
                 self.execute_sql(&sql).await?;
                 if !vec!["readonly", "internal"].contains(&table_options.as_str()) {
@@ -1703,7 +1703,7 @@ impl Valve {
             let options = table_config.options.get(0).unwrap_or(&default_options);
 
             // Views and internal tables are never loaded:
-            if vec!["view", "internal"].contains(&options.as_str()) {
+            if vec!["db_view", "internal"].contains(&options.as_str()) {
                 continue;
             }
             // For all others, how they are loaded depends on the path, such that an empty
@@ -1768,7 +1768,7 @@ impl Valve {
             // TODO: We need to check all of the options, not just the first one:
             let default_options = "".to_string();
             let options = options.get(0).unwrap_or(&default_options);
-            if vec!["view", "readonly"].contains(&options.as_str()) {
+            if vec!["db_view", "readonly"].contains(&options.as_str()) {
                 log::warn!("Not saving table '{table}' because it has options '{options}'");
                 continue;
             }
@@ -1823,7 +1823,7 @@ impl Valve {
         // TODO: We need to check all of the options, not just the first one:
         let default_options = "".to_string();
         let table_options = table_options.get(0).unwrap_or(&default_options);
-        if table_options == "view" {
+        if table_options == "db_view" {
             return Err(ValveError::InputError(format!(
                 "Unable to save '{}': Saving views is not supported",
                 table
@@ -1911,7 +1911,7 @@ impl Valve {
         // TODO: We need to check all of the options, not just the first one:
         let default_options = "".to_string();
         let table_options = table_options.get(0).unwrap_or(&default_options);
-        if vec!["internal", "view", "readonly"].contains(&table_options.as_str()) {
+        if vec!["internal", "db_view", "readonly"].contains(&table_options.as_str()) {
             return Err(ValveError::InputError(format!(
                 "Inserting to a table with options '{}' is not allowed",
                 table_options
@@ -1974,7 +1974,7 @@ impl Valve {
         // TODO: We need to check all of the options, not just the first one:
         let default_options = "".to_string();
         let table_options = table_options.get(0).unwrap_or(&default_options);
-        if vec!["internal", "view", "readonly"].contains(&table_options.as_str()) {
+        if vec!["internal", "db_view", "readonly"].contains(&table_options.as_str()) {
             return Err(ValveError::InputError(format!(
                 "Updating a table with options '{}' is not allowed",
                 table_options
@@ -2039,7 +2039,7 @@ impl Valve {
         // TODO: We need to check all of the options, not just the first one:
         let default_options = "".to_string();
         let table_options = table_options.get(0).unwrap_or(&default_options);
-        if vec!["internal", "view", "readonly"].contains(&table_options.as_str()) {
+        if vec!["internal", "db_view", "readonly"].contains(&table_options.as_str()) {
             return Err(ValveError::InputError(format!(
                 "Deleting from a table with options '{}' is not allowed",
                 table_options

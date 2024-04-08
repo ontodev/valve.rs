@@ -335,6 +335,7 @@ pub fn read_config_files(
         }
         let row_desc = row.get("description").and_then(|t| t.as_str()).unwrap();
 
+        // TODO: Rewrite this comment:
         // Here is a summary of the allowed table configurations for the various table modes:
         // - A table of mode 'view' is allowed to have an empty path. If the path is non-empty then
         //   it must either end (case insensitively) in '.sql' or be an executable file. It must not
@@ -345,9 +346,9 @@ pub fn read_config_files(
         // - All other tables must have a path and it must end (case insensitively) in '.tsv'.
         if row_options
             .iter()
-            .any(|s| vec!["view", "readonly"].contains(&s))
+            .any(|s| vec!["db_view", "readonly"].contains(&s))
         {
-            if row_options.iter().any(|&s| s == "view") && row_path.ends_with(".tsv") {
+            if row_options.iter().any(|&s| s == "db_view") && row_path.ends_with(".tsv") {
                 return Err(ValveError::ConfigError(format!(
                     "Invalid path '{}' for view '{}'. TSV files are not supported for views.",
                     row_path, row_table,
@@ -3415,7 +3416,7 @@ pub fn get_table_ddl(
                 // TODO: We need to check all of the options, not just the first one:
                 let default_options = "".to_string();
                 let options = table_config.options.get(0).unwrap_or(&default_options);
-                options != "view"
+                options != "db_view"
             })
             .collect::<Vec<_>>();
         if !(r >= c && applicable_foreigns.is_empty()) {
@@ -3436,7 +3437,7 @@ pub fn get_table_ddl(
             let options = table_config.options.get(0).unwrap_or(&default_options);
             options
         };
-        if ftable_options != "view" {
+        if ftable_options != "db_view" {
             create_lines.push(format!(
                 r#"  FOREIGN KEY ("{}") REFERENCES "{}"("{}"){}"#,
                 fkey.column,
