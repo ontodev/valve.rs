@@ -302,7 +302,6 @@ pub fn read_config_files(
         }
     };
 
-    let default_options = "".to_string();
     for row in rows {
         if let Err(e) = check_table_requirements(
             &vec!["table", "path", "type", "description"],
@@ -325,13 +324,8 @@ pub fn read_config_files(
         let row_type = row_type.as_str();
         let row_options = row.get("options").and_then(|t| t.as_str()).unwrap();
         let row_options = row_options.to_lowercase();
-        // TODO: We need to save all of the options, not just the first one:
         let row_options = row_options.as_str().split(",").collect::<Vec<_>>();
-        let row_options = row_options
-            .get(0)
-            .unwrap_or(&default_options.as_str())
-            .to_string();
-        if row_options == "internal" {
+        if row_options.contains(&"internal") {
             return Err(ValveError::ConfigError(format!(
                 "The option 'internal' is reserved for internal use and is not allowed to be \
                  specified as a table option in '{}'",
@@ -349,8 +343,11 @@ pub fn read_config_files(
         //   can be a file ending (case insensitively) with '.tsv', a file ending (case
         //   insensitively) with '.sql', or an executable file.
         // - All other tables must have a path and it must end (case insensitively) in '.tsv'.
-        if vec!["view", "readonly"].contains(&row_options.as_str()) {
-            if row_options == "view" && row_path.ends_with(".tsv") {
+        if row_options
+            .iter()
+            .any(|s| vec!["view", "readonly"].contains(&s))
+        {
+            if row_options.iter().any(|&s| s == "view") && row_path.ends_with(".tsv") {
                 return Err(ValveError::ConfigError(format!(
                     "Invalid path '{}' for view '{}'. TSV files are not supported for views.",
                     row_path, row_table,
@@ -367,11 +364,13 @@ pub fn read_config_files(
                     .into());
                 }
             }
-        } else if row_options != "internal" && !row_path.to_lowercase().ends_with(".tsv") {
+        } else if row_options.iter().any(|&s| s != "internal")
+            && !row_path.to_lowercase().ends_with(".tsv")
+        {
             return Err(ValveError::ConfigError(format!(
-                "Illegal path for table '{}'. Tables with option '{}' require a path that ends in \
-                 '.tsv'",
-                row_table, row_options
+                "Illegal path for table '{}'. Tables with option 'internal' require a path that \
+                 ends in '.tsv'",
+                row_table
             ))
             .into());
         }
@@ -432,7 +431,10 @@ pub fn read_config_files(
             ValveTableConfig {
                 table: row_table.to_string(),
                 table_type: row_type.to_string(),
-                options: vec![row_options.to_string()],
+                options: row_options
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>(),
                 description: row_desc.to_string(),
                 path: row_path.to_string(),
                 ..Default::default()
