@@ -17,6 +17,6 @@ table11	test/src/ontology/table11.tsv	The eleventh data table
 view1	test/output/view1.sql			db_view, create, drop
 view2	test/output/view2.sh			db_view, create, drop
 view3				db_view, create, drop
-readonly1	test/output/readonly1.sh			readonly
-readonly2	test/src/ontology/readonly2.tsv			readonly
-readonly3	test/output/readonly3.sql			readonly
+readonly1	test/output/readonly1.sh			db_table, create, drop, truncate, load
+readonly2	test/src/ontology/readonly2.tsv			db_table, create, drop, truncate, load
+readonly3	test/output/readonly3.sql			db_table, create, drop, truncate, load, validate_on_load

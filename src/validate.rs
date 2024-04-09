@@ -3,8 +3,8 @@
 use crate::{
     toolkit::{
         cast_sql_param_from_text, get_column_value, get_sql_type_from_global_config,
-        get_table_options, is_sql_type_error, local_sql_syntax, ColumnRule, CompiledCondition,
-        QueryAsIf, QueryAsIfKind,
+        get_table_options, is_internal, is_readonly, is_sql_type_error, is_view, local_sql_syntax,
+        ColumnRule, CompiledCondition, QueryAsIf, QueryAsIfKind,
     },
     valve::{
         ValveCell, ValveCellMessage, ValveConfig, ValveDatatypeConfig, ValveRow, ValveRuleConfig,
@@ -182,11 +182,8 @@ pub async fn validate_under(
         .expect(&format!("Undefined table '{}'", table_name));
 
     let table_options = get_table_options(config, table_name)?;
-    // TODO: We need to check all of the options, not just the first one:
-    let default_options = "".to_string();
-    let table_options = table_options.get(0).unwrap_or(&default_options);
     let query_table = {
-        if vec!["internal", "readonly", "db_view"].contains(&table_options.as_str()) {
+        if is_readonly(&table_options) || is_internal(&table_options) || is_view(&table_options) {
             table_name.to_string()
         } else {
             format!("{}_view", table_name)
@@ -369,11 +366,8 @@ pub async fn validate_tree_foreign_keys(
         .expect(&format!("Undefined table '{}'", table_name));
 
     let table_options = get_table_options(config, table_name)?;
-    // TODO: We need to check all of the options, not just the first one:
-    let default_options = "".to_string();
-    let table_options = table_options.get(0).unwrap_or(&default_options);
     let query_table = {
-        if vec!["internal", "readonly", "db_view"].contains(&table_options.as_str()) {
+        if is_readonly(&table_options) || is_internal(&table_options) || is_view(&table_options) {
             table_name.to_string()
         } else {
             format!("{}_view", table_name)
@@ -1199,12 +1193,8 @@ pub async fn validate_cell_foreign_constraints(
                     ftable
                 ))
                 .options;
-            // TODO: We need to save all of the options, not just the first one:
-            let foptions = match foptions.get(0) {
-                Some(foptions) => foptions.to_string(),
-                None => "".to_string(),
-            };
-            if !vec!["internal", "db_view", "readonly"].contains(&foptions.as_str()) {
+
+            if !(is_view(&foptions) || is_readonly(&foptions) || is_internal(&foptions)) {
                 let (as_if_clause_for_conflict, ftable_alias) = match query_as_if {
                     Some(query_as_if) if *ftable == query_as_if.table => (
                         as_if_clause_for_conflict.to_string(),
@@ -1286,11 +1276,8 @@ pub async fn validate_cell_trees(
     let parent_sql_param = cast_sql_param_from_text(&parent_sql_type);
     let parent_val = cell.strvalue();
     let table_options = get_table_options(config, table_name)?;
-    // TODO: We need to check all of the options, not just the first one:
-    let default_options = "".to_string();
-    let table_options = table_options.get(0).unwrap_or(&default_options);
     let query_table = {
-        if vec!["internal", "db_view", "readonly"].contains(&table_options.as_str()) {
+        if is_readonly(&table_options) || is_internal(&table_options) || is_view(&table_options) {
             table_name.to_string()
         } else {
             format!("{}_view", table_name)
@@ -1485,11 +1472,9 @@ pub async fn validate_cell_unique_constraints(
 
     if is_primary || is_unique || is_tree_child {
         let table_options = get_table_options(config, table_name)?;
-        // TODO: We need to check all of the options, not just the first one:
-        let default_options = "".to_string();
-        let table_options = table_options.get(0).unwrap_or(&default_options);
         let mut query_table = {
-            if vec!["internal", "readonly", "db_view"].contains(&table_options.as_str()) {
+            if is_readonly(&table_options) || is_internal(&table_options) || is_view(&table_options)
+            {
                 table_name.to_string()
             } else {
                 format!("{}_view", table_name)

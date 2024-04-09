@@ -11,9 +11,9 @@ use crate::{
         get_parsed_structure_conditions, get_pool_from_connection_string, get_record_to_redo,
         get_record_to_undo, get_row_from_db, get_sql_for_standard_view, get_sql_for_text_view,
         get_sql_type, get_sql_type_from_global_config, get_table_ddl, insert_chunks,
-        insert_new_row_tx, local_sql_syntax, read_config_files, record_row_change,
-        switch_undone_state, update_row_tx, verify_table_deps_and_sort, ColumnRule,
-        CompiledCondition, ParsedStructure,
+        insert_new_row_tx, is_internal, is_readonly, is_view, local_sql_syntax, read_config_files,
+        record_row_change, switch_undone_state, update_row_tx, verify_table_deps_and_sort,
+        ColumnRule, CompiledCondition, ParsedStructure,
     },
     validate::{validate_row_tx, validate_tree_foreign_keys, validate_under, with_tree_sql},
     valve_grammar::StartParser,
@@ -707,10 +707,7 @@ impl Valve {
                 let table_options = self
                     .get_table_options(t)
                     .expect(&format!("Error getting options for table '{}'", t));
-                // TODO: We need to check all of the options, not just the first one:
-                let default_options = "".to_string();
-                let table_options = table_options.get(0).unwrap_or(&default_options);
-                !vec!["readonly", "db_view"].contains(&table_options.as_str())
+                !is_view(&table_options) && !is_readonly(&table_options)
             })
             .map(|i| i.as_str())
             .collect::<Vec<_>>();
@@ -1260,9 +1257,7 @@ impl Valve {
                 let mut statements =
                     get_table_ddl(tables_config, datatypes_config, &parser, &table, &self.pool);
                 table_statements.append(&mut statements);
-                let default_options = "".to_string();
-                // TODO: We need to check all of the options, not just the first one:
-                if table_config.options.get(0).unwrap_or(&default_options) != "readonly" {
+                if !is_readonly(&table_config.options) {
                     let cable = format!("{}_conflict", table);
                     let mut statements =
                         get_table_ddl(tables_config, datatypes_config, &parser, &cable, &self.pool);
@@ -1314,12 +1309,9 @@ impl Valve {
     pub async fn create_all_tables(&self) -> Result<&Self> {
         let setup_statements = self.get_setup_statements().await?;
         let sorted_table_list = self.get_sorted_table_list(false);
-        let default_options = "".to_string();
         for table in &sorted_table_list {
             let table_config = self.get_table_config(table)?;
-            // TODO: We need to check all of the options, not just the first one:
-            let options = table_config.options.get(0).unwrap_or(&default_options);
-            if options == "db_view" {
+            if is_view(&table_config.options) {
                 // If the path points to a .sql file, execute the statements that are contained in
                 // it against the database, trusting that the user has written the script correctly.
                 // Note that the SQL script, not Valve, is responsible for deciding whether the
@@ -1340,7 +1332,9 @@ impl Valve {
                     ))
                     .into());
                 }
-            } else if table_config.path.to_lowercase().ends_with(".tsv") || options == "internal" {
+            } else if table_config.path.to_lowercase().ends_with(".tsv")
+                || is_internal(&table_config.options)
+            {
                 if self.table_has_changed(*table).await? {
                     self.drop_tables(&vec![table]).await?;
                     let table_statements =
@@ -1429,13 +1423,13 @@ impl Valve {
     /// that must be dropped implicitly because of a dependency relationship.
     pub async fn drop_tables(&self, tables: &Vec<&str>) -> Result<&Self> {
         let drop_list = self.add_dependencies(tables, true)?;
-        let default_options = "".to_string();
         for table in &drop_list {
             let table_config = self.get_table_config(table)?;
             if table_config.path != "" {
-                // TODO: We need to check all of the options, not just the first one:
-                let options = table_config.options.get(0).unwrap_or(&default_options);
-                if !vec!["db_view", "readonly", "internal"].contains(&options.as_str()) {
+                if !(is_view(&table_config.options)
+                    || is_readonly(&table_config.options)
+                    || is_internal(&table_config.options))
+                {
                     let sql = format!(r#"DROP VIEW IF EXISTS "{}_text_view""#, table);
                     self.execute_sql(&sql).await?;
                     let sql = format!(r#"DROP VIEW IF EXISTS "{}_view""#, table);
@@ -1443,12 +1437,9 @@ impl Valve {
                     let sql = format!(r#"DROP TABLE IF EXISTS "{}_conflict""#, table);
                     self.execute_sql(&sql).await?;
                 }
-                let type_to_drop = {
-                    if options == "db_view" {
-                        "VIEW"
-                    } else {
-                        "TABLE"
-                    }
+                let type_to_drop = match is_view(&table_config.options) {
+                    true => "VIEW",
+                    false => "TABLE",
                 };
                 let sql = format!(r#"DROP {} IF EXISTS "{}""#, type_to_drop, table);
                 self.execute_sql(&sql).await?;
@@ -1485,13 +1476,10 @@ impl Valve {
 
         for table in &truncate_list {
             let table_options = self.get_table_options(table)?;
-            // TODO: We need to check all of the options, not just the first one:
-            let default_options = "".to_string();
-            let table_options = table_options.get(0).unwrap_or(&default_options);
-            if table_options != "db_view" {
+            if !is_view(&table_options) {
                 let sql = truncate_sql(&table);
                 self.execute_sql(&sql).await?;
-                if !vec!["readonly", "internal"].contains(&table_options.as_str()) {
+                if !(is_readonly(&table_options) || is_internal(&table_options)) {
                     let sql = truncate_sql(&format!("{}_conflict", table));
                     self.execute_sql(&sql).await?;
                 }
@@ -1696,14 +1684,11 @@ impl Valve {
             Ok(())
         };
 
-        let default_options = "".to_string();
         for table in table_list {
             let table_config = self.get_table_config(&table)?;
-            // TODO: We need to check all of the options, not just the first one:
-            let options = table_config.options.get(0).unwrap_or(&default_options);
 
             // Views and internal tables are never loaded:
-            if vec!["db_view", "internal"].contains(&options.as_str()) {
+            if is_view(&table_config.options) || is_internal(&table_config.options) {
                 continue;
             }
             // For all others, how they are loaded depends on the path, such that an empty
@@ -1765,11 +1750,12 @@ impl Valve {
 
         for (table, path) in table_paths.iter() {
             let options = self.get_table_options(table)?;
-            // TODO: We need to check all of the options, not just the first one:
-            let default_options = "".to_string();
-            let options = options.get(0).unwrap_or(&default_options);
-            if vec!["db_view", "readonly"].contains(&options.as_str()) {
-                log::warn!("Not saving table '{table}' because it has options '{options}'");
+            if is_view(&options) || is_readonly(&options) {
+                log::warn!(
+                    "Not saving table '{}' because it has options '{:?}'",
+                    table,
+                    options
+                );
                 continue;
             }
 
@@ -1820,12 +1806,9 @@ impl Valve {
         }
 
         let table_options = self.get_table_options(table)?;
-        // TODO: We need to check all of the options, not just the first one:
-        let default_options = "".to_string();
-        let table_options = table_options.get(0).unwrap_or(&default_options);
-        if table_options == "db_view" {
+        if is_view(&table_options) || is_readonly(&table_options) {
             return Err(ValveError::InputError(format!(
-                "Unable to save '{}': Saving views is not supported",
+                "Unable to save '{}': Saving views and readonly tables is not supported",
                 table
             ))
             .into());
@@ -1908,12 +1891,9 @@ impl Valve {
     /// and the row itself in the form of a [ValveRow].
     pub async fn insert_row(&self, table_name: &str, row: &JsonRow) -> Result<(u32, ValveRow)> {
         let table_options = &self.get_table_options(table_name)?;
-        // TODO: We need to check all of the options, not just the first one:
-        let default_options = "".to_string();
-        let table_options = table_options.get(0).unwrap_or(&default_options);
-        if vec!["internal", "db_view", "readonly"].contains(&table_options.as_str()) {
+        if is_view(&table_options) || is_readonly(&table_options) || is_internal(&table_options) {
             return Err(ValveError::InputError(format!(
-                "Inserting to a table with options '{}' is not allowed",
+                "Inserting to a table with options '{:?}' is not allowed",
                 table_options
             ))
             .into());
@@ -1971,12 +1951,9 @@ impl Valve {
         row: &JsonRow,
     ) -> Result<ValveRow> {
         let table_options = &self.get_table_options(table_name)?;
-        // TODO: We need to check all of the options, not just the first one:
-        let default_options = "".to_string();
-        let table_options = table_options.get(0).unwrap_or(&default_options);
-        if vec!["internal", "db_view", "readonly"].contains(&table_options.as_str()) {
+        if is_view(&table_options) || is_readonly(&table_options) || is_internal(&table_options) {
             return Err(ValveError::InputError(format!(
-                "Updating a table with options '{}' is not allowed",
+                "Updating a table with options '{:?}' is not allowed",
                 table_options
             ))
             .into());
@@ -2036,12 +2013,9 @@ impl Valve {
     /// Given a table name and a row number, delete that row from the table.
     pub async fn delete_row(&self, table_name: &str, row_number: &u32) -> Result<()> {
         let table_options = &self.get_table_options(table_name)?;
-        // TODO: We need to check all of the options, not just the first one:
-        let default_options = "".to_string();
-        let table_options = table_options.get(0).unwrap_or(&default_options);
-        if vec!["internal", "db_view", "readonly"].contains(&table_options.as_str()) {
+        if is_view(&table_options) || is_readonly(&table_options) || is_internal(&table_options) {
             return Err(ValveError::InputError(format!(
-                "Deleting from a table with options '{}' is not allowed",
+                "Deleting from a table with options '{:?}' is not allowed",
                 table_options
             ))
             .into());

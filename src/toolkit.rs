@@ -217,6 +217,25 @@ pub fn get_label_for_column(
     }
 }
 
+/// TODO: Add docstring
+pub fn is_readonly(options: &Vec<String>) -> bool {
+    if options.is_empty() {
+        false
+    } else {
+        options.iter().all(|o| o != "edit")
+    }
+}
+
+/// TODO: Add docstring
+pub fn is_view(options: &Vec<String>) -> bool {
+    options.iter().any(|o| o == "db_view")
+}
+
+/// TODO: Add docstring
+pub fn is_internal(options: &Vec<String>) -> bool {
+    options.iter().any(|s| s == "internal")
+}
+
 /// Given the path to a table table (either a table.tsv file or a database containing a
 /// table named "table"), load and check the 'table', 'column', and 'datatype' tables, and return
 /// the following items:
@@ -333,6 +352,11 @@ pub fn read_config_files(
             ))
             .into());
         }
+        let row_options = row_options
+            .iter()
+            .map(|s| s.to_string())
+            .filter(|s| s != "")
+            .collect::<Vec<_>>();
         let row_desc = row.get("description").and_then(|t| t.as_str()).unwrap();
 
         // Here is a summary of the allowed table configurations for the various table modes:
@@ -344,11 +368,8 @@ pub fn read_config_files(
         //   (case insensitively) with '.sql', or an executable file.
         // - All other tables (other than internal tables) must have a path and it must end
         //   (case insensitively) in '.tsv'.
-        let is_view = row_options.iter().any(|&o| o == "db_view");
-        let is_readonly = row_options.iter().all(|&o| o != "edit");
-        let is_internal = row_options.iter().any(|&s| s == "internal");
-        if is_view || is_readonly {
-            if is_view && row_path.ends_with(".tsv") {
+        if is_view(&row_options) || is_readonly(&row_options) {
+            if is_view(&row_options) && row_path.ends_with(".tsv") {
                 return Err(ValveError::ConfigError(format!(
                     "Invalid path '{}' for view '{}'. TSV files are not supported for views.",
                     row_path, row_table,
@@ -365,7 +386,7 @@ pub fn read_config_files(
                     .into());
                 }
             }
-        } else if !is_internal && !row_path.to_lowercase().ends_with(".tsv") {
+        } else if !is_internal(&row_options) && !row_path.to_lowercase().ends_with(".tsv") {
             return Err(ValveError::ConfigError(format!(
                 "Illegal path for table '{}'. Editable tables require a path that \
                  ends in '.tsv'",
@@ -430,10 +451,7 @@ pub fn read_config_files(
             ValveTableConfig {
                 table: row_table.to_string(),
                 table_type: row_type.to_string(),
-                options: row_options
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect::<Vec<_>>(),
+                options: row_options,
                 description: row_desc.to_string(),
                 path: row_path.to_string(),
                 ..Default::default()
@@ -795,7 +813,7 @@ pub fn read_config_files(
         }
 
         // Constraints on internal tables do not need to be configured explicitly:
-        if this_table.options.iter().any(|s| s == "internal") {
+        if is_internal(&this_table.options) {
             continue;
         }
 
@@ -3408,7 +3426,7 @@ pub fn get_table_ddl(
                 let table_config = &tables_config
                     .get(&fkey.ftable)
                     .expect(&format!("Undefined table '{}'", fkey.ftable));
-                table_config.options.iter().all(|o| o != "db_view")
+                !is_view(&table_config.options)
             })
             .collect::<Vec<_>>();
         if !(r >= c && applicable_foreigns.is_empty()) {
@@ -3426,7 +3444,7 @@ pub fn get_table_ddl(
                 .expect(&format!("Undefined table '{}'", fkey.ftable));
             table_config.options.to_vec()
         };
-        if ftable_options.iter().all(|o| o != "db_view") {
+        if !is_view(&ftable_options) {
             create_lines.push(format!(
                 r#"  FOREIGN KEY ("{}") REFERENCES "{}"("{}"){}"#,
                 fkey.column,
