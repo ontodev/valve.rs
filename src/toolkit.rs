@@ -3401,17 +3401,14 @@ pub fn get_table_ddl(
         }
 
         // If there are foreign constraints add a column to the end of the statement which we will
-        // finish after this for loop is done:
+        // finish after this for loop is done (but don't do this for views):
         let applicable_foreigns = foreigns
             .iter()
             .filter(|fkey| {
                 let table_config = &tables_config
                     .get(&fkey.ftable)
                     .expect(&format!("Undefined table '{}'", fkey.ftable));
-                // TODO: We need to check all of the options, not just the first one:
-                let default_options = "".to_string();
-                let options = table_config.options.get(0).unwrap_or(&default_options);
-                options != "db_view"
+                table_config.options.iter().all(|o| o != "db_view")
             })
             .collect::<Vec<_>>();
         if !(r >= c && applicable_foreigns.is_empty()) {
@@ -3422,17 +3419,14 @@ pub fn get_table_ddl(
 
     // Add the SQL to indicate any foreign constraints:
     let num_fkeys = foreigns.len();
-    let default_options = "".to_string();
     for (i, fkey) in foreigns.iter().enumerate() {
         let ftable_options = {
             let table_config = &tables_config
                 .get(&fkey.ftable)
                 .expect(&format!("Undefined table '{}'", fkey.ftable));
-            // TODO: We need to check all of the options, not just the first one:
-            let options = table_config.options.get(0).unwrap_or(&default_options);
-            options
+            table_config.options.to_vec()
         };
-        if ftable_options != "db_view" {
+        if ftable_options.iter().all(|o| o != "db_view") {
             create_lines.push(format!(
                 r#"  FOREIGN KEY ("{}") REFERENCES "{}"("{}"){}"#,
                 fkey.column,
