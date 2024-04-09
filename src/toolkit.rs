@@ -24,6 +24,7 @@ use indexmap::IndexMap;
 use indoc::indoc;
 use is_executable::IsExecutable;
 use itertools::{IntoChunks, Itertools};
+use lazy_static::lazy_static;
 use petgraph::{
     algo::{all_simple_paths, toposort},
     graphmap::DiGraphMap,
@@ -43,6 +44,25 @@ use std::{
     str::FromStr,
     sync::Arc,
 };
+
+lazy_static! {
+    static ref ALLOWED_OPTIONS: HashSet<&'static str> = HashSet::from([
+        "db_table",
+        "db_view",
+        "create",
+        "drop",
+        "truncate",
+        "load",
+        "conflict",
+        "validate_on_load",
+        "edit",
+        "save",
+        "no-conflict",
+        "no-validate_on_load",
+        "no-edit",
+        "no-save",
+    ]);
+}
 
 /// Alias for [Map](serde_json::map)<[String], [Value](serde_json::value)>.
 pub type SerdeMap = serde_json::Map<String, SerdeValue>;
@@ -236,6 +256,173 @@ pub fn is_internal(options: &Vec<String>) -> bool {
     options.iter().any(|s| s == "internal")
 }
 
+/// TODO: Add a docstring here.
+pub fn normalize_options(input_options: &Vec<&str>) -> Result<Vec<String>> {
+    if input_options.contains(&"internal") {
+        return Err(ValveError::ConfigError(format!(
+            "The option 'internal' is reserved for internal use"
+        ))
+        .into());
+    }
+
+    // Collect all input options into a set, resolving any logical conflicts in favour of the last
+    // read input option if necessary.
+    let mut explicit_options = HashSet::new();
+    for input_option in input_options {
+        let input_option = input_option.trim().to_string();
+        if input_option == "" {
+            continue;
+        }
+        if !ALLOWED_OPTIONS.contains(&input_option.as_str()) {
+            log::warn!(
+                "Unrecognized table option: '{}' will be ignored",
+                input_option
+            );
+            continue;
+        }
+        if explicit_options.contains(&input_option) {
+            log::warn!("Redundant table option: '{}' will be ignored", input_option);
+            continue;
+        }
+
+        match input_option.as_str() {
+            "db_table" => {
+                if explicit_options.contains("db_view") {
+                    log::warn!("Option 'db_table' overrides 'db_view'");
+                    explicit_options.remove("db_view");
+                }
+            }
+            "db_view" => {
+                for conflicting_option in [
+                    "db_table",
+                    "truncate",
+                    "load",
+                    "conflict",
+                    "save",
+                    "edit",
+                    "validate_on_load",
+                ] {
+                    if explicit_options.contains(conflicting_option) {
+                        log::warn!("Option 'db_view' overrides '{}'", conflicting_option);
+                        explicit_options.remove(conflicting_option);
+                    }
+                }
+            }
+            "truncate" => {
+                if explicit_options.contains("db_view") {
+                    log::warn!("Option 'truncate' overrides 'db_view'");
+                    explicit_options.remove("db_view");
+                }
+            }
+            "load" => {
+                if explicit_options.contains("db_view") {
+                    log::warn!("Option 'load' overrides 'db_view'");
+                    explicit_options.remove("db_view");
+                }
+            }
+            "conflict" => {
+                for conflicting_option in ["db_view", "no-conflict"] {
+                    if explicit_options.contains(conflicting_option) {
+                        log::warn!("Option 'conflict' overrides '{}'", conflicting_option);
+                        explicit_options.remove(conflicting_option);
+                    }
+                }
+            }
+            "no-conflict" => {
+                if explicit_options.contains("conflict") {
+                    log::warn!("Option 'no-conflict' overrides 'conflict'");
+                    explicit_options.remove("conflict");
+                }
+            }
+            "save" => {
+                for conflicting_option in ["db_view", "no-save"] {
+                    if explicit_options.contains(conflicting_option) {
+                        log::warn!("Option 'save' overrides '{}'", conflicting_option);
+                        explicit_options.remove(conflicting_option);
+                    }
+                }
+            }
+            "no-save" => {
+                if explicit_options.contains("save") {
+                    log::warn!("Option 'no-save' overrides 'save'");
+                    explicit_options.remove("save");
+                }
+            }
+            "edit" => {
+                for conflicting_option in ["db_view", "no-edit"] {
+                    if explicit_options.contains(conflicting_option) {
+                        log::warn!("Option 'edit' overrides '{}'", conflicting_option);
+                        explicit_options.remove(conflicting_option);
+                    }
+                }
+            }
+            "no-edit" => {
+                if explicit_options.contains("edit") {
+                    log::warn!("Option 'no-edit' overrides 'edit'");
+                    explicit_options.remove("edit");
+                }
+            }
+            "validate_on_load" => {
+                for conflicting_option in ["db_view", "no-validate_on_load"] {
+                    if explicit_options.contains(conflicting_option) {
+                        log::warn!(
+                            "Option 'validate_on_load' overrides '{}'",
+                            conflicting_option
+                        );
+                        explicit_options.remove(conflicting_option);
+                    }
+                }
+            }
+            "no-validate_on_load" => {
+                if explicit_options.contains("validate_on_load") {
+                    log::warn!("Option 'no-validate_on_load' overrides 'validate_on_load'");
+                    explicit_options.remove("validate_on_load");
+                }
+            }
+            _ => (),
+        };
+
+        explicit_options.insert(input_option);
+    }
+
+    // If no options were specified, the user wants the default, which is a db_table with all
+    // "extra" options enabled:
+    if input_options.is_empty() || *input_options == vec![""] {
+        explicit_options.insert("save".to_string());
+        explicit_options.insert("edit".to_string());
+        explicit_options.insert("validate_on_load".to_string());
+        explicit_options.insert("conflict".to_string());
+    }
+
+    // Construct the base options for this view or table
+    let mut base_options = HashSet::new();
+    if explicit_options.contains("db_view") {
+        base_options.insert("db_view".to_string());
+        base_options.insert("create".to_string());
+        base_options.insert("drop".to_string());
+    } else {
+        base_options.insert("db_table".to_string());
+        base_options.insert("create".to_string());
+        base_options.insert("drop".to_string());
+        base_options.insert("truncate".to_string());
+        base_options.insert("load".to_string());
+    }
+
+    // Construct the union of the base and explicit sets of options:
+    let normalized_options: HashSet<_> = base_options.union(&explicit_options).collect();
+
+    println!("Explicit options: {:?}", explicit_options);
+    println!("Normalized options: {:?}", normalized_options);
+
+    // Convert the hashset into a vector, remove any negative options in the process. These were
+    // used to construct the set of explicit options and are no longer necessary.
+    Ok(normalized_options
+        .iter()
+        .map(|s| s.to_string())
+        .filter(|o| !o.starts_with("no-"))
+        .collect::<Vec<_>>())
+}
+
 /// Given the path to a table table (either a table.tsv file or a database containing a
 /// table named "table"), load and check the 'table', 'column', and 'datatype' tables, and return
 /// the following items:
@@ -303,24 +490,6 @@ pub fn read_config_files(
             }
         }
         Ok(())
-    }
-
-    // TODO: Add a comment about this function
-    fn normalize_options(options: &Vec<&str>) -> Result<Vec<String>> {
-        if options.contains(&"internal") {
-            return Err(ValveError::ConfigError(format!(
-                "The option 'internal' is reserved for internal use"
-            ))
-            .into());
-        }
-
-        // TODO: Implement the rest of this function.
-
-        Ok(options
-            .iter()
-            .map(|s| s.to_string())
-            .filter(|s| s != "")
-            .collect::<Vec<_>>())
     }
 
     // 1. Load the table config for the 'table' table from the given path, and determine the

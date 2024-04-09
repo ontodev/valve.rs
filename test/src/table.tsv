@@ -14,9 +14,9 @@ table8	test/src/ontology/table8.tsv	The eightth data table
 table9	test/src/ontology/table9.tsv	The ninth data table		
 table10	test/src/ontology/table10.tsv	The tenth data table		
 table11	test/src/ontology/table11.tsv	The eleventh data table		
-view1	test/output/view1.sql			db_view, create, drop
-view2	test/output/view2.sh			db_view, create, drop
-view3				db_view, create, drop
-readonly1	test/output/readonly1.sh			db_table, create, drop, truncate, load
-readonly2	test/src/ontology/readonly2.tsv			db_table, create, drop, truncate, load
-readonly3	test/output/readonly3.sql			db_table, create, drop, truncate, load, validate_on_load
+view1	test/output/view1.sql			db_view
+view2	test/output/view2.sh			db_view
+view3				db_view
+readonly1	test/output/readonly1.sh			no-edit, no-save, no-conflict
+readonly2	test/src/ontology/readonly2.tsv			no-edit, no-save, no-conflict
+readonly3	test/output/readonly3.sql			no-edit, no-save, no-conflict, no-validate_on_load
