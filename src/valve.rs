@@ -695,6 +695,24 @@ impl Valve {
         }
     }
 
+    /// TODO: Add docstring
+    pub fn is_view(&self, table_name: &str) -> Result<bool> {
+        let table_config = self.get_table_config(&table_name)?;
+        Ok(is_view(&table_config.options))
+    }
+
+    /// TODO: Add docstring
+    pub fn is_readonly(&self, table_name: &str) -> Result<bool> {
+        let table_config = self.get_table_config(&table_name)?;
+        Ok(is_readonly(&table_config.options))
+    }
+
+    /// TODO: Add docstring
+    pub fn is_internal(&self, table_name: &str) -> Result<bool> {
+        let table_config = self.get_table_config(&table_name)?;
+        Ok(is_internal(&table_config.options))
+    }
+
     /// Return the list of configured editable tables in sorted order, or reverse sorted order if
     /// the reverse flag is set. Note that 'editable' refers to the rows in a table. Depending on
     /// the table's options, Valve may be allowed to drop and/or create and/or save and/or truncate
@@ -1752,9 +1770,8 @@ impl Valve {
             let options = self.get_table_options(table)?;
             if is_view(&options) || is_readonly(&options) {
                 log::warn!(
-                    "Not saving table '{}' because it has options '{:?}'",
+                    "Not saving table '{}'. Saving views and readonly tables is not supported",
                     table,
-                    options
                 );
                 continue;
             }
@@ -1893,8 +1910,8 @@ impl Valve {
         let table_options = &self.get_table_options(table_name)?;
         if is_view(&table_options) || is_readonly(&table_options) || is_internal(&table_options) {
             return Err(ValveError::InputError(format!(
-                "Inserting to a table with options '{:?}' is not allowed",
-                table_options
+                "Inserting to table '{}' is not allowed",
+                table_name
             ))
             .into());
         }
@@ -1953,8 +1970,8 @@ impl Valve {
         let table_options = &self.get_table_options(table_name)?;
         if is_view(&table_options) || is_readonly(&table_options) || is_internal(&table_options) {
             return Err(ValveError::InputError(format!(
-                "Updating a table with options '{:?}' is not allowed",
-                table_options
+                "Updating table '{}' is not allowed",
+                table_name
             ))
             .into());
         }
@@ -2015,8 +2032,8 @@ impl Valve {
         let table_options = &self.get_table_options(table_name)?;
         if is_view(&table_options) || is_readonly(&table_options) || is_internal(&table_options) {
             return Err(ValveError::InputError(format!(
-                "Deleting from a table with options '{:?}' is not allowed",
-                table_options
+                "Deleting from table '{}' is not allowed",
+                table_name
             ))
             .into());
         }
