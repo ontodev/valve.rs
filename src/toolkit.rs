@@ -335,20 +335,20 @@ pub fn read_config_files(
         }
         let row_desc = row.get("description").and_then(|t| t.as_str()).unwrap();
 
-        // TODO: Rewrite this comment:
         // Here is a summary of the allowed table configurations for the various table modes:
-        // - A table of mode 'view' is allowed to have an empty path. If the path is non-empty then
-        //   it must either end (case insensitively) in '.sql' or be an executable file. It must not
-        //   end (case insensitively) in '.tsv'.
-        // - A 'readonly' table is allowed to have an empty path. If the path is non-empty then it
-        //   can be a file ending (case insensitively) with '.tsv', a file ending (case
-        //   insensitively) with '.sql', or an executable file.
-        // - All other tables must have a path and it must end (case insensitively) in '.tsv'.
-        if row_options
-            .iter()
-            .any(|s| vec!["db_view", "readonly"].contains(&s))
-        {
-            if row_options.iter().any(|&s| s == "db_view") && row_path.ends_with(".tsv") {
+        // - Views are allowed to have an empty path. If the path is non-empty then it must either
+        //   end (case insensitively) in '.sql' or be an executable file. It must not end (case
+        //   insensitively) in '.tsv'.
+        // - A table is allowed to have an empty path unless it is editable. If the path is
+        //   non-empty then it can be a file ending (case insensitively) with '.tsv', a file ending
+        //   (case insensitively) with '.sql', or an executable file.
+        // - All other tables (other than internal tables) must have a path and it must end
+        //   (case insensitively) in '.tsv'.
+        let is_view = row_options.iter().any(|&o| o == "db_view");
+        let is_readonly = row_options.iter().all(|&o| o != "edit");
+        let is_internal = row_options.iter().any(|&s| s == "internal");
+        if is_view || is_readonly {
+            if is_view && row_path.ends_with(".tsv") {
                 return Err(ValveError::ConfigError(format!(
                     "Invalid path '{}' for view '{}'. TSV files are not supported for views.",
                     row_path, row_table,
@@ -365,11 +365,9 @@ pub fn read_config_files(
                     .into());
                 }
             }
-        } else if row_options.iter().any(|&s| s != "internal")
-            && !row_path.to_lowercase().ends_with(".tsv")
-        {
+        } else if !is_internal && !row_path.to_lowercase().ends_with(".tsv") {
             return Err(ValveError::ConfigError(format!(
-                "Illegal path for table '{}'. Tables with option 'internal' require a path that \
+                "Illegal path for table '{}'. Editable tables require a path that \
                  ends in '.tsv'",
                 row_table
             ))
@@ -797,10 +795,7 @@ pub fn read_config_files(
         }
 
         // Constraints on internal tables do not need to be configured explicitly:
-        // TODO: We need to check all of the options, not just the first one:
-        let default_options = "".to_string();
-        let options = this_table.options.get(0).unwrap_or(&default_options);
-        if options == "internal" {
+        if this_table.options.iter().any(|s| s == "internal") {
             continue;
         }
 
