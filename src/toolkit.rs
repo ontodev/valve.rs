@@ -305,6 +305,24 @@ pub fn read_config_files(
         Ok(())
     }
 
+    // TODO: Add a comment about this function
+    fn normalize_options(options: &Vec<&str>) -> Result<Vec<String>> {
+        if options.contains(&"internal") {
+            return Err(ValveError::ConfigError(format!(
+                "The option 'internal' is reserved for internal use"
+            ))
+            .into());
+        }
+
+        // TODO: Implement the rest of this function.
+
+        Ok(options
+            .iter()
+            .map(|s| s.to_string())
+            .filter(|s| s != "")
+            .collect::<Vec<_>>())
+    }
+
     // 1. Load the table config for the 'table' table from the given path, and determine the
     // table names to use for the other special config types: 'column', 'datatype', and 'rule', then
     // save those in specials_config. Also begin filling out the more general table configuration
@@ -344,19 +362,16 @@ pub fn read_config_files(
         let row_options = row.get("options").and_then(|t| t.as_str()).unwrap();
         let row_options = row_options.to_lowercase();
         let row_options = row_options.as_str().split(",").collect::<Vec<_>>();
-        if row_options.contains(&"internal") {
-            return Err(ValveError::ConfigError(format!(
-                "The option 'internal' is reserved for internal use and is not allowed to be \
-                 specified as a table option in '{}'",
-                path
-            ))
-            .into());
-        }
-        let row_options = row_options
-            .iter()
-            .map(|s| s.to_string())
-            .filter(|s| s != "")
-            .collect::<Vec<_>>();
+        let row_options = match normalize_options(&row_options) {
+            Err(e) => {
+                return Err(ValveError::ConfigError(format!(
+                    "Error while reading options for '{}' from table table: {}",
+                    row_table, e,
+                ))
+                .into());
+            }
+            Ok(v) => v,
+        };
         let row_desc = row.get("description").and_then(|t| t.as_str()).unwrap();
 
         // Here is a summary of the allowed table configurations for the various table modes:
