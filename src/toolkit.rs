@@ -49,8 +49,6 @@ lazy_static! {
     static ref ALLOWED_OPTIONS: HashSet<&'static str> = HashSet::from([
         "db_table",
         "db_view",
-        "create",
-        "drop",
         "truncate",
         "load",
         "conflict",
@@ -237,25 +235,6 @@ pub fn get_label_for_column(
     }
 }
 
-/// TODO: Add docstring
-pub fn is_readonly(options: &HashSet<String>) -> bool {
-    if options.is_empty() {
-        false
-    } else {
-        options.iter().all(|o| o != "edit")
-    }
-}
-
-/// TODO: Add docstring
-pub fn is_view(options: &HashSet<String>) -> bool {
-    options.iter().any(|o| o == "db_view")
-}
-
-/// TODO: Add docstring
-pub fn is_internal(options: &HashSet<String>) -> bool {
-    options.iter().any(|s| s == "internal")
-}
-
 /// TODO: Add a docstring here.
 pub fn normalize_options(input_options: &Vec<&str>) -> Result<HashSet<String>> {
     if input_options.contains(&"internal") {
@@ -385,39 +364,43 @@ pub fn normalize_options(input_options: &Vec<&str>) -> Result<HashSet<String>> {
         explicit_options.insert(input_option);
     }
 
-    // If no options were specified, the user wants the default, which is a db_table with all
-    // "extra" options enabled:
-    if input_options.is_empty() || *input_options == vec![""] {
-        explicit_options.insert("save".to_string());
-        explicit_options.insert("edit".to_string());
-        explicit_options.insert("validate_on_load".to_string());
-        explicit_options.insert("conflict".to_string());
-    }
-
     // Construct the base options for this view or table
     let mut base_options = HashSet::new();
     if explicit_options.contains("db_view") {
         base_options.insert("db_view".to_string());
-        base_options.insert("create".to_string());
-        base_options.insert("drop".to_string());
     } else {
         base_options.insert("db_table".to_string());
-        base_options.insert("create".to_string());
-        base_options.insert("drop".to_string());
         base_options.insert("truncate".to_string());
         base_options.insert("load".to_string());
+
+        // If no options were specified, the user wants the default, which is a db_table with all
+        // "extra" options enabled:
+        if input_options.is_empty() || *input_options == vec![""] {
+            explicit_options.insert("save".to_string());
+            explicit_options.insert("edit".to_string());
+            explicit_options.insert("validate_on_load".to_string());
+            explicit_options.insert("conflict".to_string());
+        } else {
+            if !explicit_options.contains("no-save") {
+                explicit_options.insert("save".to_string());
+            } else if !explicit_options.contains("no-edit") {
+                explicit_options.insert("edit".to_string());
+            } else if !explicit_options.contains("no-validate_on_load") {
+                explicit_options.insert("validate_on_load".to_string());
+            } else if !explicit_options.contains("no-conflict") {
+                explicit_options.insert("conflict".to_string());
+            }
+        }
     }
+    // Remove any negative options here. They are no longer needed.
+    explicit_options.remove("no-save");
+    explicit_options.remove("no-edit");
+    explicit_options.remove("no-validate_on_load");
+    explicit_options.remove("no-conflict");
 
-    // Construct the union of the base and explicit sets of options:
-    let normalized_options: HashSet<_> = base_options.union(&explicit_options).collect();
-
-    // Remove any negative options here. These were used to construct the set of explicit options
-    // above and are no longer necessary now.
-    Ok(normalized_options
-        .iter()
-        .map(|s| s.to_string())
-        .filter(|o| !o.starts_with("no-"))
-        .collect::<HashSet<_>>())
+    // Construct the union of the base and explicit sets of options and return it:
+    let normalized_options = base_options.union(&explicit_options).cloned().collect();
+    Ok(normalized_options)
 }
 
 /// Given the path to a table table (either a table.tsv file or a database containing a
@@ -549,8 +532,11 @@ pub fn read_config_files(
         //   (case insensitively) with '.sql', or an executable file.
         // - All other tables (other than internal tables) must have a path and it must end
         //   (case insensitively) in '.tsv'.
-        if is_view(&row_options) || is_readonly(&row_options) {
-            if is_view(&row_options) && row_path.ends_with(".tsv") {
+        let is_view = row_options.contains("db_view");
+        let is_readonly = !row_options.contains("edit");
+        let is_internal = row_options.contains("internal");
+        if is_view || is_readonly {
+            if is_view && row_path.ends_with(".tsv") {
                 return Err(ValveError::ConfigError(format!(
                     "Invalid path '{}' for view '{}'. TSV files are not supported for views.",
                     row_path, row_table,
@@ -567,7 +553,7 @@ pub fn read_config_files(
                     .into());
                 }
             }
-        } else if !is_internal(&row_options) && !row_path.to_lowercase().ends_with(".tsv") {
+        } else if !is_internal && !row_path.to_lowercase().ends_with(".tsv") {
             return Err(ValveError::ConfigError(format!(
                 "Illegal path for table '{}'. Editable tables require a path that \
                  ends in '.tsv'",
@@ -993,8 +979,8 @@ pub fn read_config_files(
             path = Some(this_table.path.to_string())
         }
 
-        // Constraints on internal tables do not need to be configured explicitly:
-        if is_internal(&this_table.options) {
+        // Constraints on tables that valve can't create do not need to be configured explicitly:
+        if this_table.options.contains("internal") {
             continue;
         }
 
@@ -3607,7 +3593,7 @@ pub fn get_table_ddl(
                 let table_config = &tables_config
                     .get(&fkey.ftable)
                     .expect(&format!("Undefined table '{}'", fkey.ftable));
-                !is_view(&table_config.options)
+                !table_config.options.contains("db_view")
             })
             .collect::<Vec<_>>();
         if !(r >= c && applicable_foreigns.is_empty()) {
@@ -3625,7 +3611,7 @@ pub fn get_table_ddl(
                 .expect(&format!("Undefined table '{}'", fkey.ftable));
             table_config.options.clone()
         };
-        if !is_view(&ftable_options) {
+        if !ftable_options.contains("db_view") {
             create_lines.push(format!(
                 r#"  FOREIGN KEY ("{}") REFERENCES "{}"("{}"){}"#,
                 fkey.column,

@@ -11,9 +11,9 @@ use crate::{
         get_parsed_structure_conditions, get_pool_from_connection_string, get_record_to_redo,
         get_record_to_undo, get_row_from_db, get_sql_for_standard_view, get_sql_for_text_view,
         get_sql_type, get_sql_type_from_global_config, get_table_ddl, insert_chunks,
-        insert_new_row_tx, is_internal, is_readonly, is_view, local_sql_syntax, read_config_files,
-        record_row_change, switch_undone_state, update_row_tx, verify_table_deps_and_sort,
-        ColumnRule, CompiledCondition, ParsedStructure,
+        insert_new_row_tx, local_sql_syntax, read_config_files, record_row_change,
+        switch_undone_state, update_row_tx, verify_table_deps_and_sort, ColumnRule,
+        CompiledCondition, ParsedStructure,
     },
     validate::{validate_row_tx, validate_tree_foreign_keys, validate_under, with_tree_sql},
     valve_grammar::StartParser,
@@ -702,24 +702,6 @@ impl Valve {
         }
     }
 
-    /// TODO: Add docstring
-    pub fn is_view(&self, table_name: &str) -> Result<bool> {
-        let table_config = self.get_table_config(&table_name)?;
-        Ok(is_view(&table_config.options))
-    }
-
-    /// TODO: Add docstring
-    pub fn is_readonly(&self, table_name: &str) -> Result<bool> {
-        let table_config = self.get_table_config(&table_name)?;
-        Ok(is_readonly(&table_config.options))
-    }
-
-    /// TODO: Add docstring
-    pub fn is_internal(&self, table_name: &str) -> Result<bool> {
-        let table_config = self.get_table_config(&table_name)?;
-        Ok(is_internal(&table_config.options))
-    }
-
     /// Return the list of configured editable tables in sorted order, or reverse sorted order if
     /// the reverse flag is set. Note that 'editable' refers to the rows in a table. Depending on
     /// the table's options, Valve may be allowed to drop and/or create and/or save and/or truncate
@@ -732,7 +714,7 @@ impl Valve {
                 let table_options = self
                     .get_table_options(t)
                     .expect(&format!("Error getting options for table '{}'", t));
-                !is_view(&table_options) && !is_readonly(&table_options)
+                table_options.contains("edit")
             })
             .map(|i| i.as_str())
             .collect::<Vec<_>>();
@@ -1282,7 +1264,7 @@ impl Valve {
                 let mut statements =
                     get_table_ddl(tables_config, datatypes_config, &parser, &table, &self.pool);
                 table_statements.append(&mut statements);
-                if !is_readonly(&table_config.options) {
+                if table_config.options.contains("conflict") {
                     let cable = format!("{}_conflict", table);
                     let mut statements =
                         get_table_ddl(tables_config, datatypes_config, &parser, &cable, &self.pool);
@@ -1336,7 +1318,7 @@ impl Valve {
         let sorted_table_list = self.get_sorted_table_list(false);
         for table in &sorted_table_list {
             let table_config = self.get_table_config(table)?;
-            if is_view(&table_config.options) {
+            if table_config.options.contains("db_view") {
                 // If the path points to a .sql file, execute the statements that are contained in
                 // it against the database, trusting that the user has written the script correctly.
                 // Note that the SQL script, not Valve, is responsible for deciding whether the
@@ -1358,7 +1340,7 @@ impl Valve {
                     .into());
                 }
             } else if table_config.path.to_lowercase().ends_with(".tsv")
-                || is_internal(&table_config.options)
+                || table_config.options.contains("internal")
             {
                 if self.table_has_changed(*table).await? {
                     self.drop_tables(&vec![table]).await?;
@@ -1451,10 +1433,7 @@ impl Valve {
         for table in &drop_list {
             let table_config = self.get_table_config(table)?;
             if table_config.path != "" {
-                if !(is_view(&table_config.options)
-                    || is_readonly(&table_config.options)
-                    || is_internal(&table_config.options))
-                {
+                if table_config.options.contains("conflict") {
                     let sql = format!(r#"DROP VIEW IF EXISTS "{}_text_view""#, table);
                     self.execute_sql(&sql).await?;
                     let sql = format!(r#"DROP VIEW IF EXISTS "{}_view""#, table);
@@ -1462,7 +1441,7 @@ impl Valve {
                     let sql = format!(r#"DROP TABLE IF EXISTS "{}_conflict""#, table);
                     self.execute_sql(&sql).await?;
                 }
-                let type_to_drop = match is_view(&table_config.options) {
+                let type_to_drop = match table_config.options.contains("db_view") {
                     true => "VIEW",
                     false => "TABLE",
                 };
@@ -1501,10 +1480,10 @@ impl Valve {
 
         for table in &truncate_list {
             let table_options = self.get_table_options(table)?;
-            if !is_view(&table_options) {
+            if table_options.contains("truncate") {
                 let sql = truncate_sql(&table);
                 self.execute_sql(&sql).await?;
-                if !(is_readonly(&table_options) || is_internal(&table_options)) {
+                if table_options.contains("conflict") {
                     let sql = truncate_sql(&format!("{}_conflict", table));
                     self.execute_sql(&sql).await?;
                 }
@@ -1712,8 +1691,7 @@ impl Valve {
         for table in table_list {
             let table_config = self.get_table_config(&table)?;
 
-            // Views and internal tables are never loaded:
-            if is_view(&table_config.options) || is_internal(&table_config.options) {
+            if !table_config.options.contains("load") {
                 continue;
             }
             // For all others, how they are loaded depends on the path, such that an empty
@@ -1775,11 +1753,8 @@ impl Valve {
 
         for (table, path) in table_paths.iter() {
             let options = self.get_table_options(table)?;
-            if is_view(&options) || is_readonly(&options) {
-                log::warn!(
-                    "Not saving table '{}'. Saving views and readonly tables is not supported",
-                    table,
-                );
+            if !options.contains("save") {
+                log::warn!("Saving '{}' is not supported", table,);
                 continue;
             }
 
@@ -1830,9 +1805,9 @@ impl Valve {
         }
 
         let table_options = self.get_table_options(table)?;
-        if is_view(&table_options) || is_readonly(&table_options) {
+        if !table_options.contains("save") {
             return Err(ValveError::InputError(format!(
-                "Unable to save '{}': Saving views and readonly tables is not supported",
+                "Unable to save '{}': Not supported",
                 table
             ))
             .into());
@@ -1915,7 +1890,7 @@ impl Valve {
     /// and the row itself in the form of a [ValveRow].
     pub async fn insert_row(&self, table_name: &str, row: &JsonRow) -> Result<(u32, ValveRow)> {
         let table_options = &self.get_table_options(table_name)?;
-        if is_view(&table_options) || is_readonly(&table_options) || is_internal(&table_options) {
+        if !table_options.contains("edit") {
             return Err(ValveError::InputError(format!(
                 "Inserting to table '{}' is not allowed",
                 table_name
@@ -1975,7 +1950,7 @@ impl Valve {
         row: &JsonRow,
     ) -> Result<ValveRow> {
         let table_options = &self.get_table_options(table_name)?;
-        if is_view(&table_options) || is_readonly(&table_options) || is_internal(&table_options) {
+        if !table_options.contains("edit") {
             return Err(ValveError::InputError(format!(
                 "Updating table '{}' is not allowed",
                 table_name
@@ -2037,7 +2012,7 @@ impl Valve {
     /// Given a table name and a row number, delete that row from the table.
     pub async fn delete_row(&self, table_name: &str, row_number: &u32) -> Result<()> {
         let table_options = &self.get_table_options(table_name)?;
-        if is_view(&table_options) || is_readonly(&table_options) || is_internal(&table_options) {
+        if !table_options.contains("edit") {
             return Err(ValveError::InputError(format!(
                 "Deleting from table '{}' is not allowed",
                 table_name

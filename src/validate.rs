@@ -3,8 +3,8 @@
 use crate::{
     toolkit::{
         cast_sql_param_from_text, get_column_value, get_sql_type_from_global_config,
-        get_table_options, is_internal, is_readonly, is_sql_type_error, is_view, local_sql_syntax,
-        ColumnRule, CompiledCondition, QueryAsIf, QueryAsIfKind,
+        get_table_options, is_sql_type_error, local_sql_syntax, ColumnRule, CompiledCondition,
+        QueryAsIf, QueryAsIfKind,
     },
     valve::{
         ValveCell, ValveCellMessage, ValveConfig, ValveDatatypeConfig, ValveRow, ValveRuleConfig,
@@ -183,7 +183,7 @@ pub async fn validate_under(
 
     let table_options = get_table_options(config, table_name)?;
     let query_table = {
-        if is_readonly(&table_options) || is_internal(&table_options) || is_view(&table_options) {
+        if !table_options.contains("conflict") {
             table_name.to_string()
         } else {
             format!("{}_view", table_name)
@@ -367,7 +367,7 @@ pub async fn validate_tree_foreign_keys(
 
     let table_options = get_table_options(config, table_name)?;
     let query_table = {
-        if is_readonly(&table_options) || is_internal(&table_options) || is_view(&table_options) {
+        if !table_options.contains("conflict") {
             table_name.to_string()
         } else {
             format!("{}_view", table_name)
@@ -1194,7 +1194,7 @@ pub async fn validate_cell_foreign_constraints(
                 ))
                 .options;
 
-            if !(is_view(&foptions) || is_readonly(&foptions) || is_internal(&foptions)) {
+            if foptions.contains("conflict") {
                 let (as_if_clause_for_conflict, ftable_alias) = match query_as_if {
                     Some(query_as_if) if *ftable == query_as_if.table => (
                         as_if_clause_for_conflict.to_string(),
@@ -1277,7 +1277,7 @@ pub async fn validate_cell_trees(
     let parent_val = cell.strvalue();
     let table_options = get_table_options(config, table_name)?;
     let query_table = {
-        if is_readonly(&table_options) || is_internal(&table_options) || is_view(&table_options) {
+        if !table_options.contains("conflict") {
             table_name.to_string()
         } else {
             format!("{}_view", table_name)
@@ -1473,8 +1473,7 @@ pub async fn validate_cell_unique_constraints(
     if is_primary || is_unique || is_tree_child {
         let table_options = get_table_options(config, table_name)?;
         let mut query_table = {
-            if is_readonly(&table_options) || is_internal(&table_options) || is_view(&table_options)
-            {
+            if !table_options.contains("conflict") {
                 table_name.to_string()
             } else {
                 format!("{}_view", table_name)
