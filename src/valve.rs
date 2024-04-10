@@ -32,7 +32,14 @@ use sqlx::{
     any::{AnyKind, AnyPool},
     query as sqlx_query, Row, ValueRef,
 };
-use std::{collections::HashMap, error::Error, fmt, fs::File, path::Path, process::Command};
+use std::{
+    collections::{HashMap, HashSet},
+    error::Error,
+    fmt,
+    fs::File,
+    path::Path,
+    process::Command,
+};
 
 /// Alias for [Map](serde_json::map)<[String], [Value](serde_json::value)>.
 pub type JsonRow = serde_json::Map<String, SerdeValue>;
@@ -323,7 +330,7 @@ pub struct ValveTableConfig {
     /// The table's type
     pub table_type: String,
     /// The options for this table
-    pub options: Vec<String>,
+    pub options: HashSet<String>,
     /// A description of the table
     pub description: String,
     /// The location of the TSV file representing the table in the filesystem
@@ -1426,7 +1433,7 @@ impl Valve {
     }
 
     /// Given a table name, returns the options of the table.
-    pub fn get_table_options(&self, table: &str) -> Result<Vec<String>> {
+    pub fn get_table_options(&self, table: &str) -> Result<HashSet<String>> {
         toolkit::get_table_options(&self.config, table)
     }
 

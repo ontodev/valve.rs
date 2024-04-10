@@ -4,7 +4,7 @@ use crate::valve::{ValveColumnConfig, ValveTableConfig};
 use indoc::indoc;
 use lazy_static::lazy_static;
 use sqlx::any::AnyKind;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 lazy_static! {
     pub static ref INTERNAL_TABLES: Vec<&'static str> = vec!["message", "history"];
@@ -18,7 +18,7 @@ pub fn generate_internal_table_config(table_name: &str) -> ValveTableConfig {
         "message" => ValveTableConfig {
             table: "message".to_string(),
             table_type: "message".to_string(),
-            options: vec!["internal".to_string()],
+            options: HashSet::from(["internal".to_string()]),
             description: "Validation messages for all of the tables and columns".to_string(),
             column_order: vec![
                 "table".to_string(),
@@ -110,7 +110,7 @@ pub fn generate_internal_table_config(table_name: &str) -> ValveTableConfig {
         "history" => ValveTableConfig {
             table: "history".to_string(),
             table_type: "history".to_string(),
-            options: vec!["internal".to_string()],
+            options: HashSet::from(["internal".to_string()]),
             description: "History of changes to the VALVE database".to_string(),
             column_order: vec![
                 "table".to_string(),

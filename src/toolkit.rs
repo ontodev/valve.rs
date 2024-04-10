@@ -238,7 +238,7 @@ pub fn get_label_for_column(
 }
 
 /// TODO: Add docstring
-pub fn is_readonly(options: &Vec<String>) -> bool {
+pub fn is_readonly(options: &HashSet<String>) -> bool {
     if options.is_empty() {
         false
     } else {
@@ -247,17 +247,17 @@ pub fn is_readonly(options: &Vec<String>) -> bool {
 }
 
 /// TODO: Add docstring
-pub fn is_view(options: &Vec<String>) -> bool {
+pub fn is_view(options: &HashSet<String>) -> bool {
     options.iter().any(|o| o == "db_view")
 }
 
 /// TODO: Add docstring
-pub fn is_internal(options: &Vec<String>) -> bool {
+pub fn is_internal(options: &HashSet<String>) -> bool {
     options.iter().any(|s| s == "internal")
 }
 
 /// TODO: Add a docstring here.
-pub fn normalize_options(input_options: &Vec<&str>) -> Result<Vec<String>> {
+pub fn normalize_options(input_options: &Vec<&str>) -> Result<HashSet<String>> {
     if input_options.contains(&"internal") {
         return Err(ValveError::ConfigError(format!(
             "The option 'internal' is reserved for internal use"
@@ -411,16 +411,13 @@ pub fn normalize_options(input_options: &Vec<&str>) -> Result<Vec<String>> {
     // Construct the union of the base and explicit sets of options:
     let normalized_options: HashSet<_> = base_options.union(&explicit_options).collect();
 
-    println!("Explicit options: {:?}", explicit_options);
-    println!("Normalized options: {:?}", normalized_options);
-
-    // Convert the hashset into a vector, remove any negative options in the process. These were
-    // used to construct the set of explicit options and are no longer necessary.
+    // Remove any negative options here. These were used to construct the set of explicit options
+    // above and are no longer necessary now.
     Ok(normalized_options
         .iter()
         .map(|s| s.to_string())
         .filter(|o| !o.starts_with("no-"))
-        .collect::<Vec<_>>())
+        .collect::<HashSet<_>>())
 }
 
 /// Given the path to a table table (either a table.tsv file or a database containing a
@@ -3366,7 +3363,7 @@ pub fn verify_table_deps_and_sort(
 }
 
 /// Given a global configuration struct and a table name, returns the options for the table.
-pub fn get_table_options(config: &ValveConfig, table: &str) -> Result<Vec<String>> {
+pub fn get_table_options(config: &ValveConfig, table: &str) -> Result<HashSet<String>> {
     Ok(config
         .table
         .get(table)
@@ -3374,7 +3371,7 @@ pub fn get_table_options(config: &ValveConfig, table: &str) -> Result<Vec<String
             ValveError::InputError(format!("'{}' is not in table config", table)).into(),
         )?
         .options
-        .to_vec())
+        .clone())
 }
 
 /// Given a table configuration map and a datatype configuration map, a parser, a table name, and a
@@ -3626,7 +3623,7 @@ pub fn get_table_ddl(
             let table_config = &tables_config
                 .get(&fkey.ftable)
                 .expect(&format!("Undefined table '{}'", fkey.ftable));
-            table_config.options.to_vec()
+            table_config.options.clone()
         };
         if !is_view(&ftable_options) {
             create_lines.push(format!(
