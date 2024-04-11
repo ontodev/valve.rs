@@ -702,11 +702,9 @@ impl Valve {
         }
     }
 
-    /// Return the list of configured editable tables in sorted order, or reverse sorted order if
-    /// the reverse flag is set. Note that 'editable' refers to the rows in a table. Depending on
-    /// the table's options, Valve may be allowed to drop and/or create and/or save and/or truncate
-    /// the table even if it is not editable.
-    pub fn get_sorted_editable_table_list(&self, reverse: bool) -> Vec<&str> {
+    /// Return the list of configured tables that have the given option in sorted order, or
+    /// reverse sorted order if the reverse flag is set.
+    pub fn get_sorted_table_list_with_option(&self, option: &str, reverse: bool) -> Vec<&str> {
         let mut sorted_tables = self
             .sorted_table_list
             .iter()
@@ -714,7 +712,7 @@ impl Valve {
                 let table_options = self
                     .get_table_options(t)
                     .expect(&format!("Error getting options for table '{}'", t));
-                table_options.contains("edit")
+                table_options.contains(option)
             })
             .map(|i| i.as_str())
             .collect::<Vec<_>>();
@@ -1297,7 +1295,7 @@ impl Valve {
     pub async fn dump_schema(&self) -> Result<String> {
         let setup_statements = self.get_setup_statements().await?;
         let mut output = String::from("");
-        for table in self.get_sorted_editable_table_list(false) {
+        for table in self.get_sorted_table_list_with_option("edit", false) {
             let table_statements =
                 setup_statements
                     .get(table)
@@ -1455,7 +1453,7 @@ impl Valve {
 
     /// Truncate all configured tables, in reverse dependency order.
     pub async fn truncate_all_tables(&self) -> Result<&Self> {
-        self.truncate_tables(&self.get_sorted_editable_table_list(true))
+        self.truncate_tables(&self.get_sorted_table_list_with_option("edit", true))
             .await?;
         Ok(self)
     }
@@ -1720,7 +1718,7 @@ impl Valve {
     /// Save all configured editable tables to their configured paths, unless save_dir is specified,
     /// in which case save them there instead.
     pub fn save_all_tables(&self, save_dir: &Option<String>) -> Result<&Self> {
-        let tables = self.get_sorted_editable_table_list(false);
+        let tables = self.get_sorted_table_list_with_option("save", false);
         self.save_tables(&tables, save_dir)?;
         Ok(self)
     }

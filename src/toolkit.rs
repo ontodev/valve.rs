@@ -171,7 +171,8 @@ pub async fn get_pool_from_connection_string(database: &str) -> Result<AnyPool> 
     Ok(pool)
 }
 
-/// TODO: Add a docstring here
+/// Given a column configuration map, a label, and a table name, return the column name
+/// corresponding to the label.
 pub fn get_column_for_label(
     column_config_map: &HashMap<String, ValveColumnConfig>,
     label: &str,
@@ -200,7 +201,8 @@ pub fn get_column_for_label(
     }
 }
 
-/// TODO: Add a docstring here
+/// Given a column configuration map, a column and a table, return the label corresponding to the
+/// column.
 pub fn get_label_for_column(
     column_config_map: &HashMap<String, ValveColumnConfig>,
     column: &str,
@@ -235,7 +237,12 @@ pub fn get_label_for_column(
     }
 }
 
-/// TODO: Add a docstring here.
+/// Given a vector of string slices, return a set containing the distinct options contained therein.
+/// If there are logical conflicts between options, e.g., if both 'db_view' and 'load' are
+/// specified (views cannot be loaded), then resolve them in favour of the last specified option by
+/// removing the earlier conflicting option from the option set, and writing a warning to the log.
+/// Note that if there are unrecognized options in the list these will generate warning messages but
+/// will otherwise be ignored.
 pub fn normalize_options(input_options: &Vec<&str>) -> Result<HashSet<String>> {
     if input_options.contains(&"internal") {
         return Err(ValveError::ConfigError(format!(
@@ -979,7 +986,7 @@ pub fn read_config_files(
             path = Some(this_table.path.to_string())
         }
 
-        // Constraints on tables that valve can't create do not need to be configured explicitly:
+        // Constraints on internal tables do not need to be configured explicitly:
         if this_table.options.contains("internal") {
             continue;
         }
