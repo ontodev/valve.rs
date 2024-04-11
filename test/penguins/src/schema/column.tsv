@@ -17,7 +17,7 @@ datatype	transform		empty	word
 datatype	condition	condition	empty	line		the method for testing the datatype
 datatype	structure		empty	trimmed_line		
 datatype	description	description	empty	text		a description of this datatype
-datatype	SQL type	SQL type	empty	sql_type		the SQLite type for representing this data
+datatype	sql_type	SQL type	empty	sql_type		the SQLite type for representing this data
 datatype	HTML type	HTML type	empty	html_type		the HTML type for viewing and editing this data
 penguin	study_name			word		the name of the study
 penguin	sample_number			natural_number	primary	the sample identifier

@@ -15,7 +15,7 @@ datatype	datatype			datatype_name	primary	the name of this datatype
 datatype	parent	ignore_me	empty	datatype_name	tree(datatype)	the parent datatype
 datatype	condition		empty	datatype_condition		
 datatype	description		empty	trimmed_text		
-datatype	SQL type		empty	trimmed_line		
+datatype	sql_type		empty	trimmed_line		
 datatype	HTML type		empty	datatype_name		
 rule	table			table_name		
 rule	when column			column_name		

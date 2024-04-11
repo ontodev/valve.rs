@@ -363,8 +363,6 @@ pub struct ValveColumnConfig {
 /// Configuration information for a particular datatype
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct ValveDatatypeConfig {
-    /// The datatype's corresponding HTML type
-    pub html_type: String,
     /// The datatype's corresponding SQL type
     pub sql_type: String,
     /// The regular expression which all data values of this type must match

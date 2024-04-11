@@ -729,14 +729,7 @@ pub fn read_config_files(
     let rows = get_special_config("datatype", &specials_config, &tables_config, path, pool)?;
     for row in rows {
         if let Err(e) = check_table_requirements(
-            &vec![
-                "datatype",
-                "HTML type",
-                "SQL type",
-                "condition",
-                "description",
-                "parent",
-            ],
+            &vec!["datatype", "sql_type", "condition", "description", "parent"],
             &vec!["datatype"],
             &row,
         ) {
@@ -748,15 +741,13 @@ pub fn read_config_files(
         }
 
         let dt_name = row.get("datatype").and_then(|d| d.as_str()).unwrap();
-        let html_type = row.get("HTML type").and_then(|s| s.as_str()).unwrap();
-        let sql_type = row.get("SQL type").and_then(|s| s.as_str()).unwrap();
+        let sql_type = row.get("sql_type").and_then(|s| s.as_str()).unwrap();
         let condition = row.get("condition").and_then(|s| s.as_str()).unwrap();
         let description = row.get("description").and_then(|s| s.as_str()).unwrap();
         let parent = row.get("parent").and_then(|s| s.as_str()).unwrap();
         datatypes_config.insert(
             dt_name.to_string(),
             ValveDatatypeConfig {
-                html_type: html_type.to_string(),
                 sql_type: sql_type.to_string(),
                 condition: condition.to_string(),
                 datatype: dt_name.to_string(),

@@ -1,4 +1,4 @@
-datatype	parent	condition	description	SQL type	HTML type
+datatype	parent	condition	description	sql_type	HTML type
 CURIE	nonspace	match(/\S+:\S+/)	a Compact URI		
 IRI	nonspace	exclude(/\s/)	an Internationalized Resource Identifier		
 column_name	trimmed_line	match(/\S([^\n]*\S)*/)	a column name		

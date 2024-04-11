@@ -1,11 +1,101 @@
 study_name	sample_number	species	region	island	stage	individual_id	clutch_completion	date_egg	culmen_length	culmen_depth	flipper_length	body_mass	sex	delta_15_n	delta_13_c	comments
-FAKE123	1	Adelie Penguin (Pygoscelis adeliae)	Anvers	Biscoe	Adult, 1 Egg Stage	N1A2	No	2008-07-30	50.0	18.8	221	2466	FEMALE	8.14526	-24.35399	
-FAKE123	2	Adelie Penguin (Pygoscelis adeliae)	Anvers	Biscoe	Adult, 1 Egg Stage	N2A1	Yes	2008-09-23	45.4	16.8	199	1404	FEMALE	8.73118	-24.52462	
-FAKE123	3	Adelie Penguin (Pygoscelis adeliae)	Anvers	Dream	Adult, 1 Egg Stage	N2A2	Yes	2007-09-16	41.3	21.6	193	1255	FEMALE	9.87676	-26.92639	
-FAKE123	4	Adelie Penguin (Pygoscelis adeliae)	Anvers	Torgersen	Adult, 1 Egg Stage	N3A1	Yes	2008-04-24	38.3	15.8	184	4756	FEMALE	8.25103	-26.25292	
-FAKE123	5	Adelie Penguin (Pygoscelis adeliae)	Anvers	Biscoe	Adult, 1 Egg Stage	N3A2	Yes	2008-02-10	44.1	18.7	175	3242	MALE	9.83264	-25.93464	
-FAKE123	6	Adelie Penguin (Pygoscelis adeliae)	Anvers	Biscoe	Adult, 1 Egg Stage	N4A1	Yes	2007-05-06	34.8	17.3	164	3509		8.36344	-24.50161	
-FAKE123	7	Adelie Penguin (Pygoscelis adeliae)	Anvers	Torgersen	Adult, 1 Egg Stage	N4A2	Yes	2007-02-29	47.9	21.9	210	4431	FEMALE	8.44511	-24.26432	
-FAKE123	8	Adelie Penguin (Pygoscelis adeliae)	Anvers	Torgersen	Adult, 1 Egg Stage	N5A1	Yes	2008-08-22	46.4	19.5	170	2328	FEMALE	9.55036	-23.92204	
-FAKE123	9	Adelie Penguin (Pygoscelis adeliae)	Anvers	Biscoe	Adult, 1 Egg Stage	N5A2	Yes	2007-12-08	39.5	17.1	202	2745	FEMALE	7.52747	-26.23267	
-FAKE123	10	Adelie Penguin (Pygoscelis adeliae)	Anvers	Torgersen	Adult, 1 Egg Stage	N6A1	Yes	2009-04-20	44.7	16.5	210	1374	MALE	7.60841	-26.80921	
+FAKE123	1	Adelie Penguin (Pygoscelis adeliae)	Anvers	Torgersen	Adult, 1 Egg Stage	N1A2	Yes	2008-03-25	32.4	22.9	192	4726	FEMALE	7.7705	-25.37394	
+FAKE123	2	Adelie Penguin (Pygoscelis adeliae)	Anvers	Torgersen	Adult, 1 Egg Stage	N2A1	Yes	2007-06-14	38.0	22.8	186	4959	FEMALE	9.32098	-24.26661	
+FAKE123	3	Adelie Penguin (Pygoscelis adeliae)	Anvers	Torgersen	Adult, 1 Egg Stage	N2A2	Yes	2008-12-27	50.0	23.0	160	3506	FEMALE	8.74658	-25.72121	
+FAKE123	4	Adelie Penguin (Pygoscelis adeliae)	Anvers	Biscoe	Adult, 1 Egg Stage	N3A1	Yes	2007-09-15	32.3	16.0	200	4584	FEMALE	9.56527	-26.42823	
+FAKE123	5	Adelie Penguin (Pygoscelis adeliae)	Anvers	Torgersen	Adult, 1 Egg Stage	N3A2	Yes	2009-04-26	45.4	22.0	196	2822	MALE	9.01799	-25.33777	
+FAKE123	6 foo	Adelie Penguin (Pygoscelis adeliae)	Anvers	Biscoe	Adult, 1 Egg Stage	N4A1	Yes	2007-10-22	36.6	21.0	168	1367	FEMALE	7.68275	-26.21593	
+FAKE123	7	Adelie Penguin (Pygoscelis adeliae)	Anvers	Torgersen	Adult, 1 Egg Stage	N4A2	Yes	2009-05-17	36.0	17.7	213	3374	MALE	9.58293	-23.53842	
+FAKE123	8	Adelie Penguin (Pygoscelis adeliae)	Anvers	Dream	Adult, 1 Egg Stage	N5A1	Yes	2009-06-28	34.8	18.1	162	3996	MALE	8.15584	-25.04934	
+FAKE123	9	Adelie Penguin (Pygoscelis adeliae)	Anvers	Dream	Adult, 1 Egg Stage	N5A2	Yes	2007-12-08	31.1	22.3	228	3466	FEMALE	7.13996	-26.34756	
+FAKE123	10	Adelie Penguin (Pygoscelis adeliae)	Anvers	Dream	Adult, 1 Egg Stage	N6A1	Yes	2007-01-20	30.5	17.4	183	3941	MALE	8.10402	-23.18762	
+FAKE123	11	Adelie Penguin (Pygoscelis adeliae)	Anvers	Torgersen	Adult, 1 Egg Stage	N6A2	Yes	2008-02-08	31.8	18.8	204	2786	MALE	9.6405	-24.55089	
+FAKE123	12	Adelie Penguin (Pygoscelis adeliae)	Anvers	Torgersen	Adult, 1 Egg Stage	N7A1	Yes	2008-12-16	44.5	17.1	186	4958	FEMALE	7.82946	-26.1509	
+FAKE123	13	Adelie Penguin (Pygoscelis adeliae)	Anvers	Biscoe	Adult, 1 Egg Stage	N7A2	Yes	2007-08-22	40.4	22.2	225	4758	MALE	8.8725	-24.9624	
+FAKE123	14	Adelie Penguin (Pygoscelis adeliae)	Anvers	Torgersen	Adult, 1 Egg Stage	N8A1	Yes	2007-06-24	31.1	21.9	195	1552	MALE	9.52616	-25.15333	
+FAKE123	15	Adelie Penguin (Pygoscelis adeliae)	Anvers	Torgersen	Adult, 1 Egg Stage	N8A2	Yes	2008-12-14	46.6	16.0	160	3435	MALE	8.75322	-26.16073	
+FAKE123	16	Adelie Penguin (Pygoscelis adeliae)	Anvers	Torgersen	Adult, 1 Egg Stage	N9A1	Yes	2009-10-28	40.6	15.4	211	4570	FEMALE	9.19271	-23.52819	
+FAKE123	17	Adelie Penguin (Pygoscelis adeliae)	Anvers	Dream	Adult, 1 Egg Stage	N9A2	Yes	2007-08-17	42.4	22.1	160	4620	MALE	8.70888	-25.36392	
+FAKE123	18	Adelie Penguin (Pygoscelis adeliae)	Anvers	Dream	Adult, 1 Egg Stage	N10A1	Yes	2009-02-27	48.5	16.6	161	2645	FEMALE	9.18882	-25.34233	
+FAKE123	19	Adelie Penguin (Pygoscelis adeliae)	Anvers	Biscoe	Adult, 1 Egg Stage	N10A2	No	2009-09-20	32.5	17.4	175	3491	FEMALE	8.58553	-25.53209	
+FAKE123	20	Adelie Penguin (Pygoscelis adeliae)	Anvers	Dream	Adult, 1 Egg Stage	N11A1	Yes	2007-05-30	41.5	16.4	192	1546	FEMALE	8.81955	-26.3965	
+FAKE123	21	Adelie Penguin (Pygoscelis adeliae)	Anvers	Biscoe	Adult, 1 Egg Stage	N11A2	Yes	2009-05-18	38.0	19.6	165	4466	FEMALE	9.59252	-23.2652	
+FAKE123	22	Adelie Penguin (Pygoscelis adeliae)	Anvers	Dream	Adult, 1 Egg Stage	N12A1	Yes	2009-05-01	33.5	16.9	194	2365	MALE	8.92519	-23.233	
+FAKE123	23	Adelie Penguin (Pygoscelis adeliae)	Anvers	Torgersen	Adult, 1 Egg Stage	N12A2	Yes	2007-03-19	37.4	19.6	210	3246	MALE	7.60238	-24.49357	
+FAKE123	24	Adelie Penguin (Pygoscelis adeliae)	Anvers	Dream	Adult, 1 Egg Stage	N13A1	Yes	2009-02-10	40.3	19.2	198	2698	MALE	9.94036	-24.47728	
+FAKE123	25	Adelie Penguin (Pygoscelis adeliae)	Anvers	Dream	Adult, 1 Egg Stage	N13A2	Yes	2009-08-14	30.9	18.8	202	4009	FEMALE	7.81612	-26.12677	
+FAKE123	26	Adelie Penguin (Pygoscelis adeliae)	Anvers	Biscoe	Adult, 1 Egg Stage	N14A1	Yes	2007-01-13	30.2	16.2	210	3279	FEMALE	9.35166	-24.43824	
+FAKE123	27	Adelie Penguin (Pygoscelis adeliae)	Anvers	Biscoe	Adult, 1 Egg Stage	N14A2	Yes	2008-10-25	34.2	20.5	184	2468	MALE	7.1448	-24.24322	
+FAKE123	28	Adelie Penguin (Pygoscelis adeliae)	Anvers	Biscoe	Adult, 1 Egg Stage	N15A1	Yes	2007-11-02	35.5	22.9	178	1428	MALE	8.98197	-25.10396	
+FAKE123	29	Adelie Penguin (Pygoscelis adeliae)	Anvers	Torgersen	Adult, 1 Egg Stage	N15A2	Yes	2008-11-22	40.8	21.6	223	3782	FEMALE	8.69062	-24.38674	
+FAKE123	30	Adelie Penguin (Pygoscelis adeliae)	Anvers	Torgersen	Adult, 1 Egg Stage	N16A1	Yes	2009-12-29	38.1	19.1	164	3150	MALE	8.3468	-23.84072	
+FAKE123	31	Adelie Penguin (Pygoscelis adeliae)	Anvers	Torgersen	Adult, 1 Egg Stage	N16A2	Yes	2008-02-26	32.1	21.6	165	1271	MALE	7.21302	-25.42479	
+FAKE123	32	Adelie Penguin (Pygoscelis adeliae)	Anvers	Dream	Adult, 1 Egg Stage	N17A1	Yes	2009-08-12	42.9	19.8	227	3057	MALE	7.47525	-23.44234	
+FAKE123	33	Adelie Penguin (Pygoscelis adeliae)	Anvers	Biscoe	Adult, 1 Egg Stage	N17A2	Yes	2009-07-27	42.3	19.9	189	4486	FEMALE	7.10738	-23.55551	
+FAKE123	34 foo	Adelie Penguin (Pygoscelis adeliae)	Anvers	Dream	Adult, 1 Egg Stage	N18A1	Yes	2008-05-27	37.7	20.2	209	4317	MALE	7.85875	-23.6394	
+FAKE123	35	Adelie Penguin (Pygoscelis adeliae)	Anvers	Dream	Adult, 1 Egg Stage	N18A2	Yes	2007-08-14	33.6	21.2	170	3758	FEMALE	8.84954	-24.84445	
+FAKE123	36	Adelie Penguin (Pygoscelis adeliae)	Anvers	Dream	Adult, 1 Egg Stage	N19A1	Yes	2008-03-01	30.8	22.6	176	3580	MALE	9.87909	-23.59742	
+FAKE123	37	Adelie Penguin (Pygoscelis adeliae)	Anvers	Dream	Adult, 1 Egg Stage	N19A2	Yes	2007-10-23	41.9	22.8	203	3664	MALE	8.55391	-26.33359	
+FAKE123	38	Adelie Penguin (Pygoscelis adeliae)	Anvers	Torgersen	Adult, 1 Egg Stage	N20A1	Yes	2007-01-26	40.0	20.6	207	4099	MALE	8.86936	-23.68643	
+FAKE123	39 foo	Adelie Penguin (Pygoscelis adeliae)	Anvers	Biscoe	Adult, 1 Egg Stage	N20A2	Yes	2007-09-22	44.5	22.3	187	1940	MALE	9.63409	-23.33784	
+FAKE123	40	Adelie Penguin (Pygoscelis adeliae)	Anvers	Biscoe	Adult, 1 Egg Stage	N21A1	Yes	2009-07-30	32.1	16.3	213	1257	MALE	7.81871	-23.15027	
+FAKE123	41	Adelie Penguin (Pygoscelis adeliae)	Anvers	Dream	Adult, 1 Egg Stage	N21A2	Yes	2008-12-09	32.0	19.5	169	1497	MALE	7.15402	-25.18888	
+FAKE123	42	Adelie Penguin (Pygoscelis adeliae)	Anvers	Biscoe	Adult, 1 Egg Stage	N22A1	Yes	2007-10-29	33.6	17.6	160	1838	FEMALE	7.64586	-23.07845	
+FAKE123	43	Adelie Penguin (Pygoscelis adeliae)	Anvers	Dream	Adult, 1 Egg Stage	N22A2	No	2007-03-06	41.6	16.4	221	2410	FEMALE	8.35381	-26.3176	
+FAKE123	44	Adelie Penguin (Pygoscelis adeliae)	Anvers	Dream	Adult, 1 Egg Stage	N23A1	Yes	2008-05-30	44.1	19.1	183	3429		7.53781	-24.20436	
+FAKE123	45	Adelie Penguin (Pygoscelis adeliae)	Anvers	Dream	Adult, 1 Egg Stage	N23A2	No	2007-06-17	36.2	18.0	183	2192	MALE	7.24251	-26.30672	
+FAKE123	46	Adelie Penguin (Pygoscelis adeliae)	Anvers	Biscoe	Adult, 1 Egg Stage	N24A1	Yes	2008-09-14	48.9	16.8	214	2220	FEMALE	7.44331	-25.69946	
+FAKE123	47	Adelie Penguin (Pygoscelis adeliae)	Anvers	Torgersen	Adult, 1 Egg Stage	N24A2	Yes	2007-07-24	38.2	20.6	186	2522	MALE	9.4688	-26.52261	
+FAKE123	48	Adelie Penguin (Pygoscelis adeliae)	Anvers	Dream	Adult, 1 Egg Stage	N25A1	Yes	2009-03-26	47.9	20.7	211	1759	FEMALE	9.26343	-26.08388	
+FAKE123	49	Adelie Penguin (Pygoscelis adeliae)	Anvers	Dream	Adult, 1 Egg Stage	N25A2	Yes	2009-11-03	42.3	17.6	197	1007	FEMALE	9.35451	-23.75605	
+FAKE123	50 foo	Adelie Penguin (Pygoscelis adeliae)	Anvers	Biscoe	Adult, 1 Egg Stage	N26A1	Yes	2009-05-18	45.5	16.9	214	3892	FEMALE	7.48524	-23.4444	
+FAKE123	51	Adelie Penguin (Pygoscelis adeliae)	Anvers	Torgersen	Adult, 1 Egg Stage	N26A2	Yes	2007-02-09	47.1	15.5	160	2050	MALE	9.07741	-24.6691	
+FAKE123	52 foo	Adelie Penguin (Pygoscelis adeliae)	Anvers	Dream	Adult, 1 Egg Stage	N27A1	Yes	2009-04-20	32.1	15.4	169	4245	MALE	9.7978	-25.218	
+FAKE123	53	Adelie Penguin (Pygoscelis adeliae)	Anvers	Biscoe	Adult, 1 Egg Stage	N27A2	Yes	2008-05-17	33.4	22.3	226	3568	MALE	7.5521	-24.84621	
+FAKE123	54 foo	Adelie Penguin (Pygoscelis adeliae)	Anvers	Dream	Adult, 1 Egg Stage	N28A1	Yes	2009-03-06	33.1	16.5	208	2643	FEMALE	7.73155	-24.06602	
+FAKE123	55	Adelie Penguin (Pygoscelis adeliae)	Anvers	Torgersen	Adult, 1 Egg Stage	N28A2	Yes	2007-08-16	47.7	21.4	200	3018	FEMALE	7.31573	-24.67226	
+FAKE123	56	Adelie Penguin (Pygoscelis adeliae)	Anvers	Torgersen	Adult, 1 Egg Stage	N29A1	Yes	2009-04-01	39.0	21.0	210	4639		9.76209	-26.65158	
+FAKE123	57	Adelie Penguin (Pygoscelis adeliae)	Anvers	Biscoe	Adult, 1 Egg Stage	N29A2	Yes	2009-01-09	46.3	18.7	189	1576	FEMALE	8.50955	-25.99754	
+FAKE123	58	Adelie Penguin (Pygoscelis adeliae)	Anvers	Dream	Adult, 1 Egg Stage	N30A1	Yes	2008-07-21	47.5	20.5	178	2832	FEMALE	7.77332	-24.25189	
+FAKE123	59	Adelie Penguin (Pygoscelis adeliae)	Anvers	Biscoe	Adult, 1 Egg Stage	N30A2	Yes	2008-07-26	42.5	19.9	188	4258	MALE	8.07095	-23.9249	
+FAKE123	60	Adelie Penguin (Pygoscelis adeliae)	Anvers	Biscoe	Adult, 1 Egg Stage	N31A1	Yes	2007-06-02	49.0	17.2	189	3501	MALE	7.45418	-23.30417	
+FAKE123	61	Adelie Penguin (Pygoscelis adeliae)	Anvers	Dream	Adult, 1 Egg Stage	N31A2	Yes	2009-09-22	46.6	22.0	215	3379	MALE	8.33563	-23.30841	
+FAKE123	62	Adelie Penguin (Pygoscelis adeliae)	Anvers	Dream	Adult, 1 Egg Stage	N32A1	Yes	2007-03-12	30.0	18.7	160	1575	MALE	9.24261	-23.4322	
+FAKE123	63 foo	Adelie Penguin (Pygoscelis adeliae)	Anvers	Torgersen	Adult, 1 Egg Stage	N32A2	Yes	2008-10-04	45.5	16.0	200	2322	FEMALE	8.70468	-25.66045	
+FAKE123	64	Adelie Penguin (Pygoscelis adeliae)	Anvers	Biscoe	Adult, 1 Egg Stage	N33A1	Yes	2009-06-07	35.1	18.2	198	2278	FEMALE	9.01678	-25.66496	
+FAKE123	65	Adelie Penguin (Pygoscelis adeliae)	Anvers	Torgersen	Adult, 1 Egg Stage	N33A2	Yes	2009-02-01	41.7	21.3	216	1194	FEMALE	9.16069	-24.41221	
+FAKE123	66 foo	Adelie Penguin (Pygoscelis adeliae)	Anvers	Biscoe	Adult, 1 Egg Stage	N34A1	Yes	2007-03-14	35.4	20.6	169	4350	MALE	9.06816	-26.79369	
+FAKE123	67	Adelie Penguin (Pygoscelis adeliae)	Anvers	Dream	Adult, 1 Egg Stage	N34A2	Yes	2008-06-11	41.1	16.3	196	3498	FEMALE	8.05478	-23.27196	
+FAKE123	68	Adelie Penguin (Pygoscelis adeliae)	Anvers	Torgersen	Adult, 1 Egg Stage	N35A1	Yes	2008-05-08	30.4	16.5	172	1706	FEMALE	8.30429	-25.85672	
+FAKE123	69	Adelie Penguin (Pygoscelis adeliae)	Anvers	Torgersen	Adult, 1 Egg Stage	N35A2	Yes	2007-07-21	36.9	16.5	205	1940	FEMALE	9.86595	-23.53651	
+FAKE123	70	Adelie Penguin (Pygoscelis adeliae)	Anvers	Torgersen	Adult, 1 Egg Stage	N36A1	Yes	2008-11-11	35.9	19.7	221	2174	FEMALE	7.71978	-26.91875	
+FAKE123	71	Adelie Penguin (Pygoscelis adeliae)	Anvers	Torgersen	Adult, 1 Egg Stage	N36A2	Yes	2008-03-06	43.0	15.9	177	4133	MALE	9.60433	-24.0142	
+FAKE123	72	Adelie Penguin (Pygoscelis adeliae)	Anvers	Torgersen	Adult, 1 Egg Stage	N37A1	Yes	2008-06-20	45.1	16.6	223	4689	FEMALE	7.13639	-24.23997	
+FAKE123	73	Adelie Penguin (Pygoscelis adeliae)	Anvers	Dream	Adult, 1 Egg Stage	N37A2	Yes	2007-09-21	34.1	21.3	221	3236	MALE	7.41299	-25.64127	
+FAKE123	74	Adelie Penguin (Pygoscelis adeliae)	Anvers	Torgersen	Adult, 1 Egg Stage	N38A1	Yes	2008-07-02	35.3	15.4	200	3975	FEMALE	8.30866	-25.20083	
+FAKE123	75	Adelie Penguin (Pygoscelis adeliae)	Anvers	Dream	Adult, 1 Egg Stage	N38A2	Yes	2008-01-12	44.6	21.9	167	3999	FEMALE	8.85293	-26.88473	
+FAKE123	76	Adelie Penguin (Pygoscelis adeliae)	Anvers	Biscoe	Adult, 1 Egg Stage	N39A1	Yes	2007-11-11	31.7	15.7	204	4981	FEMALE	7.71224	-25.86479	
+FAKE123	77	Adelie Penguin (Pygoscelis adeliae)	Anvers	Biscoe	Adult, 1 Egg Stage	N39A2	Yes	2009-06-24	49.1	20.2	208	1039	MALE	8.38276	-24.20185	
+FAKE123	78	Adelie Penguin (Pygoscelis adeliae)	Anvers	Torgersen	Adult, 1 Egg Stage	N40A1	Yes	2008-03-01	42.8	16.7	225	4440	FEMALE	7.77682	-26.58242	
+FAKE123	79	Adelie Penguin (Pygoscelis adeliae)	Anvers	Biscoe	Adult, 1 Egg Stage	N40A2	No	2007-12-26	47.5	22.1	181	3940	MALE	7.54346	-23.74674	
+FAKE123	80	Adelie Penguin (Pygoscelis adeliae)	Anvers	Torgersen	Adult, 1 Egg Stage	N41A1	Yes	2009-12-13	30.6	23.0	164	3033	MALE	8.53477	-23.47865	
+FAKE123	81	Adelie Penguin (Pygoscelis adeliae)	Anvers	Biscoe	Adult, 1 Egg Stage	N41A2	Yes	2008-06-09	42.6	20.0	161	2272	FEMALE	8.51114	-24.11407	
+FAKE123	82	Adelie Penguin (Pygoscelis adeliae)	Anvers	Torgersen	Adult, 1 Egg Stage	N42A1	No	2007-08-13	48.4	16.5	211	2419	FEMALE	7.10844	-25.56844	
+FAKE123	83	Adelie Penguin (Pygoscelis adeliae)	Anvers	Torgersen	Adult, 1 Egg Stage	N42A2	No	2007-09-17	38.7	19.9	192	1855	MALE	8.72722	-25.72784	
+FAKE123	84	Adelie Penguin (Pygoscelis adeliae)	Anvers	Biscoe	Adult, 1 Egg Stage	N43A1	Yes	2007-10-27	31.3	22.2	179	4900	MALE	8.52667	-23.71947	
+FAKE123	85	Adelie Penguin (Pygoscelis adeliae)	Anvers	Dream	Adult, 1 Egg Stage	N43A2	Yes	2007-01-26	33.6	22.2	165	2809	MALE	7.04885	-23.21661	
+FAKE123	86	Adelie Penguin (Pygoscelis adeliae)	Anvers	Torgersen	Adult, 1 Egg Stage	N44A1	Yes	2008-05-27	34.4	21.7	181	1259	FEMALE	7.82523	-23.96078	
+FAKE123	87	Adelie Penguin (Pygoscelis adeliae)	Anvers	Dream	Adult, 1 Egg Stage	N44A2	Yes	2007-07-25	48.3	18.5	193	3203	FEMALE	8.66686	-25.20556	
+FAKE123	88	Adelie Penguin (Pygoscelis adeliae)	Anvers	Biscoe	Adult, 1 Egg Stage	N45A1	Yes	2007-11-23	50.0	22.2	209	2478	MALE	7.19067	-24.05561	
+FAKE123	89	Adelie Penguin (Pygoscelis adeliae)	Anvers	Biscoe	Adult, 1 Egg Stage	N45A2	Yes	2007-11-07	46.1	19.5	223	1078	FEMALE	8.30649	-24.00339	
+FAKE123	90	Adelie Penguin (Pygoscelis adeliae)	Anvers	Biscoe	Adult, 1 Egg Stage	N46A1	Yes	2008-04-24	48.2	20.7	225	4665	FEMALE	7.52649	-26.01288	
+FAKE123	91	Adelie Penguin (Pygoscelis adeliae)	Anvers	Biscoe	Adult, 1 Egg Stage	N46A2	Yes	2008-05-14	49.3	19.5	201	1371	MALE	9.58221	-26.94249	
+FAKE123	92	Adelie Penguin (Pygoscelis adeliae)	Anvers	Dream	Adult, 1 Egg Stage	N47A1	Yes	2009-11-22	39.9	15.4	219	2452	FEMALE	7.66486	-24.04084	
+FAKE123	93	Adelie Penguin (Pygoscelis adeliae)	Anvers	Biscoe	Adult, 1 Egg Stage	N47A2	Yes	2009-03-02	32.0	22.2	204	2478	MALE	8.0002	-23.23935	
+FAKE123	94	Adelie Penguin (Pygoscelis adeliae)	Anvers	Biscoe	Adult, 1 Egg Stage	N48A1	No	2007-06-13	33.2	18.5	212	3747	MALE	7.77326	-24.88082	
+FAKE123	95	Adelie Penguin (Pygoscelis adeliae)	Anvers	Biscoe	Adult, 1 Egg Stage	N48A2	Yes	2008-12-21	48.3	15.5	226	1178	FEMALE	9.03038	-26.05513	
+FAKE123	96	Adelie Penguin (Pygoscelis adeliae)	Anvers	Biscoe	Adult, 1 Egg Stage	N49A1	Yes	2007-05-11	47.9	18.2	193	3119	FEMALE	7.81368	-23.03286	
+FAKE123	97	Adelie Penguin (Pygoscelis adeliae)	Anvers	Biscoe	Adult, 1 Egg Stage	N49A2	Yes	2007-06-27	31.8	17.4	218	3502	MALE	9.40475	-24.26184	
+FAKE123	98 foo	Adelie Penguin (Pygoscelis adeliae)	Anvers	Torgersen	Adult, 1 Egg Stage	N50A1	Yes	2009-01-18	32.1	21.6	203	1010	FEMALE	7.41936	-26.45484	
+FAKE123	99	Adelie Penguin (Pygoscelis adeliae)	Anvers	Torgersen	Adult, 1 Egg Stage	N50A2	Yes	2008-09-12	46.2	16.5	177	2297	FEMALE	7.95734	-23.15302	
+FAKE123	100	Adelie Penguin (Pygoscelis adeliae)	Anvers	Dream	Adult, 1 Egg Stage	N51A1	Yes	2009-01-23	37.9	19.9	166	3459	FEMALE	7.88164	-25.12366	
