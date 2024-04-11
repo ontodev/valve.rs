@@ -2,13 +2,12 @@
 
 use crate::{
     toolkit::{
-        cast_sql_param_from_text, get_column_value, get_sql_type_from_global_config,
-        get_table_options, is_sql_type_error, local_sql_syntax, ColumnRule, CompiledCondition,
-        QueryAsIf, QueryAsIfKind,
+        cast_sql_param_from_text, get_column_value, get_datatype_hierarchy,
+        get_sql_type_from_global_config, get_table_options, is_sql_type_error, local_sql_syntax,
+        ColumnRule, CompiledCondition, QueryAsIf, QueryAsIfKind,
     },
     valve::{
-        ValveCell, ValveCellMessage, ValveConfig, ValveDatatypeConfig, ValveRow, ValveRuleConfig,
-        ValveTreeConstraint,
+        ValveCell, ValveCellMessage, ValveConfig, ValveRow, ValveRuleConfig, ValveTreeConstraint,
     },
 };
 use anyhow::Result;
@@ -819,37 +818,6 @@ pub fn validate_cell_datatype(
     column_name: &String,
     cell: &mut ValveCell,
 ) {
-    fn get_datatypes_to_check(
-        config: &ValveConfig,
-        compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
-        primary_dt_name: &str,
-        dt_name: &str,
-    ) -> Vec<ValveDatatypeConfig> {
-        let mut datatypes = vec![];
-        if dt_name != "" {
-            let datatype = config
-                .datatype
-                .get(dt_name)
-                .expect(&format!("Undefined datatype '{}'", dt_name));
-            let dt_name = datatype.datatype.as_str();
-            let dt_condition = compiled_datatype_conditions.get(dt_name);
-            let dt_parent = datatype.parent.as_str();
-            if dt_name != primary_dt_name {
-                if let Some(_) = dt_condition {
-                    datatypes.push(datatype.clone());
-                }
-            }
-            let mut more_datatypes = get_datatypes_to_check(
-                config,
-                compiled_datatype_conditions,
-                primary_dt_name,
-                dt_parent,
-            );
-            datatypes.append(&mut more_datatypes);
-        }
-        datatypes
-    }
-
     let column = config
         .table
         .get(table_name)
@@ -868,17 +836,13 @@ pub fn validate_cell_datatype(
         let primary_dt_condition_func = &primary_dt_condition_func.compiled;
         if !primary_dt_condition_func(&cell.strvalue()) {
             cell.valid = false;
-            let mut parent_datatypes = get_datatypes_to_check(
-                config,
-                compiled_datatype_conditions,
-                primary_dt_name,
-                primary_dt_name,
-            );
+            let mut datatypes_to_check =
+                get_datatype_hierarchy(config, compiled_datatype_conditions, primary_dt_name, true);
             // If this datatype has any parents, check them beginning from the most general to the
             // most specific. We use while and pop instead of a for loop so as to check the
             // conditions in LIFO order.
-            while !parent_datatypes.is_empty() {
-                let datatype = parent_datatypes.pop().unwrap();
+            while !datatypes_to_check.is_empty() {
+                let datatype = datatypes_to_check.pop().unwrap();
                 let dt_name = &datatype.datatype;
                 let dt_description = &datatype.description;
                 let dt_condition = &compiled_datatype_conditions.get(dt_name).unwrap().compiled;

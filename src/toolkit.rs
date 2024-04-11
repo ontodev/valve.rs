@@ -3667,6 +3667,58 @@ pub fn add_message_counts(
     }
 }
 
+/// TODO: Add docstring
+pub fn get_datatype_hierarchy(
+    config: &ValveConfig,
+    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
+    dt_name: &str,
+    only_conditioned: bool,
+) -> Vec<ValveDatatypeConfig> {
+    fn build_hierarchy(
+        config: &ValveConfig,
+        compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
+        start_dt_name: &str,
+        dt_name: &str,
+        only_conditioned: bool,
+    ) -> Vec<ValveDatatypeConfig> {
+        let mut datatypes = vec![];
+        if dt_name != "" {
+            let datatype = config
+                .datatype
+                .get(dt_name)
+                .expect(&format!("Undefined datatype '{}'", dt_name));
+            let dt_name = datatype.datatype.as_str();
+            let dt_condition = compiled_datatype_conditions.get(dt_name);
+            let dt_parent = datatype.parent.as_str();
+            if dt_name != start_dt_name {
+                if !only_conditioned {
+                    datatypes.push(datatype.clone());
+                } else {
+                    if let Some(_) = dt_condition {
+                        datatypes.push(datatype.clone());
+                    }
+                }
+            }
+            let mut more_datatypes = build_hierarchy(
+                config,
+                compiled_datatype_conditions,
+                start_dt_name,
+                dt_parent,
+                only_conditioned,
+            );
+            datatypes.append(&mut more_datatypes);
+        }
+        datatypes
+    }
+    build_hierarchy(
+        config,
+        compiled_datatype_conditions,
+        dt_name,
+        dt_name,
+        only_conditioned,
+    )
+}
+
 /// Given a global config struct, return a list of defined datatype names sorted from the most
 /// generic to the most specific. This function will panic if circular dependencies are encountered.
 pub fn get_sorted_datatypes(config: &ValveConfig) -> Vec<&str> {
