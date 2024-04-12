@@ -3667,8 +3667,12 @@ pub fn add_message_counts(
     }
 }
 
-/// TODO: Add docstring
-pub fn get_datatype_hierarchy(
+/// Given a global configuration struct, a map of compiled datatype conditions, and the name of a
+/// datatype, returns the configuration information for all of the datatype's ancestors if
+/// only_conditioned is set to false, otherwise returns the configuration information only for
+/// those ancestors that define a datatype condition. Note that this function will panic if
+/// the datatype name is not defined in the given config.
+pub fn get_datatype_ancestors(
     config: &ValveConfig,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     dt_name: &str,
@@ -3719,8 +3723,11 @@ pub fn get_datatype_hierarchy(
     )
 }
 
-/// Given a global config struct, return a list of defined datatype names sorted from the most
-/// generic to the most specific. This function will panic if circular dependencies are encountered.
+/// Given a global config struct, return a list of defined datatype names such that:
+/// - if datatype_1 is an ancestor of datatype_2, datatype_1 appears before datatype_2 in the list
+/// - if datatype_1 is not an ancestor of datatype_2, then their relative order in the list is
+///   arbitrary (unless otherwise constrained by their relations to other datatypes in the lsit).
+/// Note that this function will panic if circular dependencies are encountered.
 pub fn get_sorted_datatypes(config: &ValveConfig) -> Vec<&str> {
     let mut graph = DiGraphMap::<&str, ()>::new();
     let dt_config = &config.datatype;
@@ -4010,12 +4017,11 @@ pub async fn insert_chunk(
     verbose: bool,
     validate: bool,
 ) -> Result<()> {
-    // First, do the tree validation. TODO: I don't remember why this needs to be done first, but
-    // it does. Add a comment here explaining why.
+    // Optional tree validation:
     if validate {
         validate_rows_trees(config, pool, table_name, rows).await?;
     }
-
+    // Insertion with optional inter-table validation:
     // Try to insert the rows to the db first without validating unique and foreign constraints.
     // If there are constraint violations this will cause a database error, in which case we then
     // explicitly do the constraint validation and insert the resulting rows.
@@ -4152,6 +4158,7 @@ pub async fn insert_chunks(
     if !MULTI_THREADED {
         for (chunk_number, chunk) in chunks.into_iter().enumerate() {
             let mut rows: Vec<_> = chunk.collect();
+            // Intra-table validation:
             let mut intra_validated_rows = {
                 let only_nulltype = !validate;
                 validate_rows_intra(
@@ -4164,6 +4171,7 @@ pub async fn insert_chunks(
                     only_nulltype,
                 )
             };
+            // Insertion with optional inter-table and tree validation:
             insert_chunk(
                 config,
                 pool,

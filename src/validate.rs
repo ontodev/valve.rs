@@ -2,7 +2,7 @@
 
 use crate::{
     toolkit::{
-        cast_sql_param_from_text, get_column_value, get_datatype_hierarchy,
+        cast_sql_param_from_text, get_column_value, get_datatype_ancestors,
         get_sql_type_from_global_config, get_table_options, is_sql_type_error, local_sql_syntax,
         ColumnRule, CompiledCondition, QueryAsIf, QueryAsIfKind,
     },
@@ -458,7 +458,7 @@ pub async fn validate_tree_foreign_keys(
 }
 
 /// Given a config map, a database connection pool, a table name, and a number of rows to validate,
-/// perform tree validation on the rows and return the validated results.
+/// perform tree validation on the rows.
 pub async fn validate_rows_trees(
     config: &ValveConfig,
     pool: &AnyPool,
@@ -837,7 +837,7 @@ pub fn validate_cell_datatype(
         if !primary_dt_condition_func(&cell.strvalue()) {
             cell.valid = false;
             let mut datatypes_to_check =
-                get_datatype_hierarchy(config, compiled_datatype_conditions, primary_dt_name, true);
+                get_datatype_ancestors(config, compiled_datatype_conditions, primary_dt_name, true);
             // If this datatype has any parents, check them beginning from the most general to the
             // most specific. We use while and pop instead of a for loop so as to check the
             // conditions in LIFO order.

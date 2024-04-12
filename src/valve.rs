@@ -7,11 +7,11 @@ use crate::{
     toolkit::{
         add_message_counts, cast_column_sql_to_text, convert_undo_or_redo_record_to_change,
         delete_row_tx, get_column_for_label, get_column_value, get_compiled_datatype_conditions,
-        get_compiled_rule_conditions, get_datatype_hierarchy, get_json_from_row,
-        get_label_for_column, get_parsed_structure_conditions, get_pool_from_connection_string,
-        get_record_to_redo, get_record_to_undo, get_row_from_db, get_sql_for_standard_view,
-        get_sql_for_text_view, get_sql_type, get_sql_type_from_global_config, get_table_ddl,
-        insert_chunks, insert_new_row_tx, local_sql_syntax, read_config_files, record_row_change,
+        get_compiled_rule_conditions, get_json_from_row, get_label_for_column,
+        get_parsed_structure_conditions, get_pool_from_connection_string, get_record_to_redo,
+        get_record_to_undo, get_row_from_db, get_sql_for_standard_view, get_sql_for_text_view,
+        get_sql_type, get_sql_type_from_global_config, get_table_ddl, insert_chunks,
+        insert_new_row_tx, local_sql_syntax, read_config_files, record_row_change,
         switch_undone_state, update_row_tx, verify_table_deps_and_sort, ColumnRule,
         CompiledCondition, ParsedStructure,
     },
@@ -2251,14 +2251,15 @@ impl Valve {
         }
     }
 
-    /// TODO: Add docstring here
-    pub fn get_parent_datatypes(&self, datatype: &str) -> Vec<ValveDatatypeConfig> {
-        get_datatype_hierarchy(&self.config, &self.datatype_conditions, datatype, false)
+    /// Given the name of a datatype, returns the configuration information for all of its
+    /// ancestors.
+    pub fn get_datatype_ancestors(&self, datatype: &str) -> Vec<ValveDatatypeConfig> {
+        toolkit::get_datatype_ancestors(&self.config, &self.datatype_conditions, datatype, false)
     }
 
-    /// TODO: Add docstring here
-    pub fn get_parent_datatype_names(&self, datatype: &str) -> Vec<String> {
-        self.get_parent_datatypes(datatype)
+    /// Given the name of a datatype, returns the names of all of its ancestors.
+    pub fn get_datatype_ancestor_names(&self, datatype: &str) -> Vec<String> {
+        self.get_datatype_ancestors(datatype)
             .iter()
             .map(|d| d.datatype.to_string())
             .collect::<Vec<_>>()
