@@ -17,6 +17,7 @@ datatype	condition		empty	datatype_condition
 datatype	description		empty	trimmed_text		
 datatype	sql_type		empty	trimmed_line		
 datatype	HTML type		empty	datatype_name		
+datatype	format		empty	trimmed_line		
 rule	table			table_name		
 rule	when column			column_name		
 rule	when condition			datatype_condition		

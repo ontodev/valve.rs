@@ -28,6 +28,7 @@ use itertools::Itertools;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as SerdeValue};
+use sprintf::sprintf;
 use sqlx::{
     any::{AnyKind, AnyPool},
     query as sqlx_query, Row, ValueRef,
@@ -342,7 +343,7 @@ pub struct ValveTableConfig {
 }
 
 /// Configuration information for a particular column of a particular table
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub struct ValveColumnConfig {
     /// The table that the column belongs to
     pub table: String,
@@ -1784,6 +1785,44 @@ impl Valve {
         Ok(self)
     }
 
+    /// Given a table name and the name of a column in that table, find (in the database) the value
+    /// of the optional configuration parameter called 'format' and return it, or an empty string
+    /// if no format parameter has been configured or if none has been defined for that column.
+    pub async fn get_column_format(&self, table: &str, column: &str) -> Result<String> {
+        if !self
+            .config
+            .table
+            .get("datatype")
+            .and_then(|t| Some(t.column.clone()))
+            .and_then(|c| Some(c.keys().cloned().collect::<Vec<_>>()))
+            .and_then(|v| Some(v.contains(&"format".to_string())))
+            .expect("Could not find column configrations for the datatype table")
+        {
+            Ok("".to_string())
+        } else {
+            let sql = format!(
+                r#"SELECT d."format"
+                     FROM "column" c, "datatype" d
+                    WHERE c."table" = '{}'
+                      AND c."column" = '{}'
+                      AND c."datatype" = d."datatype""#,
+                table, column
+            );
+            let rows = sqlx_query(&sql).fetch_all(&self.pool).await?;
+            if rows.len() > 1 {
+                panic!(
+                    "Multiple entries corresponding to '{}' in datatype table",
+                    column
+                );
+            }
+            let format_string = rows[0]
+                .try_get::<&str, &str>("format")
+                .ok()
+                .unwrap_or_default();
+            Ok(format_string.to_string())
+        }
+    }
+
     /// Save the given table with the given columns at the given path as a TSV file.
     pub fn save_table(
         &self,
@@ -1792,6 +1831,62 @@ impl Valve {
         labels: &Vec<&str>,
         path: &str,
     ) -> Result<&Self> {
+        // TODO: Add a comment here.
+        fn format_cell(colformat: &str, format_regex: &Regex, cell: &str) -> String {
+            let conversion_spec = match format_regex.captures(colformat) {
+                Some(c) => c[1].to_lowercase(),
+                None => {
+                    log::warn!("Illegal format: '{}'", colformat);
+                    "s".to_string()
+                }
+            };
+            let generic_error = format!("Error applying format '{}' to '{}':", colformat, cell);
+            match conversion_spec.as_str() {
+                "d" | "i" | "c" => match cell.parse::<isize>() {
+                    Ok(cell) => match sprintf!(&colformat, cell) {
+                        Ok(cell) => {
+                            // For some reason sprintf converts signed ints to unsigned ints before
+                            // converting them to a string. So we have to workaround this here:
+                            let cell = cell.parse::<usize>().unwrap();
+                            let cell = cell as isize;
+                            cell.to_string()
+                        }
+                        Err(e) => {
+                            log::warn!("{}: {}", generic_error, e);
+                            cell.to_string()
+                        }
+                    },
+                    Err(e) => {
+                        log::warn!("{}: {}", generic_error, e);
+                        cell.to_string()
+                    }
+                },
+                "o" | "u" | "x" => match cell.parse::<usize>() {
+                    Ok(cell) => sprintf!(&colformat, cell).unwrap_or(cell.to_string()),
+                    Err(e) => {
+                        log::warn!("{}: {}", generic_error, e);
+                        cell.to_string()
+                    }
+                },
+                "e" | "f" | "g" | "a" => match cell.parse::<f64>() {
+                    Ok(cell) => sprintf!(&colformat, cell).unwrap_or(cell.to_string()),
+                    Err(e) => {
+                        log::warn!("{}: {}", generic_error, e);
+                        cell.to_string()
+                    }
+                },
+                "s" => sprintf!(&colformat, cell).unwrap_or(cell.to_string()),
+                _ => {
+                    log::warn!(
+                        "Unsupported conversion specifier '{}' in column format '{}'",
+                        conversion_spec,
+                        colformat
+                    );
+                    cell.to_string()
+                }
+            }
+        }
+
         if columns.len() != labels.len() {
             return Err(ValveError::InputError(format!(
                 "The column list: {:?} and label list: {:?} differ in length.",
@@ -1809,20 +1904,20 @@ impl Valve {
             .into());
         }
 
-        let mut casted_columns = vec!["\"row_number\"".to_string()];
-        casted_columns.append(
-            &mut columns
-                .iter()
-                .map(|v| format!(r#"CAST("{}" AS TEXT) AS "{}""#, v, v))
-                .collect::<Vec<_>>(),
-        );
+        let mut formatted_columns = vec!["\"row_number\"".to_string()];
+        for column in columns {
+            formatted_columns.push(format!(r#""{}""#, column));
+        }
         let query_table = format!("\"{}_text_view\"", table);
         let sql = format!(
-            r#"SELECT {} from {} ORDER BY "row_number""#,
-            casted_columns.join(", "),
+            r#"SELECT {} FROM {} ORDER BY "row_number""#,
+            formatted_columns.join(", "),
             query_table
         );
 
+        // Used to match a printf-style format specifier
+        // (see https://docs.rs/sprintf/latest/sprintf/#)
+        let format_regex = Regex::new(r#"^%.*([\w%])$"#)?;
         let mut writer = WriterBuilder::new()
             .delimiter(b'\t')
             .quote_style(QuoteStyle::Never)
@@ -1830,10 +1925,18 @@ impl Valve {
         writer.write_record(labels)?;
         let mut stream = sqlx_query(&sql).fetch(&self.pool);
         while let Some(row) = block_on(stream.try_next())? {
-            let mut record: Vec<&str> = vec![];
+            let mut record: Vec<String> = vec![];
             for column in columns.iter() {
-                let cell = row.try_get::<&str, &str>(column).ok().unwrap_or_default();
-                record.push(cell);
+                let colformat = block_on(self.get_column_format(table, column))?;
+                let cell;
+                if colformat != "" {
+                    cell = row.try_get::<&str, &str>(column).ok().unwrap_or_default();
+                    let formatted_cell = format_cell(&colformat, &format_regex, &cell);
+                    record.push(formatted_cell.to_string());
+                } else {
+                    cell = row.try_get::<&str, &str>(column).ok().unwrap_or_default();
+                    record.push(cell.to_string());
+                }
             }
             writer.write_record(record)?;
         }
