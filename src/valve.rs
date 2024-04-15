@@ -1831,7 +1831,8 @@ impl Valve {
         labels: &Vec<&str>,
         path: &str,
     ) -> Result<&Self> {
-        // TODO: Add a comment here.
+        // Uses the given (unverified) printf-style format string and the given compiled regular
+        // expression (which is used to verify the given format) to format the given cell.
         fn format_cell(colformat: &str, format_regex: &Regex, cell: &str) -> String {
             let conversion_spec = match format_regex.captures(colformat) {
                 Some(c) => c[1].to_lowercase(),
@@ -1928,13 +1929,11 @@ impl Valve {
             let mut record: Vec<String> = vec![];
             for column in columns.iter() {
                 let colformat = block_on(self.get_column_format(table, column))?;
-                let cell;
+                let cell = row.try_get::<&str, &str>(column).ok().unwrap_or_default();
                 if colformat != "" {
-                    cell = row.try_get::<&str, &str>(column).ok().unwrap_or_default();
                     let formatted_cell = format_cell(&colformat, &format_regex, &cell);
                     record.push(formatted_cell.to_string());
                 } else {
-                    cell = row.try_get::<&str, &str>(column).ok().unwrap_or_default();
                     record.push(cell.to_string());
                 }
             }
