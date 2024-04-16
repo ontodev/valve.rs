@@ -8,9 +8,9 @@ use crate::{
     },
     valve::{
         ValveCell, ValveCellMessage, ValveChange, ValveColumnConfig, ValveConfig,
-        ValveConstraintConfig, ValveDatatypeConfig, ValveError, ValveForeignConstraint, ValveRow,
-        ValveRowChange, ValveRuleConfig, ValveSpecialConfig, ValveTableConfig, ValveTreeConstraint,
-        ValveUnderConstraint,
+        ValveConstraintConfig, ValveDatatypeConfig, ValveError, ValveForeignConstraint,
+        ValveMessage, ValveRow, ValveRowChange, ValveRuleConfig, ValveSpecialConfig,
+        ValveTableConfig, ValveTreeConstraint, ValveUnderConstraint,
     },
     valve_grammar::StartParser,
     CHUNK_SIZE, MAX_DB_CONNECTIONS, MULTI_THREADED, SQL_PARAM, SQL_TYPES,
@@ -52,6 +52,7 @@ lazy_static! {
         "truncate",
         "load",
         "conflict",
+        "internal",
         "validate_on_load",
         "edit",
         "save",
@@ -243,38 +244,70 @@ pub fn get_label_for_column(
 /// removing the earlier conflicting option from the option set, and writing a warning to the log.
 /// Note that if there are unrecognized options in the list these will generate warning messages but
 /// will otherwise be ignored.
-pub fn normalize_options(input_options: &Vec<&str>) -> Result<HashSet<String>> {
-    if input_options.contains(&"internal") {
-        return Err(ValveError::ConfigError(format!(
-            "The option 'internal' is reserved for internal use"
-        ))
-        .into());
+pub fn normalize_options(
+    input_options: &Vec<&str>,
+) -> Result<(HashSet<String>, Vec<ValveMessage>)> {
+    fn warn_and_get_message(
+        message: &str,
+        violation: &str,
+        level: &str,
+        value: &str,
+    ) -> ValveMessage {
+        log::warn!("{}: '{}'", message, value);
+        ValveMessage {
+            column: "options".to_string(),
+            value: value.to_string(),
+            rule: format!("option:{}", violation),
+            level: level.to_string(),
+            message: message.to_string(),
+        }
     }
 
     // Collect all input options into a set, resolving any logical conflicts in favour of the last
     // read input option if necessary.
     let mut explicit_options = HashSet::new();
+    let mut messages = vec![];
     for input_option in input_options {
         let input_option = input_option.trim().to_string();
         if input_option == "" {
             continue;
         }
         if !ALLOWED_OPTIONS.contains(&input_option.as_str()) {
-            log::warn!(
-                "Unrecognized table option: '{}' will be ignored",
-                input_option
-            );
+            messages.push(warn_and_get_message(
+                "unrecognized option",
+                "unrecognized",
+                "error",
+                &input_option.as_str(),
+            ));
             continue;
         }
         if explicit_options.contains(&input_option) {
-            log::warn!("Redundant table option: '{}' will be ignored", input_option);
+            messages.push(warn_and_get_message(
+                "redundant option",
+                "redundant",
+                "warning",
+                &input_option.as_str(),
+            ));
             continue;
         }
 
         match input_option.as_str() {
+            "internal" => {
+                messages.push(warn_and_get_message(
+                    "reserved for internal use",
+                    "reserved",
+                    "error",
+                    &input_option.as_str(),
+                ));
+            }
             "db_table" => {
                 if explicit_options.contains("db_view") {
-                    log::warn!("Option 'db_table' overrides 'db_view'");
+                    messages.push(warn_and_get_message(
+                        "overrides 'db_view'",
+                        "overrides",
+                        "warning",
+                        &input_option.as_str(),
+                    ));
                     explicit_options.remove("db_view");
                 }
             }
@@ -289,79 +322,131 @@ pub fn normalize_options(input_options: &Vec<&str>) -> Result<HashSet<String>> {
                     "validate_on_load",
                 ] {
                     if explicit_options.contains(conflicting_option) {
-                        log::warn!("Option 'db_view' overrides '{}'", conflicting_option);
+                        messages.push(warn_and_get_message(
+                            &format!("overrides '{}'", conflicting_option),
+                            "overrides",
+                            "warning",
+                            &input_option.as_str(),
+                        ));
                         explicit_options.remove(conflicting_option);
                     }
                 }
             }
             "truncate" => {
                 if explicit_options.contains("db_view") {
-                    log::warn!("Option 'truncate' overrides 'db_view'");
+                    messages.push(warn_and_get_message(
+                        "overrides 'db_view'",
+                        "overrides",
+                        "warning",
+                        &input_option.as_str(),
+                    ));
                     explicit_options.remove("db_view");
                 }
             }
             "load" => {
                 if explicit_options.contains("db_view") {
-                    log::warn!("Option 'load' overrides 'db_view'");
+                    messages.push(warn_and_get_message(
+                        "overrides 'db_view'",
+                        "overrides",
+                        "warning",
+                        &input_option.as_str(),
+                    ));
                     explicit_options.remove("db_view");
                 }
             }
             "conflict" => {
                 for conflicting_option in ["db_view", "no-conflict"] {
                     if explicit_options.contains(conflicting_option) {
-                        log::warn!("Option 'conflict' overrides '{}'", conflicting_option);
+                        messages.push(warn_and_get_message(
+                            &format!("overrides '{}'", conflicting_option),
+                            "overrides",
+                            "warning",
+                            &input_option.as_str(),
+                        ));
                         explicit_options.remove(conflicting_option);
                     }
                 }
             }
             "no-conflict" => {
                 if explicit_options.contains("conflict") {
-                    log::warn!("Option 'no-conflict' overrides 'conflict'");
+                    messages.push(warn_and_get_message(
+                        "overrides 'conflict'",
+                        "overrides",
+                        "warning",
+                        &input_option.as_str(),
+                    ));
                     explicit_options.remove("conflict");
                 }
             }
             "save" => {
                 for conflicting_option in ["db_view", "no-save"] {
                     if explicit_options.contains(conflicting_option) {
-                        log::warn!("Option 'save' overrides '{}'", conflicting_option);
+                        messages.push(warn_and_get_message(
+                            &format!("overrides '{}'", conflicting_option),
+                            "overrides",
+                            "warning",
+                            &input_option.as_str(),
+                        ));
                         explicit_options.remove(conflicting_option);
                     }
                 }
             }
             "no-save" => {
                 if explicit_options.contains("save") {
-                    log::warn!("Option 'no-save' overrides 'save'");
+                    messages.push(warn_and_get_message(
+                        "overrides 'save'",
+                        "overrides",
+                        "warning",
+                        &input_option.as_str(),
+                    ));
                     explicit_options.remove("save");
                 }
             }
             "edit" => {
                 for conflicting_option in ["db_view", "no-edit"] {
                     if explicit_options.contains(conflicting_option) {
-                        log::warn!("Option 'edit' overrides '{}'", conflicting_option);
+                        messages.push(warn_and_get_message(
+                            &format!("overrides '{}'", conflicting_option),
+                            "overrides",
+                            "warning",
+                            &input_option.as_str(),
+                        ));
                         explicit_options.remove(conflicting_option);
                     }
                 }
             }
             "no-edit" => {
                 if explicit_options.contains("edit") {
-                    log::warn!("Option 'no-edit' overrides 'edit'");
+                    messages.push(warn_and_get_message(
+                        "overrides 'edit'",
+                        "overrides",
+                        "warning",
+                        &input_option.as_str(),
+                    ));
                     explicit_options.remove("edit");
                 }
             }
             "validate_on_load" => {
                 for conflicting_option in ["db_view", "no-validate_on_load"] {
                     if explicit_options.contains(conflicting_option) {
-                        log::warn!(
-                            "Option 'validate_on_load' overrides '{}'",
-                            conflicting_option
-                        );
+                        messages.push(warn_and_get_message(
+                            &format!("overrides '{}'", conflicting_option),
+                            "overrides",
+                            "warning",
+                            &input_option.as_str(),
+                        ));
                         explicit_options.remove(conflicting_option);
                     }
                 }
             }
             "no-validate_on_load" => {
                 if explicit_options.contains("validate_on_load") {
-                    log::warn!("Option 'no-validate_on_load' overrides 'validate_on_load'");
+                    messages.push(warn_and_get_message(
+                        "overrides 'validate_on_load'",
+                        "overrides",
+                        "warning",
+                        &input_option.as_str(),
+                    ));
                     explicit_options.remove("validate_on_load");
                 }
             }
@@ -404,10 +489,13 @@ pub fn normalize_options(input_options: &Vec<&str>) -> Result<HashSet<String>> {
     explicit_options.remove("no-edit");
     explicit_options.remove("no-validate_on_load");
     explicit_options.remove("no-conflict");
+    // If the user specified the 'internal' option we also remove this here (a warning will have
+    // been generated above);
+    explicit_options.remove("internal");
 
     // Construct the union of the base and explicit sets of options and return it:
     let normalized_options = base_options.union(&explicit_options).cloned().collect();
-    Ok(normalized_options)
+    Ok((normalized_options, messages))
 }
 
 /// Given the path to a table table (either a table.tsv file or a database containing a
@@ -435,6 +523,7 @@ pub fn read_config_files(
     Vec<String>,
     HashMap<String, Vec<String>>,
     HashMap<String, Vec<String>>,
+    IndexMap<u32, Vec<ValveMessage>>,
 )> {
     // Given a list of columns that are required for some table, and a subset of those columns
     // that are required to have values, check if both sets of requirements are met by the given
@@ -495,7 +584,11 @@ pub fn read_config_files(
         }
     };
 
-    for row in rows {
+    let mut startup_messages = IndexMap::new();
+    for (row_number, row) in rows.iter().enumerate() {
+        // enumerate() begins at 0 but we want to count rows from 1:
+        let row_number = row_number as u32;
+        let row_number = row_number + 1;
         if let Err(e) = check_table_requirements(
             &vec!["table", "path", "type", "description"],
             &vec!["table"],
@@ -518,7 +611,7 @@ pub fn read_config_files(
         let row_options = row.get("options").and_then(|t| t.as_str()).unwrap();
         let row_options = row_options.to_lowercase();
         let row_options = row_options.as_str().split(",").collect::<Vec<_>>();
-        let row_options = match normalize_options(&row_options) {
+        let (row_options, messages) = match normalize_options(&row_options) {
             Err(e) => {
                 return Err(ValveError::ConfigError(format!(
                     "Error while reading options for '{}' from table table: {}",
@@ -526,9 +619,12 @@ pub fn read_config_files(
                 ))
                 .into());
             }
-            Ok(v) => v,
+            Ok((o, m)) => (o, m),
         };
+        startup_messages.insert(row_number, messages);
         let row_desc = row.get("description").and_then(|t| t.as_str()).unwrap();
+
+        println!("ROW OPTIONS FOR {}: {:?}", row_table, row_options);
 
         // Here is a summary of the allowed table configurations for the various table modes:
         // - Views are allowed to have an empty path. If the path is non-empty then it must either
@@ -1132,6 +1228,7 @@ pub fn read_config_files(
         sorted_tables,
         table_dependencies_in,
         table_dependencies_out,
+        startup_messages,
     ))
 }
 

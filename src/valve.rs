@@ -268,7 +268,7 @@ impl std::fmt::Display for ValveError {
 impl Error for ValveError {}
 
 /// Represents a message associated with a particular value of a particular column.
-#[derive(Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct ValveMessage {
     /// The name of the column
     pub column: String,
@@ -519,6 +519,11 @@ pub struct Valve {
     pub interactive: bool,
     /// Activates optimizations used for the initial loading of data.
     pub initial_load: bool,
+    /// Private field used to store startup error messages. Note that these are also accessible via
+    /// the 'message' database table. Startup messages represent errors and warnings that are
+    /// encountered while configuring Valve which cannot be handled at load time. They are always
+    /// associated with the 'table' table.
+    startup_messages: Vec<ValveMessage>,
 }
 
 impl Valve {
@@ -545,6 +550,7 @@ impl Valve {
             sorted_table_list,
             table_dependencies_in,
             table_dependencies_out,
+            startup_messages,
         ) = read_config_files(table_path, &parser, &pool)?;
 
         let config = ValveConfig {
@@ -574,6 +580,7 @@ impl Valve {
             verbose: false,
             interactive: false,
             initial_load: false,
+            startup_messages: vec![],
         })
     }
 
@@ -1514,6 +1521,8 @@ impl Valve {
                 .collect::<Vec<_>>(),
         )
         .await?;
+
+        // TODO: Insert the 'startup' messages here.
 
         let num_tables = table_list.len();
         let mut total_errors = 0;
