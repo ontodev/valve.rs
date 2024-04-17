@@ -246,14 +246,21 @@ pub fn get_label_for_column(
 /// will otherwise be ignored.
 pub fn normalize_options(
     input_options: &Vec<&str>,
+    row_number: u32,
 ) -> Result<(HashSet<String>, Vec<ValveMessage>)> {
     fn warn_and_get_message(
+        row_number: u32,
         message: &str,
         violation: &str,
         level: &str,
         value: &str,
     ) -> ValveMessage {
-        log::warn!("{}: '{}'", message, value);
+        log::warn!(
+            "{}: '{}' in row {} of 'table' table",
+            message,
+            value,
+            row_number
+        );
         ValveMessage {
             column: "options".to_string(),
             value: value.to_string(),
@@ -274,6 +281,7 @@ pub fn normalize_options(
         }
         if !ALLOWED_OPTIONS.contains(&input_option.as_str()) {
             messages.push(warn_and_get_message(
+                row_number,
                 "unrecognized option",
                 "unrecognized",
                 "error",
@@ -283,6 +291,7 @@ pub fn normalize_options(
         }
         if explicit_options.contains(&input_option) {
             messages.push(warn_and_get_message(
+                row_number,
                 "redundant option",
                 "redundant",
                 "warning",
@@ -294,6 +303,7 @@ pub fn normalize_options(
         match input_option.as_str() {
             "internal" => {
                 messages.push(warn_and_get_message(
+                    row_number,
                     "reserved for internal use",
                     "reserved",
                     "error",
@@ -303,6 +313,7 @@ pub fn normalize_options(
             "db_table" => {
                 if explicit_options.contains("db_view") {
                     messages.push(warn_and_get_message(
+                        row_number,
                         "overrides db_view",
                         "overrides",
                         "warning",
@@ -323,6 +334,7 @@ pub fn normalize_options(
                 ] {
                     if explicit_options.contains(conflicting_option) {
                         messages.push(warn_and_get_message(
+                            row_number,
                             &format!("overrides {}", conflicting_option),
                             "overrides",
                             "warning",
@@ -335,6 +347,7 @@ pub fn normalize_options(
             "truncate" => {
                 if explicit_options.contains("db_view") {
                     messages.push(warn_and_get_message(
+                        row_number,
                         "overrides db_view",
                         "overrides",
                         "warning",
@@ -346,6 +359,7 @@ pub fn normalize_options(
             "load" => {
                 if explicit_options.contains("db_view") {
                     messages.push(warn_and_get_message(
+                        row_number,
                         "overrides db_view",
                         "overrides",
                         "warning",
@@ -358,6 +372,7 @@ pub fn normalize_options(
                 for conflicting_option in ["db_view", "no-conflict"] {
                     if explicit_options.contains(conflicting_option) {
                         messages.push(warn_and_get_message(
+                            row_number,
                             &format!("overrides {}", conflicting_option),
                             "overrides",
                             "warning",
@@ -370,6 +385,7 @@ pub fn normalize_options(
             "no-conflict" => {
                 if explicit_options.contains("conflict") {
                     messages.push(warn_and_get_message(
+                        row_number,
                         "overrides conflict",
                         "overrides",
                         "warning",
@@ -382,6 +398,7 @@ pub fn normalize_options(
                 for conflicting_option in ["db_view", "no-save"] {
                     if explicit_options.contains(conflicting_option) {
                         messages.push(warn_and_get_message(
+                            row_number,
                             &format!("overrides {}", conflicting_option),
                             "overrides",
                             "warning",
@@ -394,6 +411,7 @@ pub fn normalize_options(
             "no-save" => {
                 if explicit_options.contains("save") {
                     messages.push(warn_and_get_message(
+                        row_number,
                         "overrides save",
                         "overrides",
                         "warning",
@@ -406,6 +424,7 @@ pub fn normalize_options(
                 for conflicting_option in ["db_view", "no-edit"] {
                     if explicit_options.contains(conflicting_option) {
                         messages.push(warn_and_get_message(
+                            row_number,
                             &format!("overrides {}", conflicting_option),
                             "overrides",
                             "warning",
@@ -418,6 +437,7 @@ pub fn normalize_options(
             "no-edit" => {
                 if explicit_options.contains("edit") {
                     messages.push(warn_and_get_message(
+                        row_number,
                         "overrides edit",
                         "overrides",
                         "warning",
@@ -430,6 +450,7 @@ pub fn normalize_options(
                 for conflicting_option in ["db_view", "no-validate_on_load"] {
                     if explicit_options.contains(conflicting_option) {
                         messages.push(warn_and_get_message(
+                            row_number,
                             &format!("overrides {}", conflicting_option),
                             "overrides",
                             "warning",
@@ -442,6 +463,7 @@ pub fn normalize_options(
             "no-validate_on_load" => {
                 if explicit_options.contains("validate_on_load") {
                     messages.push(warn_and_get_message(
+                        row_number,
                         "overrides validate_on_load",
                         "overrides",
                         "warning",
@@ -611,7 +633,7 @@ pub fn read_config_files(
         let row_options = row.get("options").and_then(|t| t.as_str()).unwrap();
         let row_options = row_options.to_lowercase();
         let row_options = row_options.as_str().split(",").collect::<Vec<_>>();
-        let (row_options, messages) = match normalize_options(&row_options) {
+        let (row_options, messages) = match normalize_options(&row_options, row_number) {
             Err(e) => {
                 return Err(ValveError::ConfigError(format!(
                     "Error while reading options for '{}' from table table: {}",
