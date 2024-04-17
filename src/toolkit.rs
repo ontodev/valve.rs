@@ -303,7 +303,7 @@ pub fn normalize_options(
             "db_table" => {
                 if explicit_options.contains("db_view") {
                     messages.push(warn_and_get_message(
-                        "overrides 'db_view'",
+                        "overrides db_view",
                         "overrides",
                         "warning",
                         &input_option.as_str(),
@@ -323,7 +323,7 @@ pub fn normalize_options(
                 ] {
                     if explicit_options.contains(conflicting_option) {
                         messages.push(warn_and_get_message(
-                            &format!("overrides '{}'", conflicting_option),
+                            &format!("overrides {}", conflicting_option),
                             "overrides",
                             "warning",
                             &input_option.as_str(),
@@ -335,7 +335,7 @@ pub fn normalize_options(
             "truncate" => {
                 if explicit_options.contains("db_view") {
                     messages.push(warn_and_get_message(
-                        "overrides 'db_view'",
+                        "overrides db_view",
                         "overrides",
                         "warning",
                         &input_option.as_str(),
@@ -346,7 +346,7 @@ pub fn normalize_options(
             "load" => {
                 if explicit_options.contains("db_view") {
                     messages.push(warn_and_get_message(
-                        "overrides 'db_view'",
+                        "overrides db_view",
                         "overrides",
                         "warning",
                         &input_option.as_str(),
@@ -358,7 +358,7 @@ pub fn normalize_options(
                 for conflicting_option in ["db_view", "no-conflict"] {
                     if explicit_options.contains(conflicting_option) {
                         messages.push(warn_and_get_message(
-                            &format!("overrides '{}'", conflicting_option),
+                            &format!("overrides {}", conflicting_option),
                             "overrides",
                             "warning",
                             &input_option.as_str(),
@@ -370,7 +370,7 @@ pub fn normalize_options(
             "no-conflict" => {
                 if explicit_options.contains("conflict") {
                     messages.push(warn_and_get_message(
-                        "overrides 'conflict'",
+                        "overrides conflict",
                         "overrides",
                         "warning",
                         &input_option.as_str(),
@@ -382,7 +382,7 @@ pub fn normalize_options(
                 for conflicting_option in ["db_view", "no-save"] {
                     if explicit_options.contains(conflicting_option) {
                         messages.push(warn_and_get_message(
-                            &format!("overrides '{}'", conflicting_option),
+                            &format!("overrides {}", conflicting_option),
                             "overrides",
                             "warning",
                             &input_option.as_str(),
@@ -394,7 +394,7 @@ pub fn normalize_options(
             "no-save" => {
                 if explicit_options.contains("save") {
                     messages.push(warn_and_get_message(
-                        "overrides 'save'",
+                        "overrides save",
                         "overrides",
                         "warning",
                         &input_option.as_str(),
@@ -406,7 +406,7 @@ pub fn normalize_options(
                 for conflicting_option in ["db_view", "no-edit"] {
                     if explicit_options.contains(conflicting_option) {
                         messages.push(warn_and_get_message(
-                            &format!("overrides '{}'", conflicting_option),
+                            &format!("overrides {}", conflicting_option),
                             "overrides",
                             "warning",
                             &input_option.as_str(),
@@ -418,7 +418,7 @@ pub fn normalize_options(
             "no-edit" => {
                 if explicit_options.contains("edit") {
                     messages.push(warn_and_get_message(
-                        "overrides 'edit'",
+                        "overrides edit",
                         "overrides",
                         "warning",
                         &input_option.as_str(),
@@ -430,7 +430,7 @@ pub fn normalize_options(
                 for conflicting_option in ["db_view", "no-validate_on_load"] {
                     if explicit_options.contains(conflicting_option) {
                         messages.push(warn_and_get_message(
-                            &format!("overrides '{}'", conflicting_option),
+                            &format!("overrides {}", conflicting_option),
                             "overrides",
                             "warning",
                             &input_option.as_str(),
@@ -442,7 +442,7 @@ pub fn normalize_options(
             "no-validate_on_load" => {
                 if explicit_options.contains("validate_on_load") {
                     messages.push(warn_and_get_message(
-                        "overrides 'validate_on_load'",
+                        "overrides validate_on_load",
                         "overrides",
                         "warning",
                         &input_option.as_str(),
@@ -584,7 +584,7 @@ pub fn read_config_files(
         }
     };
 
-    let mut startup_messages = IndexMap::new();
+    let mut startup_table_messages = IndexMap::new();
     for (row_number, row) in rows.iter().enumerate() {
         // enumerate() begins at 0 but we want to count rows from 1:
         let row_number = row_number as u32;
@@ -621,10 +621,8 @@ pub fn read_config_files(
             }
             Ok((o, m)) => (o, m),
         };
-        startup_messages.insert(row_number, messages);
+        startup_table_messages.insert(row_number, messages);
         let row_desc = row.get("description").and_then(|t| t.as_str()).unwrap();
-
-        println!("ROW OPTIONS FOR {}: {:?}", row_table, row_options);
 
         // Here is a summary of the allowed table configurations for the various table modes:
         // - Views are allowed to have an empty path. If the path is non-empty then it must either
@@ -1228,7 +1226,7 @@ pub fn read_config_files(
         sorted_tables,
         table_dependencies_in,
         table_dependencies_out,
-        startup_messages,
+        startup_table_messages,
     ))
 }
 

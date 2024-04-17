@@ -168,7 +168,7 @@ def export_messages(cursor, is_sqlite, args):
                 SELECT "table", "row", "column", "level", "rule", "message", "value"
                 FROM "message"
                 WHERE "table" in ({in_clause})
-                ORDER by "table", "row", "column", "rule"
+                ORDER by "table", "row", "column", "rule", "level", "value"
                 """
                 if not a1:
                     cursor.execute(message_select)
@@ -232,7 +232,7 @@ def export_messages(cursor, is_sqlite, args):
                     FROM "message" m
                       INNER JOIN "{table}_view" t ON m."row" = t."row_number"
                     WHERE m."table" = '{table}'
-                    ORDER by "row", m."column", m."rule"
+                    ORDER by "row", m."column", m."rule", m."level", m."value"
                     """
                     cursor.execute(message_select)
                     message_columns_info = [d[0] for d in cursor.description]

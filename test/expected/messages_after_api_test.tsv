@@ -1,5 +1,11 @@
 table	row	column	level	rule	message	value
 table	3	type	error	datatype:table_type	type should be a table type	rule
+table	12	options	error	option:unrecognized	unrecognized option	foo
+table	16	options	warning	option:overrides	overrides db_table	db_view
+table	16	options	error	option:reserved	reserved for internal use	internal
+table	17	options	warning	option:overrides	overrides save	db_view
+table	20	options	warning	option:overrides	overrides edit	no-edit
+table	20	options	warning	option:overrides	overrides save	no-save
 table1	5	base	error	key:unique	Values of base must be unique	http://purl.obolibrary.org/obo/VO_
 table1	5	prefix	error	key:primary	Values of prefix must be unique	VO
 table1	10	base	error	key:unique	Values of base must be unique	http://www.w3.org/1999/02/22-rdf-syntax-ns#

@@ -523,7 +523,7 @@ pub struct Valve {
     /// the 'message' database table. Startup messages represent errors and warnings that are
     /// encountered while configuring Valve which cannot be handled at load time. They are always
     /// associated with the 'table' table.
-    startup_messages: Vec<ValveMessage>,
+    startup_table_messages: IndexMap<u32, Vec<ValveMessage>>,
 }
 
 impl Valve {
@@ -550,7 +550,7 @@ impl Valve {
             sorted_table_list,
             table_dependencies_in,
             table_dependencies_out,
-            startup_messages,
+            startup_table_messages,
         ) = read_config_files(table_path, &parser, &pool)?;
 
         let config = ValveConfig {
@@ -580,7 +580,7 @@ impl Valve {
             verbose: false,
             interactive: false,
             initial_load: false,
-            startup_messages: vec![],
+            startup_table_messages: startup_table_messages,
         })
     }
 
@@ -1522,7 +1522,19 @@ impl Valve {
         )
         .await?;
 
-        // TODO: Insert the 'startup' messages here.
+        // Insert any 'startup' messages into the message table. These are messages generated
+        // during the configuration stage.
+        for (row, messages) in self.startup_table_messages.iter() {
+            for msg in messages {
+                let msg_sql = format!(
+                    r#"INSERT INTO "message"
+                       ("table", "row", "column", "value", "level", "rule", "message")
+                       VALUES ('table', {}, '{}', '{}', '{}', '{}', '{}')"#,
+                    row, msg.column, msg.value, msg.level, msg.rule, msg.message
+                );
+                self.execute_sql(&msg_sql).await?;
+            }
+        }
 
         let num_tables = table_list.len();
         let mut total_errors = 0;
