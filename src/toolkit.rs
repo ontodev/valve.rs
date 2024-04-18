@@ -950,6 +950,11 @@ pub fn read_config_files(
         }
         let structure = row.get("structure").and_then(|c| c.as_str()).unwrap();
 
+        let default = match row.get("default") {
+            None => SerdeValue::String("".to_string()),
+            Some(default) => default.clone(),
+        };
+
         // If an entry in the defined_column_orderings map for this table doesn't already exist,
         // create one:
         if defined_column_orderings
@@ -987,6 +992,7 @@ pub fn read_config_files(
                     label: label,
                     structure: structure.to_string(),
                     nulltype: nulltype.to_string(),
+                    default: default,
                 },
             ))
         });
@@ -2931,7 +2937,10 @@ pub fn read_tsv_into_vector(path: &str) -> Result<Vec<SerdeMap>> {
         // enumerate() begins at 0 but we want to count rows from 1:
         let i = i + 1;
         for (col, val) in row {
-            let val = val.as_str().unwrap();
+            let val = match val {
+                SerdeValue::String(s) => s.to_string(),
+                _ => val.to_string(),
+            };
             let trimmed_val = val.trim();
             if trimmed_val != val {
                 return Err(ValveError::DataError(format!(
@@ -3621,25 +3630,28 @@ pub fn get_table_constraints(
 /// and a database connection pool, return a list of DDL statements that can be used to create the
 /// database tables.
 pub fn get_table_ddl(
-    tables_config: &HashMap<String, ValveTableConfig>,
-    datatypes_config: &HashMap<String, ValveDatatypeConfig>,
+    config: &ValveConfig,
     parser: &StartParser,
     table_name: &String,
     pool: &AnyPool,
-) -> Vec<String> {
+) -> Result<Vec<String>> {
+    let tables_config = &config.table;
+    let datatypes_config = &config.datatype;
+
     let mut statements = vec![];
     let mut create_lines = vec![
         format!(r#"CREATE TABLE "{}" ("#, table_name),
         String::from(r#"  "row_number" BIGINT,"#),
     ];
 
+    let normal_table_name;
+    if let Some(s) = table_name.strip_suffix("_conflict") {
+        normal_table_name = String::from(s);
+    } else {
+        normal_table_name = table_name.to_string();
+    }
+
     let column_configs = {
-        let normal_table_name;
-        if let Some(s) = table_name.strip_suffix("_conflict") {
-            normal_table_name = String::from(s);
-        } else {
-            normal_table_name = table_name.to_string();
-        }
         let column_order = &tables_config
             .get(&normal_table_name)
             .expect(&format!("Undefined table '{}'", normal_table_name))
@@ -3660,7 +3672,13 @@ pub fn get_table_ddl(
         if table_name.ends_with("_conflict") {
             (vec![], vec![], vec![], vec![], vec![])
         } else {
-            get_table_constraints(tables_config, datatypes_config, parser, &table_name, &pool)
+            get_table_constraints(
+                &tables_config,
+                &datatypes_config,
+                parser,
+                &table_name,
+                &pool,
+            )
         }
     };
 
@@ -3668,7 +3686,7 @@ pub fn get_table_ddl(
     let mut r = 0;
     for column_config in column_configs {
         r += 1;
-        let sql_type = get_sql_type(datatypes_config, &column_config.datatype, pool);
+        let sql_type = get_sql_type(&datatypes_config, &column_config.datatype, pool);
 
         let short_sql_type = {
             if sql_type.to_lowercase().as_str().starts_with("varchar(") {
@@ -3698,6 +3716,21 @@ pub fn get_table_ddl(
         // Check if the column has a unique constraint and indicate this in the DDL if so:
         if uniques.contains(&column_name) {
             line.push_str(" UNIQUE");
+        }
+
+        // Check if the column has a default value and indicate this in the DDL if it does:
+        let default_value = match &column_config.default {
+            SerdeValue::String(s) if s == "" => "".to_string(),
+            SerdeValue::String(s) => format!("'{}'", s),
+            SerdeValue::Number(n) => n.to_string(),
+            _ => panic!(
+                "Configured default value, {:?}, of column '{}' is neither \
+                         a number nor a string.",
+                column_config.default, column_name
+            ),
+        };
+        if default_value != "" {
+            line.push_str(&format!(" DEFAULT {}", default_value));
         }
 
         // If there are foreign constraints add a column to the end of the statement which we will
@@ -3758,7 +3791,7 @@ pub fn get_table_ddl(
         table_name, table_name
     ));
 
-    return statements;
+    Ok(statements)
 }
 
 /// Given a list of messages and a HashMap, messages_stats, with which to collect counts of

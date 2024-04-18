@@ -359,6 +359,9 @@ pub struct ValveColumnConfig {
     pub structure: String,
     /// The datatype of the column's nulltype (or the empty string if the column has none)
     pub nulltype: String,
+    /// The default for a column indicates which value should be inserted for the column in a given
+    /// row when the value of that column has not been specified in an INSERT database statement.
+    pub default: SerdeValue,
 }
 
 /// Configuration information for a particular datatype
@@ -1265,13 +1268,11 @@ impl Valve {
             let mut table_statements = vec![];
             // Tables without TSV paths are necessarily managed externally:
             if table_config.path.to_lowercase().ends_with(".tsv") {
-                let mut statements =
-                    get_table_ddl(tables_config, datatypes_config, &parser, &table, &self.pool);
+                let mut statements = get_table_ddl(&self.config, &parser, &table, &self.pool)?;
                 table_statements.append(&mut statements);
                 if table_config.options.contains("conflict") {
                     let cable = format!("{}_conflict", table);
-                    let mut statements =
-                        get_table_ddl(tables_config, datatypes_config, &parser, &cable, &self.pool);
+                    let mut statements = get_table_ddl(&self.config, &parser, &cable, &self.pool)?;
                     table_statements.append(&mut statements);
 
                     let create_view_sql = get_sql_for_standard_view(&table, &self.pool);
@@ -1809,6 +1810,8 @@ impl Valve {
     /// Given a table name and the name of a column in that table, find (in the database) the value
     /// of the optional configuration parameter called 'format' and return it, or an empty string
     /// if no format parameter has been configured or if none has been defined for that column.
+    /// The format parameter indicates how values of the given column are to be formatted when
+    /// saving a table to an external file.
     pub async fn get_column_format(&self, table: &str, column: &str) -> Result<String> {
         if !self
             .config

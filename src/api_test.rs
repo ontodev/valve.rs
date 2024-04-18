@@ -642,6 +642,10 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<()> {
     test_randomized_api_test_with_undo_redo(&valve).await?;
     test_modes(&valve).await?;
 
+    // TODO: Add a test that inserts a row to table8 but does not specify a value for column 'base',
+    // and then verify that the value of that column in the row inserted to the database is the
+    // default value specified in the column table.
+
     // TODO: Add a test to make sure that the SOURCE command line argument can be a database
     // rather than a .tsv file.
 
