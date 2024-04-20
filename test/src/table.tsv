@@ -10,7 +10,7 @@ table4	test/src/ontology/table4.tsv	The fourth data table
 table5	test/src/ontology/table5.tsv	The fifth data table		
 table6	test/src/ontology/table6.tsv	The sixth data table (like table2 but all numeric)		
 table7	test/src/ontology/table7.tsv	The seventh data table		
-table8	test/src/ontology/table8.tsv	The eightth data table		foo, validate_on_load, conflict
+table8	test/src/ontology/table8.tsv	The eightth data table		foo, validate_on_load, conflict, edit
 table9	test/src/ontology/table9.tsv	The ninth data table		
 table10	test/src/ontology/table10.tsv	The tenth data table		
 table11	test/src/ontology/table11.tsv	The eleventh data table		

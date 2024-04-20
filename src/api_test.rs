@@ -414,6 +414,7 @@ async fn test_undo_redo(valve: &Valve) -> Result<()> {
 }
 
 async fn test_modes(valve: &Valve) -> Result<()> {
+    eprint!("Running test_modes() ... ");
     let readonly_row = json!({
         "study_name": "FAKE123",
         "sample_number": 100,
@@ -625,11 +626,177 @@ async fn test_modes(valve: &Valve) -> Result<()> {
         _ => assert!(false, "Expected an error result but got an OK result"),
     };
 
+    eprintln!("done.");
+    Ok(())
+}
+
+async fn test_default(valve: &Valve) -> Result<()> {
+    eprint!("Running test_default() ... ");
+
+    // Default value of text type:
+    let row = json!({
+        "prefix": "g",
+        "ontology_IRI": "foo",
+        "version_IRI": "bar",
+    });
+    let (_, new_row) = valve.insert_row("table8", row.as_object().unwrap()).await?;
+    let expected = indoc! {r#"ValveRow {
+                                  row_number: Some(
+                                      3,
+                                  ),
+                                  contents: {
+                                      "ontology_IRI": ValveCell {
+                                          nulltype: None,
+                                          value: String("foo"),
+                                          valid: true,
+                                          messages: [],
+                                      },
+                                      "prefix": ValveCell {
+                                          nulltype: None,
+                                          value: String("g"),
+                                          valid: true,
+                                          messages: [],
+                                      },
+                                      "version_IRI": ValveCell {
+                                          nulltype: None,
+                                          value: String("bar"),
+                                          valid: true,
+                                          messages: [],
+                                      },
+                                  },
+                              }"#};
+    assert_eq!(format!("{:#?}", new_row), expected);
+    let query = sqlx_query(
+        r#"SELECT * FROM "table8"
+            WHERE "prefix" = 'g'
+              AND "ontology_IRI" = 'foo'
+              AND "version_IRI" = 'bar'"#,
+    );
+    let rows = query.fetch_all(&valve.pool).await?;
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+    let base = row.get::<&str, &str>("base");
+    assert_eq!("b", base);
+
+    // Default value of numeric type:
+    let row = json!({
+        "child": "f",
+        "parent": "d",
+        "xyzzy": "x",
+        "bar": "w",
+    });
+    let (_, new_row) = valve.insert_row("table9", row.as_object().unwrap()).await?;
+    let expected = indoc! {r#"ValveRow {
+                                  row_number: Some(
+                                      10,
+                                  ),
+                                  contents: {
+                                      "bar": ValveCell {
+                                          nulltype: None,
+                                          value: String("w"),
+                                          valid: true,
+                                          messages: [],
+                                      },
+                                      "child": ValveCell {
+                                          nulltype: None,
+                                          value: String("f"),
+                                          valid: true,
+                                          messages: [],
+                                      },
+                                      "parent": ValveCell {
+                                          nulltype: None,
+                                          value: String("d"),
+                                          valid: true,
+                                          messages: [],
+                                      },
+                                      "xyzzy": ValveCell {
+                                          nulltype: None,
+                                          value: String("x"),
+                                          valid: true,
+                                          messages: [],
+                                      },
+                                  },
+                              }"#};
+    assert_eq!(format!("{:#?}", new_row), expected);
+    let query = sqlx_query(
+        r#"SELECT * FROM "table9"
+            WHERE "bar" = 'w'
+              AND "child" = 'f'
+              AND "parent" = 'd'
+              AND "xyzzy" = 'x'"#,
+    );
+    let rows = query.fetch_all(&valve.pool).await?;
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+    let foo: i32 = row.get("foo");
+    assert_eq!(1, foo);
+
+    // Override default value:
+    let row = json!({
+        "child": "g",
+        "parent": "e",
+        "xyzzy": "y",
+        "bar": "x",
+        "foo": 2,
+    });
+    let (_, new_row) = valve.insert_row("table9", row.as_object().unwrap()).await?;
+    let expected = indoc! {r#"ValveRow {
+                                  row_number: Some(
+                                      11,
+                                  ),
+                                  contents: {
+                                      "bar": ValveCell {
+                                          nulltype: None,
+                                          value: String("x"),
+                                          valid: true,
+                                          messages: [],
+                                      },
+                                      "child": ValveCell {
+                                          nulltype: None,
+                                          value: String("g"),
+                                          valid: true,
+                                          messages: [],
+                                      },
+                                      "foo": ValveCell {
+                                          nulltype: None,
+                                          value: Number(2),
+                                          valid: true,
+                                          messages: [],
+                                      },
+                                      "parent": ValveCell {
+                                          nulltype: None,
+                                          value: String("e"),
+                                          valid: true,
+                                          messages: [],
+                                      },
+                                      "xyzzy": ValveCell {
+                                          nulltype: None,
+                                          value: String("y"),
+                                          valid: true,
+                                          messages: [],
+                                      },
+                                  },
+                              }"#};
+    assert_eq!(format!("{:#?}", new_row), expected);
+    let query = sqlx_query(
+        r#"SELECT * FROM "table9"
+            WHERE "bar" = 'x'
+              AND "child" = 'g'
+              AND "parent" = 'e'
+              AND "xyzzy" = 'y'"#,
+    );
+    let rows = query.fetch_all(&valve.pool).await?;
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+    let foo: i32 = row.get("foo");
+    assert_eq!(2, foo);
+    eprintln!("done.");
     Ok(())
 }
 
 pub async fn run_api_tests(table: &str, database: &str) -> Result<()> {
     let valve = Valve::build(table, database).await?;
+
     // NOTE that you must use an external script to fetch the data from the database and run a diff
     // against a known good sample to verify that these tests yield the expected results:
     test_matching(&valve).await?;
@@ -641,13 +808,14 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<()> {
     test_undo_redo(&valve).await?;
     test_randomized_api_test_with_undo_redo(&valve).await?;
     test_modes(&valve).await?;
+    test_default(&valve).await?;
 
-    // TODO: Add a test that inserts a row to table8 but does not specify a value for column 'base',
-    // and then verify that the value of that column in the row inserted to the database is the
-    // default value specified in the column table.
+    // When the first argument to Valve::build() is not a string ending in .tsv, the table table
+    // should be read from the database string (given by the second argument) instead, i.e., valve
+    // will look in the given database and read the configuration from the "table" db table. Here
+    // we just make sure that this is possible.
+    let valve2 = Valve::build("ignored", database).await?;
 
-    // TODO: Add a test to make sure that the SOURCE command line argument can be a database
-    // rather than a .tsv file.
-
+    eprintln!("done.");
     Ok(())
 }

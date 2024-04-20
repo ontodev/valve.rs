@@ -361,6 +361,7 @@ pub struct ValveColumnConfig {
     pub nulltype: String,
     /// The default for a column indicates which value should be inserted for the column in a given
     /// row when the value of that column has not been specified in an INSERT database statement.
+    /// An empty string indicates that the column has no default.
     pub default: SerdeValue,
 }
 
@@ -534,7 +535,7 @@ impl Valve {
     /// database should be configured for initial loading: Set up a database connection, configure
     /// VALVE, and return a new Valve struct.
     pub async fn build(table_path: &str, database: &str) -> Result<Self> {
-        env_logger::init();
+        let _ = env_logger::try_init();
         let pool = get_pool_from_connection_string(database).await?;
         if pool.any_kind() == AnyKind::Sqlite {
             sqlx_query("PRAGMA foreign_keys = ON")
@@ -2022,7 +2023,7 @@ impl Valve {
 
         let mut tx = self.pool.begin().await?;
         let row = ValveRow::from_simple_json(row, None)?;
-        let row = validate_row_tx(
+        let mut row = validate_row_tx(
             &self.config,
             &self.datatype_conditions,
             &self.rule_conditions,
@@ -2047,6 +2048,8 @@ impl Valve {
             true,
         )
         .await?;
+
+        row.row_number = Some(rn);
 
         let serde_row = row.contents_to_rich_json()?;
         record_row_change(&mut tx, table_name, &rn, None, Some(&serde_row), &self.user).await?;
