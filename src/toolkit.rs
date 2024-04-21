@@ -2530,7 +2530,7 @@ pub async fn get_previous_row_tx(
     tx: &mut Transaction<'_, sqlx::Any>,
 ) -> Result<u32> {
     let sql = format!(
-        r#"SELECT "previous_row" FROM "{}" WHERE "row_number" = {}"#,
+        r#"SELECT "previous_row" FROM "{}_view" WHERE "row_number" = {}"#,
         table, row_number
     );
     let query = sqlx_query(&sql);
@@ -2782,16 +2782,26 @@ pub async fn delete_row_tx(
     )
     .await?;
 
-    // Now delete the row:
+    // Now delete the row. Note that any rows in the table that had the row to be deleted as its
+    // previous_row, needs to have its previous_row updated to the row to be deleted's previous_row.
+    let this_previous_row = get_previous_row_tx(table, row_number, tx).await?;
     let sql1 = format!(
+        r#"UPDATE "{}" SET "previous_row" = {} WHERE "previous_row" = {}"#,
+        table, this_previous_row, row_number,
+    );
+    let sql2 = format!(
+        r#"UPDATE "{}_conflict" SET "previous_row" = {} WHERE "previous_row" = {}"#,
+        table, this_previous_row, row_number,
+    );
+    let sql3 = format!(
         "DELETE FROM \"{}\" WHERE row_number = {}",
         table, row_number,
     );
-    let sql2 = format!(
+    let sql4 = format!(
         "DELETE FROM \"{}_conflict\" WHERE row_number = {}",
         table, row_number
     );
-    for sql in vec![sql1, sql2] {
+    for sql in vec![sql1, sql2, sql3, sql4] {
         let query = sqlx_query(&sql);
         query.execute(tx.acquire().await?).await?;
     }

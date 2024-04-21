@@ -1974,7 +1974,7 @@ impl Valve {
     /// row number in the given table.
     pub async fn get_previous_row(&self, table: &str, row_number: &u32) -> Result<u32> {
         let sql = format!(
-            r#"SELECT "previous_row" FROM "{}" WHERE "row_number" = {}"#,
+            r#"SELECT "previous_row" FROM "{}_view" WHERE "row_number" = {}"#,
             table, row_number
         );
         let query = sqlx_query(&sql);
