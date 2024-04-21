@@ -1970,6 +1970,30 @@ impl Valve {
         Ok(self)
     }
 
+    /// Given a table name and a row number, return the previous_row corresponding to the given
+    /// row number in the given table.
+    pub async fn get_previous_row(&self, table: &str, row_number: &u32) -> Result<u32> {
+        let sql = format!(
+            r#"SELECT "previous_row" FROM "{}" WHERE "row_number" = {}"#,
+            table, row_number
+        );
+        let query = sqlx_query(&sql);
+        let rows = query.fetch_all(&self.pool).await?;
+        if rows.len() > 1 {
+            Err(ValveError::DataError(format!(
+                "There is more than one row with row_number {} in {}",
+                row_number, table
+            ))
+            .into())
+        } else if rows.len() == 0 {
+            Ok(0)
+        } else {
+            let previous_row: i64 = rows[0].get("previous_row");
+            let previous_row = previous_row as u32;
+            Ok(previous_row)
+        }
+    }
+
     /// Given a table name and a row, represented as a JSON object in the following ('simple')
     /// format:
     /// ```

@@ -2522,6 +2522,34 @@ pub fn is_sql_type_error(sql_type: &str, value: &str) -> bool {
     }
 }
 
+/// Given a table name, a row number, and a database transaction, return the previous_row
+/// corresponding to the given row number in the given table.
+pub async fn get_previous_row_tx(
+    table: &str,
+    row_number: &u32,
+    tx: &mut Transaction<'_, sqlx::Any>,
+) -> Result<u32> {
+    let sql = format!(
+        r#"SELECT "previous_row" FROM "{}" WHERE "row_number" = {}"#,
+        table, row_number
+    );
+    let query = sqlx_query(&sql);
+    let rows = query.fetch_all(tx.acquire().await?).await?;
+    if rows.len() > 1 {
+        Err(ValveError::DataError(format!(
+            "There is more than one row with row_number {} in {}",
+            row_number, table
+        ))
+        .into())
+    } else if rows.len() == 0 {
+        Ok(0)
+    } else {
+        let previous_row: i64 = rows[0].get("previous_row");
+        let previous_row = previous_row as u32;
+        Ok(previous_row)
+    }
+}
+
 /// Given a global config struct, compiled datatype and rule conditions, a database connection pool,
 /// a database transaction, a table name, a row represented as a [ValveRow],
 /// insert it to the database using the given transaction, then return the new row number. If
@@ -2861,6 +2889,9 @@ pub async fn update_row_tx(
         row.clone()
     };
 
+    // Get the previous_row for this row:
+    let previous_row = get_previous_row_tx(table, row_number, tx).await?;
+
     // Perform the update in two steps:
     delete_row_tx(
         config,
@@ -2881,7 +2912,7 @@ pub async fn update_row_tx(
         table,
         &row,
         Some(*row_number),
-        None, // TODO: Is it correct to pass None here?
+        Some(previous_row),
         false,
     )
     .await?;
