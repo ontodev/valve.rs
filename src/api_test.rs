@@ -76,7 +76,9 @@ async fn test_insert_1(valve: &Valve) -> Result<()> {
         "type": "owl:Class",
     });
 
-    let (_new_row_num, _new_row) = valve.insert_row("table3", row.as_object().unwrap()).await?;
+    let (_new_row_num, _new_row) = valve
+        .insert_row("table3", row.as_object().unwrap(), None, None)
+        .await?;
 
     eprintln!("done.");
     Ok(())
@@ -112,7 +114,9 @@ async fn test_insert_2(valve: &Valve) -> Result<()> {
         "bar": 2,
     });
 
-    let (_new_row_num, _new_row) = valve.insert_row("table6", row.as_object().unwrap()).await?;
+    let (_new_row_num, _new_row) = valve
+        .insert_row("table6", row.as_object().unwrap(), None, None)
+        .await?;
 
     eprintln!("done.");
     Ok(())
@@ -153,7 +157,7 @@ async fn test_dependencies(valve: &Valve) -> Result<()> {
     });
 
     let (_new_row_num, _new_row) = valve
-        .insert_row("table10", &row.as_object().unwrap())
+        .insert_row("table10", &row.as_object().unwrap(), None, None)
         .await?;
 
     eprintln!("done.");
@@ -322,7 +326,7 @@ async fn test_randomized_api_test_with_undo_redo(valve: &Valve) -> Result<()> {
             }
             DbOperation::Insert => {
                 let row = generate_row();
-                let (_rn, _r) = valve.insert_row("table1", &row).await?;
+                let (_rn, _r) = valve.insert_row("table1", &row, None, None).await?;
             }
             DbOperation::Undo => {
                 valve.undo().await?;
@@ -354,7 +358,7 @@ async fn test_undo_redo(valve: &Valve) -> Result<()> {
 
     // Undo/redo test 1:
     let (_rn, _r) = valve
-        .insert_row("table10", &row_1.as_object().unwrap())
+        .insert_row("table10", &row_1.as_object().unwrap(), None, None)
         .await?;
 
     valve.undo().await?;
@@ -385,7 +389,7 @@ async fn test_undo_redo(valve: &Valve) -> Result<()> {
 
     // Undo/redo test 4:
     let (rn, _row) = valve
-        .insert_row("table10", &row_1.as_object().unwrap())
+        .insert_row("table10", &row_1.as_object().unwrap(), None, None)
         .await?;
 
     valve
@@ -572,7 +576,9 @@ async fn test_modes(valve: &Valve) -> Result<()> {
     let vrow = valve.validate_row("view1", &view_row, None).await?;
     assert_eq!(format!("{:#?}", vrow), expected_vrow);
 
-    let result = valve.insert_row("readonly1", &readonly_row).await;
+    let result = valve
+        .insert_row("readonly1", &readonly_row, None, None)
+        .await;
     match result {
         Err(e) => assert_eq!(
             format!("{:?}", e),
@@ -581,7 +587,7 @@ async fn test_modes(valve: &Valve) -> Result<()> {
         _ => assert!(false, "Expected an error result but got an OK result"),
     };
 
-    let result = valve.insert_row("view1", &view_row).await;
+    let result = valve.insert_row("view1", &view_row, None, None).await;
     match result {
         Err(e) => assert_eq!(
             format!("{:?}", e),
@@ -639,7 +645,9 @@ async fn test_default(valve: &Valve) -> Result<()> {
         "ontology_IRI": "foo",
         "version_IRI": "bar",
     });
-    let (_, new_row) = valve.insert_row("table8", row.as_object().unwrap()).await?;
+    let (_, new_row) = valve
+        .insert_row("table8", row.as_object().unwrap(), None, None)
+        .await?;
     let expected = indoc! {r#"ValveRow {
                                   row_number: Some(
                                       3,
@@ -685,7 +693,9 @@ async fn test_default(valve: &Valve) -> Result<()> {
         "xyzzy": "x",
         "bar": "w",
     });
-    let (_, new_row) = valve.insert_row("table9", row.as_object().unwrap()).await?;
+    let (_, new_row) = valve
+        .insert_row("table9", row.as_object().unwrap(), None, None)
+        .await?;
     let expected = indoc! {r#"ValveRow {
                                   row_number: Some(
                                       10,
@@ -739,7 +749,9 @@ async fn test_default(valve: &Valve) -> Result<()> {
         "bar": "x",
         "foo": 2,
     });
-    let (_, new_row) = valve.insert_row("table9", row.as_object().unwrap()).await?;
+    let (_, new_row) = valve
+        .insert_row("table9", row.as_object().unwrap(), None, None)
+        .await?;
     let expected = indoc! {r#"ValveRow {
                                   row_number: Some(
                                       11,

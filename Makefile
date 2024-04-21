@@ -11,7 +11,7 @@ MAKEFLAGS += --warn-undefined-variables
 
 .PHONY: build
 build:
-	mkdir build
+	mkdir -p build
 
 .PHONY: doc
 doc:

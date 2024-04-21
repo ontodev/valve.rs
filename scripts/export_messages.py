@@ -182,7 +182,11 @@ def export_messages(cursor, is_sqlite, args):
                             columns = get_column_order_and_info_for_sqlite(cursor, table)
                         else:
                             columns = get_column_order_and_info_for_postgres(cursor, table)
-                        columns = [c for c in columns["unsorted_columns"] if c != "row_number"]
+                        columns = [
+                            c
+                            for c in columns["unsorted_columns"]
+                            if c not in ["row_number", "previous_row"]
+                        ]
                         table_columns[table] = columns
 
                     cursor.execute(message_select)

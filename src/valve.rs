@@ -1052,7 +1052,7 @@ impl Valve {
                     } else if table == "history" {
                         vec!["history_id".to_string()]
                     } else {
-                        vec!["row_number".to_string()]
+                        vec!["row_number".to_string(), "previous_row".to_string()]
                     }
                 };
                 configured_column_order.append(&mut table_config.column_order.clone());
@@ -1165,6 +1165,7 @@ impl Valve {
                 || (table == "history" && cname == "timestamp")
                 || (table == "history" && cname == "row")
                 || cname == "row_number"
+                || cname == "previous_row"
             {
                 continue;
             }
@@ -2011,7 +2012,13 @@ impl Valve {
     /// ```
     /// validate and insert the row to the table and return the row number of the inserted row
     /// and the row itself in the form of a [ValveRow].
-    pub async fn insert_row(&self, table_name: &str, row: &JsonRow) -> Result<(u32, ValveRow)> {
+    pub async fn insert_row(
+        &self,
+        table_name: &str,
+        row: &JsonRow,
+        new_row_number: Option<u32>,
+        prev_row_number: Option<u32>,
+    ) -> Result<(u32, ValveRow)> {
         let table_options = &self.get_table_options(table_name)?;
         if !table_options.contains("edit") {
             return Err(ValveError::InputError(format!(
@@ -2031,7 +2038,7 @@ impl Valve {
             Some(&mut tx),
             table_name,
             &row,
-            None,
+            new_row_number,
             None,
         )
         .await?;
@@ -2044,7 +2051,8 @@ impl Valve {
             &mut tx,
             table_name,
             &row,
-            None,
+            new_row_number,
+            prev_row_number,
             true,
         )
         .await?;
@@ -2248,6 +2256,7 @@ impl Valve {
                     table,
                     &from,
                     Some(row_number),
+                    None, // TODO: Is it correct to pass None here?
                     false,
                 )
                 .await?;
@@ -2327,6 +2336,7 @@ impl Valve {
                     table,
                     &to,
                     Some(row_number),
+                    None, // Is it correct to pass None here?
                     false,
                 )
                 .await?;

@@ -2539,6 +2539,7 @@ pub async fn insert_new_row_tx(
     table: &str,
     row: &ValveRow,
     new_row_number: Option<u32>,
+    prev_row_number: Option<u32>,
     skip_validation: bool,
 ) -> Result<u32> {
     // Send the row through the row validator to determine if any fields are problematic and
@@ -2561,8 +2562,14 @@ pub async fn insert_new_row_tx(
     };
 
     // Now prepare the row and messages for insertion to the database.
-    let new_row_number = match new_row_number {
-        Some(n) => n,
+    let (new_row_number, prev_row_number) = match new_row_number {
+        Some(n) => (
+            n,
+            match prev_row_number {
+                Some(n) => n,
+                None => n - 1,
+            },
+        ),
         None => {
             let sql = format!(
                 r#"SELECT MAX("row_number") AS "row_number" FROM (
@@ -2590,7 +2597,7 @@ pub async fn insert_new_row_tx(
                 }
             }
             let new_row_number = new_row_number as u32 + 1;
-            new_row_number
+            (new_row_number, new_row_number - 1)
         }
     };
 
@@ -2654,10 +2661,11 @@ pub async fn insert_new_row_tx(
     let insert_stmt = local_sql_syntax(
         &pool,
         &format!(
-            r#"INSERT INTO "{}" ("row_number", {}) VALUES ({}, {})"#,
+            r#"INSERT INTO "{}" ("row_number", "previous_row", {}) VALUES ({}, {}, {})"#,
             table_to_write,
             insert_columns.join(", "),
             new_row_number,
+            prev_row_number,
             insert_values.join(", "),
         ),
     );
@@ -2873,6 +2881,7 @@ pub async fn update_row_tx(
         table,
         &row,
         Some(*row_number),
+        None, // TODO: Is it correct to pass None here?
         false,
     )
     .await?;
@@ -2970,7 +2979,7 @@ pub fn read_db_table_into_vector(pool: &AnyPool, config_table: &str) -> Result<V
         let mut table_row = SerdeMap::new();
         for column in row.columns() {
             let cname = column.name();
-            if cname != "row_number" {
+            if cname != "row_number" && cname != "previous_row" {
                 let raw_value = row.try_get_raw(format!(r#"{}"#, cname).as_str()).unwrap();
                 if !raw_value.is_null() {
                     let value = get_column_value(&row, &cname, "text");
@@ -3642,6 +3651,7 @@ pub fn get_table_ddl(
     let mut create_lines = vec![
         format!(r#"CREATE TABLE "{}" ("#, table_name),
         String::from(r#"  "row_number" BIGINT,"#),
+        String::from(r#"  "previous_row" BIGINT,"#),
     ];
 
     let normal_table_name;
@@ -4025,8 +4035,10 @@ pub async fn make_inserts(
             // enumerate begins at 0 but we need to begin at 1:
             let i = i + 1;
             row.row_number = Some(i as u32 + chunk_number as u32 * CHUNK_SIZE as u32);
+            let row_number = row.row_number.unwrap();
+            let previous_row = row_number - 1;
             let use_conflict_table = is_conflict_row(&row, &conflict_columns);
-            let mut row_values = vec![format!("{}", row.row_number.unwrap())];
+            let mut row_values = vec![format!("{}, {}", row_number, previous_row)];
             let mut row_params = vec![];
             for column in columns {
                 let cell = row.contents.get(column).unwrap();
@@ -4046,7 +4058,7 @@ pub async fn make_inserts(
                 }
 
                 for message in sort_messages(&sorted_datatypes, &cell.messages) {
-                    let row = row.row_number.unwrap().to_string();
+                    let row = row_number.to_string();
                     let message_values = vec![
                         SQL_PARAM, &row, SQL_PARAM, SQL_PARAM, SQL_PARAM, SQL_PARAM, SQL_PARAM,
                     ];
@@ -4078,7 +4090,7 @@ pub async fn make_inserts(
             let mut output = String::from("");
             if !lines.is_empty() {
                 output.push_str(&format!(
-                    r#"INSERT INTO "{}" ("row_number", {}) VALUES"#,
+                    r#"INSERT INTO "{}" ("row_number", "previous_row", {}) VALUES"#,
                     table,
                     {
                         let mut quoted_columns = vec![];
