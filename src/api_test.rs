@@ -57,9 +57,12 @@ async fn test_update_1(valve: &Valve) -> Result<()> {
         "bar": "B",
     });
 
+    let prev_row_before = valve.get_previous_row("table2", &1).await?;
     valve
         .update_row("table2", &1, &row.as_object().unwrap())
         .await?;
+    let prev_row_after = valve.get_previous_row("table2", &1).await?;
+    assert_eq!(prev_row_before, prev_row_after);
 
     eprintln!("done.");
     Ok(())
@@ -76,9 +79,11 @@ async fn test_insert_1(valve: &Valve) -> Result<()> {
         "type": "owl:Class",
     });
 
-    let (_new_row_num, _new_row) = valve
+    let (new_row_num, _new_row) = valve
         .insert_row("table3", row.as_object().unwrap(), None, None)
         .await?;
+    let prev_row = valve.get_previous_row("table3", &new_row_num).await?;
+    assert_eq!(prev_row, new_row_num - 1);
 
     eprintln!("done.");
     Ok(())
@@ -95,9 +100,12 @@ async fn test_update_2(valve: &Valve) -> Result<()> {
         "bar": 2,
     });
 
+    let prev_row_before = valve.get_previous_row("table6", &1).await?;
     valve
         .update_row("table6", &1, row.as_object().unwrap())
         .await?;
+    let prev_row_after = valve.get_previous_row("table6", &1).await?;
+    assert_eq!(prev_row_before, prev_row_after);
 
     eprintln!("done.");
     Ok(())
@@ -114,9 +122,11 @@ async fn test_insert_2(valve: &Valve) -> Result<()> {
         "bar": 2,
     });
 
-    let (_new_row_num, _new_row) = valve
+    let (new_row_num, _new_row) = valve
         .insert_row("table6", row.as_object().unwrap(), None, None)
         .await?;
+    let prev_row = valve.get_previous_row("table6", &new_row_num).await?;
+    assert_eq!(prev_row, new_row_num - 1);
 
     eprintln!("done.");
     Ok(())
