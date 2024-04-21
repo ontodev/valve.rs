@@ -813,8 +813,8 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<()> {
     // When the first argument to Valve::build() is not a string ending in .tsv, the table table
     // should be read from the database string (given by the second argument) instead, i.e., valve
     // will look in the given database and read the configuration from the "table" db table. Here
-    // we just make sure that this is possible.
-    let valve2 = Valve::build("ignored", database).await?;
+    // we just make sure that this is possible. If there is a problem an error will be returned.
+    let _valve = Valve::build("ignored", database).await?;
 
     eprintln!("done.");
     Ok(())
