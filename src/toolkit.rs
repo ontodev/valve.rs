@@ -2529,6 +2529,8 @@ pub async fn get_previous_row_tx(
     row_number: &u32,
     tx: &mut Transaction<'_, sqlx::Any>,
 ) -> Result<u32> {
+    // TODO: We should also look into the history table, to which we will also need to add
+    // a `previous_row` field.
     let sql = format!(
         r#"SELECT "previous_row" FROM "{}_view" WHERE "row_number" = {}"#,
         table, row_number
