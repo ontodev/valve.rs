@@ -2224,10 +2224,11 @@ pub async fn record_row_change(
 
     let summary = summarize(from, to)?;
     let (from, to) = (to_text(from, true), to_text(to, true));
+    let previous_row = get_previous_row_tx(table, row_number, tx).await?;
     let sql = format!(
-        r#"INSERT INTO "history" ("table", "row", "from", "to", "summary", "user")
-           VALUES ('{}', {}, {}, {}, {}, '{}')"#,
-        table, row_number, from, to, summary, user
+        r#"INSERT INTO "history" ("table", "row", "previous_row", "from", "to", "summary", "user")
+           VALUES ('{}', {}, {}, {}, {}, {}, '{}')"#,
+        table, row_number, previous_row, from, to, summary, user
     );
     let query = sqlx_query(&sql);
     query.execute(tx.acquire().await?).await?;
@@ -2529,11 +2530,17 @@ pub async fn get_previous_row_tx(
     row_number: &u32,
     tx: &mut Transaction<'_, sqlx::Any>,
 ) -> Result<u32> {
-    // TODO: We should also look into the history table, to which we will also need to add
-    // a `previous_row` field.
     let sql = format!(
-        r#"SELECT "previous_row" FROM "{}_view" WHERE "row_number" = {}"#,
-        table, row_number
+        r#"SELECT "previous_row"
+             FROM "{table}_view"
+            WHERE "row_number" = {row_number}
+           UNION
+           SELECT "previous_row"
+             FROM "history"
+            WHERE "table" = '{table}'
+              AND "row" = {row_number}"#,
+        table = table,
+        row_number = row_number
     );
     let query = sqlx_query(&sql);
     let rows = query.fetch_all(tx.acquire().await?).await?;

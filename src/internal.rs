@@ -115,6 +115,7 @@ pub fn generate_internal_table_config(table_name: &str) -> ValveTableConfig {
             column_order: vec![
                 "table".to_string(),
                 "row".to_string(),
+                "previous_row".to_string(),
                 "from".to_string(),
                 "to".to_string(),
                 "summary".to_string(),
@@ -141,6 +142,16 @@ pub fn generate_internal_table_config(table_name: &str) -> ValveTableConfig {
                         column: "row".to_string(),
                         description: "The row number of the table referred to by the history entry"
                             .to_string(),
+                        datatype: "natural_number".to_string(),
+                        ..Default::default()
+                    },
+                );
+                column_configs.insert(
+                    "previous_row".to_string(),
+                    ValveColumnConfig {
+                        table: "history".to_string(),
+                        column: "previous_row".to_string(),
+                        description: "The row before this one in the order of rows".to_string(),
                         datatype: "natural_number".to_string(),
                         ..Default::default()
                     },
@@ -236,6 +247,7 @@ pub fn generate_internal_table_ddl(
                       {history_id}
                       "table" {text_type},
                       "row" BIGINT,
+                      "previous_row" BIGINT,
                       "from" {text_type},
                       "to" {text_type},
                       "summary" {text_type},
