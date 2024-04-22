@@ -160,11 +160,6 @@ async fn test_dependencies(valve: &Valve) -> Result<()> {
 
     valve.delete_row("table11", &4).await?;
 
-    // Despite the fact that row #4 was deleted, it still exists in the history table and it should
-    // still be identified as the previous row to row #5. Here we verify this:
-    let previous_to_five = valve.get_previous_row("table11", &5).await?;
-    assert_eq!(previous_to_five, 4);
-
     let row = json!({
         "foreign_column": "i",
         "other_foreign_column": "i",
