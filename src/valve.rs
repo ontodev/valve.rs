@@ -1268,21 +1268,17 @@ impl Valve {
         for (table, table_config) in tables_config.iter() {
             // Generate DDL for the table and its corresponding conflict table:
             let mut table_statements = vec![];
-            // Tables without TSV paths are necessarily managed externally:
-            if table_config.path.to_lowercase().ends_with(".tsv") {
-                let mut statements = get_table_ddl(&self.config, &parser, &table, &self.pool)?;
+            let mut statements = get_table_ddl(&self.config, &parser, &table, &self.pool)?;
+            table_statements.append(&mut statements);
+            if table_config.options.contains("conflict") {
+                let cable = format!("{}_conflict", table);
+                let mut statements = get_table_ddl(&self.config, &parser, &cable, &self.pool)?;
                 table_statements.append(&mut statements);
-                if table_config.options.contains("conflict") {
-                    let cable = format!("{}_conflict", table);
-                    let mut statements = get_table_ddl(&self.config, &parser, &cable, &self.pool)?;
-                    table_statements.append(&mut statements);
 
-                    let create_view_sql = get_sql_for_standard_view(&table, &self.pool);
-                    let create_text_view_sql =
-                        get_sql_for_text_view(tables_config, &table, &self.pool);
-                    table_statements.push(create_view_sql);
-                    table_statements.push(create_text_view_sql);
-                }
+                let create_view_sql = get_sql_for_standard_view(&table, &self.pool);
+                let create_text_view_sql = get_sql_for_text_view(tables_config, &table, &self.pool);
+                table_statements.push(create_view_sql);
+                table_statements.push(create_text_view_sql);
             }
             setup_statements.insert(table.to_string(), table_statements);
         }
@@ -1346,9 +1342,7 @@ impl Valve {
                     ))
                     .into());
                 }
-            } else if table_config.path.to_lowercase().ends_with(".tsv")
-                || table_config.options.contains("internal")
-            {
+            } else {
                 if self.table_has_changed(*table).await? {
                     self.drop_tables(&vec![table]).await?;
                     let table_statements =

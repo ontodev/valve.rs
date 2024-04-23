@@ -3764,6 +3764,7 @@ pub fn get_table_ddl(
             SerdeValue::String(s) if s == "" => "".to_string(),
             SerdeValue::String(s) => format!("'{}'", s),
             SerdeValue::Number(n) => n.to_string(),
+            SerdeValue::Null => "".to_string(),
             _ => panic!(
                 "Configured default value, {:?}, of column '{}' is neither \
                          a number nor a string.",
