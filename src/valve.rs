@@ -1342,19 +1342,17 @@ impl Valve {
                     ))
                     .into());
                 }
-            } else {
-                if self.table_has_changed(*table).await? {
-                    self.drop_tables(&vec![table]).await?;
-                    let table_statements =
-                        setup_statements
-                            .get(*table)
-                            .ok_or(ValveError::ConfigError(format!(
-                                "Could not find setup statements for {}",
-                                table
-                            )))?;
-                    for stmt in table_statements {
-                        self.execute_sql(stmt).await?;
-                    }
+            } else if self.table_has_changed(*table).await? {
+                self.drop_tables(&vec![table]).await?;
+                let table_statements =
+                    setup_statements
+                        .get(*table)
+                        .ok_or(ValveError::ConfigError(format!(
+                            "Could not find setup statements for {}",
+                            table
+                        )))?;
+                for stmt in table_statements {
+                    self.execute_sql(stmt).await?;
                 }
             }
         }
