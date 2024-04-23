@@ -43,8 +43,6 @@ build/valve.db: valve | build test/output
 	cp -f test/src/ontology/readonly1_sqlite_load.sh test/output/readonly1.sh
 	cp -f test/src/ontology/readonly3_sqlite_load.sql test/output/readonly3.sql
 	chmod u+x test/output/readonly1.sh
-	# test/src/ontology/readonly1_sqlite_create.sh $@ "readonly1"
-	# sqlite3 $@ < test/src/ontology/readonly3_sqlite_create.sql
 	sqlite3 $@ < test/src/ontology/view3_sqlite.sql
 
 test/output:
@@ -79,8 +77,6 @@ pg_test: valve test/src/table.tsv | test/output
 	cp -f test/src/ontology/readonly1_postgresql_load.sh test/output/readonly1.sh
 	cp -f test/src/ontology/readonly3_postgresql_load.sql test/output/readonly3.sql
 	chmod u+x test/output/readonly1.sh
-	# test/src/ontology/readonly1_postgresql_create.sh $(pg_connect_string) "readonly1"
-	# psql $(pg_connect_string) < test/src/ontology/readonly3_postgresql_create.sql
 	psql $(pg_connect_string) < test/src/ontology/view3_postgresql.sql
 	./$^ $(pg_connect_string)
 	test/round_trip.sh $(pg_connect_string) $(word 2,$^)
