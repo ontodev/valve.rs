@@ -1233,13 +1233,13 @@ pub fn read_config_files(
     // 7. Sort the tables (other than internal tables) according to their foreign key
     // dependencies so that tables are always loaded after the tables they depend on.
     let (sorted_tables, table_dependencies_in, table_dependencies_out) = verify_table_deps_and_sort(
-        &tables_config
-            .keys()
+        &table_order
+            .iter()
             .cloned()
             // Internal tables will be taken account of within verify_table_deps_and_sort() and
             // manually added to the sorted table list that is returned there.
             .filter(|m| !INTERNAL_TABLES.contains(&m.to_string().as_str()))
-            .collect(),
+            .collect::<Vec<_>>(),
         &constraints_config,
     );
 
@@ -1709,6 +1709,7 @@ pub async fn get_affected_rows(
             row_number.ok_or(ValveError::DataError("Row: has no row number".to_string()))?;
         valve_rows.push(ValveRow {
             row_number: Some(row_number),
+            previous_row: None,
             contents: contents,
         });
     }
@@ -2522,6 +2523,7 @@ pub fn is_sql_type_error(sql_type: &str, value: &str) -> bool {
     }
 }
 
+// TODO: If we make previous row a field of ValveRow, is this function still needed?
 /// Given a table name, a row number, and a database transaction, return the previous_row
 /// corresponding to the given row number in the given table.
 pub async fn get_previous_row_tx(

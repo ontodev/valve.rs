@@ -451,6 +451,7 @@ async fn test_modes(valve: &Valve) -> Result<()> {
     let readonly_row = readonly_row.as_object().unwrap();
     let expected_vrow = indoc! {r#"ValveRow {
                                        row_number: None,
+                                       previous_row: None,
                                        contents: {
                                            "body_mass": ValveCell {
                                                nulltype: None,
@@ -568,6 +569,7 @@ async fn test_modes(valve: &Valve) -> Result<()> {
     let view_row = view_row.as_object().unwrap();
     let expected_vrow = indoc! {r#"ValveRow {
                                        row_number: None,
+                                       previous_row: None,
                                        contents: {
                                            "bar": ValveCell {
                                                nulltype: None,
@@ -662,6 +664,7 @@ async fn test_default(valve: &Valve) -> Result<()> {
                                   row_number: Some(
                                       3,
                                   ),
+                                  previous_row: None,
                                   contents: {
                                       "ontology_IRI": ValveCell {
                                           nulltype: None,
@@ -710,6 +713,7 @@ async fn test_default(valve: &Valve) -> Result<()> {
                                   row_number: Some(
                                       10,
                                   ),
+                                  previous_row: None,
                                   contents: {
                                       "bar": ValveCell {
                                           nulltype: None,
@@ -766,6 +770,7 @@ async fn test_default(valve: &Valve) -> Result<()> {
                                   row_number: Some(
                                       11,
                                   ),
+                                  previous_row: None,
                                   contents: {
                                       "bar": ValveCell {
                                           nulltype: None,
