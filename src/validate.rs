@@ -30,7 +30,6 @@ pub async fn validate_row_tx(
     tx: Option<&mut Transaction<'_, sqlx::Any>>,
     table_name: &str,
     row: &ValveRow,
-    row_number: Option<u32>,
     query_as_if: Option<&QueryAsIf>,
 ) -> Result<ValveRow> {
     // Fallback to a default transaction if it is not given. Since we do not commit before it falls
@@ -41,6 +40,9 @@ pub async fn validate_row_tx(
         Some(tx) => tx,
         None => default_tx,
     };
+
+    // Store the row number in a separate local variable for convenience:
+    let row_number = row.row_number;
 
     // Initialize the result row with the values from the given row:
     let mut valve_row = row.clone();

@@ -1994,7 +1994,6 @@ impl Valve {
             None,
             table_name,
             &row,
-            row_number,
             None,
         )
         .await
@@ -2028,7 +2027,8 @@ impl Valve {
         }
 
         let mut tx = self.pool.begin().await?;
-        let row = ValveRow::from_simple_json(row, None)?;
+        let mut row = ValveRow::from_simple_json(row, None)?;
+        row.row_number = new_row_number;
         let mut row = validate_row_tx(
             &self.config,
             &self.datatype_conditions,
@@ -2037,7 +2037,6 @@ impl Valve {
             Some(&mut tx),
             table_name,
             &row,
-            new_row_number,
             None,
         )
         .await?;
@@ -2050,14 +2049,12 @@ impl Valve {
             &mut tx,
             table_name,
             &row,
-            new_row_number,
             prev_row_number,
             true,
         )
         .await?;
 
         row.row_number = Some(rn);
-
         let serde_row = row.contents_to_rich_json()?;
         record_row_change(&mut tx, table_name, &rn, None, Some(&serde_row), &self.user).await?;
 
@@ -2106,7 +2103,6 @@ impl Valve {
             Some(&mut tx),
             table_name,
             &row,
-            Some(*row_number),
             None,
         )
         .await?;
@@ -2119,7 +2115,6 @@ impl Valve {
             &mut tx,
             table_name,
             &row,
-            row_number,
             true,
             false,
         )
@@ -2254,7 +2249,6 @@ impl Valve {
                     &mut tx,
                     table,
                     &from,
-                    Some(row_number),
                     None, // TODO: Is it correct to pass None here?
                     false,
                 )
@@ -2277,7 +2271,6 @@ impl Valve {
                     &mut tx,
                     table,
                     &from,
-                    &row_number,
                     false,
                     false,
                 )
@@ -2334,7 +2327,6 @@ impl Valve {
                     &mut tx,
                     table,
                     &to,
-                    Some(row_number),
                     None, // Is it correct to pass None here?
                     false,
                 )
@@ -2376,7 +2368,6 @@ impl Valve {
                     &mut tx,
                     table,
                     &to,
-                    &row_number,
                     false,
                     false,
                 )

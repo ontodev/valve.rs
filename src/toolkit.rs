@@ -2066,9 +2066,6 @@ pub async fn process_updates(
 ) -> Result<()> {
     for (update_table, rows_to_update) in updates {
         for row in rows_to_update {
-            let row_number = row
-                .row_number
-                .ok_or(ValveError::InputError("Row has no row number".to_string()))?;
             // Validate each row 'counterfactually':
             let vrow = validate_row_tx(
                 config,
@@ -2078,7 +2075,6 @@ pub async fn process_updates(
                 Some(tx),
                 update_table,
                 row,
-                Some(row_number),
                 Some(&query_as_if),
             )
             .await?;
@@ -2092,7 +2088,6 @@ pub async fn process_updates(
                 tx,
                 update_table,
                 &vrow,
-                &row_number,
                 false,
                 do_not_recurse,
             )
@@ -2566,7 +2561,6 @@ pub async fn insert_new_row_tx(
     tx: &mut Transaction<sqlx::Any>,
     table: &str,
     row: &ValveRow,
-    new_row_number: Option<u32>,
     prev_row_number: Option<u32>,
     skip_validation: bool,
 ) -> Result<u32> {
@@ -2580,8 +2574,7 @@ pub async fn insert_new_row_tx(
             pool,
             Some(tx),
             table,
-            row,
-            new_row_number,
+            &row,
             None,
         )
         .await?
@@ -2590,7 +2583,7 @@ pub async fn insert_new_row_tx(
     };
 
     // Now prepare the row and messages for insertion to the database.
-    let (new_row_number, prev_row_number) = match new_row_number {
+    let (new_row_number, prev_row_number) = match row.row_number {
         Some(n) => (
             n,
             match prev_row_number {
@@ -2834,7 +2827,6 @@ pub async fn update_row_tx(
     tx: &mut Transaction<sqlx::Any>,
     table: &str,
     row: &ValveRow,
-    row_number: &u32,
     skip_validation: bool,
     do_not_recurse: bool,
 ) -> Result<()> {
@@ -2842,11 +2834,14 @@ pub async fn update_row_tx(
     // the rows that need to be updated. The variable query_as_if is used to validate the given row,
     // counterfactually, "as if" the version of the row in the database currently were replaced with
     // `row`:
+    let row_number = row
+        .row_number
+        .ok_or(ValveError::InputError("Row has no row number".to_string()))?;
     let query_as_if = QueryAsIf {
         kind: QueryAsIfKind::Replace,
         table: table.to_string(),
         alias: format!("{}_as_if", table),
-        row_number: *row_number,
+        row_number: row_number,
         row: Some(row.clone()),
     };
     let (updates_before, updates_after, updates_intra) = {
@@ -2873,6 +2868,8 @@ pub async fn update_row_tx(
     // Send the row through the row validator to determine if any fields are problematic and
     // to mark them with appropriate messages:
     let row = if !skip_validation {
+        let mut row = row.clone();
+        row.row_number = Some(row_number);
         validate_row_tx(
             config,
             compiled_datatype_conditions,
@@ -2880,8 +2877,7 @@ pub async fn update_row_tx(
             pool,
             Some(tx),
             table,
-            row,
-            Some(*row_number),
+            &row,
             None,
         )
         .await?
@@ -2890,7 +2886,7 @@ pub async fn update_row_tx(
     };
 
     // Get the previous_row for this row:
-    let previous_row = get_previous_row_tx(table, row_number, tx).await?;
+    let previous_row = get_previous_row_tx(table, &row_number, tx).await?;
 
     // Perform the update in two steps:
     delete_row_tx(
@@ -2900,7 +2896,7 @@ pub async fn update_row_tx(
         pool,
         tx,
         table,
-        row_number,
+        &row_number,
     )
     .await?;
     insert_new_row_tx(
@@ -2911,7 +2907,6 @@ pub async fn update_row_tx(
         tx,
         table,
         &row,
-        Some(*row_number),
         Some(previous_row),
         false,
     )
