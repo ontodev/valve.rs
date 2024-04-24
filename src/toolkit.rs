@@ -1233,8 +1233,8 @@ pub fn read_config_files(
     // 7. Sort the tables (other than internal tables) according to their foreign key
     // dependencies so that tables are always loaded after the tables they depend on.
     let (sorted_tables, table_dependencies_in, table_dependencies_out) = verify_table_deps_and_sort(
-        &tables_config
-            .keys()
+        &table_order
+            .iter()
             .cloned()
             // Internal tables will be taken account of within verify_table_deps_and_sort() and
             // manually added to the sorted table list that is returned there.
@@ -3723,6 +3723,7 @@ pub fn get_table_ddl(
             SerdeValue::String(s) if s == "" => "".to_string(),
             SerdeValue::String(s) => format!("'{}'", s),
             SerdeValue::Number(n) => n.to_string(),
+            SerdeValue::Null => "".to_string(),
             _ => panic!(
                 "Configured default value, {:?}, of column '{}' is neither \
                          a number nor a string.",
