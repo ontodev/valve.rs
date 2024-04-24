@@ -1268,7 +1268,7 @@ impl Valve {
             // Generate DDL for the table and its corresponding conflict table:
             let mut table_statements = vec![];
             // Tables without TSV paths are necessarily managed externally:
-            if table_config.path.to_lowercase().ends_with(".tsv") {
+            if !table_config.options.contains("db_view") {
                 let mut statements = get_table_ddl(&self.config, &parser, &table, &self.pool)?;
                 table_statements.append(&mut statements);
                 if table_config.options.contains("conflict") {
@@ -1345,9 +1345,7 @@ impl Valve {
                     ))
                     .into());
                 }
-            } else if table_config.path.to_lowercase().ends_with(".tsv")
-                || table_config.options.contains("internal")
-            {
+            } else {
                 if self.table_has_changed(*table).await? {
                     self.drop_tables(&vec![table]).await?;
                     let table_statements =
