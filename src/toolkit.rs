@@ -2517,15 +2517,15 @@ pub fn is_sql_type_error(sql_type: &str, value: &str) -> bool {
     }
 }
 
-/// Given a table name, a row number, and a database transaction, return the previous_row
+/// Given a table name, a row number, and a database transaction, return the row_order
 /// corresponding to the given row number in the given table.
-pub async fn get_previous_row_tx(
+pub async fn get_row_order_tx(
     table: &str,
     row_number: &u32,
     tx: &mut Transaction<'_, sqlx::Any>,
 ) -> Result<u32> {
     let sql = format!(
-        r#"SELECT "previous_row" FROM "{}_view" WHERE "row_number" = {}"#,
+        r#"SELECT "row_order" FROM "{}_view" WHERE "row_number" = {}"#,
         table, row_number
     );
     let query = sqlx_query(&sql);
@@ -2539,9 +2539,9 @@ pub async fn get_previous_row_tx(
     } else if rows.len() == 0 {
         Ok(0)
     } else {
-        let previous_row: i64 = rows[0].get("previous_row");
-        let previous_row = previous_row as u32;
-        Ok(previous_row)
+        let row_order: i64 = rows[0].get("row_order");
+        let row_order = row_order as u32;
+        Ok(row_order)
     }
 }
 
@@ -2561,7 +2561,7 @@ pub async fn insert_new_row_tx(
     tx: &mut Transaction<sqlx::Any>,
     table: &str,
     row: &ValveRow,
-    prev_row_number: Option<u32>,
+    new_row_order: Option<u32>,
     skip_validation: bool,
 ) -> Result<u32> {
     // Send the row through the row validator to determine if any fields are problematic and
@@ -2583,12 +2583,13 @@ pub async fn insert_new_row_tx(
     };
 
     // Now prepare the row and messages for insertion to the database.
-    let (new_row_number, prev_row_number) = match row.row_number {
+    let (new_row_number, new_row_order) = match row.row_number {
         Some(n) => (
             n,
-            match prev_row_number {
-                Some(n) => n,
-                None => n - 1,
+            match new_row_order {
+                Some(o) => o,
+                // The row order defaults to the row number:
+                None => n,
             },
         ),
         None => {
@@ -2618,7 +2619,8 @@ pub async fn insert_new_row_tx(
                 }
             }
             let new_row_number = new_row_number as u32 + 1;
-            (new_row_number, new_row_number - 1)
+            // The row order defaults to the row number:
+            (new_row_number, new_row_number)
         }
     };
 
@@ -2682,11 +2684,11 @@ pub async fn insert_new_row_tx(
     let insert_stmt = local_sql_syntax(
         &pool,
         &format!(
-            r#"INSERT INTO "{}" ("row_number", "previous_row", {}) VALUES ({}, {}, {})"#,
+            r#"INSERT INTO "{}" ("row_number", "row_order", {}) VALUES ({}, {}, {})"#,
             table_to_write,
             insert_columns.join(", "),
             new_row_number,
-            prev_row_number,
+            new_row_order,
             insert_values.join(", "),
         ),
     );
@@ -2885,8 +2887,8 @@ pub async fn update_row_tx(
         row.clone()
     };
 
-    // Get the previous_row for this row:
-    let previous_row = get_previous_row_tx(table, &row_number, tx).await?;
+    // Get the row_order for this row:
+    let row_order = get_row_order_tx(table, &row_number, tx).await?;
 
     // Perform the update in two steps:
     delete_row_tx(
@@ -2907,7 +2909,7 @@ pub async fn update_row_tx(
         tx,
         table,
         &row,
-        Some(previous_row),
+        Some(row_order),
         false,
     )
     .await?;
@@ -3005,7 +3007,7 @@ pub fn read_db_table_into_vector(pool: &AnyPool, config_table: &str) -> Result<V
         let mut table_row = SerdeMap::new();
         for column in row.columns() {
             let cname = column.name();
-            if cname != "row_number" && cname != "previous_row" {
+            if cname != "row_number" && cname != "row_order" {
                 let raw_value = row.try_get_raw(format!(r#"{}"#, cname).as_str()).unwrap();
                 if !raw_value.is_null() {
                     let value = get_column_value(&row, &cname, "text");
@@ -3677,7 +3679,7 @@ pub fn get_table_ddl(
     let mut create_lines = vec![
         format!(r#"CREATE TABLE "{}" ("#, table_name),
         String::from(r#"  "row_number" BIGINT,"#),
-        String::from(r#"  "previous_row" BIGINT,"#),
+        String::from(r#"  "row_order" BIGINT,"#),
     ];
 
     let normal_table_name;
@@ -4063,9 +4065,10 @@ pub async fn make_inserts(
             let i = i + 1;
             row.row_number = Some(i as u32 + chunk_number as u32 * CHUNK_SIZE as u32);
             let row_number = row.row_number.unwrap();
-            let previous_row = row_number - 1;
+            // The row order defaults to the row number:
+            let row_order = row_number;
             let use_conflict_table = is_conflict_row(&row, &conflict_columns);
-            let mut row_values = vec![format!("{}, {}", row_number, previous_row)];
+            let mut row_values = vec![format!("{}, {}", row_number, row_order)];
             let mut row_params = vec![];
             for column in columns {
                 let cell = row.contents.get(column).unwrap();
@@ -4117,7 +4120,7 @@ pub async fn make_inserts(
             let mut output = String::from("");
             if !lines.is_empty() {
                 output.push_str(&format!(
-                    r#"INSERT INTO "{}" ("row_number", "previous_row", {}) VALUES"#,
+                    r#"INSERT INTO "{}" ("row_number", "row_order", {}) VALUES"#,
                     table,
                     {
                         let mut quoted_columns = vec![];

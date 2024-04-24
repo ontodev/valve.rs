@@ -185,7 +185,7 @@ def export_messages(cursor, is_sqlite, args):
                         columns = [
                             c
                             for c in columns["unsorted_columns"]
-                            if c not in ["row_number", "previous_row"]
+                            if c not in ["row_number", "row_order"]
                         ]
                         table_columns[table] = columns
 

@@ -8,8 +8,8 @@ use crate::{
         add_message_counts, cast_column_sql_to_text, convert_undo_or_redo_record_to_change,
         delete_row_tx, get_column_for_label, get_column_value, get_compiled_datatype_conditions,
         get_compiled_rule_conditions, get_json_from_row, get_label_for_column,
-        get_parsed_structure_conditions, get_pool_from_connection_string, get_previous_row_tx,
-        get_record_to_redo, get_record_to_undo, get_row_from_db, get_sql_for_standard_view,
+        get_parsed_structure_conditions, get_pool_from_connection_string, get_record_to_redo,
+        get_record_to_undo, get_row_from_db, get_row_order_tx, get_sql_for_standard_view,
         get_sql_for_text_view, get_sql_type, get_sql_type_from_global_config, get_table_ddl,
         insert_chunks, insert_new_row_tx, local_sql_syntax, read_config_files, record_row_change,
         switch_undone_state, update_row_tx, verify_table_deps_and_sort, ColumnRule,
@@ -1052,7 +1052,7 @@ impl Valve {
                     } else if table == "history" {
                         vec!["history_id".to_string()]
                     } else {
-                        vec!["row_number".to_string(), "previous_row".to_string()]
+                        vec!["row_number".to_string(), "row_order".to_string()]
                     }
                 };
                 configured_column_order.append(&mut table_config.column_order.clone());
@@ -1165,7 +1165,7 @@ impl Valve {
                 || (table == "history" && cname == "timestamp")
                 || (table == "history" && cname == "row")
                 || cname == "row_number"
-                || cname == "previous_row"
+                || cname == "row_order"
             {
                 continue;
             }
@@ -1962,11 +1962,11 @@ impl Valve {
         Ok(self)
     }
 
-    /// Given a table name and a row number, return the previous_row corresponding to the given
+    /// Given a table name and a row number, return the row_order corresponding to the given
     /// row number in the given table.
-    pub async fn get_previous_row(&self, table: &str, row_number: &u32) -> Result<u32> {
+    pub async fn get_row_order(&self, table: &str, row_number: &u32) -> Result<u32> {
         let mut tx = self.pool.begin().await?;
-        get_previous_row_tx(table, row_number, &mut tx).await
+        get_row_order_tx(table, row_number, &mut tx).await
     }
 
     /// Given a table name and a row, represented as a JSON object in the following ('simple')
