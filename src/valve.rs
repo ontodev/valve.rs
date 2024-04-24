@@ -96,8 +96,6 @@ pub fn unfold_json_row(json_row: &JsonRow) -> Result<JsonRow> {
 pub struct ValveRow {
     /// The row number of this row. None indicates "unspecified".
     pub row_number: Option<u32>,
-    /// The row number of the previous row. None indicates "unspecified".
-    pub previous_row: Option<u32>,
     /// A map from column names to the cells corresponding to each column in the row.
     pub contents: IndexMap<String, ValveCell>,
 }
@@ -120,7 +118,6 @@ impl ValveRow {
         }
         Ok(Self {
             row_number: row_number,
-            previous_row: None,
             contents: valve_cells,
         })
     }
@@ -1965,7 +1962,6 @@ impl Valve {
         Ok(self)
     }
 
-    // TODO: If we make previous row a field of ValveRow, is this function still needed?
     /// Given a table name and a row number, return the previous_row corresponding to the given
     /// row number in the given table.
     pub async fn get_previous_row(&self, table: &str, row_number: &u32) -> Result<u32> {

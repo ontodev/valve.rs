@@ -1709,7 +1709,6 @@ pub async fn get_affected_rows(
             row_number.ok_or(ValveError::DataError("Row: has no row number".to_string()))?;
         valve_rows.push(ValveRow {
             row_number: Some(row_number),
-            previous_row: None,
             contents: contents,
         });
     }
@@ -2523,7 +2522,6 @@ pub fn is_sql_type_error(sql_type: &str, value: &str) -> bool {
     }
 }
 
-// TODO: If we make previous row a field of ValveRow, is this function still needed?
 /// Given a table name, a row number, and a database transaction, return the previous_row
 /// corresponding to the given row number in the given table.
 pub async fn get_previous_row_tx(

@@ -475,7 +475,6 @@ pub async fn validate_rows_trees(
     for row in rows {
         let mut valve_row = ValveRow {
             row_number: None,
-            previous_row: None,
             contents: IndexMap::new(),
         };
         for column_name in column_names {
@@ -531,7 +530,6 @@ pub async fn validate_rows_constraints(
     for row in rows.iter_mut() {
         let mut valve_row = ValveRow {
             row_number: None,
-            previous_row: None,
             contents: IndexMap::new(),
         };
         for column_name in column_names {
@@ -601,7 +599,6 @@ pub fn validate_rows_intra(
             Ok(row) => {
                 let mut valve_row = ValveRow {
                     row_number: None,
-                    previous_row: None,
                     contents: IndexMap::new(),
                 };
                 for (i, value) in row.iter().enumerate() {
