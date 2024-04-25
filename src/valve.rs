@@ -1964,7 +1964,7 @@ impl Valve {
 
     /// Given a table name and a row number, return the row_order corresponding to the given
     /// row number in the given table.
-    pub async fn get_row_order(&self, table: &str, row_number: &u32) -> Result<u32> {
+    pub async fn get_row_order(&self, table: &str, row_number: &u32) -> Result<f32> {
         let mut tx = self.pool.begin().await?;
         get_row_order_tx(table, row_number, &mut tx).await
     }
@@ -2015,7 +2015,7 @@ impl Valve {
         table_name: &str,
         row: &JsonRow,
         new_row_number: Option<u32>,
-        prev_row_number: Option<u32>,
+        row_order: Option<f32>,
     ) -> Result<(u32, ValveRow)> {
         let table_options = &self.get_table_options(table_name)?;
         if !table_options.contains("edit") {
@@ -2049,7 +2049,7 @@ impl Valve {
             &mut tx,
             table_name,
             &row,
-            prev_row_number,
+            row_order,
             true,
         )
         .await?;
@@ -2175,6 +2175,69 @@ impl Valve {
 
         tx.commit().await?;
         Ok(())
+    }
+
+    /// TODO: Add docstring here.
+    pub async fn move_row(&self, table: &str, row: &u32, after_row: &u32) -> Result<f32> {
+        // 1. Get the row order, (A), of `after_row`:
+        let after_row_order: f32 = {
+            let sql = format!(
+                r#"SELECT "row_order" FROM "{}_view" WHERE "row_number" = {}"#,
+                table, after_row
+            );
+            let result_row = sqlx_query(&sql).fetch_one(&self.pool).await?;
+            let raw_row_order = result_row.try_get_raw("row_order")?;
+            if raw_row_order.is_null() {
+                return Err(ValveError::DataError(
+                    format!("No row_order defined for row {} of table '{}'", row, table,).into(),
+                )
+                .into());
+            }
+            result_row.get("row_order")
+        };
+
+        // 2. Run a query to get the minimum row_order, (B), that is greater than (A).
+        let next_row_order = {
+            let mut ceiling = after_row_order.ceil();
+            if ceiling == after_row_order {
+                ceiling += 1.0;
+            }
+            let sql = format!(
+                r#"SELECT MIN("row_order") AS "row_order" FROM "{}_view" WHERE "row_order" > {}"#,
+                table, after_row_order
+            );
+            let result_row = sqlx_query(&sql).fetch_one(&self.pool).await?;
+            let raw_row_order = result_row.try_get_raw("row_order")?;
+            if raw_row_order.is_null() {
+                // This might happen if we ask Valve to move a row to a position after the last row
+                // in the table.
+                ceiling
+            } else {
+                result_row.get("row_order")
+            }
+        };
+
+        // 3. Split the difference between (A) and (B) and use that as the new row_order for `row`.
+        let new_row_order = after_row_order + (next_row_order - after_row_order) / 2.0;
+        let sql = format!(
+            r#"UPDATE "{}" SET "row_order" = {}
+                WHERE "row_number" = {}
+                RETURNING 1 AS "updated""#,
+            table, new_row_order, row,
+        );
+        let rows = sqlx_query(&sql).fetch_all(&self.pool).await?;
+        if rows.len() == 0 {
+            let sql = format!(
+                r#"UPDATE "{}_conflict" SET "row_order" = {}
+                WHERE "row_number" = {}"#,
+                table, new_row_order, row,
+            );
+            self.execute_sql(&sql).await?;
+        }
+
+        // TODO: Update the history table here.
+
+        Ok(new_row_order)
     }
 
     /// Return the next recorded change to the data that can be undone, or None if there isn't any.

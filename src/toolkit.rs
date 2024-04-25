@@ -2523,7 +2523,7 @@ pub async fn get_row_order_tx(
     table: &str,
     row_number: &u32,
     tx: &mut Transaction<'_, sqlx::Any>,
-) -> Result<u32> {
+) -> Result<f32> {
     let sql = format!(
         r#"SELECT "row_order" FROM "{}_view" WHERE "row_number" = {}"#,
         table, row_number
@@ -2537,10 +2537,9 @@ pub async fn get_row_order_tx(
         ))
         .into())
     } else if rows.len() == 0 {
-        Ok(0)
+        Ok(0.0)
     } else {
-        let row_order: i64 = rows[0].get("row_order");
-        let row_order = row_order as u32;
+        let row_order: f32 = rows[0].get("row_order");
         Ok(row_order)
     }
 }
@@ -2561,7 +2560,7 @@ pub async fn insert_new_row_tx(
     tx: &mut Transaction<sqlx::Any>,
     table: &str,
     row: &ValveRow,
-    new_row_order: Option<u32>,
+    new_row_order: Option<f32>,
     skip_validation: bool,
 ) -> Result<u32> {
     // Send the row through the row validator to determine if any fields are problematic and
@@ -2589,7 +2588,7 @@ pub async fn insert_new_row_tx(
             match new_row_order {
                 Some(o) => o,
                 // The row order defaults to the row number:
-                None => n,
+                None => n as f32,
             },
         ),
         None => {
@@ -2620,7 +2619,7 @@ pub async fn insert_new_row_tx(
             }
             let new_row_number = new_row_number as u32 + 1;
             // The row order defaults to the row number:
-            (new_row_number, new_row_number)
+            (new_row_number, new_row_number as f32)
         }
     };
 
@@ -3679,7 +3678,7 @@ pub fn get_table_ddl(
     let mut create_lines = vec![
         format!(r#"CREATE TABLE "{}" ("#, table_name),
         String::from(r#"  "row_number" BIGINT,"#),
-        String::from(r#"  "row_order" BIGINT,"#),
+        String::from(r#"  "row_order" REAL,"#),
     ];
 
     let normal_table_name;
@@ -3824,9 +3823,13 @@ pub fn get_table_ddl(
         }
     }
 
-    // Finally, create a further unique index on row_number:
+    // Finally, create further unique indexes on row_number and row_order:
     statements.push(format!(
         r#"CREATE UNIQUE INDEX "{}_row_number_idx" ON "{}"("row_number");"#,
+        table_name, table_name
+    ));
+    statements.push(format!(
+        r#"CREATE UNIQUE INDEX "{}_row_order_idx" ON "{}"("row_order");"#,
         table_name, table_name
     ));
 

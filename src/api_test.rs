@@ -83,7 +83,7 @@ async fn test_insert_1(valve: &Valve) -> Result<()> {
         .insert_row("table3", row.as_object().unwrap(), None, None)
         .await?;
     let row_order = valve.get_row_order("table3", &new_row_num).await?;
-    assert_eq!(row_order, new_row_num);
+    assert_eq!(row_order, new_row_num as f32);
 
     eprintln!("done.");
     Ok(())
@@ -126,7 +126,7 @@ async fn test_insert_2(valve: &Valve) -> Result<()> {
         .insert_row("table6", row.as_object().unwrap(), None, None)
         .await?;
     let row_order = valve.get_row_order("table6", &new_row_num).await?;
-    assert_eq!(row_order, new_row_num);
+    assert_eq!(row_order, new_row_num as f32);
 
     eprintln!("done.");
     Ok(())
@@ -816,6 +816,21 @@ async fn test_default(valve: &Valve) -> Result<()> {
     Ok(())
 }
 
+async fn test_move(valve: &Valve) -> Result<()> {
+    valve.move_row("table4", &5, &2).await?;
+    valve.move_row("table4", &7, &5).await?;
+    valve.move_row("table4", &9, &5).await?;
+    valve.move_row("table4", &5, &11).await?;
+    assert_eq!(valve.get_row_order("table4", &9).await?, 2.625);
+    assert_eq!(valve.get_row_order("table4", &7).await?, 2.75);
+    assert_eq!(valve.get_row_order("table4", &5).await?, 11.5);
+
+    // TODO: Once the recording of moves to the history table has been implemented, verify that
+    // it has been done correctly here.
+
+    Ok(())
+}
+
 pub async fn run_api_tests(table: &str, database: &str) -> Result<()> {
     let valve = Valve::build(table, database).await?;
 
@@ -831,6 +846,7 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<()> {
     test_randomized_api_test_with_undo_redo(&valve).await?;
     test_modes(&valve).await?;
     test_default(&valve).await?;
+    test_move(&valve).await?;
 
     // When the first argument to Valve::build() is not a string ending in .tsv, the table table
     // should be read from the database string (given by the second argument) instead, i.e., valve
