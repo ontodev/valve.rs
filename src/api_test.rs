@@ -174,6 +174,7 @@ async fn test_dependencies(valve: &Valve) -> Result<()> {
     Ok(())
 }
 
+// TODO: Add Move
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum DbOperation {
     Insert,
@@ -421,6 +422,17 @@ async fn test_undo_redo(valve: &Valve) -> Result<()> {
     valve.undo().await?;
 
     // Undo insert:
+    valve.undo().await?;
+
+    // Undo/redo test 5:
+    valve.move_row("table10", &1, &5).await?;
+
+    valve.undo().await?;
+
+    valve.redo().await?;
+
+    valve.move_row("table10", &3, &2).await?;
+
     valve.undo().await?;
 
     eprintln!("done.");

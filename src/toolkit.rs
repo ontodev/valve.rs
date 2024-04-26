@@ -2097,20 +2097,47 @@ pub async fn process_updates(
     Ok(())
 }
 
+/// TODO: Add docstring here
+pub async fn update_row_order(
+    table: &str,
+    row: &u32,
+    row_order: &f32,
+    tx: &mut Transaction<'_, sqlx::Any>,
+) -> Result<()> {
+    let sql = format!(
+        r#"UPDATE "{}" SET "row_order" = {} WHERE "row_number" = {} RETURNING 1 AS "updated""#,
+        table, row_order, row,
+    );
+    let rows = sqlx_query(&sql).fetch_all(tx.acquire().await?).await?;
+    if rows.len() == 0 {
+        // If the update of the normal table yielded zero affected rows, then the row must be
+        // in the conflict table, so we try updating that instead:
+        let sql = format!(
+            r#"UPDATE "{}_conflict" SET "row_order" = {} WHERE "row_number" = {}"#,
+            table, row_order, row,
+        );
+        sqlx_query(&sql).execute(tx.acquire().await?).await?;
+    }
+    Ok(())
+}
+
 /// TODO: Add docstring here.
 pub async fn record_row_move(
-    _tx: &mut Transaction<'_, sqlx::Any>,
+    config: &ValveConfig,
+    pool: &AnyPool,
+    tx: &mut Transaction<'_, sqlx::Any>,
     table: &str,
     row_num: &u32,
     old_row_order: &f32,
     new_row_order: &f32,
+    user: &str,
 ) -> Result<()> {
-    println!(
-        "To implement: Record the change of the row_order of row {} of table {} from {} to {}",
-        row_num, table, old_row_order, new_row_order
-    );
-
-    Ok(())
+    let row = get_row_from_db(config, pool, tx, table, row_num).await?;
+    let mut from_row = row.clone();
+    let mut to_row = row.clone();
+    from_row.insert("row_order".to_string(), json!(old_row_order));
+    to_row.insert("row_order".to_string(), json!(new_row_order));
+    record_row_change(tx, table, row_num, Some(&from_row), Some(&to_row), &user).await
 }
 
 /// Given a database transaction, a table name, a row number, optionally: the version of the row we
@@ -2154,7 +2181,9 @@ pub async fn record_row_change(
         match row {
             None => "NULL".to_string(),
             Some(r) => {
-                let inner = format!("{}", json!(r)).replace("'", "''");
+                let mut row = r.clone();
+                row.remove("row_order");
+                let inner = format!("{}", json!(row)).replace("'", "''");
                 if !quoted {
                     inner
                 } else {
@@ -2176,7 +2205,7 @@ pub async fn record_row_change(
         // Constructs a summary of the form:
         // {
         //   "column":"bar",
-        //   "level":"update",
+        //   "level":"update|move",
         //   "message":"Value changed from 'A' to 'B'",
         //   "old_value":"'A'",
         //   "value":"'B'"
@@ -2187,33 +2216,66 @@ pub async fn record_row_change(
             (Some(from), Some(to)) => {
                 let numeric_re = Regex::new(r"^[0-9]*\.?[0-9]+$")?;
                 for (column, cell) in from.iter() {
-                    let old_value = cell
-                        .get("value")
-                        .and_then(|v| match v {
-                            SerdeValue::String(s) => Some(format!("{}", s)),
-                            SerdeValue::Number(n) => Some(format!("{}", n)),
-                            SerdeValue::Bool(b) => Some(format!("{}", b)),
-                            _ => None,
-                        })
-                        .ok_or(ValveError::DataError(
-                            format!("No value in {}", cell).into(),
-                        ))?;
-                    let new_value = to
-                        .get(column)
-                        .and_then(|v| v.get("value"))
-                        .and_then(|v| match v {
-                            SerdeValue::String(s) => Some(format!("{}", s)),
-                            SerdeValue::Number(n) => Some(format!("{}", n)),
-                            SerdeValue::Bool(b) => Some(format!("{}", b)),
-                            _ => None,
-                        })
-                        .ok_or(ValveError::DataError(
-                            format!("No value for column: {} in {:?}", column, to).into(),
-                        ))?;
+                    let old_value = match column.as_str() {
+                        "row_order" => match cell {
+                            SerdeValue::Number(n) => format!("{}", n),
+                            _ => {
+                                return Err(ValveError::DataError(format!(
+                                    "Value {:?} for column '{}' is not a number",
+                                    cell, column,
+                                ))
+                                .into())
+                            }
+                        },
+                        _ => cell
+                            .get("value")
+                            .and_then(|v| match v {
+                                SerdeValue::String(s) => Some(format!("{}", s)),
+                                SerdeValue::Number(n) => Some(format!("{}", n)),
+                                SerdeValue::Bool(b) => Some(format!("{}", b)),
+                                _ => None,
+                            })
+                            .ok_or(ValveError::DataError(
+                                format!("No value in {}", cell).into(),
+                            ))?,
+                    };
+                    let new_value = match column.as_str() {
+                        "row_order" => to
+                            .get(column)
+                            .and_then(|v| match v {
+                                SerdeValue::Number(n) => Some(format!("{}", n)),
+                                _ => None,
+                            })
+                            .ok_or(ValveError::DataError(
+                                format!(
+                                    "Value of column: '{}' in row {:?} is not a number",
+                                    column, to
+                                )
+                                .into(),
+                            ))?,
+                        _ => to
+                            .get(column)
+                            .and_then(|v| v.get("value"))
+                            .and_then(|v| match v {
+                                SerdeValue::String(s) => Some(format!("{}", s)),
+                                SerdeValue::Number(n) => Some(format!("{}", n)),
+                                SerdeValue::Bool(b) => Some(format!("{}", b)),
+                                _ => None,
+                            })
+                            .ok_or(ValveError::DataError(
+                                format!("No value for column: {} in {:?}", column, to).into(),
+                            ))?,
+                    };
                     if new_value != old_value {
                         let mut column_summary = SerdeMap::new();
                         column_summary.insert("column".to_string(), json!(column));
-                        column_summary.insert("level".to_string(), json!("update"));
+                        column_summary.insert(
+                            "level".to_string(),
+                            match column.as_str() {
+                                "row_order" => json!("move"),
+                                _ => json!("update"),
+                            },
+                        );
                         column_summary.insert("old_value".to_string(), json!(old_value));
                         column_summary.insert("value".to_string(), json!(new_value));
                         column_summary.insert(
@@ -2252,8 +2314,8 @@ pub fn convert_undo_or_redo_record_to_change(record: &AnyRow) -> Result<Option<V
     let table: &str = record.get("table");
     let row_number: i64 = record.get("row");
     let row_number = row_number as u32;
-    let from = get_json_from_row(&record, "from");
-    let to = get_json_from_row(&record, "to");
+    let from = get_json_object_from_row(&record, "from");
+    let to = get_json_object_from_row(&record, "to");
     let summary = {
         let summary = record.try_get_raw("summary")?;
         if !summary.is_null() {
@@ -2385,8 +2447,31 @@ pub async fn get_record_to_redo(pool: &AnyPool) -> Result<Option<AnyRow>> {
     Ok(result_row)
 }
 
+/// Given a row and a column name, extract the contents of the row as a JSON array and return it.
+pub fn get_json_array_from_row(row: &AnyRow, column: &str) -> Option<Vec<SerdeValue>> {
+    let raw_value = row
+        .try_get_raw(column)
+        .expect("Unable to get raw value from row");
+    if !raw_value.is_null() {
+        let value: &str = row.get(column);
+        match serde_json::from_str::<SerdeValue>(value) {
+            Err(e) => {
+                log::warn!("{}", e);
+                None
+            }
+            Ok(SerdeValue::Array(value)) => Some(value),
+            _ => {
+                log::warn!("{} is not an array.", value);
+                None
+            }
+        }
+    } else {
+        None
+    }
+}
+
 /// Given a row and a column name, extract the contents of the row as a JSON object and return it.
-pub fn get_json_from_row(row: &AnyRow, column: &str) -> Option<SerdeMap> {
+pub fn get_json_object_from_row(row: &AnyRow, column: &str) -> Option<SerdeMap> {
     let raw_value = row
         .try_get_raw(column)
         .expect("Unable to get raw value from row");
@@ -2406,6 +2491,79 @@ pub fn get_json_from_row(row: &AnyRow, column: &str) -> Option<SerdeMap> {
     } else {
         None
     }
+}
+
+pub async fn undo_or_redo_move(
+    table: &str,
+    last_change: &AnyRow,
+    history_id: u16,
+    row_number: &u32,
+    tx: &mut Transaction<'_, sqlx::Any>,
+    undo: bool,
+) -> Result<()> {
+    let summary = match get_json_array_from_row(&last_change, "summary") {
+        None => {
+            return Err(ValveError::DataError(format!(
+                "No summary found in undo record for history_id == {}",
+                history_id,
+            ))
+            .into())
+        }
+        Some(summary) => summary[0].clone(),
+    };
+    let column = summary
+        .get("column")
+        .and_then(|c| c.as_str())
+        .ok_or(ValveError::DataError(format!(
+            "No property 'column' found in summary for history_id == {}",
+            history_id,
+        )))?;
+    if column != "row_order" {
+        return Err(ValveError::DataError(format!(
+            "Unexpected column '{}' in summary record for history_id == {}. \
+             Expected: 'row_order'",
+            column, history_id
+        ))
+        .into());
+    }
+    let level = summary
+        .get("level")
+        .and_then(|l| l.as_str())
+        .ok_or(ValveError::DataError(format!(
+            "No property 'level' found in summary for history_id == {}",
+            history_id,
+        )))?;
+    if level != "move" {
+        return Err(ValveError::DataError(format!(
+            "Unexpected level '{}' in summary record for history_id == {}. \
+             Expected 'move'",
+            level, history_id
+        ))
+        .into());
+    }
+    let update_value = {
+        if undo {
+            summary
+                .get("old_value")
+                .and_then(|l| l.as_str())
+                .ok_or(ValveError::DataError(format!(
+                    "No property 'old_value' found in summary for history_id == {}",
+                    history_id,
+                )))?
+                .parse::<f32>()?
+        } else {
+            summary
+                .get("value")
+                .and_then(|l| l.as_str())
+                .ok_or(ValveError::DataError(format!(
+                    "No property 'old_value' found in summary for history_id == {}",
+                    history_id,
+                )))?
+                .parse::<f32>()?
+        }
+    };
+    update_row_order(table, &row_number, &update_value, tx).await?;
+    Ok(())
 }
 
 /// Given a user, a history_id, a database transaction, and an undone_state indicating whether to
