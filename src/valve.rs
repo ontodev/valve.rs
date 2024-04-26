@@ -12,8 +12,8 @@ use crate::{
         get_record_to_undo, get_row_from_db, get_row_order_tx, get_sql_for_standard_view,
         get_sql_for_text_view, get_sql_type, get_sql_type_from_global_config, get_table_ddl,
         insert_chunks, insert_new_row_tx, local_sql_syntax, read_config_files, record_row_change,
-        switch_undone_state, update_row_tx, verify_table_deps_and_sort, ColumnRule,
-        CompiledCondition, ParsedStructure,
+        record_row_move, switch_undone_state, update_row_tx, verify_table_deps_and_sort,
+        ColumnRule, CompiledCondition, ParsedStructure,
     },
     validate::{validate_row_tx, validate_tree_foreign_keys, validate_under, with_tree_sql},
     valve_grammar::StartParser,
@@ -31,7 +31,7 @@ use serde_json::{json, Value as SerdeValue};
 use sprintf::sprintf;
 use sqlx::{
     any::{AnyKind, AnyPool},
-    query as sqlx_query, Row, ValueRef,
+    query as sqlx_query, Acquire, Row, ValueRef,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -2177,41 +2177,31 @@ impl Valve {
         Ok(())
     }
 
-    /// TODO: Add docstring here.
+    /// Given a table name, `table`, a row number, `row`, and the number of the row, `after_row`,
+    /// representing the row number that will come immediately before `row` in the ordering of rows
+    /// after the move has been completed: Set the `row_order` field corresponding to `row` in the
+    /// database so that `row` comes immediately after `after_row` in the ordering of rows.
     pub async fn move_row(&self, table: &str, row: &u32, after_row: &u32) -> Result<f32> {
+        // 0. Save the old row order of the row to be updated, which we will use later to record
+        // this change in the history table:
+        let mut tx = self.pool.begin().await?;
+        let old_row_order = get_row_order_tx(table, row, &mut tx).await?;
+
         // 1. Get the row order, (A), of `after_row`:
-        let after_row_order: f32 = {
-            let sql = format!(
-                r#"SELECT "row_order" FROM "{}_view" WHERE "row_number" = {}"#,
-                table, after_row
-            );
-            let result_row = sqlx_query(&sql).fetch_one(&self.pool).await?;
-            let raw_row_order = result_row.try_get_raw("row_order")?;
-            if raw_row_order.is_null() {
-                return Err(ValveError::DataError(
-                    format!("No row_order defined for row {} of table '{}'", row, table,).into(),
-                )
-                .into());
-            }
-            result_row.get("row_order")
-        };
+        let after_row_order = get_row_order_tx(table, after_row, &mut tx).await?;
 
         // 2. Run a query to get the minimum row_order, (B), that is greater than (A).
         let next_row_order = {
-            let mut ceiling = after_row_order.ceil();
-            if ceiling == after_row_order {
-                ceiling += 1.0;
-            }
             let sql = format!(
                 r#"SELECT MIN("row_order") AS "row_order" FROM "{}_view" WHERE "row_order" > {}"#,
                 table, after_row_order
             );
-            let result_row = sqlx_query(&sql).fetch_one(&self.pool).await?;
+            let result_row = sqlx_query(&sql).fetch_one(tx.acquire().await?).await?;
             let raw_row_order = result_row.try_get_raw("row_order")?;
             if raw_row_order.is_null() {
-                // This might happen if we ask Valve to move a row to a position after the last row
-                // in the table.
-                ceiling
+                // The raw_row_order will be null if we ask Valve to move a row to a position after
+                // the last row in the table.
+                (after_row_order + 1.0).floor()
             } else {
                 result_row.get("row_order")
             }
@@ -2220,23 +2210,22 @@ impl Valve {
         // 3. Split the difference between (A) and (B) and use that as the new row_order for `row`.
         let new_row_order = after_row_order + (next_row_order - after_row_order) / 2.0;
         let sql = format!(
-            r#"UPDATE "{}" SET "row_order" = {}
-                WHERE "row_number" = {}
-                RETURNING 1 AS "updated""#,
+            r#"UPDATE "{}" SET "row_order" = {} WHERE "row_number" = {} RETURNING 1 AS "updated""#,
             table, new_row_order, row,
         );
-        let rows = sqlx_query(&sql).fetch_all(&self.pool).await?;
+        let rows = sqlx_query(&sql).fetch_all(tx.acquire().await?).await?;
         if rows.len() == 0 {
+            // If the update of the normal table yielded zero affected rows, then the row must be
+            // in the conflict table, so we try updating that instead:
             let sql = format!(
-                r#"UPDATE "{}_conflict" SET "row_order" = {}
-                WHERE "row_number" = {}"#,
+                r#"UPDATE "{}_conflict" SET "row_order" = {} WHERE "row_number" = {}"#,
                 table, new_row_order, row,
             );
-            self.execute_sql(&sql).await?;
+            sqlx_query(&sql).execute(tx.acquire().await?).await?;
         }
 
-        // TODO: Update the history table here.
-
+        record_row_move(&mut tx, table, row, &old_row_order, &new_row_order).await?;
+        tx.commit().await?;
         Ok(new_row_order)
     }
 

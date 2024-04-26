@@ -817,6 +817,7 @@ async fn test_default(valve: &Valve) -> Result<()> {
 }
 
 async fn test_move(valve: &Valve) -> Result<()> {
+    eprint!("Running test_move() ... ");
     valve.move_row("table4", &5, &2).await?;
     valve.move_row("table4", &7, &5).await?;
     valve.move_row("table4", &9, &5).await?;
@@ -828,6 +829,7 @@ async fn test_move(valve: &Valve) -> Result<()> {
     // TODO: Once the recording of moves to the history table has been implemented, verify that
     // it has been done correctly here.
 
+    eprintln!("done.");
     Ok(())
 }
 

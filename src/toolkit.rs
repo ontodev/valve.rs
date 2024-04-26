@@ -2097,6 +2097,22 @@ pub async fn process_updates(
     Ok(())
 }
 
+/// TODO: Add docstring here.
+pub async fn record_row_move(
+    _tx: &mut Transaction<'_, sqlx::Any>,
+    table: &str,
+    row_num: &u32,
+    old_row_order: &f32,
+    new_row_order: &f32,
+) -> Result<()> {
+    println!(
+        "To implement: Record the change of the row_order of row {} of table {} from {} to {}",
+        row_num, table, old_row_order, new_row_order
+    );
+
+    Ok(())
+}
+
 /// Given a database transaction, a table name, a row number, optionally: the version of the row we
 /// are going to change it from, optionally: the version of the row we are going to change it to,
 /// and the name of the user making the change, record the change to the history table in the
@@ -2528,20 +2544,19 @@ pub async fn get_row_order_tx(
         r#"SELECT "row_order" FROM "{}_view" WHERE "row_number" = {}"#,
         table, row_number
     );
-    let query = sqlx_query(&sql);
-    let rows = query.fetch_all(tx.acquire().await?).await?;
-    if rows.len() > 1 {
-        Err(ValveError::DataError(format!(
-            "There is more than one row with row_number {} in {}",
-            row_number, table
-        ))
-        .into())
-    } else if rows.len() == 0 {
-        Ok(0.0)
-    } else {
-        let row_order: f32 = rows[0].get("row_order");
-        Ok(row_order)
+    let result_row = sqlx_query(&sql).fetch_one(tx.acquire().await?).await?;
+    let raw_row_order = result_row.try_get_raw("row_order")?;
+    if raw_row_order.is_null() {
+        return Err(ValveError::DataError(
+            format!(
+                "No row_order defined for row {} of table '{}'",
+                row_number, table,
+            )
+            .into(),
+        )
+        .into());
     }
+    Ok(result_row.get("row_order"))
 }
 
 /// Given a global config struct, compiled datatype and rule conditions, a database connection pool,
