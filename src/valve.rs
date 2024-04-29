@@ -2188,7 +2188,16 @@ impl Valve {
         let old_row_order = get_row_order_tx(table, row, &mut tx).await?;
 
         // 1. Get the row order, (A), of `after_row`:
-        let after_row_order = get_row_order_tx(table, after_row, &mut tx).await?;
+        let after_row_order = {
+            if *after_row > 0 {
+                get_row_order_tx(table, after_row, &mut tx).await?
+            } else {
+                // It is not possible for a row to be assigned a row number of zero. We allow
+                // it as a possible value of `after_row`, however, which is used to signify that
+                // `row` should become the very first row in the table ordering.
+                0.0
+            }
+        };
 
         // 2. Run a query to get the minimum row_order, (B), that is greater than (A).
         let next_row_order = {

@@ -834,9 +834,11 @@ async fn test_move(valve: &Valve) -> Result<()> {
     valve.move_row("table4", &7, &5).await?;
     valve.move_row("table4", &9, &5).await?;
     valve.move_row("table4", &5, &11).await?;
+    valve.move_row("table4", &2, &0).await?;
     assert_eq!(valve.get_row_order("table4", &9).await?, 2.625);
     assert_eq!(valve.get_row_order("table4", &7).await?, 2.75);
     assert_eq!(valve.get_row_order("table4", &5).await?, 11.5);
+    assert_eq!(valve.get_row_order("table4", &2).await?, 0.5);
 
     // TODO: Once the recording of moves to the history table has been implemented, verify that
     // it has been done correctly here.
