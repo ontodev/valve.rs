@@ -2181,9 +2181,7 @@ pub async fn record_row_change(
         match row {
             None => "NULL".to_string(),
             Some(r) => {
-                let mut row = r.clone();
-                row.remove("row_order");
-                let inner = format!("{}", json!(row)).replace("'", "''");
+                let inner = format!("{}", json!(r)).replace("'", "''");
                 if !quoted {
                     inner
                 } else {

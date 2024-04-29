@@ -7,12 +7,13 @@ use crate::{
     toolkit::{
         add_message_counts, cast_column_sql_to_text, convert_undo_or_redo_record_to_change,
         delete_row_tx, get_column_for_label, get_column_value, get_compiled_datatype_conditions,
-        get_compiled_rule_conditions, get_json_object_from_row, get_label_for_column,
-        get_parsed_structure_conditions, get_pool_from_connection_string, get_record_to_redo,
-        get_record_to_undo, get_row_from_db, get_row_order_tx, get_sql_for_standard_view,
-        get_sql_for_text_view, get_sql_type, get_sql_type_from_global_config, get_table_ddl,
-        insert_chunks, insert_new_row_tx, local_sql_syntax, read_config_files, record_row_change,
-        record_row_move, switch_undone_state, undo_or_redo_move, update_row_order, update_row_tx,
+        get_compiled_rule_conditions, get_json_array_from_row, get_json_object_from_row,
+        get_label_for_column, get_parsed_structure_conditions, get_pool_from_connection_string,
+        get_record_to_redo, get_record_to_undo, get_row_from_db, get_row_order_tx,
+        get_sql_for_standard_view, get_sql_for_text_view, get_sql_type,
+        get_sql_type_from_global_config, get_table_ddl, insert_chunks, insert_new_row_tx,
+        local_sql_syntax, read_config_files, record_row_change, record_row_move,
+        switch_undone_state, undo_or_redo_move, update_row_order, update_row_tx,
         verify_table_deps_and_sort, ColumnRule, CompiledCondition, ParsedStructure,
     },
     validate::{validate_row_tx, validate_tree_foreign_keys, validate_under, with_tree_sql},
@@ -2265,33 +2266,38 @@ impl Valve {
         let table: &str = last_change.get("table");
         let row_number: i64 = last_change.get("row");
         let row_number = row_number as u32;
-        let mut from = get_json_object_from_row(&last_change, "from");
-        let mut to = get_json_object_from_row(&last_change, "to");
-        if from == None && to == None {
-            return Err(ValveError::DataError(
-                "Cannot undo unknown operation from None to None".into(),
-            )
-            .into());
-        }
-        // If `from` is the same as `to`, then the last change was a move, which we indicate
-        // to the match block below by setting them both to None here:
-        if from == to {
-            from = None;
-            to = None;
-        }
-
-        match (from, to) {
-            (None, None) => {
+        let from = get_json_object_from_row(&last_change, "from");
+        let to = get_json_object_from_row(&last_change, "to");
+        let summary = get_json_array_from_row(&last_change, "summary");
+        // TODO: Check that the filtered vector below does not have more than one item:
+        if let Some(summary) = summary {
+            if summary
+                .iter()
+                .filter(|o| {
+                    o.get("column").expect("No 'column' in summary") == "row_order"
+                        && o.get("level").expect("No 'level' in summary") == "move"
+                })
+                .collect::<Vec<_>>()
+                .len()
+                == 1
+            {
                 // Undo a move:
                 let mut tx = self.pool.begin().await?;
 
                 undo_or_redo_move(table, &last_change, history_id, &row_number, &mut tx, true)
                     .await?;
-
                 switch_undone_state(&self.user, history_id, true, &mut tx, &self.pool).await?;
+
                 tx.commit().await?;
-                Ok(None)
+                return Ok(None);
             }
+        }
+
+        match (from, to) {
+            (None, None) => Err(ValveError::DataError(
+                "Cannot undo unknown operation from None to None".into(),
+            )
+            .into()),
             (None, Some(_)) => {
                 // Undo an insert:
                 let mut tx = self.pool.begin().await?;
@@ -2379,32 +2385,39 @@ impl Valve {
         let table: &str = last_undo.get("table");
         let row_number: i64 = last_undo.get("row");
         let row_number = row_number as u32;
-        let mut from = get_json_object_from_row(&last_undo, "from");
-        let mut to = get_json_object_from_row(&last_undo, "to");
-        if from == None && to == None {
-            return Err(ValveError::DataError(
-                "Cannot redo unknown operation from None to None".into(),
-            )
-            .into());
-        }
-        // If `from` is the same as `to`, then the last change that was undone was was a move,
-        // which we indicate to the match block below by setting them both to None here:
-        if from == to {
-            from = None;
-            to = None;
-        }
-
-        match (from, to) {
-            (None, None) => {
+        let from = get_json_object_from_row(&last_undo, "from");
+        let to = get_json_object_from_row(&last_undo, "to");
+        let summary = get_json_array_from_row(&last_undo, "summary");
+        // TODO: Check that the filtered vector below does not have more than one item:
+        if let Some(summary) = summary {
+            if summary
+                .iter()
+                .filter(|o| {
+                    o.get("column").expect("No 'column' in summary") == "row_order"
+                        && o.get("level").expect("No 'level' in summary") == "move"
+                })
+                .collect::<Vec<_>>()
+                .len()
+                == 1
+            {
                 // Redo a move:
                 let mut tx = self.pool.begin().await?;
 
                 undo_or_redo_move(table, &last_undo, history_id, &row_number, &mut tx, false)
                     .await?;
-
                 switch_undone_state(&self.user, history_id, false, &mut tx, &self.pool).await?;
+
                 tx.commit().await?;
-                Ok(None)
+                return Ok(None);
+            }
+        }
+
+        match (from, to) {
+            (None, None) => {
+                return Err(ValveError::DataError(
+                    "Cannot redo unknown operation from None to None".into(),
+                )
+                .into());
             }
             (None, Some(to)) => {
                 // Redo an insert:
