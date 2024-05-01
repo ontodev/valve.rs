@@ -12,9 +12,9 @@ use crate::{
         get_record_to_redo, get_record_to_undo, get_row_from_db, get_row_order_tx,
         get_sql_for_standard_view, get_sql_for_text_view, get_sql_type,
         get_sql_type_from_global_config, get_table_ddl, insert_chunks, insert_new_row_tx,
-        local_sql_syntax, read_config_files, record_row_change, record_row_move,
-        switch_undone_state, undo_or_redo_move, update_row_order, update_row_tx,
-        verify_table_deps_and_sort, ColumnRule, CompiledCondition, ParsedStructure,
+        local_sql_syntax, move_row_tx, read_config_files, record_row_change, record_row_move,
+        switch_undone_state, undo_or_redo_move, update_row_tx, verify_table_deps_and_sort,
+        ColumnRule, CompiledCondition, ParsedStructure,
     },
     validate::{validate_row_tx, validate_tree_foreign_keys, validate_under, with_tree_sql},
     valve_grammar::StartParser,
@@ -2183,55 +2183,41 @@ impl Valve {
     /// after the move has been completed: Set the `row_order` field corresponding to `row` in the
     /// database so that `row` comes immediately after `after_row` in the ordering of rows.
     pub async fn move_row(&self, table: &str, row: &u32, after_row: &u32) -> Result<f32> {
-        // 0. Save the old row order of the row to be updated, which we will use later to record
-        // this change in the history table:
         let mut tx = self.pool.begin().await?;
-        let old_row_order = get_row_order_tx(table, row, &mut tx).await?;
-
-        // 1. Get the row order, (A), of `after_row`:
-        let after_row_order = {
-            if *after_row > 0 {
-                get_row_order_tx(table, after_row, &mut tx).await?
-            } else {
-                // It is not possible for a row to be assigned a row number of zero. We allow
-                // it as a possible value of `after_row`, however, which is used to signify that
-                // `row` should become the very first row in the table ordering.
-                0.0
-            }
-        };
-
-        // 2. Run a query to get the minimum row_order, (B), that is greater than (A).
-        let next_row_order = {
+        // Get the previous row, i.e., the row after which one will find the current row, which we
+        // will use later to record this change in the history table:
+        let old_after_row = {
+            let curr_row_order = get_row_order_tx(table, row, &mut tx).await?;
             let sql = format!(
-                r#"SELECT MIN("row_order") AS "row_order" FROM "{}_view" WHERE "row_order" > {}"#,
-                table, after_row_order
+                r#"SELECT MAX("row_number") AS "row_number" FROM "{}_view" WHERE "row_order" < {}"#,
+                table, curr_row_order
             );
             let result_row = sqlx_query(&sql).fetch_one(tx.acquire().await?).await?;
-            let raw_row_order = result_row.try_get_raw("row_order")?;
-            if raw_row_order.is_null() {
-                // The raw_row_order will be null if we ask Valve to move a row to a position after
-                // the last row in the table.
-                (after_row_order + 1.0).floor()
+            let raw_row_number = result_row.try_get_raw("row_number")?;
+            let row_number: i64;
+            if raw_row_number.is_null() {
+                row_number = 0
             } else {
-                result_row.get("row_order")
+                row_number = result_row.get("row_number")
             }
+            row_number as u32
         };
 
-        // 3. Split the difference between (A) and (B) and use that as the new row_order for `row`.
-        let new_row_order = after_row_order + (next_row_order - after_row_order) / 2.0;
-        update_row_order(table, row, &new_row_order, &mut tx).await?;
+        let new_row_order = move_row_tx(&mut tx, table, row, after_row).await?;
 
+        // Record the move in the history table unless we have been explicitly told not to:
         record_row_move(
             &self.config,
             &self.pool,
             &mut tx,
             table,
             row,
-            &old_row_order,
-            &new_row_order,
+            &old_after_row,
+            &after_row,
             &self.user,
         )
         .await?;
+
         tx.commit().await?;
         Ok(new_row_order)
     }
@@ -2274,7 +2260,7 @@ impl Valve {
             if summary
                 .iter()
                 .filter(|o| {
-                    o.get("column").expect("No 'column' in summary") == "row_order"
+                    o.get("column").expect("No 'column' in summary") == "previous_row"
                         && o.get("level").expect("No 'level' in summary") == "move"
                 })
                 .collect::<Vec<_>>()
@@ -2393,7 +2379,7 @@ impl Valve {
             if summary
                 .iter()
                 .filter(|o| {
-                    o.get("column").expect("No 'column' in summary") == "row_order"
+                    o.get("column").expect("No 'column' in summary") == "previous_row"
                         && o.get("level").expect("No 'level' in summary") == "move"
                 })
                 .collect::<Vec<_>>()

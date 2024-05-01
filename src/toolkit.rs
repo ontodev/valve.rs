@@ -2128,15 +2128,15 @@ pub async fn record_row_move(
     tx: &mut Transaction<'_, sqlx::Any>,
     table: &str,
     row_num: &u32,
-    old_row_order: &f32,
-    new_row_order: &f32,
+    old_after_row: &u32,
+    new_after_row: &u32,
     user: &str,
 ) -> Result<()> {
     let row = get_row_from_db(config, pool, tx, table, row_num).await?;
     let mut from_row = row.clone();
     let mut to_row = row.clone();
-    from_row.insert("row_order".to_string(), json!(old_row_order));
-    to_row.insert("row_order".to_string(), json!(new_row_order));
+    from_row.insert("previous_row".to_string(), json!(old_after_row));
+    to_row.insert("previous_row".to_string(), json!(new_after_row));
     record_row_change(tx, table, row_num, Some(&from_row), Some(&to_row), &user).await
 }
 
@@ -2215,7 +2215,7 @@ pub async fn record_row_change(
                 let numeric_re = Regex::new(r"^[0-9]*\.?[0-9]+$")?;
                 for (column, cell) in from.iter() {
                     let old_value = match column.as_str() {
-                        "row_order" => match cell {
+                        "previous_row" => match cell {
                             SerdeValue::Number(n) => format!("{}", n),
                             _ => {
                                 return Err(ValveError::DataError(format!(
@@ -2238,7 +2238,7 @@ pub async fn record_row_change(
                             ))?,
                     };
                     let new_value = match column.as_str() {
-                        "row_order" => to
+                        "previous_row" => to
                             .get(column)
                             .and_then(|v| match v {
                                 SerdeValue::Number(n) => Some(format!("{}", n)),
@@ -2270,7 +2270,7 @@ pub async fn record_row_change(
                         column_summary.insert(
                             "level".to_string(),
                             match column.as_str() {
-                                "row_order" => json!("move"),
+                                "previous_row" => json!("move"),
                                 _ => json!("update"),
                             },
                         );
@@ -2516,10 +2516,10 @@ pub async fn undo_or_redo_move(
             "No property 'column' found in summary for history_id == {}",
             history_id,
         )))?;
-    if column != "row_order" {
+    if column != "previous_row" {
         return Err(ValveError::DataError(format!(
             "Unexpected column '{}' in summary record for history_id == {}. \
-             Expected: 'row_order'",
+             Expected: 'previous_row'",
             column, history_id
         ))
         .into());
@@ -2548,7 +2548,7 @@ pub async fn undo_or_redo_move(
                     "No property 'old_value' found in summary for history_id == {}",
                     history_id,
                 )))?
-                .parse::<f32>()?
+                .parse::<u32>()?
         } else {
             summary
                 .get("value")
@@ -2557,10 +2557,10 @@ pub async fn undo_or_redo_move(
                     "No property 'old_value' found in summary for history_id == {}",
                     history_id,
                 )))?
-                .parse::<f32>()?
+                .parse::<u32>()?
         }
     };
-    update_row_order(table, &row_number, &update_value, tx).await?;
+    move_row_tx(tx, table, &row_number, &update_value).await?;
     Ok(())
 }
 
@@ -2713,6 +2713,66 @@ pub async fn get_row_order_tx(
         .into());
     }
     Ok(result_row.get("row_order"))
+}
+
+/// TODO: Add docstring here
+pub async fn move_row_tx(
+    tx: &mut Transaction<'_, sqlx::Any>,
+    table: &str,
+    row: &u32,
+    after_row: &u32,
+) -> Result<f32> {
+    // Get the row order, (A), of `after_row`:
+    let after_row_order = {
+        if *after_row > 0 {
+            get_row_order_tx(table, after_row, tx).await?
+        } else {
+            // It is not possible for a row to be assigned a row number of zero. We allow
+            // it as a possible value of `after_row`, however, which is used to signify that
+            // `row` should become the very first row in the table ordering.
+            0.0
+        }
+    };
+
+    // Run a query to get the minimum row_order, (B), that is greater than (A).
+    let next_row_order = {
+        let sql = format!(
+            r#"SELECT MIN("row_order") AS "row_order" FROM "{}_view" WHERE "row_order" > {}"#,
+            table, after_row_order
+        );
+        let result_row = sqlx_query(&sql).fetch_one(tx.acquire().await?).await?;
+        let raw_row_order = result_row.try_get_raw("row_order")?;
+        if raw_row_order.is_null() {
+            // The raw_row_order will be null if we ask Valve to move a row to a position after
+            // the last row in the table.
+            (after_row_order + 1.0).floor()
+        } else {
+            result_row.get("row_order")
+        }
+    };
+
+    async fn _add_room_to_move(_after_row_order: &f32, _next_row_order: &f32) -> Result<()> {
+        return Err(ValveError::DataError("No more room to move".into()).into());
+    }
+
+    // Split the difference between (A) and (B) and use that as the new row_order for `row`.
+    let new_row_order = after_row_order + (next_row_order - after_row_order) / 2.0;
+
+    // TODO: This is the new algorithm:
+    //let mut new_row_order = next_row_order;
+    //while new_row_order >= next_row_order {
+    //    new_row_order -= 0.000001;
+    //    if new_row_order <= after_row_order {
+    //        add_room_to_move(&after_row_order, &next_row_order).await?;
+    //    }
+    //}
+
+    println!("New row order for row {}: {}", row, new_row_order);
+
+    // Update the row order of the given row:
+    update_row_order(table, row, &new_row_order, tx).await?;
+
+    Ok(new_row_order)
 }
 
 /// Given a global config struct, compiled datatype and rule conditions, a database connection pool,

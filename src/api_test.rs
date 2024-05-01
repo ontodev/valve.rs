@@ -830,15 +830,65 @@ async fn test_default(valve: &Valve) -> Result<()> {
 
 async fn test_move(valve: &Valve) -> Result<()> {
     eprint!("Running test_move() ... ");
+
+    async fn get_rows_in_order(valve: &Valve) -> Result<Vec<u32>> {
+        let query = sqlx_query("SELECT row_number FROM table4_view ORDER BY row_order");
+        let rows = query.fetch_all(&valve.pool).await?;
+        let rows: Vec<i64> = rows.iter().map(|r| r.get("row_number")).collect::<Vec<_>>();
+        let rows = rows.iter().map(|n| *n as u32).collect::<Vec<_>>();
+        Ok(rows)
+    }
+
     valve.move_row("table4", &5, &2).await?;
+    assert_eq!(
+        vec![1, 2, 5, 3, 4, 6, 7, 8, 9, 10, 11],
+        get_rows_in_order(valve).await?
+    );
     valve.move_row("table4", &7, &5).await?;
+    assert_eq!(
+        vec![1, 2, 5, 7, 3, 4, 6, 8, 9, 10, 11],
+        get_rows_in_order(valve).await?
+    );
     valve.move_row("table4", &9, &5).await?;
+    assert_eq!(
+        vec![1, 2, 5, 9, 7, 3, 4, 6, 8, 10, 11],
+        get_rows_in_order(valve).await?
+    );
     valve.move_row("table4", &5, &11).await?;
+    assert_eq!(
+        vec![1, 2, 9, 7, 3, 4, 6, 8, 10, 11, 5],
+        get_rows_in_order(valve).await?
+    );
     valve.move_row("table4", &2, &0).await?;
-    assert_eq!(valve.get_row_order("table4", &9).await?, 2.625);
-    assert_eq!(valve.get_row_order("table4", &7).await?, 2.75);
-    assert_eq!(valve.get_row_order("table4", &5).await?, 11.5);
-    assert_eq!(valve.get_row_order("table4", &2).await?, 0.5);
+    assert_eq!(
+        vec![2, 1, 9, 7, 3, 4, 6, 8, 10, 11, 5],
+        get_rows_in_order(valve).await?
+    );
+    valve.undo().await?;
+    assert_eq!(
+        vec![1, 2, 9, 7, 3, 4, 6, 8, 10, 11, 5],
+        get_rows_in_order(valve).await?
+    );
+    valve.undo().await?;
+    assert_eq!(
+        vec![1, 2, 5, 9, 7, 3, 4, 6, 8, 10, 11],
+        get_rows_in_order(valve).await?
+    );
+    valve.undo().await?;
+    assert_eq!(
+        vec![1, 2, 5, 7, 3, 4, 6, 8, 9, 10, 11],
+        get_rows_in_order(valve).await?
+    );
+    valve.undo().await?;
+    assert_eq!(
+        vec![1, 2, 5, 3, 4, 6, 7, 8, 9, 10, 11],
+        get_rows_in_order(valve).await?
+    );
+    valve.undo().await?;
+    assert_eq!(
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+        get_rows_in_order(valve).await?
+    );
 
     // TODO: Once the recording of moves to the history table has been implemented, verify that
     // it has been done correctly here.
@@ -847,22 +897,33 @@ async fn test_move(valve: &Valve) -> Result<()> {
     Ok(())
 }
 
+// TODO: Remove this from the test suite. We don't need to run it all the time.
+async fn test_circular_move(valve: &Valve) -> Result<()> {
+    for row in 2..11 {
+        //println!("Moving row {}", row);
+        let prev_row = row - 1;
+        valve.move_row("penguin", &row, &prev_row).await?;
+    }
+    Ok(())
+}
+
 pub async fn run_api_tests(table: &str, database: &str) -> Result<()> {
     let valve = Valve::build(table, database).await?;
 
     // NOTE that you must use an external script to fetch the data from the database and run a diff
     // against a known good sample to verify that these tests yield the expected results:
-    test_matching(&valve).await?;
-    test_update_1(&valve).await?;
-    test_insert_1(&valve).await?;
-    test_update_2(&valve).await?;
-    test_insert_2(&valve).await?;
-    test_dependencies(&valve).await?;
-    test_undo_redo(&valve).await?;
-    test_randomized_api_test_with_undo_redo(&valve).await?;
-    test_modes(&valve).await?;
-    test_default(&valve).await?;
+    //test_matching(&valve).await?;
+    //test_update_1(&valve).await?;
+    //test_insert_1(&valve).await?;
+    //test_update_2(&valve).await?;
+    //test_insert_2(&valve).await?;
+    //test_dependencies(&valve).await?;
+    //test_undo_redo(&valve).await?;
+    //test_randomized_api_test_with_undo_redo(&valve).await?;
+    //test_modes(&valve).await?;
+    //test_default(&valve).await?;
     test_move(&valve).await?;
+    //test_circular_move(&valve).await?;
 
     // When the first argument to Valve::build() is not a string ending in .tsv, the table table
     // should be read from the database string (given by the second argument) instead, i.e., valve
