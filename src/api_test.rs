@@ -79,9 +79,7 @@ async fn test_insert_1(valve: &Valve) -> Result<()> {
         "type": "owl:Class",
     });
 
-    let (new_row_num, _new_row) = valve
-        .insert_row("table3", row.as_object().unwrap(), None, None)
-        .await?;
+    let (new_row_num, _new_row) = valve.insert_row("table3", row.as_object().unwrap()).await?;
     let row_order = valve.get_row_order("table3", &new_row_num).await?;
     assert_eq!(row_order, new_row_num as f32);
 
@@ -122,9 +120,7 @@ async fn test_insert_2(valve: &Valve) -> Result<()> {
         "bar": 2,
     });
 
-    let (new_row_num, _new_row) = valve
-        .insert_row("table6", row.as_object().unwrap(), None, None)
-        .await?;
+    let (new_row_num, _new_row) = valve.insert_row("table6", row.as_object().unwrap()).await?;
     let row_order = valve.get_row_order("table6", &new_row_num).await?;
     assert_eq!(row_order, new_row_num as f32);
 
@@ -167,7 +163,7 @@ async fn test_dependencies(valve: &Valve) -> Result<()> {
     });
 
     let (_new_row_num, _new_row) = valve
-        .insert_row("table10", &row.as_object().unwrap(), None, None)
+        .insert_row("table10", &row.as_object().unwrap())
         .await?;
 
     eprintln!("done.");
@@ -337,7 +333,7 @@ async fn test_randomized_api_test_with_undo_redo(valve: &Valve) -> Result<()> {
             }
             DbOperation::Insert => {
                 let row = generate_row();
-                let (_rn, _r) = valve.insert_row("table1", &row, None, None).await?;
+                let (_rn, _r) = valve.insert_row("table1", &row).await?;
             }
             DbOperation::Undo => {
                 valve.undo().await?;
@@ -369,7 +365,7 @@ async fn test_undo_redo(valve: &Valve) -> Result<()> {
 
     // Undo/redo test 1:
     let (_rn, _r) = valve
-        .insert_row("table10", &row_1.as_object().unwrap(), None, None)
+        .insert_row("table10", &row_1.as_object().unwrap())
         .await?;
 
     valve.undo().await?;
@@ -400,7 +396,7 @@ async fn test_undo_redo(valve: &Valve) -> Result<()> {
 
     // Undo/redo test 4:
     let (rn, _row) = valve
-        .insert_row("table10", &row_1.as_object().unwrap(), None, None)
+        .insert_row("table10", &row_1.as_object().unwrap())
         .await?;
 
     valve
@@ -598,9 +594,7 @@ async fn test_modes(valve: &Valve) -> Result<()> {
     let vrow = valve.validate_row("view1", &view_row, None).await?;
     assert_eq!(format!("{:#?}", vrow), expected_vrow);
 
-    let result = valve
-        .insert_row("readonly1", &readonly_row, None, None)
-        .await;
+    let result = valve.insert_row("readonly1", &readonly_row).await;
     match result {
         Err(e) => assert_eq!(
             format!("{:?}", e),
@@ -609,7 +603,7 @@ async fn test_modes(valve: &Valve) -> Result<()> {
         _ => assert!(false, "Expected an error result but got an OK result"),
     };
 
-    let result = valve.insert_row("view1", &view_row, None, None).await;
+    let result = valve.insert_row("view1", &view_row).await;
     match result {
         Err(e) => assert_eq!(
             format!("{:?}", e),
@@ -667,9 +661,7 @@ async fn test_default(valve: &Valve) -> Result<()> {
         "ontology_IRI": "foo",
         "version_IRI": "bar",
     });
-    let (_, new_row) = valve
-        .insert_row("table8", row.as_object().unwrap(), None, None)
-        .await?;
+    let (_, new_row) = valve.insert_row("table8", row.as_object().unwrap()).await?;
     let expected = indoc! {r#"ValveRow {
                                   row_number: Some(
                                       3,
@@ -715,9 +707,7 @@ async fn test_default(valve: &Valve) -> Result<()> {
         "xyzzy": "x",
         "bar": "w",
     });
-    let (_, new_row) = valve
-        .insert_row("table9", row.as_object().unwrap(), None, None)
-        .await?;
+    let (_, new_row) = valve.insert_row("table9", row.as_object().unwrap()).await?;
     let expected = indoc! {r#"ValveRow {
                                   row_number: Some(
                                       10,
@@ -771,9 +761,7 @@ async fn test_default(valve: &Valve) -> Result<()> {
         "bar": "x",
         "foo": 2,
     });
-    let (_, new_row) = valve
-        .insert_row("table9", row.as_object().unwrap(), None, None)
-        .await?;
+    let (_, new_row) = valve.insert_row("table9", row.as_object().unwrap()).await?;
     let expected = indoc! {r#"ValveRow {
                                   row_number: Some(
                                       11,
@@ -832,61 +820,77 @@ async fn test_move(valve: &Valve) -> Result<()> {
     eprint!("Running test_move() ... ");
 
     async fn get_rows_in_order(valve: &Valve) -> Result<Vec<u32>> {
-        let query = sqlx_query("SELECT row_number FROM table4_view ORDER BY row_order");
+        let query = sqlx_query("SELECT row_number FROM table1_view ORDER BY row_order");
         let rows = query.fetch_all(&valve.pool).await?;
         let rows: Vec<i64> = rows.iter().map(|r| r.get("row_number")).collect::<Vec<_>>();
         let rows = rows.iter().map(|n| *n as u32).collect::<Vec<_>>();
         Ok(rows)
     }
 
-    valve.move_row("table4", &5, &2).await?;
+    // Move a bunch of rows:
+    valve.move_row("table1", &5, &2).await?;
     assert_eq!(
-        vec![1, 2, 5, 3, 4, 6, 7, 8, 9, 10, 11],
+        vec![1, 2, 5, 3, 4, 6, 7, 8, 9, 10, 11, 12],
         get_rows_in_order(valve).await?
     );
-    valve.move_row("table4", &7, &5).await?;
+    valve.move_row("table1", &7, &5).await?;
     assert_eq!(
-        vec![1, 2, 5, 7, 3, 4, 6, 8, 9, 10, 11],
+        vec![1, 2, 5, 7, 3, 4, 6, 8, 9, 10, 11, 12],
         get_rows_in_order(valve).await?
     );
-    valve.move_row("table4", &9, &5).await?;
+    valve.move_row("table1", &9, &5).await?;
     assert_eq!(
-        vec![1, 2, 5, 9, 7, 3, 4, 6, 8, 10, 11],
+        vec![1, 2, 5, 9, 7, 3, 4, 6, 8, 10, 11, 12],
         get_rows_in_order(valve).await?
     );
-    valve.move_row("table4", &5, &11).await?;
+    valve.move_row("table1", &5, &12).await?;
     assert_eq!(
-        vec![1, 2, 9, 7, 3, 4, 6, 8, 10, 11, 5],
+        vec![1, 2, 9, 7, 3, 4, 6, 8, 10, 11, 12, 5],
         get_rows_in_order(valve).await?
     );
-    valve.move_row("table4", &2, &0).await?;
+    valve.move_row("table1", &2, &0).await?;
     assert_eq!(
-        vec![2, 1, 9, 7, 3, 4, 6, 8, 10, 11, 5],
+        vec![2, 1, 9, 7, 3, 4, 6, 8, 10, 11, 12, 5],
         get_rows_in_order(valve).await?
     );
-    valve.undo().await?;
+
+    // Delete a row and then undo the delete, then check to see if it has been
+    // placed back into the right order.
+    valve.delete_row("table1", &8).await?;
     assert_eq!(
-        vec![1, 2, 9, 7, 3, 4, 6, 8, 10, 11, 5],
-        get_rows_in_order(valve).await?
-    );
-    valve.undo().await?;
-    assert_eq!(
-        vec![1, 2, 5, 9, 7, 3, 4, 6, 8, 10, 11],
-        get_rows_in_order(valve).await?
-    );
-    valve.undo().await?;
-    assert_eq!(
-        vec![1, 2, 5, 7, 3, 4, 6, 8, 9, 10, 11],
+        vec![2, 1, 9, 7, 3, 4, 6, 10, 11, 12, 5],
         get_rows_in_order(valve).await?
     );
     valve.undo().await?;
     assert_eq!(
-        vec![1, 2, 5, 3, 4, 6, 7, 8, 9, 10, 11],
+        vec![2, 1, 9, 7, 3, 4, 6, 8, 10, 11, 12, 5],
+        get_rows_in_order(valve).await?
+    );
+
+    // Undo the moves:
+    valve.undo().await?;
+    assert_eq!(
+        vec![1, 2, 9, 7, 3, 4, 6, 8, 10, 11, 12, 5],
         get_rows_in_order(valve).await?
     );
     valve.undo().await?;
     assert_eq!(
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+        vec![1, 2, 5, 9, 7, 3, 4, 6, 8, 10, 11, 12],
+        get_rows_in_order(valve).await?
+    );
+    valve.undo().await?;
+    assert_eq!(
+        vec![1, 2, 5, 7, 3, 4, 6, 8, 9, 10, 11, 12],
+        get_rows_in_order(valve).await?
+    );
+    valve.undo().await?;
+    assert_eq!(
+        vec![1, 2, 5, 3, 4, 6, 7, 8, 9, 10, 11, 12],
+        get_rows_in_order(valve).await?
+    );
+    valve.undo().await?;
+    assert_eq!(
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
         get_rows_in_order(valve).await?
     );
 

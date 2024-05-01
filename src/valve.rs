@@ -9,8 +9,8 @@ use crate::{
         delete_row_tx, get_column_for_label, get_column_value, get_compiled_datatype_conditions,
         get_compiled_rule_conditions, get_json_array_from_row, get_json_object_from_row,
         get_label_for_column, get_parsed_structure_conditions, get_pool_from_connection_string,
-        get_record_to_redo, get_record_to_undo, get_row_from_db, get_row_order_tx,
-        get_sql_for_standard_view, get_sql_for_text_view, get_sql_type,
+        get_previous_row_tx, get_record_to_redo, get_record_to_undo, get_row_from_db,
+        get_row_order_tx, get_sql_for_standard_view, get_sql_for_text_view, get_sql_type,
         get_sql_type_from_global_config, get_table_ddl, insert_chunks, insert_new_row_tx,
         local_sql_syntax, move_row_tx, read_config_files, record_row_change, record_row_move,
         switch_undone_state, undo_or_redo_move, update_row_tx, verify_table_deps_and_sort,
@@ -2011,13 +2011,7 @@ impl Valve {
     /// ```
     /// validate and insert the row to the table and return the row number of the inserted row
     /// and the row itself in the form of a [ValveRow].
-    pub async fn insert_row(
-        &self,
-        table_name: &str,
-        row: &JsonRow,
-        new_row_number: Option<u32>,
-        row_order: Option<f32>,
-    ) -> Result<(u32, ValveRow)> {
+    pub async fn insert_row(&self, table_name: &str, row: &JsonRow) -> Result<(u32, ValveRow)> {
         let table_options = &self.get_table_options(table_name)?;
         if !table_options.contains("edit") {
             return Err(ValveError::InputError(format!(
@@ -2028,8 +2022,7 @@ impl Valve {
         }
 
         let mut tx = self.pool.begin().await?;
-        let mut row = ValveRow::from_simple_json(row, None)?;
-        row.row_number = new_row_number;
+        let row = ValveRow::from_simple_json(row, None)?;
         let mut row = validate_row_tx(
             &self.config,
             &self.datatype_conditions,
@@ -2050,7 +2043,6 @@ impl Valve {
             &mut tx,
             table_name,
             &row,
-            row_order,
             true,
         )
         .await?;
@@ -2150,9 +2142,11 @@ impl Valve {
 
         let mut tx = self.pool.begin().await?;
 
-        let row =
+        let mut row =
             get_row_from_db(&self.config, &self.pool, &mut tx, &table_name, row_number).await?;
 
+        let previous_row = get_previous_row_tx(table_name, row_number, &mut tx).await?;
+        row.insert("previous_row".into(), json!(previous_row));
         record_row_change(
             &mut tx,
             &table_name,
@@ -2178,32 +2172,17 @@ impl Valve {
         Ok(())
     }
 
-    /// Given a table name, `table`, a row number, `row`, and the number of the row, `after_row`,
+    /// Given a table name, `table`, a row number, `row`, and the number of the row, `previous_row`,
     /// representing the row number that will come immediately before `row` in the ordering of rows
     /// after the move has been completed: Set the `row_order` field corresponding to `row` in the
-    /// database so that `row` comes immediately after `after_row` in the ordering of rows.
-    pub async fn move_row(&self, table: &str, row: &u32, after_row: &u32) -> Result<f32> {
+    /// database so that `row` comes immediately after `previous_row` in the ordering of rows.
+    pub async fn move_row(&self, table: &str, row: &u32, previous_row: &u32) -> Result<f32> {
         let mut tx = self.pool.begin().await?;
         // Get the previous row, i.e., the row after which one will find the current row, which we
         // will use later to record this change in the history table:
-        let old_after_row = {
-            let curr_row_order = get_row_order_tx(table, row, &mut tx).await?;
-            let sql = format!(
-                r#"SELECT MAX("row_number") AS "row_number" FROM "{}_view" WHERE "row_order" < {}"#,
-                table, curr_row_order
-            );
-            let result_row = sqlx_query(&sql).fetch_one(tx.acquire().await?).await?;
-            let raw_row_number = result_row.try_get_raw("row_number")?;
-            let row_number: i64;
-            if raw_row_number.is_null() {
-                row_number = 0
-            } else {
-                row_number = result_row.get("row_number")
-            }
-            row_number as u32
-        };
+        let old_previous_row = get_previous_row_tx(table, row, &mut tx).await?;
 
-        let new_row_order = move_row_tx(&mut tx, table, row, after_row).await?;
+        let new_row_order = move_row_tx(&mut tx, table, row, previous_row).await?;
 
         // Record the move in the history table unless we have been explicitly told not to:
         record_row_move(
@@ -2212,8 +2191,8 @@ impl Valve {
             &mut tx,
             table,
             row,
-            &old_after_row,
-            &after_row,
+            &old_previous_row,
+            &previous_row,
             &self.user,
         )
         .await?;
@@ -2303,12 +2282,33 @@ impl Valve {
                 tx.commit().await?;
                 Ok(None)
             }
-            (Some(from), None) => {
+            (Some(mut from), None) => {
                 // Undo a delete:
                 let mut tx = self.pool.begin().await?;
 
+                let previous_row = match from.get("previous_row") {
+                    Some(SerdeValue::Number(n)) => {
+                        let number: u32 = n.to_string().parse()?;
+                        number
+                    }
+                    Some(v) => {
+                        return Err(ValveError::DataError(format!(
+                            "Unexpected value: {:?} for previous_row in history record",
+                            v
+                        ))
+                        .into())
+                    }
+                    None => {
+                        return Err(ValveError::DataError(
+                            "No previous_row found in history record".into(),
+                        )
+                        .into())
+                    }
+                };
+
+                from.remove("previous_row");
                 let from = ValveRow::from_rich_json(Some(row_number), &from)?;
-                insert_new_row_tx(
+                let rn = insert_new_row_tx(
                     &self.config,
                     &self.datatype_conditions,
                     &self.rule_conditions,
@@ -2316,10 +2316,13 @@ impl Valve {
                     &mut tx,
                     table,
                     &from,
-                    None, // TODO: Is it correct to pass None here?
                     false,
                 )
                 .await?;
+
+                // Move the row back to the position after `previous_row`, which is the position
+                // it was in before it was deleted:
+                move_row_tx(&mut tx, table, &rn, &previous_row).await?;
 
                 switch_undone_state(&self.user, history_id, true, &mut tx, &self.pool).await?;
                 tx.commit().await?;
@@ -2418,7 +2421,6 @@ impl Valve {
                     &mut tx,
                     table,
                     &to,
-                    None, // Is it correct to pass None here?
                     false,
                 )
                 .await?;

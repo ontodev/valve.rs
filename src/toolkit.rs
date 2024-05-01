@@ -2128,15 +2128,15 @@ pub async fn record_row_move(
     tx: &mut Transaction<'_, sqlx::Any>,
     table: &str,
     row_num: &u32,
-    old_after_row: &u32,
-    new_after_row: &u32,
+    old_previous_row: &u32,
+    new_previous_row: &u32,
     user: &str,
 ) -> Result<()> {
     let row = get_row_from_db(config, pool, tx, table, row_num).await?;
     let mut from_row = row.clone();
     let mut to_row = row.clone();
-    from_row.insert("previous_row".to_string(), json!(old_after_row));
-    to_row.insert("previous_row".to_string(), json!(new_after_row));
+    from_row.insert("previous_row".to_string(), json!(old_previous_row));
+    to_row.insert("previous_row".to_string(), json!(new_previous_row));
     record_row_change(tx, table, row_num, Some(&from_row), Some(&to_row), &user).await
 }
 
@@ -2715,20 +2715,47 @@ pub async fn get_row_order_tx(
     Ok(result_row.get("row_order"))
 }
 
+// TODO: Add a version of this function to the API:
+/// TODO: Add docstring here
+pub async fn get_previous_row_tx(
+    table: &str,
+    row: &u32,
+    tx: &mut Transaction<'_, sqlx::Any>,
+) -> Result<u32> {
+    let curr_row_order = get_row_order_tx(table, row, tx).await?;
+    let sql = format!(
+        r#"SELECT "row_number"
+             FROM "{}_view"
+            WHERE "row_order" < {}
+            ORDER BY "row_order" DESC
+            LIMIT 1"#,
+        table, curr_row_order
+    );
+    let result_row = sqlx_query(&sql).fetch_one(tx.acquire().await?).await?;
+    let raw_rn = result_row.try_get_raw("row_number")?;
+    let rn: i64;
+    if raw_rn.is_null() {
+        rn = 0
+    } else {
+        rn = result_row.get("row_number")
+    }
+    Ok(rn as u32)
+}
+
 /// TODO: Add docstring here
 pub async fn move_row_tx(
     tx: &mut Transaction<'_, sqlx::Any>,
     table: &str,
     row: &u32,
-    after_row: &u32,
+    previous_row: &u32,
 ) -> Result<f32> {
-    // Get the row order, (A), of `after_row`:
-    let after_row_order = {
-        if *after_row > 0 {
-            get_row_order_tx(table, after_row, tx).await?
+    // Get the row order, (A), of `previous_row`:
+    let previous_row_order = {
+        if *previous_row > 0 {
+            get_row_order_tx(table, previous_row, tx).await?
         } else {
             // It is not possible for a row to be assigned a row number of zero. We allow
-            // it as a possible value of `after_row`, however, which is used to signify that
+            // it as a possible value of `previous_row`, however, which is used to signify that
             // `row` should become the very first row in the table ordering.
             0.0
         }
@@ -2738,36 +2765,36 @@ pub async fn move_row_tx(
     let next_row_order = {
         let sql = format!(
             r#"SELECT MIN("row_order") AS "row_order" FROM "{}_view" WHERE "row_order" > {}"#,
-            table, after_row_order
+            table, previous_row_order
         );
         let result_row = sqlx_query(&sql).fetch_one(tx.acquire().await?).await?;
         let raw_row_order = result_row.try_get_raw("row_order")?;
         if raw_row_order.is_null() {
             // The raw_row_order will be null if we ask Valve to move a row to a position after
             // the last row in the table.
-            (after_row_order + 1.0).floor()
+            (previous_row_order + 1.0).floor()
         } else {
             result_row.get("row_order")
         }
     };
 
-    async fn _add_room_to_move(_after_row_order: &f32, _next_row_order: &f32) -> Result<()> {
+    async fn _add_room_to_move(_previous_row_order: &f32, _next_row_order: &f32) -> Result<()> {
         return Err(ValveError::DataError("No more room to move".into()).into());
     }
 
     // Split the difference between (A) and (B) and use that as the new row_order for `row`.
-    let new_row_order = after_row_order + (next_row_order - after_row_order) / 2.0;
+    let new_row_order = previous_row_order + (next_row_order - previous_row_order) / 2.0;
 
     // TODO: This is the new algorithm:
     //let mut new_row_order = next_row_order;
     //while new_row_order >= next_row_order {
     //    new_row_order -= 0.000001;
-    //    if new_row_order <= after_row_order {
-    //        add_room_to_move(&after_row_order, &next_row_order).await?;
+    //    if new_row_order <= previous_row_order {
+    //        add_room_to_move(&previous_row_order, &next_row_order).await?;
     //    }
     //}
 
-    println!("New row order for row {}: {}", row, new_row_order);
+    //println!("New row order for row {}: {}", row, new_row_order);
 
     // Update the row order of the given row:
     update_row_order(table, row, &new_row_order, tx).await?;
@@ -2791,7 +2818,6 @@ pub async fn insert_new_row_tx(
     tx: &mut Transaction<sqlx::Any>,
     table: &str,
     row: &ValveRow,
-    new_row_order: Option<f32>,
     skip_validation: bool,
 ) -> Result<u32> {
     // Send the row through the row validator to determine if any fields are problematic and
@@ -2813,15 +2839,8 @@ pub async fn insert_new_row_tx(
     };
 
     // Now prepare the row and messages for insertion to the database.
-    let (new_row_number, new_row_order) = match row.row_number {
-        Some(n) => (
-            n,
-            match new_row_order {
-                Some(o) => o,
-                // The row order defaults to the row number:
-                None => n as f32,
-            },
-        ),
+    let new_row_number = match row.row_number {
+        Some(n) => n,
         None => {
             let sql = format!(
                 r#"SELECT MAX("row_number") AS "row_number" FROM (
@@ -2849,8 +2868,7 @@ pub async fn insert_new_row_tx(
                 }
             }
             let new_row_number = new_row_number as u32 + 1;
-            // The row order defaults to the row number:
-            (new_row_number, new_row_number as f32)
+            new_row_number
         }
     };
 
@@ -2914,11 +2932,10 @@ pub async fn insert_new_row_tx(
     let insert_stmt = local_sql_syntax(
         &pool,
         &format!(
-            r#"INSERT INTO "{}" ("row_number", "row_order", {}) VALUES ({}, {}, {})"#,
+            r#"INSERT INTO "{}" ("row_number", {}) VALUES ({}, {})"#,
             table_to_write,
             insert_columns.join(", "),
             new_row_number,
-            new_row_order,
             insert_values.join(", "),
         ),
     );
@@ -3117,9 +3134,6 @@ pub async fn update_row_tx(
         row.clone()
     };
 
-    // Get the row_order for this row:
-    let row_order = get_row_order_tx(table, &row_number, tx).await?;
-
     // Perform the update in two steps:
     delete_row_tx(
         config,
@@ -3139,7 +3153,6 @@ pub async fn update_row_tx(
         tx,
         table,
         &row,
-        Some(row_order),
         false,
     )
     .await?;
