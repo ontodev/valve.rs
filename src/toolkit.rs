@@ -2704,19 +2704,18 @@ pub async fn get_row_order_tx(
         r#"SELECT "row_order" FROM "{}_view" WHERE "row_number" = {}"#,
         table, row_number
     );
-    let result_row = sqlx_query(&sql).fetch_one(tx.acquire().await?).await?;
-    let raw_row_order = result_row.try_get_raw("row_order")?;
-    if raw_row_order.is_null() {
+    let rows = sqlx_query(&sql).fetch_all(tx.acquire().await?).await?;
+    if rows.len() == 0 {
         return Err(ValveError::DataError(
             format!(
-                "No row_order defined for row {} of table '{}'",
+                "Unable to fetch row_order for row {} of table '{}'",
                 row_number, table,
             )
             .into(),
         )
         .into());
     }
-    Ok(result_row.get("row_order"))
+    Ok(rows[0].get("row_order"))
 }
 
 /// Given a table name, a row number, and a transaction through which to access the database,

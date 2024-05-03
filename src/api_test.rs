@@ -7,7 +7,7 @@ use ontodev_valve::{
     valve::{Valve, ValveError},
 };
 use rand::distributions::{Alphanumeric, DistString, Distribution, Uniform};
-use rand::{random, thread_rng};
+use rand::{random, Rng};
 use serde_json::json;
 use sqlx::{any::AnyPool, query as sqlx_query, Row, ValueRef};
 
@@ -160,12 +160,12 @@ async fn test_dependencies(valve: &Valve) -> Result<()> {
     Ok(())
 }
 
-// TODO: Add Move
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum DbOperation {
     Insert,
     Delete,
     Update,
+    Move,
     Undo,
     Redo,
 }
@@ -191,15 +191,15 @@ async fn generate_operation_sequence(pool: &AnyPool) -> Result<Vec<DbOperation>>
 
     let list_len = {
         let between = Uniform::from(25..51);
-        let mut rng = thread_rng();
+        let mut rng = rand::thread_rng();
         between.sample(&mut rng)
     };
 
     let mut operations = vec![];
     let mut undo_stack = vec![];
     for _ in 0..list_len {
-        let between = Uniform::from(0..3);
-        let mut rng = thread_rng();
+        let between = Uniform::from(0..4);
+        let mut rng = rand::thread_rng();
         match between.sample(&mut rng) {
             0 => operations.push(DbOperation::Insert),
             1 => {
@@ -216,6 +216,15 @@ async fn generate_operation_sequence(pool: &AnyPool) -> Result<Vec<DbOperation>>
                 let rows = query.fetch_all(pool).await?;
                 if rows.len() != 0 {
                     operations.push(DbOperation::Update)
+                } else {
+                    operations.push(DbOperation::Insert)
+                }
+            }
+            3 => {
+                let query = sqlx_query("SELECT MAX(row_number) AS row_number FROM table1_view");
+                let rows = query.fetch_all(pool).await?;
+                if rows.len() != 0 {
+                    operations.push(DbOperation::Move)
                 } else {
                     operations.push(DbOperation::Insert)
                 }
@@ -324,6 +333,47 @@ async fn test_randomized_api_test_with_undo_redo(valve: &Valve) -> Result<()> {
             DbOperation::Insert => {
                 let row = generate_row();
                 let (_rn, _r) = valve.insert_row("table1", &row).await?;
+            }
+            DbOperation::Move => {
+                let query = sqlx_query("SELECT COUNT(1) AS num_rows FROM table1_view");
+                let sql_row = query.fetch_one(&valve.pool).await?;
+                let num_rows: i64 = sql_row.get("num_rows");
+                let num_rows = num_rows as u32;
+                if num_rows == 0 {
+                    return Err(ValveError::DataError("No rows in table1_view".into()).into());
+                }
+
+                async fn row_exists(valve: &Valve, row: u32) -> bool {
+                    let sql = format!(
+                        "SELECT COUNT(1) AS num_rows FROM table1_view WHERE row_number = {}",
+                        row
+                    );
+                    let query = sqlx_query(&sql);
+                    let sql_row = query.fetch_one(&valve.pool).await.unwrap();
+                    let num_rows: i64 = sql_row.get("num_rows");
+                    let num_rows = num_rows as u32;
+                    num_rows > 0
+                }
+
+                // Randomly generate a row number to move and find the previous_row for it (after
+                // making sure that the randomly generated row number exists in the db):
+                let mut row = rand::thread_rng().gen_range(1..num_rows + 1);
+                while !row_exists(valve, row).await {
+                    row = rand::thread_rng().gen_range(1..num_rows + 1);
+                }
+                let old_previous_row = valve.get_previous_row("table1", &row).await?;
+
+                // Randomly generate a new_previous_row, so that we can try to move `row` to the
+                // position immediately after it. Note that we also make sure that
+                // `new_previous_row` exists and is distinct both from `row` and `old_previous_row`:
+                let mut new_previous_row = rand::thread_rng().gen_range(1..num_rows + 1);
+                while !row_exists(valve, new_previous_row).await
+                    || new_previous_row == old_previous_row
+                    || new_previous_row == row
+                {
+                    new_previous_row = rand::thread_rng().gen_range(1..num_rows + 1);
+                }
+                valve.move_row("table1", &row, &new_previous_row).await?;
             }
             DbOperation::Undo => {
                 valve.undo().await?;
