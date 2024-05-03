@@ -10,7 +10,7 @@ use crate::{
         get_compiled_rule_conditions, get_json_array_from_row, get_json_object_from_row,
         get_label_for_column, get_parsed_structure_conditions, get_pool_from_connection_string,
         get_previous_row_tx, get_record_to_redo, get_record_to_undo, get_row_from_db,
-        get_row_order_tx, get_sql_for_standard_view, get_sql_for_text_view, get_sql_type,
+        get_sql_for_standard_view, get_sql_for_text_view, get_sql_type,
         get_sql_type_from_global_config, get_table_ddl, insert_chunks, insert_new_row_tx,
         local_sql_syntax, move_row_tx, read_config_files, record_row_change, record_row_move,
         switch_undone_state, undo_or_redo_move, update_row_tx, verify_table_deps_and_sort,
@@ -32,7 +32,7 @@ use serde_json::{json, Value as SerdeValue};
 use sprintf::sprintf;
 use sqlx::{
     any::{AnyKind, AnyPool},
-    query as sqlx_query, Acquire, Row, ValueRef,
+    query as sqlx_query, Row, ValueRef,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -1963,11 +1963,11 @@ impl Valve {
         Ok(self)
     }
 
-    /// Given a table name and a row number, return the row_order corresponding to the given
-    /// row number in the given table.
-    pub async fn get_row_order(&self, table: &str, row_number: &u32) -> Result<f32> {
+    /// Given a table name, a row number, and a transaction through which to access the database,
+    /// search for and return the row number of the row that is marked as previous to the given row.
+    pub async fn get_previous_row(&self, table: &str, row: &u32) -> Result<u32> {
         let mut tx = self.pool.begin().await?;
-        get_row_order_tx(table, row_number, &mut tx).await
+        get_previous_row_tx(table, row, &mut tx).await
     }
 
     /// Given a table name and a row, represented as a JSON object in the following ('simple')
@@ -2234,18 +2234,16 @@ impl Valve {
         let from = get_json_object_from_row(&last_change, "from");
         let to = get_json_object_from_row(&last_change, "to");
         let summary = get_json_array_from_row(&last_change, "summary");
-        // TODO: Check that the filtered vector below does not have more than one item:
         if let Some(summary) = summary {
-            if summary
+            let num_moves = summary
                 .iter()
                 .filter(|o| {
                     o.get("column").expect("No 'column' in summary") == "previous_row"
                         && o.get("level").expect("No 'level' in summary") == "move"
                 })
                 .collect::<Vec<_>>()
-                .len()
-                == 1
-            {
+                .len();
+            if num_moves == 1 {
                 // Undo a move:
                 let mut tx = self.pool.begin().await?;
 
@@ -2255,6 +2253,12 @@ impl Valve {
 
                 tx.commit().await?;
                 return Ok(None);
+            } else if num_moves > 1 {
+                return Err(ValveError::DataError(format!(
+                    "Invalid history record #{} indicated multiple moves",
+                    history_id
+                ))
+                .into());
             }
         }
 
@@ -2382,18 +2386,16 @@ impl Valve {
         let from = get_json_object_from_row(&last_undo, "from");
         let to = get_json_object_from_row(&last_undo, "to");
         let summary = get_json_array_from_row(&last_undo, "summary");
-        // TODO: Check that the filtered vector below does not have more than one item:
         if let Some(summary) = summary {
-            if summary
+            let num_moves = summary
                 .iter()
                 .filter(|o| {
                     o.get("column").expect("No 'column' in summary") == "previous_row"
                         && o.get("level").expect("No 'level' in summary") == "move"
                 })
                 .collect::<Vec<_>>()
-                .len()
-                == 1
-            {
+                .len();
+            if num_moves == 1 {
                 // Redo a move:
                 let mut tx = self.pool.begin().await?;
 
@@ -2403,6 +2405,12 @@ impl Valve {
 
                 tx.commit().await?;
                 return Ok(None);
+            } else if num_moves > 1 {
+                return Err(ValveError::DataError(format!(
+                    "Invalid history record #{} indicated multiple moves",
+                    history_id
+                ))
+                .into());
             }
         }
 

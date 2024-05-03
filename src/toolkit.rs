@@ -2097,7 +2097,8 @@ pub async fn process_updates(
     Ok(())
 }
 
-/// TODO: Add docstring here
+/// Given a table name, a row number, the new row order to assign to the row, and a database
+/// transaction, update the row order for the row in the database.
 pub async fn update_row_order(
     table: &str,
     row: &u32,
@@ -2121,7 +2122,10 @@ pub async fn update_row_order(
     Ok(())
 }
 
-/// TODO: Add docstring here.
+/// Given a global configuration struct, a database connection pool used to determine the SQL syntax
+/// to use, a database transaction through which to execute queries over the database, a table name,
+/// a row number, the old previous row for the row, and the new previous row for the row, record the
+/// move in the history table in the database.
 pub async fn record_row_move(
     config: &ValveConfig,
     pool: &AnyPool,
@@ -2715,8 +2719,8 @@ pub async fn get_row_order_tx(
     Ok(result_row.get("row_order"))
 }
 
-// TODO: Add a version of this function to the API:
-/// TODO: Add docstring here
+/// Given a table name, a row number, and a transaction through which to access the database,
+/// search for and return the row number of the row that is marked as previous to the given row.
 pub async fn get_previous_row_tx(
     table: &str,
     row: &u32,

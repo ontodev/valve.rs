@@ -57,12 +57,9 @@ async fn test_update_1(valve: &Valve) -> Result<()> {
         "bar": "B",
     });
 
-    let row_order_before = valve.get_row_order("table2", &1).await?;
     valve
         .update_row("table2", &1, &row.as_object().unwrap())
         .await?;
-    let row_order_after = valve.get_row_order("table2", &1).await?;
-    assert_eq!(row_order_before, row_order_after);
 
     eprintln!("done.");
     Ok(())
@@ -79,9 +76,7 @@ async fn test_insert_1(valve: &Valve) -> Result<()> {
         "type": "owl:Class",
     });
 
-    let (new_row_num, _new_row) = valve.insert_row("table3", row.as_object().unwrap()).await?;
-    let row_order = valve.get_row_order("table3", &new_row_num).await?;
-    assert_eq!(row_order, new_row_num as f32);
+    let (_new_row_num, _new_row) = valve.insert_row("table3", row.as_object().unwrap()).await?;
 
     eprintln!("done.");
     Ok(())
@@ -98,12 +93,9 @@ async fn test_update_2(valve: &Valve) -> Result<()> {
         "bar": 2,
     });
 
-    let row_order_before = valve.get_row_order("table6", &1).await?;
     valve
         .update_row("table6", &1, row.as_object().unwrap())
         .await?;
-    let row_order_after = valve.get_row_order("table6", &1).await?;
-    assert_eq!(row_order_before, row_order_after);
 
     eprintln!("done.");
     Ok(())
@@ -120,9 +112,7 @@ async fn test_insert_2(valve: &Valve) -> Result<()> {
         "bar": 2,
     });
 
-    let (new_row_num, _new_row) = valve.insert_row("table6", row.as_object().unwrap()).await?;
-    let row_order = valve.get_row_order("table6", &new_row_num).await?;
-    assert_eq!(row_order, new_row_num as f32);
+    let (_new_row_num, _new_row) = valve.insert_row("table6", row.as_object().unwrap()).await?;
 
     eprintln!("done.");
     Ok(())
