@@ -427,7 +427,7 @@ async fn test_undo_redo(valve: &Valve) -> Result<()> {
 
     valve.redo().await?;
 
-    valve.move_row("table10", &3, &2).await?;
+    valve.move_row("table10", &3, &1).await?;
 
     valve.undo().await?;
 
@@ -901,33 +901,22 @@ async fn test_move(valve: &Valve) -> Result<()> {
     Ok(())
 }
 
-// TODO: Remove this from the test suite. We don't need to run it all the time.
-async fn test_circular_move(valve: &Valve) -> Result<()> {
-    for row in 2..11 {
-        //println!("Moving row {}", row);
-        let prev_row = row - 1;
-        valve.move_row("penguin", &row, &prev_row).await?;
-    }
-    Ok(())
-}
-
 pub async fn run_api_tests(table: &str, database: &str) -> Result<()> {
     let valve = Valve::build(table, database).await?;
 
     // NOTE that you must use an external script to fetch the data from the database and run a diff
     // against a known good sample to verify that these tests yield the expected results:
-    //test_matching(&valve).await?;
-    //test_update_1(&valve).await?;
-    //test_insert_1(&valve).await?;
-    //test_update_2(&valve).await?;
-    //test_insert_2(&valve).await?;
-    //test_dependencies(&valve).await?;
-    //test_undo_redo(&valve).await?;
-    //test_randomized_api_test_with_undo_redo(&valve).await?;
-    //test_modes(&valve).await?;
-    //test_default(&valve).await?;
+    test_matching(&valve).await?;
+    test_update_1(&valve).await?;
+    test_insert_1(&valve).await?;
+    test_update_2(&valve).await?;
+    test_insert_2(&valve).await?;
+    test_dependencies(&valve).await?;
+    test_undo_redo(&valve).await?;
+    test_randomized_api_test_with_undo_redo(&valve).await?;
+    test_modes(&valve).await?;
+    test_default(&valve).await?;
     test_move(&valve).await?;
-    //test_circular_move(&valve).await?;
 
     // When the first argument to Valve::build() is not a string ending in .tsv, the table table
     // should be read from the database string (given by the second argument) instead, i.e., valve

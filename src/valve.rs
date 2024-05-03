@@ -2306,7 +2306,9 @@ impl Valve {
                     }
                 };
 
+                // The previous_row field is no longer needed so we remove it here:
                 from.remove("previous_row");
+
                 let from = ValveRow::from_rich_json(Some(row_number), &from)?;
                 let rn = insert_new_row_tx(
                     &self.config,
@@ -2328,9 +2330,12 @@ impl Valve {
                 tx.commit().await?;
                 Ok(Some(from))
             }
-            (Some(from), Some(_)) => {
+            (Some(mut from), Some(_)) => {
                 // Undo an an update:
                 let mut tx = self.pool.begin().await?;
+
+                // The previous_row field is not needed so we remove it here:
+                from.remove("previous_row");
 
                 let from = ValveRow::from_rich_json(Some(row_number), &from)?;
                 update_row_tx(
@@ -2408,9 +2413,12 @@ impl Valve {
                 )
                 .into());
             }
-            (None, Some(to)) => {
+            (None, Some(mut to)) => {
                 // Redo an insert:
                 let mut tx = self.pool.begin().await?;
+
+                // The previous_row field is not needed so we remove it here:
+                to.remove("previous_row");
 
                 let to = ValveRow::from_rich_json(Some(row_number), &to)?;
                 insert_new_row_tx(
@@ -2448,9 +2456,12 @@ impl Valve {
                 tx.commit().await?;
                 Ok(None)
             }
-            (Some(_), Some(to)) => {
+            (Some(_), Some(mut to)) => {
                 // Redo an an update:
                 let mut tx = self.pool.begin().await?;
+
+                // The previous_row field is not needed so we remove it here:
+                to.remove("previous_row");
 
                 let to = ValveRow::from_rich_json(Some(row_number), &to)?;
                 update_row_tx(

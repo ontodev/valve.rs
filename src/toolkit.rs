@@ -2731,15 +2731,13 @@ pub async fn get_previous_row_tx(
             LIMIT 1"#,
         table, curr_row_order
     );
-    let result_row = sqlx_query(&sql).fetch_one(tx.acquire().await?).await?;
-    let raw_rn = result_row.try_get_raw("row_number")?;
-    let rn: i64;
-    if raw_rn.is_null() {
-        rn = 0
+    let rows = sqlx_query(&sql).fetch_all(tx.acquire().await?).await?;
+    if rows.len() == 0 {
+        Ok(0)
     } else {
-        rn = result_row.get("row_number")
+        let rn: i64 = rows[0].get("row_number");
+        Ok(rn as u32)
     }
-    Ok(rn as u32)
 }
 
 /// TODO: Add docstring here
@@ -2932,11 +2930,13 @@ pub async fn insert_new_row_tx(
     let insert_stmt = local_sql_syntax(
         &pool,
         &format!(
-            r#"INSERT INTO "{}" ("row_number", {}) VALUES ({}, {})"#,
-            table_to_write,
-            insert_columns.join(", "),
-            new_row_number,
-            insert_values.join(", "),
+            r#"INSERT INTO "{table}" ("row_number", "row_order", {data_columns})
+               VALUES ({row_number}, {row_order}, {data_values})"#,
+            table = table_to_write,
+            data_columns = insert_columns.join(", "),
+            row_number = new_row_number,
+            row_order = new_row_number,
+            data_values = insert_values.join(", "),
         ),
     );
     let mut query = sqlx_query(&insert_stmt);
