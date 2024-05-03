@@ -907,6 +907,25 @@ async fn test_move(valve: &Valve) -> Result<()> {
         get_rows_in_order(valve).await?
     );
 
+    // Update a row and verify that its previous_row has not changed as a result:
+    valve.move_row("table2", &3, &4).await?;
+    let previous_row_before = valve.get_previous_row("table2", &3).await?;
+    assert_eq!(previous_row_before, 4);
+    let row = json!({
+        "child": "b",
+        "parent": "f",
+        "xyzzy": "w",
+        "foo": 1,
+        "bar": "B",
+    });
+    valve
+        .update_row("table2", &3, &row.as_object().unwrap())
+        .await?;
+    let previous_row_after = valve.get_previous_row("table2", &3).await?;
+    assert_eq!(previous_row_before, previous_row_after);
+    valve.undo().await?;
+    valve.undo().await?;
+
     // Undo the moves:
     valve.undo().await?;
     assert_eq!(
@@ -933,9 +952,6 @@ async fn test_move(valve: &Valve) -> Result<()> {
         vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
         get_rows_in_order(valve).await?
     );
-
-    // TODO: Once the recording of moves to the history table has been implemented, verify that
-    // it has been done correctly here.
 
     eprintln!("done.");
     Ok(())

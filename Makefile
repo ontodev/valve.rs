@@ -114,7 +114,6 @@ pg_api_test: valve test/src/table.tsv test/insert_update.sh | test/output
 	$(word 3,$^) $(pg_connect_string) $(word 2,$^)
 	scripts/export_messages.py $(pg_connect_string) $| $(tables_to_test)
 	diff --strip-trailing-cr -q test/expected/messages_after_api_test.tsv test/output/messages.tsv
-	# TODO: Add summary here (for move test)
 	psql $(pg_connect_string) -c "COPY (select \"history_id\", \"table\", \"row\", \"from\", \"to\", \"summary\", \"user\", \"undone_by\" from history where history_id < 15 order by history_id) TO STDOUT WITH NULL AS ''" > test/output/history.tsv
 	tail -n +2 test/expected/history.tsv | diff --strip-trailing-cr -q test/output/history.tsv -
 	# We drop all of the db tables because the schema for the next test (random test) is different

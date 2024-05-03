@@ -2779,6 +2779,11 @@ pub async fn move_row_tx(
         }
     };
 
+    // TODO: Change the way that we generate the new_row_order below. Note that some of the
+    // test case failures we are seeing in the randomized tests that relate to a unique key
+    // violation on row_order are because the current way of generating new_row_orders is
+    // blowing up when too many moves have been made.
+
     async fn _add_room_to_move(_previous_row_order: &f32, _next_row_order: &f32) -> Result<()> {
         return Err(ValveError::DataError("No more room to move".into()).into());
     }
@@ -2798,6 +2803,7 @@ pub async fn move_row_tx(
     //println!("New row order for row {}: {}", row, new_row_order);
 
     // Update the row order of the given row:
+    //println!("PREV: {}, NEXT: {}, NEW: {}", previous_row_order, next_row_order, new_row_order);
     update_row_order(table, row, &new_row_order, tx).await?;
 
     Ok(new_row_order)
@@ -3137,6 +3143,9 @@ pub async fn update_row_tx(
         row.clone()
     };
 
+    // Get the previous row number for the given row:
+    let old_previous_rn = get_previous_row_tx(table, &row_number, tx).await?;
+
     // Perform the update in two steps:
     delete_row_tx(
         config,
@@ -3159,6 +3168,9 @@ pub async fn update_row_tx(
         false,
     )
     .await?;
+
+    // Move the row back to the position it was in before it was deleted:
+    move_row_tx(tx, table, &row_number, &old_previous_rn).await?;
 
     // Now process the rows from the same table as the target table that need to be re-validated
     // because of unique or primary constraints:
