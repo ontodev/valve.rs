@@ -13,7 +13,7 @@ use crate::{
         ValveTableConfig, ValveTreeConstraint, ValveUnderConstraint,
     },
     valve_grammar::StartParser,
-    CHUNK_SIZE, MAX_DB_CONNECTIONS, MULTI_THREADED, SQL_PARAM, SQL_TYPES,
+    CHUNK_SIZE, MAX_DB_CONNECTIONS, MOVE_INTERVAL, MULTI_THREADED, SQL_PARAM, SQL_TYPES,
 };
 use anyhow::Result;
 use async_recursion::async_recursion;
@@ -2102,7 +2102,7 @@ pub async fn process_updates(
 pub async fn update_row_order(
     table: &str,
     row: &u32,
-    row_order: &f32,
+    row_order: &i64,
     tx: &mut Transaction<'_, sqlx::Any>,
 ) -> Result<()> {
     let sql = format!(
@@ -2699,7 +2699,7 @@ pub async fn get_row_order_tx(
     table: &str,
     row_number: &u32,
     tx: &mut Transaction<'_, sqlx::Any>,
-) -> Result<f32> {
+) -> Result<i64> {
     let sql = format!(
         r#"SELECT "row_order" FROM "{}_view" WHERE "row_number" = {}"#,
         table, row_number
@@ -2743,70 +2743,94 @@ pub async fn get_previous_row_tx(
     }
 }
 
-/// TODO: Add docstring here
+/// Given a database transaction, a table name, `table`, a row number, `row`, and the number of the
+/// row, `previous_row`, representing the row number that will come immediately before `row` in the
+/// ordering of rows after the move has been completed: Set the `row_order` field corresponding to
+/// `row` in the database so that `row` comes immediately after `previous_row` in the ordering of
+/// rows.
 pub async fn move_row_tx(
     tx: &mut Transaction<'_, sqlx::Any>,
     table: &str,
     row: &u32,
     previous_row: &u32,
-) -> Result<f32> {
+) -> Result<()> {
     // Get the row order, (A), of `previous_row`:
-    let previous_row_order = {
+    let row_order_prev = {
         if *previous_row > 0 {
             get_row_order_tx(table, previous_row, tx).await?
         } else {
             // It is not possible for a row to be assigned a row number of zero. We allow
-            // it as a possible value of `previous_row`, however, which is used to signify that
-            // `row` should become the very first row in the table ordering.
-            0.0
+            // it as a possible value of `previous_row`, however, which is used as a special value
+            // signifying that `row` should become the very first row in the table ordering. We
+            // represent this by assigning it the row order 0
+            0
         }
     };
 
-    // Run a query to get the minimum row_order, (B), that is greater than (A).
-    let next_row_order = {
+    // Run a query to get the minimum row order, (B), that is greater than (A).
+    let row_order_next = {
         let sql = format!(
             r#"SELECT MIN("row_order") AS "row_order" FROM "{}_view" WHERE "row_order" > {}"#,
-            table, previous_row_order
+            table, row_order_prev
         );
         let result_row = sqlx_query(&sql).fetch_one(tx.acquire().await?).await?;
         let raw_row_order = result_row.try_get_raw("row_order")?;
         if raw_row_order.is_null() {
             // The raw_row_order will be null if we ask Valve to move a row to a position after
             // the last row in the table.
-            (previous_row_order + 1.0).floor()
+            row_order_prev + MOVE_INTERVAL as i64
         } else {
             result_row.get("row_order")
         }
     };
 
-    // TODO: Change the way that we generate the new_row_order below. Note that some of the
-    // test case failures we are seeing in the randomized tests that relate to a unique key
-    // violation on row_order are because the current way of generating new_row_orders is
-    // blowing up when too many moves have been made.
+    let new_row_order = {
+        if row_order_prev + 1 < row_order_next {
+            // If the next row_order is not occupied just use it:
+            row_order_prev + 1
+        } else {
+            // Otherwise, get all the row_orders that need to be moved. We sort the results in
+            // descending order so that when we later update each value, no duplicate key
+            // violations will ensue:
+            let ceiling =
+                (row_order_next as f32 / MOVE_INTERVAL as f32).ceil() as i64 * MOVE_INTERVAL as i64;
+            let sql = format!(
+                r#"SELECT "row_order"
+                   FROM "{}_view"
+                   WHERE "row_order" >= {} AND "row_order" < {}
+                   ORDER BY "row_order" DESC"#,
+                table, row_order_next, ceiling
+            );
+            let rows = sqlx_query(&sql).fetch_all(tx.acquire().await?).await?;
+            let highest_row_order: i64 = rows[0].get("row_order");
+            if highest_row_order + 1 >= ceiling {
+                // Return an error
+                return Err(ValveError::DataError(format!(
+                    "Impossible to move row {} after row {}: No more room",
+                    row, previous_row
+                ))
+                .into());
+            }
+            for row in rows {
+                let current_row_order: i64 = row.get("row_order");
+                for table in vec![table.to_string(), format!("{}_conflict", table)] {
+                    let sql = format!(
+                        r#"UPDATE "{}"
+                           SET "row_order" = "row_order" + 1
+                           WHERE "row_order" = {}"#,
+                        table, current_row_order
+                    );
+                    sqlx_query(&sql).execute(tx.acquire().await?).await?;
+                }
+            }
+            // Now that we have made some room, we can use row_order_prev + 1,
+            // which should no longer be occupied:
+            row_order_prev + 1
+        }
+    };
 
-    async fn _add_room_to_move(_previous_row_order: &f32, _next_row_order: &f32) -> Result<()> {
-        return Err(ValveError::DataError("No more room to move".into()).into());
-    }
-
-    // Split the difference between (A) and (B) and use that as the new row_order for `row`.
-    let new_row_order = previous_row_order + (next_row_order - previous_row_order) / 2.0;
-
-    // TODO: This is the new algorithm:
-    //let mut new_row_order = next_row_order;
-    //while new_row_order >= next_row_order {
-    //    new_row_order -= 0.000001;
-    //    if new_row_order <= previous_row_order {
-    //        add_room_to_move(&previous_row_order, &next_row_order).await?;
-    //    }
-    //}
-
-    //println!("New row order for row {}: {}", row, new_row_order);
-
-    // Update the row order of the given row:
-    //println!("PREV: {}, NEXT: {}, NEW: {}", previous_row_order, next_row_order, new_row_order);
     update_row_order(table, row, &new_row_order, tx).await?;
-
-    Ok(new_row_order)
+    Ok(())
 }
 
 /// Given a global config struct, compiled datatype and rule conditions, a database connection pool,
@@ -2944,7 +2968,7 @@ pub async fn insert_new_row_tx(
             table = table_to_write,
             data_columns = insert_columns.join(", "),
             row_number = new_row_number,
-            row_order = new_row_number,
+            row_order = new_row_number * MOVE_INTERVAL,
             data_values = insert_values.join(", "),
         ),
     );
@@ -3937,7 +3961,7 @@ pub fn get_table_ddl(
     let mut create_lines = vec![
         format!(r#"CREATE TABLE "{}" ("#, table_name),
         String::from(r#"  "row_number" BIGINT,"#),
-        String::from(r#"  "row_order" REAL,"#),
+        String::from(r#"  "row_order" BIGINT,"#),
     ];
 
     let normal_table_name;
@@ -4328,7 +4352,7 @@ pub async fn make_inserts(
             row.row_number = Some(i as u32 + chunk_number as u32 * CHUNK_SIZE as u32);
             let row_number = row.row_number.unwrap();
             // The row order defaults to the row number:
-            let row_order = row_number;
+            let row_order = row_number * MOVE_INTERVAL;
             let use_conflict_table = is_conflict_row(&row, &conflict_columns);
             let mut row_values = vec![format!("{}, {}", row_number, row_order)];
             let mut row_params = vec![];

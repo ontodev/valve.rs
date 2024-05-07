@@ -980,6 +980,6 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<()> {
     // we just make sure that this is possible. If there is a problem an error will be returned.
     let _valve = Valve::build("ignored", database).await?;
 
-    eprintln!("done.");
+    eprintln!("All done.");
     Ok(())
 }

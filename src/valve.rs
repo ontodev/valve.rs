@@ -2176,13 +2176,13 @@ impl Valve {
     /// representing the row number that will come immediately before `row` in the ordering of rows
     /// after the move has been completed: Set the `row_order` field corresponding to `row` in the
     /// database so that `row` comes immediately after `previous_row` in the ordering of rows.
-    pub async fn move_row(&self, table: &str, row: &u32, previous_row: &u32) -> Result<f32> {
+    pub async fn move_row(&self, table: &str, row: &u32, previous_row: &u32) -> Result<()> {
         let mut tx = self.pool.begin().await?;
         // Get the previous row, i.e., the row after which one will find the current row, which we
         // will use later to record this change in the history table:
         let old_previous_row = get_previous_row_tx(table, row, &mut tx).await?;
 
-        let new_row_order = move_row_tx(&mut tx, table, row, previous_row).await?;
+        move_row_tx(&mut tx, table, row, previous_row).await?;
 
         // Record the move in the history table unless we have been explicitly told not to:
         record_row_move(
@@ -2198,7 +2198,7 @@ impl Valve {
         .await?;
 
         tx.commit().await?;
-        Ok(new_row_order)
+        Ok(())
     }
 
     /// Return the next recorded change to the data that can be undone, or None if there isn't any.
