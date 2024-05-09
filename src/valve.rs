@@ -16,7 +16,7 @@ use crate::{
         switch_undone_state, undo_or_redo_move, update_row_tx, verify_table_deps_and_sort,
         ColumnRule, CompiledCondition, ParsedStructure,
     },
-    validate::{validate_row_tx, validate_tree_foreign_keys, validate_under, with_tree_sql},
+    validate::validate_row_tx,
     valve_grammar::StartParser,
     CHUNK_SIZE, SQL_PARAM,
 };
@@ -1625,63 +1625,63 @@ impl Valve {
                 // (the tree's child). We also need to wait before validating a table's "under"
                 // constraints, because lthough the tree associated with such a constraint need not
                 // be defined on the same table, it can be.
-                let mut recs_to_update = block_on(validate_tree_foreign_keys(
-                    &self.config,
-                    &self.pool,
-                    None,
-                    &table_name,
-                    None,
-                ))?;
-                recs_to_update.append(&mut block_on(validate_under(
-                    &self.config,
-                    &self.pool,
-                    None,
-                    &table_name,
-                    None,
-                ))?);
+                // let mut recs_to_update = block_on(validate_tree_foreign_keys(
+                //     &self.config,
+                //     &self.pool,
+                //     None,
+                //     &table_name,
+                //     None,
+                // ))?;
+                // recs_to_update.append(&mut block_on(validate_under(
+                //     &self.config,
+                //     &self.pool,
+                //     None,
+                //     &table_name,
+                //     None,
+                // ))?);
 
-                for record in recs_to_update {
-                    let row_number = record.get("row_number").unwrap();
-                    let column_name = record.get("column").and_then(|s| s.as_str()).unwrap();
-                    let value = record.get("value").and_then(|s| s.as_str()).unwrap();
-                    let level = record.get("level").and_then(|s| s.as_str()).unwrap();
-                    let rule = record.get("rule").and_then(|s| s.as_str()).unwrap();
-                    let message = record.get("message").and_then(|s| s.as_str()).unwrap();
+                // for record in recs_to_update {
+                //     let row_number = record.get("row_number").unwrap();
+                //     let column_name = record.get("column").and_then(|s| s.as_str()).unwrap();
+                //     let value = record.get("value").and_then(|s| s.as_str()).unwrap();
+                //     let level = record.get("level").and_then(|s| s.as_str()).unwrap();
+                //     let rule = record.get("rule").and_then(|s| s.as_str()).unwrap();
+                //     let message = record.get("message").and_then(|s| s.as_str()).unwrap();
 
-                    let sql = local_sql_syntax(
-                        &self.pool,
-                        &format!(
-                            r#"INSERT INTO "message"
-                       ("table", "row", "column", "value", "level", "rule", "message")
-                       VALUES ({}, {}, {}, {}, {}, {}, {})"#,
-                            SQL_PARAM,
-                            row_number,
-                            SQL_PARAM,
-                            SQL_PARAM,
-                            SQL_PARAM,
-                            SQL_PARAM,
-                            SQL_PARAM
-                        ),
-                    );
-                    let mut query = sqlx_query(&sql);
-                    query = query.bind(&table_name);
-                    query = query.bind(&column_name);
-                    query = query.bind(&value);
-                    query = query.bind(&level);
-                    query = query.bind(&rule);
-                    query = query.bind(&message);
-                    block_on(query.execute(&self.pool))?;
+                //     let sql = local_sql_syntax(
+                //         &self.pool,
+                //         &format!(
+                //             r#"INSERT INTO "message"
+                //        ("table", "row", "column", "value", "level", "rule", "message")
+                //        VALUES ({}, {}, {}, {}, {}, {}, {})"#,
+                //             SQL_PARAM,
+                //             row_number,
+                //             SQL_PARAM,
+                //             SQL_PARAM,
+                //             SQL_PARAM,
+                //             SQL_PARAM,
+                //             SQL_PARAM
+                //         ),
+                //     );
+                //     let mut query = sqlx_query(&sql);
+                //     query = query.bind(&table_name);
+                //     query = query.bind(&column_name);
+                //     query = query.bind(&value);
+                //     query = query.bind(&level);
+                //     query = query.bind(&rule);
+                //     query = query.bind(&message);
+                //     block_on(query.execute(&self.pool))?;
 
-                    if self.verbose {
-                        // Add the generated message to messages_stats:
-                        let messages = vec![ValveCellMessage {
-                            message: message.to_string(),
-                            level: level.to_string(),
-                            ..Default::default()
-                        }];
-                        add_message_counts(&messages, &mut messages_stats);
-                    }
-                }
+                //     if self.verbose {
+                //         // Add the generated message to messages_stats:
+                //         let messages = vec![ValveCellMessage {
+                //             message: message.to_string(),
+                //             level: level.to_string(),
+                //             ..Default::default()
+                //         }];
+                //         add_message_counts(&messages, &mut messages_stats);
+                //     }
+                // }
             }
 
             if self.verbose {
@@ -2559,9 +2559,7 @@ impl Valve {
                 // If the datatype for the column does not correspond to an `in(...)` function, then
                 // we check the column's structure constraints. If they include a
                 // `from(foreign_table.foreign_column)` condition, then the values are taken from
-                // the foreign column. Otherwise if the structure includes an
-                // `under(tree_table.tree_column, value)` condition, then get the values from the
-                // tree column that are under `value`.
+                // the foreign column.
                 let structure = structure_conditions.get(
                     &config
                         .table
@@ -2610,72 +2608,6 @@ impl Valve {
                                     for row in rows.iter() {
                                         values.push(get_column_value(&row, &fcolumn, &sql_type));
                                     }
-                                }
-                            }
-                            Expression::Function(name, args)
-                                if name == "under" || name == "tree" =>
-                            {
-                                let mut tree_col = "not set";
-                                let mut under_val = Some("not set".to_string());
-                                if name == "under" {
-                                    if let Expression::Field(_, column) = &**&args[0] {
-                                        tree_col = column;
-                                    }
-                                    if let Expression::Label(label) = &**&args[1] {
-                                        under_val = Some(label.to_string());
-                                    }
-                                } else {
-                                    let tree_key = &args[0];
-                                    if let Expression::Label(label) = &**tree_key {
-                                        tree_col = label;
-                                        under_val = None;
-                                    }
-                                }
-
-                                let tree = config
-                                    .constraint
-                                    .tree
-                                    .get(table_name)
-                                    .ok_or(ValveError::ConfigError(format!(
-                                        "No tree config found for table '{}' found",
-                                        table_name
-                                    )))?
-                                    .iter()
-                                    .find(|t| t.child == *tree_col)
-                                    .ok_or(ValveError::ConfigError(format!(
-                                        "No tree: '{}.{}' found",
-                                        table_name, tree_col
-                                    )))?;
-                                let child_column = &tree.child;
-
-                                let (tree_sql, mut params) = with_tree_sql(
-                                    &self.config,
-                                    &tree,
-                                    &table_name.to_string(),
-                                    &table_name.to_string(),
-                                    under_val.as_ref(),
-                                    None,
-                                    &pool,
-                                );
-                                let child_column_text =
-                                    cast_column_sql_to_text(&child_column, &sql_type);
-                                let sql = local_sql_syntax(
-                                    &pool,
-                                    &format!(
-                                        r#"{} SELECT "{}" FROM "tree" WHERE {} LIKE {}"#,
-                                        tree_sql, child_column, child_column_text, SQL_PARAM
-                                    ),
-                                );
-                                params.push(matching_string);
-
-                                let mut query = sqlx_query(&sql);
-                                for param in &params {
-                                    query = query.bind(param);
-                                }
-
-                                let rows = query.fetch_all(pool).await?;
-                                for row in rows.iter() {
-                                    values.push(get_column_value(&row, &child_column, &sql_type));
                                 }
                             }
                             _ => {

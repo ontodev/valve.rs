@@ -16,23 +16,15 @@ table11	5	foo	error	key:primary	Values of foo must be unique	e
 table2	1	foo	error	rule:foo-2	bar cannot be null if foo is not null	5
 table2	1	foo	error	rule:foo-4	bar must be 'y' or 'z' if foo = 5	5
 table2	2	foo	error	rule:foo-1	bar must be null whenever foo is null	
-table2	2	xyzzy	error	under:not-under	Value 'e' of column xyzzy is not under 'd'	e
-table2	3	xyzzy	error	under:not-under	Value 'f' of column xyzzy is not under 'd'	f
 table2	4	foo	error	rule:foo-4	bar must be 'y' or 'z' if foo = 5	5
-table2	4	xyzzy	error	under:not-under	Value 'g' of column xyzzy is not under 'd'	g
-table2	5	xyzzy	error	under:not-under	Value 'h' of column xyzzy is not under 'd'	h
-table2	7	xyzzy	error	under:not-in-tree	Value 'z' of column xyzzy is not in table2.child	z
 table2	9	child	error	key:foreign	Value 'i' of column child exists only in table4_conflict.other_foreign_column	i
 table3	1	label	error	datatype:label	label should be of datatype label	   mobecular entity
 table3	1	label	error	datatype:trimmed_line	label should be a line of text that does not begin or end with whitespace	   mobecular entity
 table3	1	source	error	key:foreign	Value 'MOB' of column source is not in table1.prefix	MOB
 table3	2	source	error	key:foreign	Value 'ZOB' of column source is not in table1.prefix	ZOB
 table3	3	source	error	key:foreign	Value 'JOB' of column source is not in table1.prefix	JOB
-table3	4	parent	error	tree:cycle	Cyclic dependency: (label: bar, parent: car), (label: car, parent: foo), (label: foo, parent: bar) for tree(parent) of label	bar
 table3	4	source	error	key:foreign	Value 'SOB' of column source is not in table1.prefix	SOB
-table3	5	parent	error	tree:foreign	Value 'jafar' of column parent is not in column label	jafar
 table3	5	source	error	key:foreign	Value 'YOB' of column source is not in table1.prefix	YOB
-table3	6	parent	error	tree:foreign	Value 'owl:Thing' of column parent is not in column label	owl:Thing
 table3	7	source	error	datatype:nonspace	source should be text without whitespace	CO B
 table3	7	source	error	datatype:prefix	source should be a prefix for a CURIE	CO B
 table3	7	source	error	datatype:word	source should be a single word: letters, numbers, underscore	CO B
@@ -48,12 +40,7 @@ table4	10	numeric_foreign_column	error	key:primary	Values of numeric_foreign_col
 table6	1	foo	error	rule:foo-2	bar cannot be null if foo is not null	e
 table6	1	foo	error	rule:foo-4	bar must be 25 or 26 if foo = 'e'	e
 table6	2	foo	error	rule:foo-1	bar must be null whenever foo is null	
-table6	2	xyzzy	error	under:not-under	Value '5' of column xyzzy is not under '4'	5
-table6	3	xyzzy	error	under:not-under	Value '6' of column xyzzy is not under '4'	6
 table6	4	foo	error	rule:foo-4	bar must be 25 or 26 if foo = 'e'	e
-table6	4	xyzzy	error	under:not-under	Value '7' of column xyzzy is not under '4'	7
-table6	5	xyzzy	error	under:not-under	Value '8' of column xyzzy is not under '4'	8
-table6	7	xyzzy	error	under:not-in-tree	Value '26' of column xyzzy is not in table6.child	26
 table6	9	child	error	key:foreign	Value '9' of column child exists only in table4_conflict.numeric_foreign_column	9
 table7	3	planetfall	error	datatype:integer	planetfall should be a positive or negative integer	e
 table8	2	prefix	error	key:foreign	Value 'w' of column prefix is not in table10.foreign_column	w

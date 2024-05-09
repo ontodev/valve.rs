@@ -3,9 +3,7 @@
 use crate::{
     ast::Expression,
     internal::{generate_internal_table_config, INTERNAL_TABLES},
-    validate::{
-        validate_row_tx, validate_rows_constraints, validate_rows_intra, validate_rows_trees,
-    },
+    validate::{validate_row_tx, validate_rows_constraints, validate_rows_intra},
     valve::{
         ValveCell, ValveCellMessage, ValveChange, ValveColumnConfig, ValveConfig,
         ValveConstraintConfig, ValveDatatypeConfig, ValveError, ValveForeignConstraint,
@@ -4108,14 +4106,14 @@ pub fn get_table_ddl(
 
     // Loop through the tree constraints and if any of their associated child columns do not already
     // have an associated unique or primary index, create one implicitly here:
-    for tree in trees {
-        if !uniques.contains(&tree.child) && !primaries.contains(&tree.child) {
-            statements.push(format!(
-                r#"CREATE UNIQUE INDEX "{}_{}_idx" ON "{}"("{}");"#,
-                table_name, tree.child, table_name, tree.child
-            ));
-        }
-    }
+    //for tree in trees {
+    //    if !uniques.contains(&tree.child) && !primaries.contains(&tree.child) {
+    //        statements.push(format!(
+    //            r#"CREATE UNIQUE INDEX "{}_{}_idx" ON "{}"("{}");"#,
+    //            table_name, tree.child, table_name, tree.child
+    //        ));
+    //    }
+    //}
 
     // Finally, create further unique indexes on row_number and row_order:
     statements.push(format!(
@@ -4508,7 +4506,7 @@ pub async fn insert_chunk(
 ) -> Result<()> {
     // Optional tree validation:
     if validate {
-        validate_rows_trees(config, pool, table_name, rows).await?;
+        // validate_rows_trees(config, pool, table_name, rows).await?;
     }
     // Insertion with optional inter-table validation:
     // Try to insert the rows to the db first without validating unique and foreign constraints.

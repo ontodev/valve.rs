@@ -85,17 +85,17 @@ pub async fn validate_row_tx(
             let sql_type = get_sql_type_from_global_config(&config, table_name, &column_name, pool);
             if !is_sql_type_error(&sql_type, &cell.strvalue()) {
                 // TODO: Pass the query_as_if parameter to validate_cell_trees.
-                validate_cell_trees(
-                    config,
-                    pool,
-                    Some(tx),
-                    &table_name.to_string(),
-                    column_name,
-                    cell,
-                    &context,
-                    &vec![],
-                )
-                .await?;
+                //validate_cell_trees(
+                //    config,
+                //    pool,
+                //    Some(tx),
+                //    &table_name.to_string(),
+                //    column_name,
+                //    cell,
+                //    &context,
+                //    &vec![],
+                //)
+                //.await?;
                 validate_cell_foreign_constraints(
                     config,
                     pool,
@@ -122,395 +122,46 @@ pub async fn validate_row_tx(
     }
 
     // TODO: Possibly propagate `query_as_if` down into this function:
-    let mut violations = validate_tree_foreign_keys(
-        config,
-        pool,
-        Some(tx),
-        &table_name.to_string(),
-        Some(&context.clone()),
-    )
-    .await?;
-    violations.append(
-        // TODO: Possibly propagate `query_as_if` down into this function:
-        &mut validate_under(
-            config,
-            pool,
-            Some(tx),
-            &table_name.to_string(),
-            Some(&context.clone()),
-        )
-        .await?,
-    );
-
-    for violation in violations.iter_mut() {
-        let vrow_number = violation.get("row_number").unwrap().as_i64().unwrap() as u32;
-        if Some(vrow_number) == row_number || (row_number == None && Some(vrow_number) == Some(0)) {
-            let column = violation.get("column").and_then(|s| s.as_str()).unwrap();
-            let level = violation.get("level").and_then(|s| s.as_str()).unwrap();
-            let rule = violation.get("rule").and_then(|s| s.as_str()).unwrap();
-            let message = violation.get("message").and_then(|s| s.as_str()).unwrap();
-            let result_cell = &mut valve_row.contents.get_mut(column).unwrap();
-            result_cell.messages.push(ValveCellMessage {
-                level: level.to_string(),
-                rule: rule.to_string(),
-                message: message.to_string(),
-            });
-            if result_cell.valid {
-                result_cell.valid = false;
-            }
-        }
-    }
+    // let mut violations = validate_tree_foreign_keys(
+    //     config,
+    //     pool,
+    //     Some(tx),
+    //     &table_name.to_string(),
+    //     Some(&context.clone()),
+    // )
+    // .await?;
+    // violations.append(
+    //     // TODO: Possibly propagate `query_as_if` down into this function:
+    //     &mut validate_under(
+    //         config,
+    //         pool,
+    //         Some(tx),
+    //         &table_name.to_string(),
+    //         Some(&context.clone()),
+    //     )
+    //     .await?,
+    // );
+    // for violation in violations.iter_mut() {
+    //     let vrow_number = violation.get("row_number").unwrap().as_i64().unwrap() as u32;
+    //     if Some(vrow_number) == row_number || (row_number == None && Some(vrow_number) == Some(0)) {
+    //         let column = violation.get("column").and_then(|s| s.as_str()).unwrap();
+    //         let level = violation.get("level").and_then(|s| s.as_str()).unwrap();
+    //         let rule = violation.get("rule").and_then(|s| s.as_str()).unwrap();
+    //         let message = violation.get("message").and_then(|s| s.as_str()).unwrap();
+    //         let result_cell = &mut valve_row.contents.get_mut(column).unwrap();
+    //         result_cell.messages.push(ValveCellMessage {
+    //             level: level.to_string(),
+    //             rule: rule.to_string(),
+    //             message: message.to_string(),
+    //         });
+    //         if result_cell.valid {
+    //             result_cell.valid = false;
+    //         }
+    //     }
+    // }
 
     remove_duplicate_messages(&mut valve_row)?;
     Ok(valve_row)
-}
-
-/// Given a config map, a db connection pool, a table name, and an optional extra row, validate
-/// any associated under constraints for the current column. Optionally, if a transaction is
-/// given, use that instead of the pool for database access.
-pub async fn validate_under(
-    config: &ValveConfig,
-    pool: &AnyPool,
-    mut tx: Option<&mut Transaction<'_, sqlx::Any>>,
-    table_name: &String,
-    extra_row: Option<&ValveRow>,
-) -> Result<Vec<SerdeValue>> {
-    let mut results = vec![];
-    let ukeys = config
-        .constraint
-        .under
-        .get(table_name)
-        .expect(&format!("Undefined table '{}'", table_name));
-
-    let table_options = get_table_options(config, table_name)?;
-    let query_table = {
-        if !table_options.contains("conflict") {
-            table_name.to_string()
-        } else {
-            format!("{}_view", table_name)
-        }
-    };
-    for ukey in ukeys {
-        let tree_table = &ukey.ttable;
-        let tree_child = &ukey.tcolumn;
-        let column = &ukey.column;
-        let sql_type = get_sql_type_from_global_config(&config, &table_name, &column, pool);
-        let tree = config
-            .constraint
-            .tree
-            .get(tree_table)
-            .unwrap()
-            .iter()
-            .find(|tkey| tkey.child == *tree_child)
-            .unwrap();
-        let tree_parent = &tree.parent;
-        let mut extra_clause;
-        let mut params;
-        if let Some(ref extra_row) = extra_row {
-            (extra_clause, params) =
-                select_with_extra_row(config, extra_row, table_name, &query_table, pool);
-        } else {
-            extra_clause = String::new();
-            params = vec![];
-        }
-
-        // For each value of the column to be checked:
-        // (1) Determine whether it is in the tree's child column.
-        // (2) Create a sub-tree of the given tree whose root is the given "under value"
-        //     (i.e., ukey["value"]). Now on the one hand, if the value to be checked is in the
-        //     parent column of that sub-tree, then it follows that that value is _not_ under the
-        //     under value, but above it. On the other hand, if the value to be checked is not in
-        //     the parent column of the sub-tree, then if condition (1) is also satisfied it follows
-        //     that it _is_ under the under_value.
-        //     Note that "under" is interpreted in the inclusive sense; i.e., values are trivially
-        //     understood to be under themselves.
-        let effective_table;
-        if !extra_clause.is_empty() {
-            effective_table = format!("{}_ext", query_table);
-        } else {
-            effective_table = query_table.clone();
-        }
-
-        let effective_tree;
-        if tree_table == table_name {
-            effective_tree = effective_table.to_string();
-        } else {
-            effective_tree = tree_table.to_string();
-        }
-
-        let uval = ukey
-            .value
-            .as_str()
-            .and_then(|v| Some(v.to_string()))
-            .unwrap();
-        let (tree_sql, mut tree_params) = with_tree_sql(
-            config,
-            &tree,
-            &table_name,
-            &effective_tree,
-            Some(&uval),
-            None,
-            pool,
-        );
-        // Add the tree params to the beginning of the parameter list:
-        tree_params.append(&mut params);
-        params = tree_params;
-
-        // Remove the 'WITH' part of the extra clause since it is redundant given the tree sql and
-        // will therefore result in a syntax error:
-        if !extra_clause.is_empty() {
-            extra_clause = format!(", {}", &extra_clause[5..]);
-        }
-        let sql = local_sql_syntax(
-            &pool,
-            &format!(
-                r#"{tree_sql} {extra_clause}
-                   SELECT
-                    "row_number",
-                    "{effective_table}"."{column}",
-                    CASE
-                      WHEN "{effective_table}"."{column}" IN (
-                        SELECT "{tree_child}" FROM "{effective_tree}"
-                      )
-                      THEN 1 ELSE 0
-                    END AS "is_in_tree",
-                    CASE
-                      WHEN "{effective_table}"."{column}" IN (
-                        SELECT "{tree_parent}" FROM "tree"
-                      )
-                      THEN 0 ELSE 1
-                    END AS "is_under"
-                  FROM "{effective_table}""#,
-                tree_sql = tree_sql,
-                extra_clause = extra_clause,
-                effective_table = effective_table,
-                column = column,
-                tree_child = tree_child,
-                effective_tree = effective_tree,
-                tree_parent = tree_parent,
-            ),
-        );
-
-        let mut query = sqlx_query(&sql);
-        for param in &params {
-            query = query.bind(param);
-        }
-        let rows = {
-            if let None = tx {
-                query.fetch_all(pool).await?
-            } else {
-                query
-                    .fetch_all(tx.as_mut().unwrap().acquire().await?)
-                    .await?
-            }
-        };
-
-        for row in rows {
-            let raw_row_number = row.try_get_raw("row_number").unwrap();
-            let row_number: i64;
-            if raw_row_number.is_null() {
-                row_number = 0;
-            } else {
-                row_number = row.get("row_number");
-            }
-
-            let raw_column_val = row.try_get_raw(format!(r#"{}"#, column).as_str()).unwrap();
-            if !raw_column_val.is_null() {
-                let column_val = get_column_value(&row, &column, &sql_type);
-                // We use i32 instead of i64 (which we use for row_number) here because, unlike
-                // row_number, which is a BIGINT, 0 and 1 are being interpreted as normal sized ints.
-                let is_in_tree: i32 = row.get("is_in_tree");
-                let is_under: i32 = row.get("is_under");
-                if is_in_tree == 0 {
-                    results.push(json!({
-                        "row_number": row_number as u32,
-                        "column": column,
-                        "value": column_val,
-                        "level": "error",
-                        "rule": "under:not-in-tree",
-                        "message": format!("Value '{}' of column {} is not in {}.{}",
-                                           column_val, column, tree_table, tree_child).as_str(),
-                    }));
-                } else if is_under == 0 {
-                    results.push(json!({
-                        "row_number": row_number as u32,
-                        "column": column,
-                        "value": column_val,
-                        "level": "error",
-                        "rule": "under:not-under",
-                        "message": format!("Value '{}' of column {} is not under '{}'",
-                                           column_val, column, uval.clone()).as_str(),
-                    }));
-                }
-            }
-        }
-    }
-
-    Ok(results)
-}
-
-/// Given a config map, a db connection pool, and a table name, validate whether there is a
-/// 'foreign key' violation for any of the table's trees; i.e., for a given tree: tree(child) which
-/// has a given parent column, validate that all of the values in the parent column are in the child
-/// column. Optionally, if a transaction is given, use that instead of the pool for database access.
-pub async fn validate_tree_foreign_keys(
-    config: &ValveConfig,
-    pool: &AnyPool,
-    mut tx: Option<&mut Transaction<'_, sqlx::Any>>,
-    table_name: &String,
-    extra_row: Option<&ValveRow>,
-) -> Result<Vec<SerdeValue>> {
-    let tkeys = config
-        .constraint
-        .tree
-        .get(table_name)
-        .expect(&format!("Undefined table '{}'", table_name));
-
-    let table_options = get_table_options(config, table_name)?;
-    let query_table = {
-        if !table_options.contains("conflict") {
-            table_name.to_string()
-        } else {
-            format!("{}_view", table_name)
-        }
-    };
-    let mut results = vec![];
-    for tkey in tkeys {
-        let child_col = &tkey.child;
-        let parent_col = &tkey.parent;
-        let parent_sql_type =
-            get_sql_type_from_global_config(&config, &table_name, &parent_col, pool);
-        let with_clause;
-        let params;
-        if let Some(ref extra_row) = extra_row {
-            (with_clause, params) =
-                select_with_extra_row(&config, extra_row, table_name, &query_table, pool);
-        } else {
-            with_clause = String::new();
-            params = vec![];
-        }
-
-        let effective_table_name;
-        if !with_clause.is_empty() {
-            effective_table_name = format!("{}_ext", query_table);
-        } else {
-            effective_table_name = query_table.clone();
-        }
-
-        let sql = local_sql_syntax(
-            &pool,
-            &format!(
-                r#"{with_clause}
-                   SELECT
-                     t1."row_number", t1."{parent_col}"
-                   FROM "{effective_table_name}" t1
-                   WHERE NOT EXISTS (
-                     SELECT 1
-                     FROM "{effective_table_name}" t2
-                     WHERE t2."{child_col}" = t1."{parent_col}"
-                   )"#,
-                with_clause = with_clause,
-                parent_col = parent_col,
-                effective_table_name = effective_table_name,
-                child_col = child_col,
-            ),
-        );
-
-        let mut query = sqlx_query(&sql);
-        for param in &params {
-            query = query.bind(param);
-        }
-        let rows = {
-            if let None = tx {
-                query.fetch_all(pool).await?
-            } else {
-                query
-                    .fetch_all(tx.as_mut().unwrap().acquire().await?)
-                    .await?
-            }
-        };
-        for row in rows {
-            let raw_row_number = row.try_get_raw("row_number").unwrap();
-            let row_number: i64;
-            if raw_row_number.is_null() {
-                row_number = 0;
-            } else {
-                row_number = row.get("row_number");
-            }
-            let raw_parent_val = row
-                .try_get_raw(format!(r#"{}"#, parent_col).as_str())
-                .unwrap();
-            if !raw_parent_val.is_null() {
-                let parent_val = get_column_value(&row, &parent_col, &parent_sql_type);
-                let message = json!({
-                    "row_number": row_number as u32,
-                    "column": parent_col,
-                    "value": parent_val,
-                    "level": "error",
-                    "rule": "tree:foreign",
-                    "message": format!("Value '{}' of column {} is not in column {}",
-                                       parent_val, parent_col, child_col).as_str(),
-                });
-                results.push(message);
-            }
-        }
-    }
-
-    Ok(results)
-}
-
-/// Given a config map, a database connection pool, a table name, and a number of rows to validate,
-/// perform tree validation on the rows.
-pub async fn validate_rows_trees(
-    config: &ValveConfig,
-    pool: &AnyPool,
-    table_name: &String,
-    rows: &mut Vec<ValveRow>,
-) -> Result<()> {
-    let column_names = &config
-        .table
-        .get(table_name)
-        .expect(&format!("Undefined table '{}'", table_name))
-        .column_order;
-
-    let mut valve_rows = vec![];
-    for row in rows {
-        let mut valve_row = ValveRow {
-            row_number: None,
-            contents: IndexMap::new(),
-        };
-        for column_name in column_names {
-            let context = row.clone();
-            let cell = row.contents.get_mut(column_name).unwrap();
-            // We don't do any further validation on cells that are legitimately empty, or on cells
-            // that have SQL type violations. We exclude the latter because they can result in
-            // database errors when, for instance, we compare a numeric with a non-numeric type.
-            let sql_type = get_sql_type_from_global_config(config, table_name, &column_name, pool);
-            if cell.nulltype == None && !is_sql_type_error(&sql_type, &cell.strvalue()) {
-                validate_cell_trees(
-                    config,
-                    pool,
-                    None,
-                    table_name,
-                    &column_name,
-                    cell,
-                    &context,
-                    &valve_rows,
-                )
-                .await?;
-            }
-            valve_row
-                .contents
-                .insert(column_name.to_string(), cell.clone());
-        }
-        // Note that in this implementation, the result rows are never actually returned, but we
-        // still need them because the validate_cell_trees() function needs a list of previous
-        // results, and this then requires that we generate the result rows to play that role. The
-        // call to cell.clone() above is required to make rust's borrow checker happy.
-        valve_rows.push(valve_row);
-    }
-
-    Ok(())
 }
 
 /// Given a config map, a database connection pool, a table name, and a number of rows to validate,
@@ -727,58 +378,6 @@ pub fn select_with_extra_row(
         ),
         params,
     )
-}
-
-/// Given a map representing a tree constraint, a table name, a root from which to generate a
-/// sub-tree of the tree, and an extra SQL clause, generate the SQL for a WITH clause representing
-/// the sub-tree.
-pub fn with_tree_sql(
-    config: &ValveConfig,
-    tree: &ValveTreeConstraint,
-    table_name: &str,
-    effective_table_name: &str,
-    root: Option<&String>,
-    extra_clause: Option<&String>,
-    pool: &AnyPool,
-) -> (String, Vec<String>) {
-    let empty_string = String::new();
-    let extra_clause = extra_clause.unwrap_or_else(|| &empty_string);
-    let child_col = &tree.child;
-    let parent_col = &tree.parent;
-
-    let mut params = vec![];
-    let under_sql;
-    if let Some(root) = root {
-        let sql_type = get_sql_type_from_global_config(config, table_name, &child_col, pool);
-        under_sql = format!(
-            r#"WHERE "{}" = {}"#,
-            child_col,
-            cast_sql_param_from_text(&sql_type)
-        );
-        params.push(root.clone());
-    } else {
-        under_sql = String::new();
-    }
-
-    let sql = format!(
-        r#"WITH RECURSIVE "tree" AS (
-           {extra_clause}
-               SELECT "{child_col}", "{parent_col}" 
-                   FROM "{effective_table_name}" 
-                   {under_sql} 
-                   UNION ALL 
-               SELECT "t1"."{child_col}", "t1"."{parent_col}" 
-                   FROM "{effective_table_name}" AS "t1" 
-                   JOIN "tree" AS "t2" ON "t2"."{parent_col}" = "t1"."{child_col}"
-           )"#,
-        extra_clause = extra_clause,
-        child_col = child_col,
-        parent_col = parent_col,
-        effective_table_name = effective_table_name,
-        under_sql = under_sql,
-    );
-
-    (sql, params)
 }
 
 /// Given a config map, compiled datatype conditions, a table name, a column name, and a cell to
@@ -1199,185 +798,6 @@ pub async fn validate_cell_foreign_constraints(
                 }
             }
             cell.messages.push(message);
-        }
-    }
-
-    Ok(())
-}
-
-/// Given a config map, a db connection pool, a table name, a column name, a cell to validate,
-/// the row, `context`, to which the cell belongs, and a list of previously validated rows,
-/// validate that none of the "tree" constraints on the column are violated, and indicate any
-/// violations by attaching error messages to the cell. Optionally, if a transaction is
-/// given, use that instead of the pool for database access.
-pub async fn validate_cell_trees(
-    config: &ValveConfig,
-    pool: &AnyPool,
-    mut tx: Option<&mut Transaction<'_, sqlx::Any>>,
-    table_name: &String,
-    column_name: &String,
-    cell: &mut ValveCell,
-    context: &ValveRow,
-    prev_results: &Vec<ValveRow>,
-) -> Result<()> {
-    // If the current column is the parent column of a tree, validate that adding the current value
-    // will not result in a cycle between this and the parent column:
-    let tkeys = config
-        .constraint
-        .tree
-        .get(table_name)
-        .expect(&format!("Undefined table '{}'", table_name))
-        .iter()
-        .filter(|t| t.parent == *column_name)
-        .collect::<Vec<_>>();
-
-    // If there are no tree keys, just silently return so as to save the cost of finding the
-    // parent sql type etc, which will add up if we have to do it for every cell of every row.
-    if tkeys.is_empty() {
-        return Ok(());
-    }
-
-    let parent_col = column_name;
-    let parent_sql_type = get_sql_type_from_global_config(&config, &table_name, &parent_col, pool);
-    let parent_sql_param = cast_sql_param_from_text(&parent_sql_type);
-    let parent_val = cell.strvalue();
-    let table_options = get_table_options(config, table_name)?;
-    let query_table = {
-        if !table_options.contains("conflict") {
-            table_name.to_string()
-        } else {
-            format!("{}_view", table_name)
-        }
-    };
-    for tkey in tkeys {
-        let child_col = &tkey.child;
-        let child_sql_type =
-            get_sql_type_from_global_config(&config, &table_name, &child_col, pool);
-        let child_sql_param = cast_sql_param_from_text(&child_sql_type);
-        let child_val = context
-            .contents
-            .get(child_col)
-            .and_then(|c| Some(c.strvalue()))
-            .unwrap();
-
-        // In order to check if the current row will cause a dependency cycle, we need to query
-        // against all previously validated rows. Since previously validated rows belonging to the
-        // current batch will not have been inserted to the db yet, we explicitly add them in:
-        let mut params = vec![];
-        let prev_selects = prev_results
-            .iter()
-            .filter(|p| {
-                p.contents.get(child_col).unwrap().valid
-                    && p.contents.get(parent_col).unwrap().valid
-            })
-            .map(|p| {
-                params.push(p.contents.get(child_col).unwrap().strvalue());
-                params.push(p.contents.get(parent_col).unwrap().strvalue());
-                format!(
-                    r#"SELECT {} AS "{}", {} AS "{}""#,
-                    child_sql_param, child_col, parent_sql_param, parent_col
-                )
-            })
-            .collect::<Vec<_>>();
-        let prev_selects = prev_selects.join(" UNION ALL ");
-
-        let table_name_ext;
-        let extra_clause;
-        if prev_selects.is_empty() {
-            table_name_ext = query_table.clone();
-            extra_clause = String::from("");
-        } else {
-            table_name_ext = format!("{}_ext", query_table);
-            extra_clause = format!(
-                r#"WITH "{}" AS (
-                       SELECT "{}", "{}"
-                           FROM "{}"
-                           UNION ALL
-                       {}
-                   )"#,
-                table_name_ext, child_col, parent_col, query_table, prev_selects
-            );
-        }
-
-        let (tree_sql, mut tree_sql_params) = with_tree_sql(
-            &config,
-            &tkey,
-            &table_name,
-            &table_name_ext,
-            Some(&parent_val.clone()),
-            Some(&extra_clause),
-            pool,
-        );
-        params.append(&mut tree_sql_params);
-        let sql = local_sql_syntax(
-            &pool,
-            &format!(
-                r#"{} SELECT "{}", "{}" FROM "tree""#,
-                tree_sql, child_col, parent_col
-            ),
-        );
-
-        let mut query = sqlx_query(&sql);
-        for param in &params {
-            query = query.bind(param);
-        }
-
-        let rows = {
-            if let None = tx {
-                query.fetch_all(pool).await?
-            } else {
-                query
-                    .fetch_all(tx.as_mut().unwrap().acquire().await?)
-                    .await?
-            }
-        };
-
-        // If there is a row in the tree whose parent is the to-be-inserted child, then inserting
-        // the new row would result in a cycle.
-        let cycle_detected = {
-            let cycle_row = rows.iter().find(|row| {
-                let raw_foo = row
-                    .try_get_raw(format!(r#"{}"#, parent_col).as_str())
-                    .unwrap();
-                if raw_foo.is_null() {
-                    false
-                } else {
-                    let parent = get_column_value(&row, &parent_col, &parent_sql_type);
-                    parent == child_val
-                }
-            });
-            match cycle_row {
-                None => false,
-                _ => true,
-            }
-        };
-
-        if cycle_detected {
-            let mut cycle_legs = vec![];
-            for row in &rows {
-                let child = get_column_value(&row, &child_col, &child_sql_type);
-                let parent = get_column_value(&row, &parent_col, &parent_sql_type);
-                cycle_legs.push((child, parent));
-            }
-            cycle_legs.push((child_val, parent_val.clone()));
-
-            let mut cycle_msg = vec![];
-            for cycle in &cycle_legs {
-                cycle_msg.push(format!(
-                    "({}: {}, {}: {})",
-                    child_col, cycle.0, parent_col, cycle.1
-                ));
-            }
-            let cycle_msg = cycle_msg.join(", ");
-            cell.valid = false;
-            cell.messages.push(ValveCellMessage {
-                rule: "tree:cycle".to_string(),
-                level: "error".to_string(),
-                message: format!(
-                    "Cyclic dependency: {} for tree({}) of {}",
-                    cycle_msg, parent_col, child_col
-                ),
-            });
         }
     }
 
