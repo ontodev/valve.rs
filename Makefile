@@ -153,7 +153,9 @@ test/penguins/src/data:
 
 penguin_test_threshold = 45
 num_penguin_rows = 100000
-penguin_command = ./valve --initial_load src/schema/table.tsv penguins.db
+penguin_command_sqlite = ./valve --initial_load src/schema/table.tsv penguins.db
+penguin_command_pg = ./valve --initial_load src/schema/table.tsv postgresql:///valve_postgres
+penguin_command_pg_drop = ./valve --drop_all src/schema/table.tsv postgresql:///valve_postgres
 
 .PHONY: penguin_test
 penguin_test: valve | test/penguins/src/data
@@ -161,12 +163,19 @@ penguin_test: valve | test/penguins/src/data
 	rm -f test/penguins/penguins.db
 	cd test/penguins && ./generate.py $(num_penguin_rows)
 	cd test/penguins && ln -f -s ../../target/debug/ontodev_valve valve
-	@echo "cd test/penguins && $(penguin_command)"
+	@echo "cd test/penguins && $(penguin_command_sqlite)"
 	@cd test/penguins && \
 		timeout $(penguin_test_threshold) \
 		time -p \
-		$(penguin_command) || \
-		(echo "Penguin test took longer than $(penguin_test_threshold) seconds." && false)
+		$(penguin_command_sqlite) || \
+		(echo "Penguin test (SQLite) took longer than $(penguin_test_threshold) seconds." && false)
+	cd test/penguins && $(penguin_command_pg_drop)
+	@echo "cd test/penguins && $(penguin_command_pg)"
+	@cd test/penguins && \
+		timeout $(penguin_test_threshold) \
+		time -p \
+		$(penguin_command_pg) || \
+		(echo "Penguin test (PostgreSQL) took longer than $(penguin_test_threshold) seconds." && false)
 	@echo "Test succeeded!"
 
 guess_test_dir = test/guess_test_data
