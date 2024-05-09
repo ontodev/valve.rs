@@ -53,9 +53,8 @@ static MULTI_THREADED: bool = true;
 /// Maximum number of database connections.
 static MAX_DB_CONNECTIONS: u32 = 5;
 
-/// The maximum size of the interval between two given rows in the database. When the interval
-/// between two rows, A and B, is 1000, for instance, then it will be possible to move 1000 rows in
-/// between A and B.
+/// The maximum interval size to use for the move_row() operation. When MOVE_INTERVAL is set to N,
+/// then it will be possible to move N-1 rows in between two given rows.
 static MOVE_INTERVAL: u32 = 1000;
 
 // Note that SQL_PARAM must be a 'word' (from the point of view of regular expressions) since in the

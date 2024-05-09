@@ -2098,13 +2098,23 @@ pub async fn process_updates(
 }
 
 /// Given a table name, a row number, the new row order to assign to the row, and a database
-/// transaction, update the row order for the row in the database.
+/// transaction, update the row order for the row in the database. Note that the row_order is
+/// represented using the signed i64 type but it can never actually be negative. This function
+/// will return an error when a negative row_order is provided.
 pub async fn update_row_order(
     table: &str,
     row: &u32,
     row_order: &i64,
     tx: &mut Transaction<'_, sqlx::Any>,
 ) -> Result<()> {
+    if *row_order < 0 {
+        return Err(ValveError::InputError(format!(
+            "Refusing to assign a negative row_order, {}, to row {} of table {}.",
+            row_order, row, table
+        ))
+        .into());
+    }
+
     let sql = format!(
         r#"UPDATE "{}" SET "row_order" = {} WHERE "row_number" = {} RETURNING 1 AS "updated""#,
         table, row_order, row,
@@ -2694,7 +2704,8 @@ pub fn is_sql_type_error(sql_type: &str, value: &str) -> bool {
 }
 
 /// Given a table name, a row number, and a database transaction, return the row_order
-/// corresponding to the given row number in the given table.
+/// corresponding to the given row number in the given table. Note that the row order is
+/// represented using the signed type i64 but it will never be negative.
 pub async fn get_row_order_tx(
     table: &str,
     row_number: &u32,
@@ -2792,18 +2803,18 @@ pub async fn move_row_tx(
             // Otherwise, get all the row_orders that need to be moved. We sort the results in
             // descending order so that when we later update each value, no duplicate key
             // violations will ensue:
-            let ceiling =
+            let upper_bound =
                 (row_order_next as f32 / MOVE_INTERVAL as f32).ceil() as i64 * MOVE_INTERVAL as i64;
             let sql = format!(
                 r#"SELECT "row_order"
                    FROM "{}_view"
                    WHERE "row_order" >= {} AND "row_order" < {}
                    ORDER BY "row_order" DESC"#,
-                table, row_order_next, ceiling
+                table, row_order_next, upper_bound
             );
             let rows = sqlx_query(&sql).fetch_all(tx.acquire().await?).await?;
             let highest_row_order: i64 = rows[0].get("row_order");
-            if highest_row_order + 1 >= ceiling {
+            if highest_row_order + 1 >= upper_bound {
                 // Return an error
                 return Err(ValveError::DataError(format!(
                     "Impossible to move row {} after row {}: No more room",
