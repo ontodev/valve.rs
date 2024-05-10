@@ -14,7 +14,7 @@ use anyhow::Result;
 use indexmap::IndexMap;
 use serde_json::{json, Value as SerdeValue};
 use sqlx::{any::AnyPool, query as sqlx_query, Acquire, Row, Transaction, ValueRef};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// Given a config struct, maps of compiled datatype and rule conditions, a database connection
 /// pool, a table name, a row to validate represented as a [ValveRow], and a row number in the case
@@ -241,6 +241,8 @@ pub fn validate_rows_intra(
     rows: &Vec<Result<csv::StringRecord, csv::Error>>,
     only_nulltype: bool,
 ) -> Vec<ValveRow> {
+    let mut dt_cache: IndexMap<String, ValveCell> = IndexMap::new();
+
     let mut valve_rows = vec![];
     for row in rows {
         match row {
@@ -287,7 +289,7 @@ pub fn validate_rows_intra(
                 if !only_nulltype {
                     for column_name in column_names {
                         let context = valve_row.clone();
-                        let cell = valve_row.contents.get_mut(column_name).unwrap();
+                        let mut cell = valve_row.contents.get_mut(column_name).unwrap();
                         validate_cell_rules(
                             config,
                             compiled_rule_conditions,
@@ -298,13 +300,22 @@ pub fn validate_rows_intra(
                         );
 
                         if cell.nulltype == None {
-                            validate_cell_datatype(
-                                config,
-                                compiled_datatype_conditions,
-                                table_name,
-                                &column_name,
-                                cell,
-                            );
+                            let string_value = cell.value.to_string();
+                            if dt_cache.contains_key(&string_value) {
+                                cell = dt_cache.get_mut(&string_value).unwrap();
+                            } else {
+                                validate_cell_datatype(
+                                    config,
+                                    compiled_datatype_conditions,
+                                    table_name,
+                                    &column_name,
+                                    cell,
+                                );
+                                if dt_cache.len() > 2500 {
+                                    dt_cache.pop();
+                                }
+                                dt_cache.insert(string_value, cell.clone());
+                            }
                         }
                     }
                 }
