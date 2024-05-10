@@ -2,17 +2,17 @@
 
 use crate::{
     toolkit::{
-        cast_sql_param_from_text, get_datatype_ancestors, get_sql_type_from_global_config,
-        get_table_options, is_sql_type_error, local_sql_syntax, ColumnRule, CompiledCondition,
-        QueryAsIf, QueryAsIfKind,
+        cast_sql_param_from_text, get_column_value, get_datatype_ancestors,
+        get_sql_type_from_global_config, get_table_options, is_sql_type_error, local_sql_syntax,
+        ColumnRule, CompiledCondition, QueryAsIf, QueryAsIfKind,
     },
     valve::{ValveCell, ValveCellMessage, ValveConfig, ValveRow, ValveRuleConfig},
-    DT_CACHE_SIZE,
+    DT_CACHE_SIZE, FKEY_CACHE_SIZE,
 };
 use anyhow::Result;
 use indexmap::IndexMap;
-use serde_json::json;
-use sqlx::{any::AnyPool, query as sqlx_query, Acquire, Transaction};
+use serde_json::{json, Value as SerdeValue};
+use sqlx::{any::AnyPool, query as sqlx_query, Acquire, Row, Transaction};
 use std::collections::HashMap;
 
 /// Given a config struct, maps of compiled datatype and rule conditions, a database connection
@@ -172,6 +172,50 @@ pub async fn validate_rows_constraints(
     table_name: &String,
     rows: &mut Vec<ValveRow>,
 ) -> Result<()> {
+    async fn get_foreign_subset(
+        config: &ValveConfig,
+        pool: &AnyPool,
+        table: &str,
+        column: &str,
+    ) -> Vec<SerdeValue> {
+        let fkeys = config
+            .constraint
+            .foreign
+            .get(table)
+            .expect(&format!("Undefined table '{}'", table))
+            .iter()
+            .filter(|t| t.column == *column)
+            .collect::<Vec<_>>();
+
+        if fkeys.len() == 0 {
+            return vec![];
+        }
+        if fkeys.len() > 1 {
+            log::warn!(
+                r#""More than one foreign key defined for "{}"."{}". Using the first one."#,
+                table,
+                column
+            );
+        }
+        let ftable = &fkeys[0].ftable;
+        let fcolumn = &fkeys[0].fcolumn;
+        let sql = format!(
+            r#"SELECT "{}" FROM "{}" ORDER BY RANDOM() LIMIT {}"#,
+            fcolumn, ftable, FKEY_CACHE_SIZE,
+        );
+        let foreign_values = sqlx_query(&sql)
+            .fetch_all(pool)
+            .await
+            .expect(&format!("Error running SQL '{}'", sql))
+            .iter()
+            .map(|frow| {
+                let sql_type = get_sql_type_from_global_config(config, ftable, &fcolumn, pool);
+                get_column_value(&frow, fcolumn, &sql_type)
+            })
+            .collect::<Vec<_>>();
+        foreign_values
+    }
+
     let column_names = &config
         .table
         .get(table_name)
@@ -191,6 +235,14 @@ pub async fn validate_rows_constraints(
             // database errors when, for instance, we compare a numeric with a non-numeric type.
             let sql_type = get_sql_type_from_global_config(config, table_name, &column_name, pool);
             if cell.nulltype == None && !is_sql_type_error(&sql_type, &cell.strvalue()) {
+                //let fcol_cache = get_foreign_subset(config, pool, table_name, column_name).await;
+                //println!(
+                //    "FCOL CACHE FOR COLUMN {}.{}: {:#?}",
+                //    table_name, column_name, fcol_cache
+                //);
+                // YOU ARE HERE.
+                // TODO: Pass the fcol_cache into validate_cell_foreign_constrints() and use it
+                // there.
                 validate_cell_foreign_constraints(
                     config,
                     pool,
@@ -240,8 +292,8 @@ pub fn validate_rows_intra(
     rows: &Vec<Result<csv::StringRecord, csv::Error>>,
     only_nulltype: bool,
 ) -> Vec<ValveRow> {
-    let mut dt_cache: HashMap<String, IndexMap<String, ValveCell>> = HashMap::new();
-
+    let mut dt_cache: HashMap<String, IndexMap<String, ValveCell>> =
+        HashMap::with_capacity(DT_CACHE_SIZE);
     let mut valve_rows = vec![];
     for row in rows {
         match row {
@@ -319,7 +371,7 @@ pub fn validate_rows_intra(
                                     &column_name,
                                     cell,
                                 );
-                                // We only insert valid cells into the cache, since invalid cells
+                                // We only insert valid cells into the cache. Since invalid cells
                                 // will have messages (unrelated to the datatype) that we are not
                                 // interested in, they complicate the process. Since (let us assume)
                                 // the number of valid cells far outnumbers the invalid cells,
