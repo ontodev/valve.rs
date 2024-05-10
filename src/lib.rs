@@ -57,6 +57,9 @@ static MAX_DB_CONNECTIONS: u32 = 5;
 /// then it will be possible to move N-1 rows in between two given rows.
 static MOVE_INTERVAL: u32 = 1000;
 
+/// The size of the datatype validation cache.
+static DT_CACHE_SIZE: usize = 2500;
+
 // Note that SQL_PARAM must be a 'word' (from the point of view of regular expressions) since in the
 // local_sql_syntax() function below we are matchng against it using '\b' which represents a word
 // boundary. If you want to use a non-word placeholder then you must also change '\b' in the regex

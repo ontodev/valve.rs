@@ -3996,7 +3996,7 @@ pub fn get_table_ddl(
             .collect::<Vec<_>>()
     };
 
-    let (primaries, uniques, foreigns, trees, _unders) = {
+    let (primaries, uniques, foreigns, _trees, _unders) = {
         // Conflict tables have no database constraints:
         if table_name.ends_with("_conflict") {
             (vec![], vec![], vec![], vec![], vec![])

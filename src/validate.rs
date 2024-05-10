@@ -2,19 +2,18 @@
 
 use crate::{
     toolkit::{
-        cast_sql_param_from_text, get_column_value, get_datatype_ancestors,
-        get_sql_type_from_global_config, get_table_options, is_sql_type_error, local_sql_syntax,
-        ColumnRule, CompiledCondition, QueryAsIf, QueryAsIfKind,
+        cast_sql_param_from_text, get_datatype_ancestors, get_sql_type_from_global_config,
+        get_table_options, is_sql_type_error, local_sql_syntax, ColumnRule, CompiledCondition,
+        QueryAsIf, QueryAsIfKind,
     },
-    valve::{
-        ValveCell, ValveCellMessage, ValveConfig, ValveRow, ValveRuleConfig, ValveTreeConstraint,
-    },
+    valve::{ValveCell, ValveCellMessage, ValveConfig, ValveRow, ValveRuleConfig},
+    DT_CACHE_SIZE,
 };
 use anyhow::Result;
 use indexmap::IndexMap;
-use serde_json::{json, Value as SerdeValue};
-use sqlx::{any::AnyPool, query as sqlx_query, Acquire, Row, Transaction, ValueRef};
-use std::collections::{BTreeMap, HashMap};
+use serde_json::json;
+use sqlx::{any::AnyPool, query as sqlx_query, Acquire, Transaction};
+use std::collections::HashMap;
 
 /// Given a config struct, maps of compiled datatype and rule conditions, a database connection
 /// pool, a table name, a row to validate represented as a [ValveRow], and a row number in the case
@@ -241,7 +240,7 @@ pub fn validate_rows_intra(
     rows: &Vec<Result<csv::StringRecord, csv::Error>>,
     only_nulltype: bool,
 ) -> Vec<ValveRow> {
-    let mut dt_cache: IndexMap<String, ValveCell> = IndexMap::new();
+    let mut dt_cache: HashMap<String, IndexMap<String, ValveCell>> = HashMap::new();
 
     let mut valve_rows = vec![];
     for row in rows {
@@ -289,7 +288,7 @@ pub fn validate_rows_intra(
                 if !only_nulltype {
                     for column_name in column_names {
                         let context = valve_row.clone();
-                        let mut cell = valve_row.contents.get_mut(column_name).unwrap();
+                        let cell = valve_row.contents.get_mut(column_name).unwrap();
                         validate_cell_rules(
                             config,
                             compiled_rule_conditions,
@@ -300,10 +299,19 @@ pub fn validate_rows_intra(
                         );
 
                         if cell.nulltype == None {
+                            // Add a new map for the column to the dt_cache if one doesn't exist:
+                            if !dt_cache.contains_key(column_name) {
+                                dt_cache.insert(column_name.to_string(), IndexMap::new());
+                            }
+                            let dt_col_cache = dt_cache.get_mut(column_name).unwrap();
                             let string_value = cell.value.to_string();
-                            if dt_cache.contains_key(&string_value) {
-                                cell = dt_cache.get_mut(&string_value).unwrap();
-                            } else {
+                            // If the cell already has a rule violation we cannot add it to the
+                            // datatype cache since those are context-dependent (on the values of
+                            // the other columns in a given row), so such cells are validated
+                            // irrespective of whether we have seen the same value before.
+                            if cell.messages.iter().any(|m| m.rule.starts_with("rule:"))
+                                || !dt_col_cache.contains_key(&string_value)
+                            {
                                 validate_cell_datatype(
                                     config,
                                     compiled_datatype_conditions,
@@ -311,10 +319,23 @@ pub fn validate_rows_intra(
                                     &column_name,
                                     cell,
                                 );
-                                if dt_cache.len() > 2500 {
-                                    dt_cache.pop();
+                                // We only insert valid cells into the cache, since invalid cells
+                                // will have messages (unrelated to the datatype) that we are not
+                                // interested in, they complicate the process. Since (let us assume)
+                                // the number of valid cells far outnumbers the invalid cells,
+                                // nothing is lost by simplifying.
+                                if cell.valid && !dt_col_cache.contains_key(&string_value) {
+                                    if dt_col_cache.len() > DT_CACHE_SIZE {
+                                        dt_col_cache.pop();
+                                    }
+                                    dt_col_cache.insert(string_value, cell.clone());
                                 }
-                                dt_cache.insert(string_value, cell.clone());
+                            } else {
+                                let cached_cell = dt_col_cache.get_mut(&string_value).unwrap();
+                                cell.nulltype = cached_cell.nulltype.clone();
+                                cell.value = cached_cell.value.clone();
+                                cell.valid = cached_cell.valid;
+                                cell.messages = cached_cell.messages.clone();
                             }
                         }
                     }
