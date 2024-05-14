@@ -103,6 +103,7 @@ pub async fn validate_row_tx(
                     column_name,
                     cell,
                     query_as_if,
+                    None,
                 )
                 .await?;
                 validate_cell_unique_constraints(
@@ -172,55 +173,68 @@ pub async fn validate_rows_constraints(
     table_name: &String,
     rows: &mut Vec<ValveRow>,
 ) -> Result<()> {
-    async fn get_foreign_subset(
-        config: &ValveConfig,
-        pool: &AnyPool,
-        table: &str,
-        column: &str,
-    ) -> Vec<SerdeValue> {
-        let fkeys = config
-            .constraint
-            .foreign
-            .get(table)
-            .expect(&format!("Undefined table '{}'", table))
-            .iter()
-            .filter(|t| t.column == *column)
-            .collect::<Vec<_>>();
-
-        if fkeys.len() == 0 {
-            return vec![];
-        }
-        if fkeys.len() > 1 {
-            log::warn!(
-                r#""More than one foreign key defined for "{}"."{}". Using the first one."#,
-                table,
-                column
-            );
-        }
-        let ftable = &fkeys[0].ftable;
-        let fcolumn = &fkeys[0].fcolumn;
-        let sql = format!(
-            r#"SELECT "{}" FROM "{}" ORDER BY RANDOM() LIMIT {}"#,
-            fcolumn, ftable, FKEY_CACHE_SIZE,
-        );
-        let foreign_values = sqlx_query(&sql)
-            .fetch_all(pool)
-            .await
-            .expect(&format!("Error running SQL '{}'", sql))
-            .iter()
-            .map(|frow| {
-                let sql_type = get_sql_type_from_global_config(config, ftable, &fcolumn, pool);
-                get_column_value(&frow, fcolumn, &sql_type)
-            })
-            .collect::<Vec<_>>();
-        foreign_values
-    }
-
     let column_names = &config
         .table
         .get(table_name)
         .expect(&format!("Undefined table '{}'", table_name))
         .column_order;
+
+    /*
+    let fcol_caches = {
+        async fn get_foreign_subset(
+            config: &ValveConfig,
+            pool: &AnyPool,
+            table: &str,
+            column: &str,
+        ) -> Vec<SerdeValue> {
+            let fkeys = config
+                .constraint
+                .foreign
+                .get(table)
+                .expect(&format!("Undefined table '{}'", table))
+                .iter()
+                .filter(|t| t.column == *column)
+                .collect::<Vec<_>>();
+
+            if fkeys.len() == 0 {
+                return vec![];
+            }
+            if fkeys.len() > 1 {
+                log::warn!(
+                    r#""More than one foreign key defined for "{}"."{}". Using the first one."#,
+                    table,
+                    column
+                );
+            }
+            let ftable = &fkeys[0].ftable;
+            let fcolumn = &fkeys[0].fcolumn;
+            let sql = format!(
+                r#"SELECT "{}" FROM "{}" ORDER BY RANDOM() LIMIT {}"#,
+                fcolumn, ftable, FKEY_CACHE_SIZE,
+            );
+            let foreign_values = sqlx_query(&sql)
+                .fetch_all(pool)
+                .await
+                .expect(&format!("Error running SQL '{}'", sql))
+                .iter()
+                .map(|frow| {
+                    let sql_type = get_sql_type_from_global_config(config, ftable, &fcolumn, pool);
+                    get_column_value(&frow, fcolumn, &sql_type)
+                })
+                .collect::<Vec<_>>();
+            foreign_values
+        }
+
+        let mut cache = HashMap::new();
+        for column in column_names {
+            cache.insert(
+                column.to_string(),
+                get_foreign_subset(config, pool, table_name, column).await,
+            );
+        }
+        cache
+    };
+    */
 
     let mut valve_rows = vec![];
     for row in rows.iter_mut() {
@@ -235,14 +249,9 @@ pub async fn validate_rows_constraints(
             // database errors when, for instance, we compare a numeric with a non-numeric type.
             let sql_type = get_sql_type_from_global_config(config, table_name, &column_name, pool);
             if cell.nulltype == None && !is_sql_type_error(&sql_type, &cell.strvalue()) {
-                //let fcol_cache = get_foreign_subset(config, pool, table_name, column_name).await;
-                //println!(
-                //    "FCOL CACHE FOR COLUMN {}.{}: {:#?}",
-                //    table_name, column_name, fcol_cache
-                //);
-                // YOU ARE HERE.
-                // TODO: Pass the fcol_cache into validate_cell_foreign_constrints() and use it
-                // there.
+                //let fcol_cache = fcol_caches
+                //    .get(column_name)
+                //    .expect(&format!("No cache found for {}", column_name));
                 validate_cell_foreign_constraints(
                     config,
                     pool,
@@ -251,6 +260,7 @@ pub async fn validate_rows_constraints(
                     &column_name,
                     cell,
                     None,
+                    None, //Some(fcol_cache),
                 )
                 .await?;
 
@@ -357,13 +367,16 @@ pub fn validate_rows_intra(
                             }
                             let dt_col_cache = dt_cache.get_mut(column_name).unwrap();
                             let string_value = cell.value.to_string();
-                            // If the cell already has a rule violation we cannot add it to the
-                            // datatype cache since those are context-dependent (on the values of
-                            // the other columns in a given row), so such cells are validated
-                            // irrespective of whether we have seen the same value before.
-                            if cell.messages.iter().any(|m| m.rule.starts_with("rule:"))
-                                || !dt_col_cache.contains_key(&string_value)
-                            {
+                            let initially_valid = cell.valid;
+
+                            // We do not want to add cells to the datatype validation cache if they
+                            // already contain other types of violations, since that will make it
+                            // more difficult to construct a unique mapping from values to result
+                            // cells; i.e., the same value could in principle map to either a valid
+                            // or an invalid cell and this will need to be considered. Ignoring
+                            // initially invalid cells (which will be comparitively fewer in number)
+                            // thus simplifies the process.
+                            if !(initially_valid && dt_col_cache.contains_key(&string_value)) {
                                 validate_cell_datatype(
                                     config,
                                     compiled_datatype_conditions,
@@ -371,12 +384,7 @@ pub fn validate_rows_intra(
                                     &column_name,
                                     cell,
                                 );
-                                // We only insert valid cells into the cache. Since invalid cells
-                                // will have messages (unrelated to the datatype) that we are not
-                                // interested in, they complicate the process. Since (let us assume)
-                                // the number of valid cells far outnumbers the invalid cells,
-                                // nothing is lost by simplifying.
-                                if cell.valid && !dt_col_cache.contains_key(&string_value) {
+                                if initially_valid && !dt_col_cache.contains_key(&string_value) {
                                     if dt_col_cache.len() > DT_CACHE_SIZE {
                                         dt_col_cache.pop();
                                     }
@@ -766,6 +774,7 @@ pub async fn validate_cell_foreign_constraints(
     column_name: &String,
     cell: &mut ValveCell,
     query_as_if: Option<&QueryAsIf>,
+    cached_colvals: Option<&Vec<SerdeValue>>,
 ) -> Result<()> {
     let fkeys = config
         .constraint
@@ -809,6 +818,21 @@ pub async fn validate_cell_foreign_constraints(
         );
 
         let frows = {
+            if let Some(cached_colvals) = cached_colvals {
+                // TODO: YOU ARE HERE.
+                match &cell.value {
+                    SerdeValue::Number(value) => {
+                        println!(
+                            "IS {} IN {:?}? {}",
+                            cell.value,
+                            cached_colvals,
+                            cached_colvals.contains(&cell.value)
+                        )
+                    }
+                    _ => (),
+                };
+            }
+
             if let None = tx {
                 sqlx_query(&fsql)
                     .bind(&cell.strvalue())
