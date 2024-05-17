@@ -61,7 +61,7 @@ static MOVE_INTERVAL: u32 = 1000;
 static DT_CACHE_SIZE: usize = 0;
 
 /// The size of the foreign key validation cache.
-static FKEY_CACHE_SIZE: usize = 0;
+static FKEY_CACHE_SIZE: usize = 2500;
 
 // Note that SQL_PARAM must be a 'word' (from the point of view of regular expressions) since in the
 // local_sql_syntax() function below we are matchng against it using '\b' which represents a word

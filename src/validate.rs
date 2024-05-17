@@ -2,10 +2,9 @@
 
 use crate::{
     toolkit::{
-        cast_sql_param_from_text, get_column_value, get_column_value_as_string,
-        get_datatype_ancestors, get_sql_type_from_global_config, get_table_options,
-        is_sql_type_error, local_sql_syntax, ColumnRule, CompiledCondition, QueryAsIf,
-        QueryAsIfKind,
+        cast_sql_param_from_text, get_column_value_as_string, get_datatype_ancestors,
+        get_sql_type_from_global_config, get_table_options, is_sql_type_error, local_sql_syntax,
+        ColumnRule, CompiledCondition, QueryAsIf, QueryAsIfKind,
     },
     valve::{
         ValveCell, ValveCellMessage, ValveConfig, ValveRow, ValveRuleConfig, ValveTreeConstraint,
@@ -507,13 +506,13 @@ pub async fn validate_rows_constraints(
         .expect(&format!("Undefined table '{}'", table_name))
         .column_order;
 
-    let fcol_caches = {
+    let fkey_caches = {
         async fn get_foreign_subset(
             config: &ValveConfig,
             pool: &AnyPool,
             table: &str,
             column: &str,
-        ) -> Vec<SerdeValue> {
+        ) -> Vec<String> {
             let fkeys = config
                 .constraint
                 .foreign
@@ -546,7 +545,7 @@ pub async fn validate_rows_constraints(
                 .iter()
                 .map(|frow| {
                     let sql_type = get_sql_type_from_global_config(config, ftable, &fcolumn, pool);
-                    get_column_value(&frow, fcolumn, &sql_type)
+                    get_column_value_as_string(&frow, fcolumn, &sql_type)
                 })
                 .collect::<Vec<_>>();
             foreign_values
@@ -580,9 +579,9 @@ pub async fn validate_rows_constraints(
             // database errors when, for instance, we compare a numeric with a non-numeric type.
             let sql_type = get_sql_type_from_global_config(config, table_name, &column_name, pool);
             if cell.nulltype == None && !is_sql_type_error(&sql_type, &cell.strvalue()) {
-                let fcol_cache = match &fcol_caches {
+                let fkey_cache = match &fkey_caches {
                     None => None,
-                    Some(fcol_caches) => fcol_caches.get(column_name),
+                    Some(fkey_caches) => fkey_caches.get(column_name),
                 };
                 validate_cell_foreign_constraints(
                     config,
@@ -592,7 +591,7 @@ pub async fn validate_rows_constraints(
                     &column_name,
                     cell,
                     None,
-                    fcol_cache,
+                    fkey_cache,
                 )
                 .await?;
 
@@ -1172,7 +1171,7 @@ pub async fn validate_cell_foreign_constraints(
     column_name: &String,
     cell: &mut ValveCell,
     query_as_if: Option<&QueryAsIf>,
-    cached_colvals: Option<&Vec<SerdeValue>>,
+    cached_fvals: Option<&Vec<String>>,
 ) -> Result<()> {
     let fkeys = config
         .constraint
@@ -1215,34 +1214,29 @@ pub async fn validate_cell_foreign_constraints(
             ),
         );
 
-        let frows = {
-            if let Some(cached_colvals) = cached_colvals {
-                match &cell.value {
-                    SerdeValue::Number(value) => {
-                        println!(
-                            "IS {} IN {:?}? {}",
-                            cell.value,
-                            cached_colvals,
-                            cached_colvals.contains(&cell.value)
-                        )
-                    }
-                    _ => (),
-                };
-            }
-
-            if let None = tx {
-                sqlx_query(&fsql)
-                    .bind(&cell.strvalue())
-                    .fetch_all(pool)
-                    .await?
-            } else {
-                sqlx_query(&fsql)
-                    .bind(&cell.strvalue())
-                    .fetch_all(tx.as_mut().unwrap().acquire().await?)
-                    .await?
+        let fkey_satisfied = {
+            match cached_fvals {
+                Some(v) if v.contains(&cell.strvalue()) => true,
+                _ => {
+                    let frows = {
+                        if let None = tx {
+                            sqlx_query(&fsql)
+                                .bind(&cell.strvalue())
+                                .fetch_all(pool)
+                                .await?
+                        } else {
+                            sqlx_query(&fsql)
+                                .bind(&cell.strvalue())
+                                .fetch_all(tx.as_mut().unwrap().acquire().await?)
+                                .await?
+                        }
+                    };
+                    !frows.is_empty()
+                }
             }
         };
-        if frows.is_empty() {
+
+        if !fkey_satisfied {
             cell.valid = false;
             let mut message = ValveCellMessage {
                 rule: "key:foreign".to_string(),
