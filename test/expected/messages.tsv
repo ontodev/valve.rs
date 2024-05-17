@@ -23,8 +23,11 @@ table3	1	label	error	datatype:trimmed_line	label should be a line of text that d
 table3	1	source	error	key:foreign	Value 'MOB' of column source is not in table1.prefix	MOB
 table3	2	source	error	key:foreign	Value 'ZOB' of column source is not in table1.prefix	ZOB
 table3	3	source	error	key:foreign	Value 'JOB' of column source is not in table1.prefix	JOB
+table3	4	parent	error	tree:cycle	Cyclic dependency: (label: bar, parent: car), (label: car, parent: foo), (label: foo, parent: bar) for tree(parent) of label	bar
 table3	4	source	error	key:foreign	Value 'SOB' of column source is not in table1.prefix	SOB
+table3	5	parent	error	tree:foreign	Value 'jafar' of column parent is not in column label	jafar
 table3	5	source	error	key:foreign	Value 'YOB' of column source is not in table1.prefix	YOB
+table3	6	parent	error	tree:foreign	Value 'owl:Thing' of column parent is not in column label	owl:Thing
 table3	7	source	error	datatype:nonspace	source should be text without whitespace	CO B
 table3	7	source	error	datatype:prefix	source should be a prefix for a CURIE	CO B
 table3	7	source	error	datatype:word	source should be a single word: letters, numbers, underscore	CO B
