@@ -86,18 +86,6 @@ pub async fn validate_row_tx(
             // non-numeric type.
             let sql_type = get_sql_type_from_global_config(&config, table_name, &column_name, pool);
             if !is_sql_type_error(&sql_type, &cell.strvalue()) {
-                // // TODO: Pass the query_as_if parameter to validate_cell_trees.
-                // validate_cell_trees(
-                //     config,
-                //     pool,
-                //     Some(tx),
-                //     &table_name.to_string(),
-                //     column_name,
-                //     cell,
-                //     &context,
-                //     &vec![],
-                // )
-                // .await?;
                 validate_cell_foreign_constraints(
                     config,
                     pool,
@@ -133,17 +121,6 @@ pub async fn validate_row_tx(
         Some(&context.clone()),
     )
     .await?;
-    // violations.append(
-    //     // TODO: Possibly propagate `query_as_if` down into this function:
-    //     &mut validate_under(
-    //         config,
-    //         pool,
-    //         Some(tx),
-    //         &table_name.to_string(),
-    //         Some(&context.clone()),
-    //     )
-    //     .await?,
-    // );
     for violation in violations.iter_mut() {
         let vrow_number = violation.get("row_number").unwrap().as_i64().unwrap() as u32;
         if Some(vrow_number) == row_number || (row_number == None && Some(vrow_number) == Some(0)) {

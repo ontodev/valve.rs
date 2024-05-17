@@ -1632,13 +1632,6 @@ impl Valve {
                     &table_name,
                     None,
                 ))?;
-                // recs_to_update.append(&mut block_on(validate_under(
-                //     &self.config,
-                //     &self.pool,
-                //     None,
-                //     &table_name,
-                //     None,
-                // ))?);
 
                 for record in recs_to_update {
                     let row_number = record.get("row_number").unwrap();

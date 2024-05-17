@@ -4531,10 +4531,6 @@ pub async fn insert_chunk(
     verbose: bool,
     validate: bool,
 ) -> Result<()> {
-    // Optional tree validation:
-    if validate {
-        // validate_rows_trees(config, pool, table_name, rows).await?;
-    }
     // Insertion with optional inter-table validation:
     // Try to insert the rows to the db first without validating unique and foreign constraints.
     // If there are constraint violations this will cause a database error, in which case we then
