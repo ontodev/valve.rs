@@ -58,10 +58,10 @@ static MAX_DB_CONNECTIONS: u32 = 5;
 static MOVE_INTERVAL: u32 = 1000;
 
 /// The size of the datatype validation cache.
-static DT_CACHE_SIZE: usize = 0;
+static DT_CACHE_SIZE: usize = 2500;
 
 /// The size of the foreign key validation cache.
-static FKEY_CACHE_SIZE: usize = 2500;
+static FKEY_CACHE_SIZE: usize = 0;
 
 // Note that SQL_PARAM must be a 'word' (from the point of view of regular expressions) since in the
 // local_sql_syntax() function below we are matchng against it using '\b' which represents a word

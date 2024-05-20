@@ -13,6 +13,7 @@ use crate::{
 };
 use anyhow::Result;
 use indexmap::IndexMap;
+use lfu_cache::LfuCache;
 use serde_json::{json, Value as SerdeValue};
 use sqlx::{any::AnyPool, query as sqlx_query, Acquire, Row, Transaction, ValueRef};
 use std::collections::HashMap;
@@ -635,7 +636,7 @@ pub fn validate_rows_intra(
 ) -> Vec<ValveRow> {
     let mut dt_cache = match DT_CACHE_SIZE {
         0 => None,
-        _ => Some(HashMap::with_capacity(DT_CACHE_SIZE)),
+        _ => Some(HashMap::new()),
     };
     let mut valve_rows = vec![];
     for row in rows {
@@ -700,7 +701,10 @@ pub fn validate_rows_intra(
                         if let Some(dt_cache) = &mut dt_cache {
                             // Add a new map for the column to the dt_cache if one doesn't exist:
                             if !dt_cache.contains_key(column_name) {
-                                dt_cache.insert(column_name.to_string(), IndexMap::new());
+                                dt_cache.insert(
+                                    column_name.to_string(),
+                                    IndexMap::with_capacity(DT_CACHE_SIZE),
+                                );
                             }
                             let dt_col_cache = dt_cache.get_mut(column_name).unwrap();
                             let string_value = cell.value.to_string();
