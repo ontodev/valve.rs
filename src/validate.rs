@@ -703,7 +703,7 @@ pub fn validate_rows_intra(
                             if !dt_cache.contains_key(column_name) {
                                 dt_cache.insert(
                                     column_name.to_string(),
-                                    LfuCache::with_capacity(DT_CACHE_SIZE),
+                                    IndexMap::with_capacity(DT_CACHE_SIZE),
                                 );
                             }
                             let dt_col_cache = dt_cache.get_mut(column_name).unwrap();
@@ -728,6 +728,9 @@ pub fn validate_rows_intra(
                                             &column_name,
                                             cell,
                                         );
+                                        if dt_col_cache.len() > DT_CACHE_SIZE {
+                                            dt_col_cache.pop();
+                                        }
                                         dt_col_cache.insert(string_value, cell.clone());
                                     }
                                     Some(cached_cell) => {
