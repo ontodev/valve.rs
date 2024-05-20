@@ -58,7 +58,7 @@ static MAX_DB_CONNECTIONS: u32 = 5;
 static MOVE_INTERVAL: u32 = 1000;
 
 /// The size of the datatype validation cache.
-static DT_CACHE_SIZE: usize = 2500;
+static DT_CACHE_SIZE: usize = 1000;
 
 /// The size of the foreign key validation cache.
 static FKEY_CACHE_SIZE: usize = 0;

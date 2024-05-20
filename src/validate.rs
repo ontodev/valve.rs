@@ -639,6 +639,10 @@ pub fn validate_rows_intra(
         _ => Some(HashMap::new()),
     };
     let mut valve_rows = vec![];
+
+    // TODO: Remove this:
+    // let mut number_evicted_remove_me = 0;
+
     for row in rows {
         match row {
             Err(err) => log::error!(
@@ -703,12 +707,11 @@ pub fn validate_rows_intra(
                             if !dt_cache.contains_key(column_name) {
                                 dt_cache.insert(
                                     column_name.to_string(),
-                                    IndexMap::with_capacity(DT_CACHE_SIZE),
+                                    LfuCache::with_capacity(DT_CACHE_SIZE),
                                 );
                             }
                             let dt_col_cache = dt_cache.get_mut(column_name).unwrap();
                             let string_value = cell.value.to_string();
-                            let initially_valid = cell.valid;
 
                             // We do not want to add cells to the datatype validation cache if they
                             // already contain other types of violations, since that will make it
@@ -717,7 +720,7 @@ pub fn validate_rows_intra(
                             // or an invalid cell and this will need to be considered. Ignoring
                             // initially invalid cells (which will be comparitively fewer in number)
                             // thus simplifies the process.
-                            if initially_valid {
+                            if cell.valid {
                                 let cached_cell = dt_col_cache.get_mut(&string_value);
                                 match cached_cell {
                                     None => {
@@ -728,10 +731,12 @@ pub fn validate_rows_intra(
                                             &column_name,
                                             cell,
                                         );
-                                        if dt_col_cache.len() > DT_CACHE_SIZE {
-                                            dt_col_cache.pop();
-                                        }
-                                        dt_col_cache.insert(string_value, cell.clone());
+                                        let result =
+                                            dt_col_cache.insert(string_value, cell.clone());
+                                        // TODO: Remove this:
+                                        // if let Some(evicted) = result {
+                                        //     number_evicted_remove_me += 1;
+                                        // }
                                     }
                                     Some(cached_cell) => {
                                         cell.nulltype = cached_cell.nulltype.clone();
@@ -764,6 +769,10 @@ pub fn validate_rows_intra(
             }
         };
     }
+
+    // TODO: Remove this:
+    //println!("Number of evicted values: {} (cache size: {})",
+    //         number_evicted_remove_me, DT_CACHE_SIZE);
 
     // Finally return the result rows:
     valve_rows
