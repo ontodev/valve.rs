@@ -703,7 +703,7 @@ pub fn validate_rows_intra(
                             if !dt_cache.contains_key(column_name) {
                                 dt_cache.insert(
                                     column_name.to_string(),
-                                    IndexMap::with_capacity(DT_CACHE_SIZE),
+                                    LfuCache::with_capacity(DT_CACHE_SIZE),
                                 );
                             }
                             let dt_col_cache = dt_cache.get_mut(column_name).unwrap();
@@ -717,7 +717,27 @@ pub fn validate_rows_intra(
                             // or an invalid cell and this will need to be considered. Ignoring
                             // initially invalid cells (which will be comparitively fewer in number)
                             // thus simplifies the process.
-                            if !(initially_valid && dt_col_cache.contains_key(&string_value)) {
+                            if initially_valid {
+                                let cached_cell = dt_col_cache.get_mut(&string_value);
+                                match cached_cell {
+                                    None => {
+                                        validate_cell_datatype(
+                                            config,
+                                            compiled_datatype_conditions,
+                                            table_name,
+                                            &column_name,
+                                            cell,
+                                        );
+                                        dt_col_cache.insert(string_value, cell.clone());
+                                    }
+                                    Some(cached_cell) => {
+                                        cell.nulltype = cached_cell.nulltype.clone();
+                                        cell.value = cached_cell.value.clone();
+                                        cell.valid = cached_cell.valid;
+                                        cell.messages = cached_cell.messages.clone();
+                                    }
+                                };
+                            } else {
                                 validate_cell_datatype(
                                     config,
                                     compiled_datatype_conditions,
@@ -725,18 +745,6 @@ pub fn validate_rows_intra(
                                     &column_name,
                                     cell,
                                 );
-                                if initially_valid && !dt_col_cache.contains_key(&string_value) {
-                                    if dt_col_cache.len() > DT_CACHE_SIZE {
-                                        dt_col_cache.pop();
-                                    }
-                                    dt_col_cache.insert(string_value, cell.clone());
-                                }
-                            } else {
-                                let cached_cell = dt_col_cache.get_mut(&string_value).unwrap();
-                                cell.nulltype = cached_cell.nulltype.clone();
-                                cell.value = cached_cell.value.clone();
-                                cell.valid = cached_cell.valid;
-                                cell.messages = cached_cell.messages.clone();
                             }
                         } else {
                             validate_cell_datatype(
