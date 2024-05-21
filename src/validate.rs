@@ -507,63 +507,14 @@ pub async fn validate_rows_constraints(
         .expect(&format!("Undefined table '{}'", table_name))
         .column_order;
 
-    let fkey_caches = {
-        async fn get_foreign_subset(
-            config: &ValveConfig,
-            pool: &AnyPool,
-            table: &str,
-            column: &str,
-        ) -> Vec<String> {
-            let fkeys = config
-                .constraint
-                .foreign
-                .get(table)
-                .expect(&format!("Undefined table '{}'", table))
-                .iter()
-                .filter(|t| t.column == *column)
-                .collect::<Vec<_>>();
-
-            if fkeys.len() == 0 {
-                return vec![];
+    let mut fkey_caches = match FKEY_CACHE_SIZE {
+        0 => None,
+        _ => {
+            let mut cache = HashMap::new();
+            for column in column_names {
+                cache.insert(column.to_string(), LfuCache::with_capacity(FKEY_CACHE_SIZE));
             }
-            if fkeys.len() > 1 {
-                log::warn!(
-                    r#""More than one foreign key defined for "{}"."{}". Using the first one."#,
-                    table,
-                    column
-                );
-            }
-            let ftable = &fkeys[0].ftable;
-            let fcolumn = &fkeys[0].fcolumn;
-            let sql = format!(
-                r#"SELECT "{}" FROM "{}" ORDER BY RANDOM() LIMIT {}"#,
-                fcolumn, ftable, FKEY_CACHE_SIZE,
-            );
-            let foreign_values = sqlx_query(&sql)
-                .fetch_all(pool)
-                .await
-                .expect(&format!("Error running SQL '{}'", sql))
-                .iter()
-                .map(|frow| {
-                    let sql_type = get_sql_type_from_global_config(config, ftable, &fcolumn, pool);
-                    get_column_value_as_string(&frow, fcolumn, &sql_type)
-                })
-                .collect::<Vec<_>>();
-            foreign_values
-        }
-
-        match FKEY_CACHE_SIZE {
-            0 => None,
-            _ => {
-                let mut cache = HashMap::with_capacity(FKEY_CACHE_SIZE);
-                for column in column_names {
-                    cache.insert(
-                        column.to_string(),
-                        get_foreign_subset(config, pool, table_name, column).await,
-                    );
-                }
-                Some(cache)
-            }
+            Some(cache)
         }
     };
 
@@ -580,9 +531,9 @@ pub async fn validate_rows_constraints(
             // database errors when, for instance, we compare a numeric with a non-numeric type.
             let sql_type = get_sql_type_from_global_config(config, table_name, &column_name, pool);
             if cell.nulltype == None && !is_sql_type_error(&sql_type, &cell.strvalue()) {
-                let fkey_cache = match &fkey_caches {
+                let fkey_cache = match &mut fkey_caches {
                     None => None,
-                    Some(fkey_caches) => fkey_caches.get(column_name),
+                    Some(fkey_caches) => fkey_caches.get_mut(column_name),
                 };
                 validate_cell_foreign_constraints(
                     config,
@@ -595,7 +546,6 @@ pub async fn validate_rows_constraints(
                     fkey_cache,
                 )
                 .await?;
-
                 validate_cell_unique_constraints(
                     config,
                     pool,
@@ -639,10 +589,6 @@ pub fn validate_rows_intra(
         _ => Some(HashMap::new()),
     };
     let mut valve_rows = vec![];
-
-    // TODO: Remove this:
-    // let mut number_evicted_remove_me = 0;
-
     for row in rows {
         match row {
             Err(err) => log::error!(
@@ -731,12 +677,7 @@ pub fn validate_rows_intra(
                                             &column_name,
                                             cell,
                                         );
-                                        let result =
-                                            dt_col_cache.insert(string_value, cell.clone());
-                                        // TODO: Remove this:
-                                        // if let Some(evicted) = result {
-                                        //     number_evicted_remove_me += 1;
-                                        // }
+                                        dt_col_cache.insert(string_value, cell.clone());
                                     }
                                     Some(cached_cell) => {
                                         cell.nulltype = cached_cell.nulltype.clone();
@@ -769,10 +710,6 @@ pub fn validate_rows_intra(
             }
         };
     }
-
-    // TODO: Remove this:
-    //println!("Number of evicted values: {} (cache size: {})",
-    //         number_evicted_remove_me, DT_CACHE_SIZE);
 
     // Finally return the result rows:
     valve_rows
@@ -1195,7 +1132,7 @@ pub async fn validate_cell_foreign_constraints(
     column_name: &String,
     cell: &mut ValveCell,
     query_as_if: Option<&QueryAsIf>,
-    cached_fvals: Option<&Vec<String>>,
+    mut fkey_cache: Option<&mut LfuCache<String, String>>,
 ) -> Result<()> {
     let fkeys = config
         .constraint
@@ -1219,6 +1156,30 @@ pub async fn validate_cell_foreign_constraints(
         None => "".to_string(),
     };
 
+    /// Use the given SQL statement to determine whether the value associated with the given cell
+    /// is in the database. Use the given transaction if it is set, otherwise use the pool.
+    async fn fkey_in_db(
+        pool: &AnyPool,
+        tx: &mut Option<&mut Transaction<'_, sqlx::Any>>,
+        cell: &mut ValveCell,
+        fsql: &str,
+    ) -> Result<bool> {
+        let frows = {
+            if let None = tx {
+                sqlx_query(&fsql)
+                    .bind(&cell.strvalue())
+                    .fetch_all(pool)
+                    .await?
+            } else {
+                sqlx_query(&fsql)
+                    .bind(&cell.strvalue())
+                    .fetch_all(tx.as_mut().unwrap().acquire().await?)
+                    .await?
+            }
+        };
+        Ok(!frows.is_empty())
+    }
+
     for fkey in fkeys {
         let ftable = &fkey.ftable;
         let (as_if_clause, ftable_alias) = match query_as_if {
@@ -1238,26 +1199,21 @@ pub async fn validate_cell_foreign_constraints(
             ),
         );
 
-        let fkey_satisfied = {
-            match cached_fvals {
-                Some(v) if v.contains(&cell.strvalue()) => true,
-                _ => {
-                    let frows = {
-                        if let None = tx {
-                            sqlx_query(&fsql)
-                                .bind(&cell.strvalue())
-                                .fetch_all(pool)
-                                .await?
-                        } else {
-                            sqlx_query(&fsql)
-                                .bind(&cell.strvalue())
-                                .fetch_all(tx.as_mut().unwrap().acquire().await?)
-                                .await?
-                        }
-                    };
-                    !frows.is_empty()
+        let fkey_satisfied = match fkey_cache {
+            Some(ref mut fkey_cache) => {
+                let in_cache = fkey_cache.get(&cell.strvalue()).is_some();
+                if in_cache {
+                    true
+                } else {
+                    let in_db = fkey_in_db(pool, &mut tx, cell, &fsql).await?;
+                    if in_db {
+                        let key = cell.strvalue();
+                        fkey_cache.insert(key.clone(), key.clone());
+                    }
+                    in_db
                 }
             }
+            None => fkey_in_db(pool, &mut tx, cell, &fsql).await?,
         };
 
         if !fkey_satisfied {
@@ -1323,6 +1279,10 @@ pub async fn validate_cell_foreign_constraints(
             cell.messages.push(message);
         }
     }
+
+    //if let Some(ref fkey_cache) = fkey_cache {
+    //    println!("CACHE SIZE ({}.{}): {}", table_name, column_name, fkey_cache.len());
+    //}
 
     Ok(())
 }
