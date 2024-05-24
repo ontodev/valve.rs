@@ -13,10 +13,11 @@ use crate::{
 };
 use anyhow::Result;
 use indexmap::IndexMap;
-use lfu_cache::LfuCache;
+use lru::LruCache;
 use serde_json::{json, Value as SerdeValue};
 use sqlx::{any::AnyPool, query as sqlx_query, Acquire, Row, Transaction, ValueRef};
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 
 /// Given a config struct, maps of compiled datatype and rule conditions, a database connection
 /// pool, a table name, a row to validate represented as a [ValveRow], and a row number in the case
@@ -512,7 +513,10 @@ pub async fn validate_rows_constraints(
         _ => {
             let mut cache = HashMap::new();
             for column in column_names {
-                cache.insert(column.to_string(), LfuCache::with_capacity(FKEY_CACHE_SIZE));
+                cache.insert(
+                    column.to_string(),
+                    LruCache::new(NonZeroUsize::new(FKEY_CACHE_SIZE).unwrap()),
+                );
             }
             Some(cache)
         }
@@ -653,7 +657,7 @@ pub fn validate_rows_intra(
                             if !dt_cache.contains_key(column_name) {
                                 dt_cache.insert(
                                     column_name.to_string(),
-                                    LfuCache::with_capacity(DT_CACHE_SIZE),
+                                    LruCache::new(NonZeroUsize::new(DT_CACHE_SIZE).unwrap()),
                                 );
                             }
                             let dt_col_cache = dt_cache.get_mut(column_name).unwrap();
@@ -677,7 +681,7 @@ pub fn validate_rows_intra(
                                             &column_name,
                                             cell,
                                         );
-                                        dt_col_cache.insert(string_value, cell.clone());
+                                        dt_col_cache.put(string_value, cell.clone());
                                     }
                                     Some(cached_cell) => {
                                         cell.nulltype = cached_cell.nulltype.clone();
@@ -1132,7 +1136,7 @@ pub async fn validate_cell_foreign_constraints(
     column_name: &String,
     cell: &mut ValveCell,
     query_as_if: Option<&QueryAsIf>,
-    mut fkey_cache: Option<&mut LfuCache<String, String>>,
+    mut fkey_cache: Option<&mut LruCache<String, String>>,
 ) -> Result<()> {
     let fkeys = config
         .constraint
@@ -1208,7 +1212,7 @@ pub async fn validate_cell_foreign_constraints(
                     let in_db = fkey_in_db(pool, &mut tx, cell, &fsql).await?;
                     if in_db {
                         let key = cell.strvalue();
-                        fkey_cache.insert(key.clone(), key.clone());
+                        fkey_cache.put(key.clone(), key.clone());
                     }
                     in_db
                 }
