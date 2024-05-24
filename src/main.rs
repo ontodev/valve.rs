@@ -208,7 +208,8 @@ async fn main() -> Result<()> {
     if api_test {
         run_api_tests(&source, &destination).await.unwrap();
     } else if test_dt_hierarchy {
-        run_dt_hierarchy_tests().unwrap();
+        let valve = build_valve().unwrap();
+        run_dt_hierarchy_tests(&valve).unwrap();
     } else if save_all || save != "" {
         let valve = build_valve().unwrap();
         let save_dir = {

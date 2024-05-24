@@ -3,13 +3,19 @@
 use anyhow::Result;
 use indoc::indoc;
 use ontodev_valve::{
+    ast::Expression,
     toolkit::SerdeMap,
     valve::{Valve, ValveError},
 };
-use rand::distributions::{Alphanumeric, DistString, Distribution, Uniform};
-use rand::{random, Rng};
+use rand::{
+    distributions::{Alphanumeric, DistString, Distribution, Uniform},
+    random, Rng, SeedableRng,
+};
+use rand_regex::Regex as RandRegex;
+use regex::Regex;
 use serde_json::json;
 use sqlx::{any::AnyPool, query as sqlx_query, Row, ValueRef};
+use std::sync::Arc;
 
 async fn test_matching(valve: &Valve) -> Result<()> {
     eprint!("Running test_matching() ... ");
@@ -984,6 +990,131 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn run_dt_hierarchy_tests() -> Result<()> {
-    todo!();
+pub fn run_dt_hierarchy_tests(valve: &Valve) -> Result<()> {
+    // TODO: Use a better seed:
+    let mut rng = rand::rngs::StdRng::from_seed(*b"The initial seedThe initial seed");
+    for (_, dt_config) in valve.config.datatype.iter() {
+        if dt_config.parent == "" {
+            continue;
+        }
+        let dt_condition = valve.datatype_conditions.get(&dt_config.datatype).unwrap();
+        let unquoted_re = Regex::new(r#"^['"](?P<unquoted>.*)['"]$"#)?;
+        let (regex_use, regex_str, regex_cond) = match &dt_condition.parsed {
+            Expression::Function(name, args) => {
+                if name == "equals" {
+                    if let Expression::Label(label) = &*args[0] {
+                        (
+                            name,
+                            String::from(unquoted_re.replace(&label, "$unquoted")),
+                            dt_condition.compiled.clone(),
+                        )
+                    } else {
+                        panic!("ERROR: Invalid condition: {}", dt_config.condition);
+                    }
+                } else if vec!["exclude", "match", "search"].contains(&name.as_str()) {
+                    if let Expression::RegexMatch(pattern, flags) = &*args[0] {
+                        let pattern = String::from(unquoted_re.replace(pattern, "$unquoted"));
+                        if pattern.starts_with("^") || pattern.ends_with("$") {
+                            log::warn!("Not testing unsupported pattern: {}", pattern);
+                            continue;
+                        }
+
+                        let mut flags = String::from(flags);
+                        if flags != "" {
+                            flags = format!("(?{})", flags.as_str());
+                        }
+
+                        (
+                            name,
+                            format!("{}{}", flags, pattern),
+                            dt_condition.compiled.clone(),
+                        )
+                    } else {
+                        panic!(
+                            "Argument to condition: {} is not a regular expression",
+                            dt_config.condition
+                        );
+                    }
+                } else if name == "in" {
+                    let mut alternatives: Vec<String> = vec![];
+                    for arg in args {
+                        if let Expression::Label(value) = &**arg {
+                            let value = unquoted_re.replace(&value, "$unquoted");
+                            alternatives.push(value.to_string());
+                        } else {
+                            panic!("Argument: {:?} to function 'in' is not a label", arg);
+                        }
+                    }
+                    (
+                        name,
+                        format!("({})", alternatives.join("|")),
+                        dt_condition.compiled.clone(),
+                    )
+                } else {
+                    panic!("Unrecognized function name: {}", name);
+                }
+            }
+            _ => {
+                panic!("Unrecognized condition: {}", dt_config.condition);
+            }
+        };
+        // println!("ORIGINAL ({}): {}", regex_use, regex_str);
+        let gen = RandRegex::compile(&regex_str, 10).unwrap();
+        let samples = (&mut rng)
+            .sample_iter(&gen)
+            .take(3)
+            .collect::<Vec<String>>();
+
+        // println!("SAMPLES: {:#?}", samples);
+
+        // println!("Parent: {}", dt_config.parent);
+        let (pregex_use, pregex_cond) = match valve.datatype_conditions.get(&dt_config.parent) {
+            Some(parent_cond) => match &parent_cond.parsed {
+                Expression::Function(name, _) => (name.to_string(), parent_cond.compiled.clone()),
+                _ => panic!("Unrecognized condition: {}", dt_config.condition),
+            },
+            None => {
+                // When a datatype has no compiled condition this means that it accepts
+                // everything.
+                let fark: Arc<dyn Fn(&str) -> bool + Sync + Send> = Arc::new(|_| true);
+                ("search".to_string(), fark)
+            }
+        };
+
+        if regex_use == "exclude"
+            || pregex_use == "exclude" && !(regex_use == "exclude" && pregex_use == "exclude")
+        {
+            log::warn!(
+                "Cannot test an exclude() condition unless its parent is also an exclude(). \
+                        Skipping {}",
+                dt_config.condition
+            );
+            continue;
+        }
+
+        let (antecedent, consequent) = {
+            // If both are exlusions we test modus tollens otherwise modus ponens:
+            if regex_use == "exclude" {
+                (pregex_cond, regex_cond)
+            } else {
+                (regex_cond, pregex_cond)
+            }
+        };
+
+        for sample in samples {
+            if antecedent(&sample) {
+                log::debug!("Antecedent is satisfied.");
+                if !consequent(&sample) {
+                    log::error!(
+                        "The datatype condition for '{}' was satisfied but the condition \
+                         for its parent, '{}', was not satisfied, for the test string '{}'",
+                        dt_config.datatype,
+                        dt_config.parent,
+                        sample
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
 }
