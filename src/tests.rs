@@ -983,3 +983,7 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<()> {
     eprintln!("All done.");
     Ok(())
 }
+
+pub fn run_dt_hierarchy_tests() -> Result<()> {
+    todo!();
+}
