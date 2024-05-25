@@ -18,6 +18,12 @@ use serde_json::{json, Value as SerdeValue};
 use sqlx::{any::AnyPool, query as sqlx_query, Acquire, Row, Transaction, ValueRef};
 use std::collections::HashMap;
 
+//#[derive(Clone, Debug)]
+//pub struct StatsDeleteMe {
+//    pub found_in_cache: usize,
+//    pub processed: usize,
+//}
+
 /// Given a config struct, maps of compiled datatype and rule conditions, a database connection
 /// pool, a table name, a row to validate represented as a [ValveRow], and a row number in the case
 /// where the row already exists, perform both intra- and inter-row validation and return the
@@ -95,6 +101,10 @@ pub async fn validate_row_tx(
                     cell,
                     query_as_if,
                     None,
+                    //&mut StatsDeleteMe {
+                    //    found_in_cache: 0,
+                    //    processed: 0,
+                    //},
                 )
                 .await?;
                 validate_cell_unique_constraints(
@@ -518,6 +528,11 @@ pub async fn validate_rows_constraints(
         }
     };
 
+    //let mut stats = StatsDeleteMe {
+    //    found_in_cache: 0,
+    //    processed: 0,
+    //};
+
     let mut valve_rows = vec![];
     for row in rows.iter_mut() {
         let mut valve_row = ValveRow {
@@ -544,6 +559,7 @@ pub async fn validate_rows_constraints(
                     cell,
                     None,
                     fkey_cache,
+                    //&mut stats,
                 )
                 .await?;
                 validate_cell_unique_constraints(
@@ -568,6 +584,8 @@ pub async fn validate_rows_constraints(
         // role. The call to cell.clone() above is required to make rust's borrow checker happy.
         valve_rows.push(valve_row);
     }
+
+    //println!("STATS FOR {}: {:#?}", table_name, stats);
 
     Ok(())
 }
@@ -1133,6 +1151,7 @@ pub async fn validate_cell_foreign_constraints(
     cell: &mut ValveCell,
     query_as_if: Option<&QueryAsIf>,
     mut fkey_cache: Option<&mut LfuCache<String, String>>,
+    //stats: &mut StatsDeleteMe,
 ) -> Result<()> {
     let fkeys = config
         .constraint
@@ -1189,13 +1208,19 @@ pub async fn validate_cell_foreign_constraints(
             _ => ("".to_string(), ftable.to_string()),
         };
         let fcolumn = &fkey.fcolumn;
-        let sql_type = get_sql_type_from_global_config(&config, ftable, fcolumn, pool);
+        let sql_type = get_sql_type_from_global_config(&config, ftable, fcolumn, pool).to_lowercase();
         let sql_param = cast_sql_param_from_text(&sql_type);
         let fsql = local_sql_syntax(
             &pool,
             &format!(
                 r#"{}SELECT 1 FROM "{}" WHERE "{}" = {} LIMIT 1"#,
-                as_if_clause, ftable_alias, fcolumn, sql_param
+                as_if_clause, ftable_alias, fcolumn, {
+                    if sql_type == "text" || sql_type.starts_with("varchar(") {
+                        format!("'{}'", cell.strvalue())
+                    } else {
+                        format!("{}", cell.strvalue())
+                    }
+                }
             ),
         );
 
@@ -1203,6 +1228,7 @@ pub async fn validate_cell_foreign_constraints(
             Some(ref mut fkey_cache) => {
                 let in_cache = fkey_cache.get(&cell.strvalue()).is_some();
                 if in_cache {
+                    //stats.found_in_cache += 1;
                     true
                 } else {
                     let in_db = fkey_in_db(pool, &mut tx, cell, &fsql).await?;
@@ -1215,6 +1241,7 @@ pub async fn validate_cell_foreign_constraints(
             }
             None => fkey_in_db(pool, &mut tx, cell, &fsql).await?,
         };
+        //stats.processed += 1;
 
         if !fkey_satisfied {
             cell.valid = false;
@@ -1279,10 +1306,6 @@ pub async fn validate_cell_foreign_constraints(
             cell.messages.push(message);
         }
     }
-
-    //if let Some(ref fkey_cache) = fkey_cache {
-    //    println!("CACHE SIZE ({}.{}): {}", table_name, column_name, fkey_cache.len());
-    //}
 
     Ok(())
 }
