@@ -9,7 +9,9 @@ use ontodev_valve::{
 };
 use rand::{
     distributions::{Alphanumeric, DistString, Distribution, Uniform},
-    random, Rng, SeedableRng,
+    random,
+    rngs::StdRng,
+    Rng, SeedableRng,
 };
 use rand_regex::Regex as RandRegex;
 use regex::Regex;
@@ -992,14 +994,16 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<()> {
 
 pub fn run_dt_hierarchy_tests(valve: &Valve) -> Result<()> {
     // TODO: Use a better seed:
-    let mut rng = rand::rngs::StdRng::from_seed(*b"The initial seedThe initial seed");
+    let mut rng = StdRng::from_seed(*b"The initial seedThe initial seed");
     for (_, dt_config) in valve.config.datatype.iter() {
         if dt_config.parent == "" {
             continue;
         }
+        // First find the datatype condition info (it's type, the regex string used, and
+        // the compiled version of the condition) for the child datatype:
         let dt_condition = valve.datatype_conditions.get(&dt_config.datatype).unwrap();
         let unquoted_re = Regex::new(r#"^['"](?P<unquoted>.*)['"]$"#)?;
-        let (regex_use, regex_str, regex_cond) = match &dt_condition.parsed {
+        let (ctype, cregex, ccond) = match &dt_condition.parsed {
             Expression::Function(name, args) => {
                 if name == "equals" {
                     if let Expression::Label(label) = &*args[0] {
@@ -1014,11 +1018,11 @@ pub fn run_dt_hierarchy_tests(valve: &Valve) -> Result<()> {
                 } else if vec!["exclude", "match", "search"].contains(&name.as_str()) {
                     if let Expression::RegexMatch(pattern, flags) = &*args[0] {
                         let pattern = String::from(unquoted_re.replace(pattern, "$unquoted"));
+                        // Anchors are not supported by the rand_regex crate:
                         if pattern.starts_with("^") || pattern.ends_with("$") {
-                            log::warn!("Not testing unsupported pattern: {}", pattern);
+                            log::warn!("Not testing unsupported pattern with anchors: {}", pattern);
                             continue;
                         }
-
                         let mut flags = String::from(flags);
                         if flags != "" {
                             flags = format!("(?{})", flags.as_str());
@@ -1045,6 +1049,7 @@ pub fn run_dt_hierarchy_tests(valve: &Valve) -> Result<()> {
                             panic!("Argument: {:?} to function 'in' is not a label", arg);
                         }
                     }
+
                     (
                         name,
                         format!("({})", alternatives.join("|")),
@@ -1058,17 +1063,21 @@ pub fn run_dt_hierarchy_tests(valve: &Valve) -> Result<()> {
                 panic!("Unrecognized condition: {}", dt_config.condition);
             }
         };
-        // println!("ORIGINAL ({}): {}", regex_use, regex_str);
-        let gen = RandRegex::compile(&regex_str, 10).unwrap();
+
+        // Now generate some sample strings based on cregex:
+        // println!("ORIGINAL ({}): {}", ctype, cregex);
+        let gen = RandRegex::compile(&cregex, 10).unwrap();
         let samples = (&mut rng)
             .sample_iter(&gen)
-            .take(3)
+            .take(10)
             .collect::<Vec<String>>();
 
         // println!("SAMPLES: {:#?}", samples);
 
+        // Next, get the type and compiled condition corresponding to the datatype of the child's
+        // parent:
         // println!("Parent: {}", dt_config.parent);
-        let (pregex_use, pregex_cond) = match valve.datatype_conditions.get(&dt_config.parent) {
+        let (ptype, pcond) = match valve.datatype_conditions.get(&dt_config.parent) {
             Some(parent_cond) => match &parent_cond.parsed {
                 Expression::Function(name, _) => (name.to_string(), parent_cond.compiled.clone()),
                 _ => panic!("Unrecognized condition: {}", dt_config.condition),
@@ -1076,34 +1085,35 @@ pub fn run_dt_hierarchy_tests(valve: &Valve) -> Result<()> {
             None => {
                 // When a datatype has no compiled condition this means that it accepts
                 // everything.
-                let fark: Arc<dyn Fn(&str) -> bool + Sync + Send> = Arc::new(|_| true);
-                ("search".to_string(), fark)
+                let default_pcond: Arc<dyn Fn(&str) -> bool + Sync + Send> = Arc::new(|_| true);
+                ("search".to_string(), default_pcond)
             }
         };
 
-        if regex_use == "exclude"
-            || pregex_use == "exclude" && !(regex_use == "exclude" && pregex_use == "exclude")
-        {
+        // We do not support testing of datatypes with exclude conditions, unless *both* the parent
+        // and the child are excludes. In that case we can use modus tollens instead of modus
+        // ponens to check whether the parent and child conditions have the right relationship.
+        if ctype == "exclude" || ptype == "exclude" && !(ctype == "exclude" && ptype == "exclude") {
             log::warn!(
-                "Cannot test an exclude() condition unless its parent is also an exclude(). \
-                        Skipping {}",
+                "Testing of exclude() conditions are not supported except when both the child \
+                 and parent datatypes are excludes. Skipping {}",
                 dt_config.condition
             );
             continue;
         }
-
         let (antecedent, consequent) = {
-            // If both are exlusions we test modus tollens otherwise modus ponens:
-            if regex_use == "exclude" {
-                (pregex_cond, regex_cond)
+            if ctype == "exclude" {
+                // modus tollens
+                (pcond, ccond)
             } else {
-                (regex_cond, pregex_cond)
+                // modus ponens
+                (ccond, pcond)
             }
         };
 
+        // Finally, test the sample strings:
         for sample in samples {
             if antecedent(&sample) {
-                log::debug!("Antecedent is satisfied.");
                 if !consequent(&sample) {
                     log::error!(
                         "The datatype condition for '{}' was satisfied but the condition \
