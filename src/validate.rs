@@ -1234,6 +1234,9 @@ pub async fn validate_cell_foreign_constraints(
                     let in_db = fkey_in_db(pool, &mut tx, cell, &fsql).await?;
                     if in_db {
                         let key = cell.strvalue();
+                        // TODO: Add a boolean in the second position to say whether it is in
+                        // the db or not. And then always insert to the cache even when it isn't there,
+                        // with false in that case. Do the same for the datatype validation cache.
                         fkey_cache.insert(key.clone(), key.clone());
                     }
                     in_db
