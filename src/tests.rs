@@ -5,7 +5,8 @@ use indoc::indoc;
 use ontodev_valve::{
     ast::Expression,
     toolkit::SerdeMap,
-    valve::{Valve, ValveError},
+    validate::validate_cell_datatype,
+    valve::{Valve, ValveCell, ValveError},
 };
 use rand::{
     distributions::{Alphanumeric, DistString, Distribution, Uniform},
@@ -15,7 +16,7 @@ use rand::{
 };
 use rand_regex::Regex as RandRegex;
 use regex::Regex;
-use serde_json::json;
+use serde_json::{json, Value as SerdeValue};
 use sqlx::{any::AnyPool, query as sqlx_query, Row, ValueRef};
 use std::sync::Arc;
 
@@ -993,8 +994,7 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<()> {
 }
 
 pub fn run_dt_hierarchy_tests(valve: &Valve) -> Result<()> {
-    // TODO: Use a better seed:
-    let mut rng = StdRng::from_seed(*b"The initial seedThe initial seed");
+    let mut rng = StdRng::from_entropy();
     for (_, dt_config) in valve.config.datatype.iter() {
         if dt_config.parent == "" {
             continue;
@@ -1064,19 +1064,16 @@ pub fn run_dt_hierarchy_tests(valve: &Valve) -> Result<()> {
             }
         };
 
+        // TODO: If possible only generate ascii strings? This would be more readable.
         // Now generate some sample strings based on cregex:
-        // println!("ORIGINAL ({}): {}", ctype, cregex);
         let gen = RandRegex::compile(&cregex, 10).unwrap();
         let samples = (&mut rng)
             .sample_iter(&gen)
-            .take(10)
+            .take(1000)
             .collect::<Vec<String>>();
-
-        // println!("SAMPLES: {:#?}", samples);
 
         // Next, get the type and compiled condition corresponding to the datatype of the child's
         // parent:
-        // println!("Parent: {}", dt_config.parent);
         let (ptype, pcond) = match valve.datatype_conditions.get(&dt_config.parent) {
             Some(parent_cond) => match &parent_cond.parsed {
                 Expression::Function(name, _) => (name.to_string(), parent_cond.compiled.clone()),
@@ -1112,18 +1109,93 @@ pub fn run_dt_hierarchy_tests(valve: &Valve) -> Result<()> {
         };
 
         // Finally, test the sample strings:
-        for sample in samples {
+        let mut failures = vec![];
+        for sample in &samples {
             if antecedent(&sample) {
                 if !consequent(&sample) {
-                    log::error!(
-                        "The datatype condition for '{}' was satisfied but the condition \
-                         for its parent, '{}', was not satisfied, for the test string '{}'",
-                        dt_config.datatype,
-                        dt_config.parent,
-                        sample
-                    );
+                    failures.push(sample.to_string());
                 }
             }
+        }
+
+        if failures.len() > 0 {
+            // Sort the failures. ASCII-only samples are preferred, as are shorter strings.
+            failures.sort_by(|a, b| {
+                if a.is_ascii() {
+                    std::cmp::Ordering::Less
+                } else if b.is_ascii() {
+                    std::cmp::Ordering::Greater
+                } else {
+                    a.len().cmp(&b.len())
+                }
+            });
+            let failure_example = &failures[0];
+
+            // Run the value through the validation engine to generate the normal validation
+            // messages for the value. First construct the ValveCell which will contain the
+            // validation info:
+            let mut cell = ValveCell {
+                nulltype: None,
+                value: SerdeValue::String(failure_example.to_string()),
+                valid: true,
+                messages: vec![],
+            };
+
+            // Now look through the column configuration, and find a column in some table which
+            // has the datatype of the failing condition (the parent datatype):
+            let (table_name, column_name) = {
+                let mut found = false;
+                let mut table_name = String::from("");
+                let mut column_name = String::from("");
+                for (table, table_config) in valve.config.table.iter() {
+                    table_name = table.to_string();
+                    for (column, column_config) in table_config.column.iter() {
+                        column_name = column.to_string();
+                        if column_config.datatype == dt_config.parent {
+                            found = true;
+                        }
+                        if found {
+                            break;
+                        }
+                    }
+                    if found {
+                        break;
+                    }
+                }
+                if found {
+                    (table_name, column_name)
+                } else {
+                    return Err(
+                        ValveError::DataError("Could not find parent datatype".into()).into(),
+                    );
+                }
+            };
+
+            // Send the cell through the validator:
+            validate_cell_datatype(
+                &valve.config,
+                &valve.datatype_conditions,
+                &table_name,
+                &column_name,
+                &mut cell,
+            );
+
+            let mut message = String::from("");
+            for msg in cell.messages {
+                message.push_str(&format!(" {} ({} {});", msg.message, msg.rule, msg.level));
+            }
+
+            log::error!(
+                "The datatype condition for '{}' was satisfied but the condition \
+                 for its parent, '{}', was not satisfied, for the test string '{}'. \
+                 A column '{}' that was assigned this datatype would generate the following \
+                 validation messages:{}",
+                dt_config.datatype,
+                dt_config.parent,
+                failure_example,
+                column_name,
+                message
+            );
         }
     }
     Ok(())
