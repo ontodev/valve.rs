@@ -1,6 +1,7 @@
 //! API tests
 
 use anyhow::Result;
+use futures::executor::block_on;
 use indoc::indoc;
 use ontodev_valve::{
     ast::Expression,
@@ -994,8 +995,121 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<()> {
 }
 
 pub fn run_dt_hierarchy_tests(valve: &Valve) -> Result<()> {
+    fn check_dt_format(valve: &Valve, datatype: &str) {
+        let colformat = block_on(valve.get_datatype_format(datatype)).unwrap();
+        if colformat != "" {
+            let format_regex = Regex::new(r#"^%.*([\w%])$"#).unwrap();
+            let conversion_spec = match format_regex.captures(&colformat) {
+                Some(c) => c[1].to_lowercase(),
+                None => {
+                    log::warn!("Illegal format: '{}'", colformat);
+                    "s".to_string()
+                }
+            };
+            let dt_condition = valve.datatype_conditions.get(datatype).unwrap();
+            let mut failures = vec![];
+
+            for _ in 0..1000 {
+                let value_to_check = match conversion_spec.as_str() {
+                    "d" | "i" | "c" => format!("{}", random::<isize>()),
+                    "o" | "u" | "x" => format!("{}", random::<usize>()),
+                    "e" | "f" | "g" | "a" => format!("{}", random::<f64>()),
+                    "s" => format!("{}", {
+                        let mut rng = rand::thread_rng();
+                        let chars: String = (0..20)
+                            .map(|_| rng.sample(rand::distributions::Alphanumeric) as char)
+                            .collect();
+                        chars
+                    }),
+                    _ => {
+                        log::error!(
+                            "Unsupported conversion specifier '{}' in column format '{}'",
+                            conversion_spec,
+                            colformat
+                        );
+                        return;
+                    }
+                };
+                if !dt_condition.compiled.clone()(&value_to_check) {
+                    failures.push(value_to_check.to_string());
+                }
+            }
+
+            if failures.len() == 0 {
+                return;
+            }
+
+            failures.sort_by(|a, b| a.len().cmp(&b.len()));
+            let failure_example = &failures[0];
+
+            // Run the value through the validation engine to generate the normal validation
+            // messages for the value. First construct the ValveCell which will contain the
+            // validation info:
+            let mut cell = ValveCell {
+                nulltype: None,
+                value: SerdeValue::String(failure_example.to_string()),
+                valid: true,
+                messages: vec![],
+            };
+
+            // Now look through the column configuration, and find a column in some table which
+            // has the datatype of the failing condition (the parent datatype):
+            let (table_name, column_name) = {
+                let mut found = false;
+                let mut table_name = String::from("");
+                let mut column_name = String::from("");
+                for (table, table_config) in valve.config.table.iter() {
+                    table_name = table.to_string();
+                    for (column, column_config) in table_config.column.iter() {
+                        column_name = column.to_string();
+                        if column_config.datatype == datatype {
+                            found = true;
+                        }
+                        if found {
+                            break;
+                        }
+                    }
+                    if found {
+                        break;
+                    }
+                }
+                if found {
+                    (table_name, column_name)
+                } else {
+                    panic!("Could not find datatype");
+                }
+            };
+
+            // Send the cell through the validator:
+            validate_cell_datatype(
+                &valve.config,
+                &valve.datatype_conditions,
+                &table_name,
+                &column_name,
+                &mut cell,
+            );
+
+            let mut message = String::from("");
+            for msg in cell.messages {
+                message.push_str(&format!(" {} ({} {});", msg.message, msg.rule, msg.level));
+            }
+
+            log::error!(
+                "Value '{}' generated using format '{}' for datatype '{}' fails validation. \
+                 A column named '{}' that was assigned this datatype would generate the following \
+                 validation messages:{}",
+                failure_example,
+                colformat,
+                datatype,
+                column_name,
+                message
+            );
+        }
+    }
+
     let mut rng = StdRng::from_entropy();
     for (_, dt_config) in valve.config.datatype.iter() {
+        check_dt_format(valve, &dt_config.datatype);
         if dt_config.parent == "" {
             continue;
         }
@@ -1064,7 +1178,6 @@ pub fn run_dt_hierarchy_tests(valve: &Valve) -> Result<()> {
             }
         };
 
-        // TODO: If possible only generate ascii strings? This would be more readable.
         // Now generate some sample strings based on cregex:
         let gen = RandRegex::compile(&cregex, 10).unwrap();
         let samples = (&mut rng)
@@ -1188,7 +1301,7 @@ pub fn run_dt_hierarchy_tests(valve: &Valve) -> Result<()> {
             log::error!(
                 "The datatype condition for '{}' was satisfied but the condition \
                  for its parent, '{}', was not satisfied, for the test string '{}'. \
-                 A column '{}' that was assigned this datatype would generate the following \
+                 A column named '{}' that was assigned this datatype would generate the following \
                  validation messages:{}",
                 dt_config.datatype,
                 dt_config.parent,

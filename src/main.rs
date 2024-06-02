@@ -184,8 +184,7 @@ async fn main() -> Result<()> {
     }
 
     let destination_optional =
-        dump_config || dump_schema || table_order || show_deps_in || show_deps_out
-        || test_dt_hierarchy;
+        dump_config || dump_schema || table_order || show_deps_in || show_deps_out;
 
     if source == "" {
         eprintln!("Parameter SOURCE is required. {}", advice);
@@ -209,6 +208,7 @@ async fn main() -> Result<()> {
         run_api_tests(&source, &destination).await.unwrap();
     } else if test_dt_hierarchy {
         let valve = build_valve().unwrap();
+        valve.create_all_tables().await.unwrap();
         run_dt_hierarchy_tests(&valve).unwrap();
     } else if save_all || save != "" {
         let valve = build_valve().unwrap();

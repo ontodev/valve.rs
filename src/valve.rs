@@ -1802,6 +1802,42 @@ impl Valve {
         Ok(self)
     }
 
+    /// Given the name of a datatype, find (in the database) the value of the optional configuration
+    /// parameter called 'format' corresponding to that datatype and return it, or an empty string
+    /// if no format parameter has been configured for that datatype or if the format parameter is
+    /// not defined. The format parameter indicates how values of the given column are to be
+    /// formatted when saving a table to an external file.
+    pub async fn get_datatype_format(&self, datatype: &str) -> Result<String> {
+        if !self
+            .config
+            .table
+            .get("datatype")
+            .and_then(|t| Some(t.column.clone()))
+            .and_then(|c| Some(c.keys().cloned().collect::<Vec<_>>()))
+            .and_then(|v| Some(v.contains(&"format".to_string())))
+            .expect("Could not find column configrations for the datatype table")
+        {
+            Ok("".to_string())
+        } else {
+            let sql = format!(
+                r#"SELECT "format"
+                     FROM "datatype"
+                    WHERE "datatype" = '{}'"#,
+                datatype,
+            );
+            let rows = sqlx_query(&sql).fetch_all(&self.pool).await?;
+            if rows.len() > 0 {
+                let format_string = rows[0]
+                    .try_get::<&str, &str>("format")
+                    .ok()
+                    .unwrap_or_default();
+                Ok(format_string.to_string())
+            } else {
+                Ok("".to_string())
+            }
+        }
+    }
+
     /// Given a table name and the name of a column in that table, find (in the database) the value
     /// of the optional configuration parameter called 'format' and return it, or an empty string
     /// if no format parameter has been configured or if none has been defined for that column.
