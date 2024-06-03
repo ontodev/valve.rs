@@ -1136,6 +1136,7 @@ dependencies = [
  "rand",
  "rand_regex",
  "regex",
+ "regex-syntax 0.8.3",
  "serde",
  "serde_json",
  "sprintf",

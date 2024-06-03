@@ -1090,6 +1090,8 @@ pub fn run_dt_hierarchy_tests(valve: &Valve) -> Result<()> {
             messages: vec![],
         };
 
+        // TODO: If there is no table and column corresponding to the datatype, don't do the
+        // validation step, but still report the basic condition violation error.
         // Now look through the column configuration, and find a column in some table which
         // has the datatype of the failing condition (the parent datatype):
         let (table_name, column_name) = get_any_column_with_datatype(valve, datatype);
@@ -1110,12 +1112,13 @@ pub fn run_dt_hierarchy_tests(valve: &Valve) -> Result<()> {
         }
         log::error!(
             "Value '{}' generated using format '{}' for datatype '{}' fails validation. \
-             A column named '{}' that was assigned this datatype would generate the following \
-             validation messages:{}",
+             Adding this value to, for instance, the column '{}' of the table '{}' would \
+             result in the following validation messages:{}",
             shortest_failure,
             colformat,
             datatype,
             column_name,
+            table_name,
             message
         );
     }
@@ -1225,11 +1228,28 @@ pub fn run_dt_hierarchy_tests(valve: &Valve) -> Result<()> {
         // Next, generate 1000 random strings based on cregex and test each of them against
         // the child and parent datatypes, gathering together all of the failures:
         let mut rng = StdRng::from_entropy();
-        let gen = RandRegex::compile(&cregex, 10).unwrap();
-        let samples = (&mut rng)
-            .sample_iter(&gen)
-            .take(1000)
-            .collect::<Vec<String>>();
+
+        let mut parser = regex_syntax::ParserBuilder::new().unicode(false).build();
+        let samples = {
+            match parser.parse(&cregex) {
+                Ok(hir) => {
+                    let gen = rand_regex::Regex::with_hir(hir, 5).unwrap();
+                    let samples = (&mut rng)
+                        .sample_iter(&gen)
+                        .take(1000)
+                        .collect::<Vec<String>>();
+                    samples
+                }
+                _ => {
+                    let gen = RandRegex::compile(&cregex, 10).unwrap();
+                    let samples = (&mut rng)
+                        .sample_iter(&gen)
+                        .take(1000)
+                        .collect::<Vec<String>>();
+                    samples
+                }
+            }
+        };
 
         let mut failures = vec![];
         for sample in &samples {
@@ -1283,13 +1303,14 @@ pub fn run_dt_hierarchy_tests(valve: &Valve) -> Result<()> {
 
             log::error!(
                 "The datatype condition for '{}' was satisfied but the condition \
-                 for its parent, '{}', was not satisfied, for the test string '{}'. \
-                 A column named '{}' that was assigned this datatype would generate the following \
-                 validation messages:{}",
+                 for its parent, '{}', was not satisfied, for the test value '{}'. \
+                 Adding this value to, for instance, the column '{}' of the table '{}' would \
+                 result in the following validation messages:{}",
                 dt_config.datatype,
                 dt_config.parent,
                 failure_example,
                 column_name,
+                table_name,
                 message
             );
         }
