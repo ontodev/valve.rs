@@ -18,7 +18,7 @@ use crate::{
     },
     validate::{validate_row_tx, validate_tree_foreign_keys, validate_under, with_tree_sql},
     valve_grammar::StartParser,
-    CHUNK_SIZE, SQL_PARAM,
+    CHUNK_SIZE, SQL_PARAM, PRINTF_RE,
 };
 use anyhow::Result;
 use csv::{QuoteStyle, ReaderBuilder, WriterBuilder};
@@ -1812,17 +1812,15 @@ impl Valve {
             .config
             .table
             .get("datatype")
-            .and_then(|t| Some(t.column.clone()))
-            .and_then(|c| Some(c.keys().cloned().collect::<Vec<_>>()))
-            .and_then(|v| Some(v.contains(&"format".to_string())))
+            .and_then(|t| Some(&t.column))
+            .and_then(|c| Some(c.keys().collect::<Vec<_>>()))
+            .and_then(|v| Some(v.contains(&&"format".to_string())))
             .expect("Could not find column configrations for the datatype table")
         {
             Ok("".to_string())
         } else {
             let sql = format!(
-                r#"SELECT "format"
-                     FROM "datatype"
-                    WHERE "datatype" = '{}'"#,
+                r#"SELECT "format" FROM "datatype" WHERE "datatype" = '{}'"#,
                 datatype,
             );
             let rows = sqlx_query(&sql).fetch_all(&self.pool).await?;
@@ -1830,7 +1828,7 @@ impl Valve {
                 let format_string = rows[0]
                     .try_get::<&str, &str>("format")
                     .ok()
-                    .unwrap_or_default();
+                    .expect("No column 'format' in row.");
                 Ok(format_string.to_string())
             } else {
                 Ok("".to_string())
@@ -1971,9 +1969,7 @@ impl Valve {
             query_table
         );
 
-        // Used to match a printf-style format specifier
-        // (see https://docs.rs/sprintf/latest/sprintf/#)
-        let format_regex = Regex::new(r#"^%.*([\w%])$"#)?;
+        let format_regex = Regex::new(PRINTF_RE)?;
         let mut writer = WriterBuilder::new()
             .delimiter(b'\t')
             .quote_style(QuoteStyle::Never)
