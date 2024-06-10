@@ -11,7 +11,7 @@ env:
   CARGO_TERM_COLOR: always
 jobs:
   run-tests:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - name: Install postgresql server and client
         run: |
