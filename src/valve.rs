@@ -18,7 +18,7 @@ use crate::{
     },
     validate::{validate_row_tx, validate_tree_foreign_keys, with_tree_sql},
     valve_grammar::StartParser,
-    CHUNK_SIZE, SQL_PARAM,
+    CHUNK_SIZE, SQL_PARAM, PRINTF_RE,
 };
 use anyhow::Result;
 use csv::{QuoteStyle, ReaderBuilder, WriterBuilder};
@@ -1795,6 +1795,40 @@ impl Valve {
         Ok(self)
     }
 
+    /// Given the name of a datatype, find (in the database) the value of the optional configuration
+    /// parameter called 'format' corresponding to that datatype and return it, or an empty string
+    /// if no format parameter has been configured for that datatype or if the format parameter is
+    /// not defined. The format parameter indicates how values of the given column are to be
+    /// formatted when saving a table to an external file.
+    pub async fn get_datatype_format(&self, datatype: &str) -> Result<String> {
+        if !self
+            .config
+            .table
+            .get("datatype")
+            .and_then(|t| Some(&t.column))
+            .and_then(|c| Some(c.keys().collect::<Vec<_>>()))
+            .and_then(|v| Some(v.contains(&&"format".to_string())))
+            .expect("Could not find column configrations for the datatype table")
+        {
+            Ok("".to_string())
+        } else {
+            let sql = format!(
+                r#"SELECT "format" FROM "datatype" WHERE "datatype" = '{}'"#,
+                datatype,
+            );
+            let rows = sqlx_query(&sql).fetch_all(&self.pool).await?;
+            if rows.len() > 0 {
+                let format_string = rows[0]
+                    .try_get::<&str, &str>("format")
+                    .ok()
+                    .expect("No column 'format' in row.");
+                Ok(format_string.to_string())
+            } else {
+                Ok("".to_string())
+            }
+        }
+    }
+
     /// Given a table name and the name of a column in that table, find (in the database) the value
     /// of the optional configuration parameter called 'format' and return it, or an empty string
     /// if no format parameter has been configured or if none has been defined for that column.
@@ -1928,9 +1962,7 @@ impl Valve {
             query_table
         );
 
-        // Used to match a printf-style format specifier
-        // (see https://docs.rs/sprintf/latest/sprintf/#)
-        let format_regex = Regex::new(r#"^%.*([\w%])$"#)?;
+        let format_regex = Regex::new(PRINTF_RE)?;
         let mut writer = WriterBuilder::new()
             .delimiter(b'\t')
             .quote_style(QuoteStyle::Never)

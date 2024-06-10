@@ -1,6 +1,6 @@
-mod api_test;
+mod tests;
 
-use crate::api_test::run_api_tests;
+use crate::tests::{run_api_tests, run_dt_hierarchy_tests};
 use anyhow::Result;
 use argparse::{ArgumentParser, Store, StoreTrue};
 use futures::executor::block_on;
@@ -16,6 +16,7 @@ async fn main() -> Result<()> {
     // things like mutually exclusive options, since argparse doesn't seem to be able to do it.
 
     let mut api_test = false;
+    let mut test_dt_hierarchy = false;
     let mut create_only = false;
     let mut destination = String::new();
     let mut drop_all = false;
@@ -125,6 +126,15 @@ async fn main() -> Result<()> {
             r#"Read the configuration referred to by SOURCE and run a set of predefined tests on the
                existing, pre-loaded database indicated by DESTINATION."#,
         );
+        ap.refer(&mut test_dt_hierarchy).add_option(
+            &["--test_dt_hierarchy"],
+            StoreTrue,
+            r#"Try to determine whether the managed data conforms to the configured datatype
+               hierarchy, in the sense that anything acceptable as a value of the child datatype
+               should also be acceptable as a value of the parent datatype. Internally, Valve will
+               randomly generate valid values of the child datatype and verify that the above
+               conditional holds for them."#,
+        );
         ap.refer(&mut source).add_argument(
             "SOURCE",
             Store,
@@ -149,6 +159,7 @@ async fn main() -> Result<()> {
 
     let mutually_exclusive_options = vec![
         api_test,
+        test_dt_hierarchy,
         dump_config,
         dump_schema,
         table_order,
@@ -195,6 +206,10 @@ async fn main() -> Result<()> {
 
     if api_test {
         run_api_tests(&source, &destination).await.unwrap();
+    } else if test_dt_hierarchy {
+        let valve = build_valve().unwrap();
+        valve.create_all_tables().await.unwrap();
+        run_dt_hierarchy_tests(&valve).unwrap();
     } else if save_all || save != "" {
         let valve = build_valve().unwrap();
         let save_dir = {

@@ -45,17 +45,21 @@ lalrpop_mod!(
 use lazy_static::lazy_static;
 
 /// The number of rows that are validated at a time by a thread.
-static CHUNK_SIZE: usize = 500;
+pub static CHUNK_SIZE: usize = 500;
 
 /// Run valve in multi-threaded mode.
-static MULTI_THREADED: bool = true;
+pub static MULTI_THREADED: bool = true;
 
 /// Maximum number of database connections.
-static MAX_DB_CONNECTIONS: u32 = 5;
+pub static MAX_DB_CONNECTIONS: u32 = 5;
 
 /// The maximum interval size to use for the move_row() operation. When MOVE_INTERVAL is set to N,
 /// then it will be possible to move N-1 rows in between two given rows.
-static MOVE_INTERVAL: u32 = 1000;
+pub static MOVE_INTERVAL: u32 = 1000;
+
+/// Used to match a printf-style format specifier (see <https://docs.rs/sprintf/latest/sprintf/#>)
+pub static PRINTF_RE: &str = r#"^%.*([\w%])$"#;
+
 
 /// The size of the datatype validation cache.
 static DT_CACHE_SIZE: usize = 0;
@@ -68,8 +72,8 @@ static FKEY_CACHE_SIZE: usize = 10000;
 // boundary. If you want to use a non-word placeholder then you must also change '\b' in the regex
 // to '\B'.
 /// The word (in the regex sense) placeholder to use for query parameters when binding using sqlx.
-static SQL_PARAM: &str = "VALVEPARAM";
+pub static SQL_PARAM: &str = "VALVEPARAM";
 
 lazy_static! {
-    static ref SQL_TYPES: Vec<&'static str> = vec!["text", "varchar", "numeric", "integer", "real"];
+    pub static ref SQL_TYPES: Vec<&'static str> = vec!["text", "varchar", "numeric", "integer", "real"];
 }
