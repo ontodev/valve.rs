@@ -62,7 +62,7 @@ pub static PRINTF_RE: &str = r#"^%.*([\w%])$"#;
 
 
 /// The size of the datatype validation cache.
-static DT_CACHE_SIZE: usize = 0;
+static DT_CACHE_SIZE: usize = 10000;
 
 /// The size of the foreign key validation cache.
 static FKEY_CACHE_SIZE: usize = 10000;
