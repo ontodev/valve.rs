@@ -15,12 +15,17 @@ static SAVE_DIR_HELP: &str = "Save tables to DIR instead of to their configured 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
 struct Cli {
-    // Required global positional parameters:
+    #[arg(action = clap::ArgAction::Set,
+          help = "The location of a TSV file, representing the 'table' table, from which to read \
+                  the Valve configuration")]
     source: String,
 
-    // Global flags:
+    /// Prompt the user before automatically making any changes to the database in order to satisfy
+    /// table dependencies.
     #[arg(long, action = clap::ArgAction::SetTrue)]
     interactive: bool,
+
+    /// Write more progress information to the terminal.
     #[arg(long, action = clap::ArgAction::SetTrue)]
     verbose: bool,
 
@@ -31,7 +36,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Read the configuration referred to by SOURCE and load the specified database.
+    /// Loads a given database.
     Load {
         #[arg(value_name = "DESTINATION", action = clap::ArgAction::Set, help = DESTINATION_HELP)]
         destination: String,
@@ -47,23 +52,20 @@ enum Commands {
         // TODO: Add a --dry-run flag.
     },
 
-    /// Read the configuration referred to by SOURCE and create a corresponding database in
-    /// a specified location but do not load any of the tables.
+    /// Creates a database in a given location but does not load any of the tables.
     Create {
         #[arg(value_name = "DESTINATION", action = clap::ArgAction::Set, help = DESTINATION_HELP)]
         destination: String,
     },
 
-    /// Read the configuration referred to by SOURCE and drop all of the configured tables in the
-    /// given database.
+    /// Drops all of the configured tables in the given database.
     DropAll {
         #[arg(value_name = "DESTINATION", action = clap::ArgAction::Set, help = DESTINATION_HELP)]
         destination: String,
     },
 
-    /// Read the configuration referred to by SOURCE and save all configured data tables as
-    /// TSV files to (by default) their configured paths, or optionally to a specified alternate
-    /// directory.
+    /// Saves all configured data tables as TSV files to (by default) their configured paths, or
+    /// optionally to a given alternate directory.
     SaveAll {
         #[arg(value_name = "DESTINATION", action = clap::ArgAction::Set, help = DESTINATION_HELP)]
         destination: String,
@@ -72,9 +74,8 @@ enum Commands {
         save_dir: Option<String>,
     },
 
-    /// Read the configuration referred to by SOURCE and save the configured data tables from the
-    /// given list as TSV files to (by default) their configured paths, or optionally to a specified
-    /// alternate directory.
+    /// Saves the configured data tables from the given list as TSV files to (by default) their
+    /// configured paths, or optionally to a given alternate directory.
     Save {
         #[arg(value_name = "DESTINATION", action = clap::ArgAction::Set, help = DESTINATION_HELP)]
         destination: String,
@@ -90,23 +91,20 @@ enum Commands {
         save_dir: Option<String>,
     },
 
-    /// Read the configuration referred to by SOURCE and print it as a JSON-formatted string.
+    /// Prints the Valve configuration as a JSON-formatted string to the terminal.
     DumpConfig {},
 
-    /// Read the configuration referred to by SOURCE and print the order in which the configured
-    /// tables will be created, as determined by their dependency relations.
+    /// Prints the order in which the configured tables will be created, as determined by their
+    /// dependency relations, to the terminal.
     ShowTableOrder {},
 
-    /// Read the configuration referred to by SOURCE and print the incoming dependencies for each
-    /// configured table.
+    /// Prints the incoming dependencies for each configured table to the terminal.
     ShowIncomingDeps {},
 
-    /// Read the configuration referred to by SOURCE and print the outgoing dependencies for each
-    /// configured table.
+    /// Prints the outgoing dependencies for each configured table to the terminal.
     ShowOutgoingDeps {},
 
-    /// Read the configuration referred to by SOURCE and print the SQL that will be used to create
-    /// the database tables to stdout.
+    /// Prints the SQL that will be used to create the database tables to the terminal.
     DumpSchema {},
 
     /// TODO: Add a doc string here.
@@ -114,20 +112,19 @@ enum Commands {
         #[arg(value_name = "DESTINATION", action = clap::ArgAction::Set, help = DESTINATION_HELP)]
         destination: String,
 
-        #[arg(value_name = "TSV", action = clap::ArgAction::Set)]
+        #[arg(value_name = "TSV", action = clap::ArgAction::Set, help = "Foo foo foo")]
         guess_file: String,
     },
 
-    /// Read the configuration referred to by SOURCE and run a set of predefined tests, on
-    /// a specified pre-loaded database, that will test Valve's Application Programmer Interface.
+    /// Runs a set of predefined tests, on a specified pre-loaded database, that will test Valve's
+    /// Application Programmer Interface.
     TestApi {
         #[arg(value_name = "DESTINATION", action = clap::ArgAction::Set, help = DESTINATION_HELP)]
         destination: String,
     },
 
-    /// Read the configuration referred to by SOURCE and run a set of predefined tests, on
-    /// a specified pre-loaded database, that will test the validity of the configured
-    /// datatype hierarchy.
+    /// Runs a set of predefined tests, on a specified pre-loaded database, that will test the
+    /// validity of the configured datatype hierarchy.
     TestDtHierarchy {
         #[arg(value_name = "DESTINATION", action = clap::ArgAction::Set, help = DESTINATION_HELP)]
         destination: String,
@@ -138,14 +135,44 @@ enum Commands {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // TODO: Instead of a closure, just build it since it is required for every option, although
-    // you will need to change the signature for run_api_tests() first.
+    // Although Valve::build() will accept a non-TSV argument (in which case it is ignored and
+    // a table called 'table' is looked up in the database instead), we do not allow this on the
+    // command line:
+    if !cli.source.to_lowercase().ends_with(".tsv") {
+        println!("SOURCE must be a file ending (case-insensitively) with .tsv");
+        std::process::exit(1);
+    }
+
+    // This has to be done multiple times so we declare a closure:
     let build_valve = |source: &str, destination: &str| -> Result<Valve> {
         let mut valve = block_on(Valve::build(&source, &destination)).unwrap();
         valve.set_verbose(cli.verbose);
         valve.set_interactive(cli.interactive);
         Ok(valve)
     };
+
+    // Prints the table dependencies in either incoming or outgoing order.
+    fn print_dependencies(valve: &Valve, incoming: bool) {
+        let dependencies = valve.collect_dependencies(incoming).unwrap();
+        for (table, deps) in dependencies.iter() {
+            let deps = {
+                let deps = deps.iter().map(|s| format!("'{}'", s)).collect::<Vec<_>>();
+                if deps.is_empty() {
+                    "None".to_string()
+                } else {
+                    deps.join(", ")
+                }
+            };
+            let preamble = {
+                if incoming {
+                    format!("Tables that depend on '{}'", table)
+                } else {
+                    format!("Table '{}' depends on", table)
+                }
+            };
+            println!("{}: {}", preamble, deps);
+        }
+    }
 
     match &cli.command {
         Commands::Load {
@@ -177,49 +204,11 @@ async fn main() -> Result<()> {
         }
         Commands::ShowIncomingDeps {} => {
             let valve = build_valve(&cli.source, "").unwrap();
-            // TODO: Refactor this since the code is shared in common with ShowOutgoingDeps:
-            let dependencies = valve.collect_dependencies(true).unwrap();
-            for (table, deps) in dependencies.iter() {
-                let deps = {
-                    let deps = deps.iter().map(|s| format!("'{}'", s)).collect::<Vec<_>>();
-                    if deps.is_empty() {
-                        "None".to_string()
-                    } else {
-                        deps.join(", ")
-                    }
-                };
-                let preamble = {
-                    if true {
-                        format!("Tables that depend on '{}'", table)
-                    } else {
-                        format!("Table '{}' depends on", table)
-                    }
-                };
-                println!("{}: {}", preamble, deps);
-            }
+            print_dependencies(&valve, true);
         }
         Commands::ShowOutgoingDeps {} => {
             let valve = build_valve(&cli.source, "").unwrap();
-            // TODO: Refactor this since the code is shared in common with ShowOutgoingDeps:
-            let dependencies = valve.collect_dependencies(false).unwrap();
-            for (table, deps) in dependencies.iter() {
-                let deps = {
-                    let deps = deps.iter().map(|s| format!("'{}'", s)).collect::<Vec<_>>();
-                    if deps.is_empty() {
-                        "None".to_string()
-                    } else {
-                        deps.join(", ")
-                    }
-                };
-                let preamble = {
-                    if false {
-                        format!("Tables that depend on '{}'", table)
-                    } else {
-                        format!("Table '{}' depends on", table)
-                    }
-                };
-                println!("{}: {}", preamble, deps);
-            }
+            print_dependencies(&valve, false);
         }
         Commands::DumpSchema {} => {
             let valve = build_valve(&cli.source, "").unwrap();
@@ -253,11 +242,11 @@ async fn main() -> Result<()> {
             println!("DEST: {}, GUESS TABLE: {}", destination, guess_file);
         }
         Commands::TestApi { destination } => {
-            run_api_tests(&cli.source, &destination).await.unwrap();
+            let valve = build_valve(&cli.source, destination).unwrap();
+            run_api_tests(&valve).await.unwrap();
         }
         Commands::TestDtHierarchy { destination } => {
             let valve = build_valve(&cli.source, destination).unwrap();
-            valve.create_all_tables().await.unwrap();
             run_dt_hierarchy_tests(&valve).unwrap();
         }
     }
