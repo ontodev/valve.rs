@@ -95,7 +95,7 @@ api_test: sqlite_api_test pg_api_test
 .PHONY: sqlite_api_test
 sqlite_api_test: valve test/src/table.tsv build/valve.db test/insert_update.sh | test/output
 	@echo "Testing API functions on sqlite ..."
-	./$< --api_test $(word 2,$^) $(word 3,$^)
+	./$< --test_api $(word 2,$^) $(word 3,$^)
 	$(word 4,$^) $(word 3,$^) $(word 2,$^)
 	scripts/export_messages.py $(word 3,$^) $| $(tables_to_test)
 	diff --strip-trailing-cr -q test/expected/messages_after_api_test.tsv test/output/messages.tsv
@@ -110,7 +110,7 @@ sqlite_api_test: valve test/src/table.tsv build/valve.db test/insert_update.sh |
 pg_api_test: valve test/src/table.tsv test/insert_update.sh | test/output
 	@echo "Testing API functions on postgresql ..."
 	./$< $(word 2,$^) $(pg_connect_string)
-	./$< --api_test $(word 2,$^) $(pg_connect_string)
+	./$< --test_api $(word 2,$^) $(pg_connect_string)
 	$(word 3,$^) $(pg_connect_string) $(word 2,$^)
 	scripts/export_messages.py $(pg_connect_string) $| $(tables_to_test)
 	diff --strip-trailing-cr -q test/expected/messages_after_api_test.tsv test/output/messages.tsv

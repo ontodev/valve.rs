@@ -85,7 +85,7 @@ def get_valve_config(valve_table):
 def get_hierarchy_for_dt(config, primary_dt_name):
     def get_parents(dt_name):
         datatypes = []
-        if dt_name is not None:
+        if dt_name is not None and dt_name != "":
             datatype = config["datatype"][dt_name]
             if datatype["datatype"] != primary_dt_name:
                 datatypes.append(datatype)

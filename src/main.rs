@@ -3,20 +3,231 @@ mod tests;
 use crate::tests::{run_api_tests, run_dt_hierarchy_tests};
 use anyhow::Result;
 use argparse::{ArgumentParser, Store, StoreTrue};
+use clap::{Parser, Subcommand};
 use futures::executor::block_on;
 use ontodev_valve::valve::Valve;
 use std::{env, process};
 
+// Help strings that are used in more than one subcommand:
+static DESTINATION_HELP: &str = "Can be one of (A) A URL of the form `postgresql://...` \
+                                 or `sqlite://...` (B) The filename (including path) of \
+                                 a sqlite database.";
+static SAVE_DIR_HELP: &str = "Save tables to DIR instead of to their configured paths";
+
+#[derive(Parser)]
+#[command(version, about, long_about = None)]
+struct Cli {
+    // Required global positional parameters:
+    source: String,
+
+    // Global flags:
+    #[arg(long, action = clap::ArgAction::SetFalse)]
+    interactive: bool,
+    #[arg(long, action = clap::ArgAction::SetFalse)]
+    verbose: bool,
+
+    // Subcommands:
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Read the configuration referred to by SOURCE and load the specified database.
+    Load {
+        #[arg(value_name = "DESTINATION", action = clap::ArgAction::Set, help = DESTINATION_HELP)]
+        destination: String,
+
+        #[arg(long,
+              action = clap::ArgAction::SetFalse,
+              help = "(SQLite only) When this flag is set, the database \
+                      settings will be tuned for initial loading. Note that \
+                      these settings are unsafe and should be used for \
+                      initial loading only, as data integrity will not be \
+                      guaranteed in the case of an interrupted transaction.")]
+        initial_load: bool,
+        // TODO: Add a --dry-run flag.
+    },
+
+    /// Read the configuration referred to by SOURCE and create a corresponding database in
+    /// a specified location but do not load any of the tables.
+    Create {
+        #[arg(value_name = "DESTINATION", action = clap::ArgAction::Set, help = DESTINATION_HELP)]
+        destination: String,
+    },
+
+    /// Read the configuration referred to by SOURCE and drop all of the configured tables in the
+    /// given database.
+    Drop {
+        #[arg(value_name = "DESTINATION", action = clap::ArgAction::Set, help = DESTINATION_HELP)]
+        destination: String,
+    },
+
+    /// Read the configuration referred to by SOURCE and save all configured data tables as
+    /// TSV files to (by default) their configured paths, or optionally to a specified alternate
+    /// directory.
+    SaveAll {
+        #[arg(value_name = "DESTINATION", action = clap::ArgAction::Set, help = DESTINATION_HELP)]
+        destination: String,
+
+        #[arg(long, value_name = "DIR", action = clap::ArgAction::Set, help = SAVE_DIR_HELP)]
+        save_dir: Option<String>,
+    },
+
+    /// Read the configuration referred to by SOURCE and save the configured data tables from the
+    /// given list as TSV files to (by default) their configured paths, or optionally to a specified
+    /// alternate directory.
+    Save {
+        #[arg(value_name = "DESTINATION", action = clap::ArgAction::Set, help = DESTINATION_HELP)]
+        destination: String,
+
+        #[arg(value_name = "LIST",
+              action = clap::ArgAction::Set,
+              help = "A comma-separated list of tables to save")]
+        tables: String,
+
+        #[arg(long, value_name = "DIR", action = clap::ArgAction::Set, help = SAVE_DIR_HELP)]
+        save_dir: Option<String>,
+    },
+
+    /// Read the configuration referred to by SOURCE and print it as a JSON-formatted string.
+    DumpConfig {},
+
+    /// Read the configuration referred to by SOURCE and print the order in which the configured
+    /// tables will be created, as determined by their dependency relations.
+    ShowTableOrder {},
+
+    /// Read the configuration referred to by SOURCE and print the incoming dependencies for each
+    /// configured table.
+    ShowIncomingDeps {},
+
+    /// Read the configuration referred to by SOURCE and print the outgoing dependencies for each
+    /// configured table.
+    ShowOutgoingDeps {},
+
+    /// Read the configuration referred to by SOURCE and print the SQL that will be used to create
+    /// the database tables to stdout.
+    DumpSchema {},
+
+    /// TODO: Add a doc string here.
+    Guess {
+        #[arg(value_name = "DESTINATION", action = clap::ArgAction::Set, help = DESTINATION_HELP)]
+        destination: String,
+
+        #[arg(value_name = "TSV", action = clap::ArgAction::Set)]
+        guess_file: String,
+    },
+
+    /// Read the configuration referred to by SOURCE and run a set of predefined tests, on
+    /// a specified pre-loaded database, that will test Valve's Application Programmer Interface.
+    TestApi {
+        #[arg(value_name = "DESTINATION", action = clap::ArgAction::Set, help = DESTINATION_HELP)]
+        destination: String,
+    },
+
+    /// Read the configuration referred to by SOURCE and run a set of predefined tests, on
+    /// a specified pre-loaded database, that will test the validity of the configured
+    /// datatype hierarchy.
+    TestDtHierarchy {
+        #[arg(value_name = "DESTINATION", action = clap::ArgAction::Set, help = DESTINATION_HELP)]
+        destination: String,
+    },
+}
+
 #[async_std::main]
 async fn main() -> Result<()> {
+    let cli = Cli::parse();
+
+    println!("Value for source: {}", cli.source);
+
+    match &cli.command {
+        Commands::Load {
+            destination,
+            initial_load,
+        } => {
+            println!(
+                "Calling subcommand Load with destination {} and initial_load set to {}",
+                destination, initial_load
+            );
+        }
+        Commands::Create { destination } => {
+            println!("Calling subcommand Create with destination {}", destination);
+        }
+        Commands::Drop { destination } => {
+            println!("Calling subcommand Drop with destination {}", destination);
+        }
+        Commands::DumpConfig {} => {
+            println!("Calling subcommand DumpConfig");
+        }
+
+        Commands::ShowTableOrder {} => {
+            println!("Calling subcommand TableOrder");
+        }
+        Commands::ShowIncomingDeps {} => {
+            println!("Calling subcommand ShowIncomingDeps");
+        }
+        Commands::ShowOutgoingDeps {} => {
+            println!("Calling subcommand ShowOutgoingDeps");
+        }
+        Commands::DumpSchema {} => {
+            println!("Calling subcommand DumpSchema");
+        }
+        Commands::SaveAll {
+            destination,
+            save_dir,
+        } => {
+            println!(
+                "Destination is {} and save_dir has been set to {:?}",
+                destination, save_dir
+            );
+        }
+        Commands::Save {
+            destination,
+            tables,
+            save_dir,
+        } => {
+            println!(
+                "Destination is {} and save_dir has been set to {:?} and tables to {}",
+                destination, save_dir, tables
+            );
+        }
+        Commands::Guess {
+            destination,
+            guess_file,
+        } => {
+            println!(
+                "Destination is {} and guess_file has been set to {}",
+                destination, guess_file
+            );
+        }
+        Commands::TestApi { destination } => {
+            println!(
+                "Calling subcommand TestApi with destination {}",
+                destination
+            );
+        }
+        Commands::TestDtHierarchy { destination } => {
+            println!(
+                "Calling subcommand TestDtHierarchy with destination {}",
+                destination
+            );
+        }
+    }
+
+    Ok(())
+}
+
+// TODO: Remove all of the code below later, once it has been completely re-written using clap
+// above.
+//#[async_std::main]
+async fn main_old() -> Result<()> {
     // Command line parameters and their default values. See below for descriptions. Note that some
     // of these are mutually exclusive. This is accounted for below.
 
     // TODO: Use a more powerful command-line parser library that can automatically take care of
     // things like mutually exclusive options, since argparse doesn't seem to be able to do it.
+    // One possibility is clap: https://crates.io/crates/clap
 
-    let mut api_test = false;
-    let mut test_dt_hierarchy = false;
     let mut create_only = false;
     let mut destination = String::new();
     let mut drop_all = false;
@@ -31,6 +242,8 @@ async fn main() -> Result<()> {
     let mut show_deps_out = false;
     let mut source = String::new();
     let mut table_order = false;
+    let mut test_api = false;
+    let mut test_dt_hierarchy = false;
     let mut verbose = false;
     // TODO: Add a "dry_run" parameter.
 
@@ -120,8 +333,8 @@ async fn main() -> Result<()> {
             r#"Ignored if neither --save nor --save-all has been specified. Saves the tables to the
                given path instead of to their configured paths."#,
         );
-        ap.refer(&mut api_test).add_option(
-            &["--api_test"],
+        ap.refer(&mut test_api).add_option(
+            &["--test_api"],
             StoreTrue,
             r#"Read the configuration referred to by SOURCE and run a set of predefined tests on the
                existing, pre-loaded database indicated by DESTINATION."#,
@@ -158,7 +371,7 @@ async fn main() -> Result<()> {
     let advice = format!("Run `{} --help` for command line usage.", program_name);
 
     let mutually_exclusive_options = vec![
-        api_test,
+        test_api,
         test_dt_hierarchy,
         dump_config,
         dump_schema,
@@ -204,7 +417,7 @@ async fn main() -> Result<()> {
         Ok(valve)
     };
 
-    if api_test {
+    if test_api {
         run_api_tests(&source, &destination).await.unwrap();
     } else if test_dt_hierarchy {
         let valve = build_valve().unwrap();
