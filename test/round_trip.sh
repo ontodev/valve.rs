@@ -19,7 +19,7 @@ output_dir=$pwd/output
 valve="./valve"
 
 # Use valve to save all of th configured tables:
-${valve} --save_all --save_dir ${output_dir} ${table_defs} $db
+${valve} ${table_defs} save-all --save-dir ${output_dir} $db
 
 num_tables=$(expr $(cat $table_defs | wc -l) - 1)
 table_paths=$(tail -$num_tables $table_defs | grep -Ev "(db_view|no-save)" | cut -f 2)

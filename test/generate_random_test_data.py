@@ -162,7 +162,7 @@ def main():
     random.seed(seed)
 
     # Get the VALVE configuration:
-    result = subprocess.run(["./valve", "--dump_config", input_table], capture_output=True)
+    result = subprocess.run(["./valve", input_table, "dump-config"], capture_output=True)
     if result.returncode != 0:
         error = result.stderr.decode()
         output = result.stdout.decode()
@@ -173,7 +173,7 @@ def main():
     config = json.loads(result.stdout.decode())
 
     # Get the sorted list of tables to generate:
-    result = subprocess.run(["./valve", "--table_order", input_table], capture_output=True)
+    result = subprocess.run(["./valve", input_table, "show-table-order"], capture_output=True)
     if result.returncode != 0:
         error = result.stderr.decode()
         output = result.stdout.decode()
