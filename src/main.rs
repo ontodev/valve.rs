@@ -7,6 +7,9 @@ use futures::executor::block_on;
 use ontodev_valve::valve::Valve;
 
 // Help strings that are used in more than one subcommand:
+static SOURCE_HELP: &str = "The location of a TSV file, representing the 'table' table, \
+                            from which to read the Valve configuration.";
+
 static DESTINATION_HELP: &str = "Can be one of (A) A URL of the form `postgresql://...` \
                                  or `sqlite://...` (B) The filename (including path) of \
                                  a sqlite database.";
@@ -15,13 +18,8 @@ static SAVE_DIR_HELP: &str = "Save tables to DIR instead of to their configured 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
 struct Cli {
-    #[arg(action = clap::ArgAction::Set,
-          help = "The location of a TSV file, representing the 'table' table, from which to read \
-                  the Valve configuration")]
-    source: String,
-
-    /// Prompt the user before automatically making any changes to the database in order to satisfy
-    /// table dependencies.
+    /// Prompt the user before automatically making changes to the database
+    /// required to satisfy table dependencies.
     #[arg(long, action = clap::ArgAction::SetTrue)]
     interactive: bool,
 
@@ -38,6 +36,9 @@ struct Cli {
 enum Commands {
     /// Loads a given database.
     Load {
+        #[arg(value_name = "SOURCE", action = clap::ArgAction::Set, help = SOURCE_HELP)]
+        source: String,
+
         #[arg(value_name = "DESTINATION", action = clap::ArgAction::Set, help = DESTINATION_HELP)]
         destination: String,
 
@@ -54,19 +55,27 @@ enum Commands {
 
     /// Creates a database in a given location but does not load any of the tables.
     Create {
+        #[arg(value_name = "SOURCE", action = clap::ArgAction::Set, help = SOURCE_HELP)]
+        source: String,
+
         #[arg(value_name = "DESTINATION", action = clap::ArgAction::Set, help = DESTINATION_HELP)]
         destination: String,
     },
 
     /// Drops all of the configured tables in the given database.
     DropAll {
+        #[arg(value_name = "SOURCE", action = clap::ArgAction::Set, help = SOURCE_HELP)]
+        source: String,
+
         #[arg(value_name = "DESTINATION", action = clap::ArgAction::Set, help = DESTINATION_HELP)]
         destination: String,
     },
 
-    /// Saves all configured data tables as TSV files to (by default) their configured paths, or
-    /// optionally to a given alternate directory.
+    /// Saves all configured data tables as TSV files.
     SaveAll {
+        #[arg(value_name = "SOURCE", action = clap::ArgAction::Set, help = SOURCE_HELP)]
+        source: String,
+
         #[arg(value_name = "DESTINATION", action = clap::ArgAction::Set, help = DESTINATION_HELP)]
         destination: String,
 
@@ -74,9 +83,11 @@ enum Commands {
         save_dir: Option<String>,
     },
 
-    /// Saves the configured data tables from the given list as TSV files to (by default) their
-    /// configured paths, or optionally to a given alternate directory.
+    /// Saves the configured data tables from the given list as TSV files.
     Save {
+        #[arg(value_name = "SOURCE", action = clap::ArgAction::Set, help = SOURCE_HELP)]
+        source: String,
+
         #[arg(value_name = "DESTINATION", action = clap::ArgAction::Set, help = DESTINATION_HELP)]
         destination: String,
 
@@ -92,23 +103,41 @@ enum Commands {
     },
 
     /// Prints the Valve configuration as a JSON-formatted string to the terminal.
-    DumpConfig {},
+    DumpConfig {
+        #[arg(value_name = "SOURCE", action = clap::ArgAction::Set, help = SOURCE_HELP)]
+        source: String,
+    },
 
     /// Prints the order in which the configured tables will be created, as determined by their
     /// dependency relations, to the terminal.
-    ShowTableOrder {},
+    ShowTableOrder {
+        #[arg(value_name = "SOURCE", action = clap::ArgAction::Set, help = SOURCE_HELP)]
+        source: String,
+    },
 
     /// Prints the incoming dependencies for each configured table to the terminal.
-    ShowIncomingDeps {},
+    ShowIncomingDeps {
+        #[arg(value_name = "SOURCE", action = clap::ArgAction::Set, help = SOURCE_HELP)]
+        source: String,
+    },
 
     /// Prints the outgoing dependencies for each configured table to the terminal.
-    ShowOutgoingDeps {},
+    ShowOutgoingDeps {
+        #[arg(value_name = "SOURCE", action = clap::ArgAction::Set, help = SOURCE_HELP)]
+        source: String,
+    },
 
     /// Prints the SQL that will be used to create the database tables to the terminal.
-    DumpSchema {},
+    DumpSchema {
+        #[arg(value_name = "SOURCE", action = clap::ArgAction::Set, help = SOURCE_HELP)]
+        source: String,
+    },
 
     /// TODO: Add a doc string here.
     Guess {
+        #[arg(value_name = "SOURCE", action = clap::ArgAction::Set, help = SOURCE_HELP)]
+        source: String,
+
         #[arg(value_name = "DESTINATION", action = clap::ArgAction::Set, help = DESTINATION_HELP)]
         destination: String,
 
@@ -119,6 +148,9 @@ enum Commands {
     /// Runs a set of predefined tests, on a specified pre-loaded database, that will test Valve's
     /// Application Programmer Interface.
     TestApi {
+        #[arg(value_name = "SOURCE", action = clap::ArgAction::Set, help = SOURCE_HELP)]
+        source: String,
+
         #[arg(value_name = "DESTINATION", action = clap::ArgAction::Set, help = DESTINATION_HELP)]
         destination: String,
     },
@@ -126,6 +158,9 @@ enum Commands {
     /// Runs a set of predefined tests, on a specified pre-loaded database, that will test the
     /// validity of the configured datatype hierarchy.
     TestDtHierarchy {
+        #[arg(value_name = "SOURCE", action = clap::ArgAction::Set, help = SOURCE_HELP)]
+        source: String,
+
         #[arg(value_name = "DESTINATION", action = clap::ArgAction::Set, help = DESTINATION_HELP)]
         destination: String,
     },
@@ -135,14 +170,6 @@ enum Commands {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Although Valve::build() will accept a non-TSV argument (in which case it is ignored and
-    // a table called 'table' is looked up in the database instead), we do not allow this on the
-    // command line:
-    if !cli.source.to_lowercase().ends_with(".tsv") {
-        println!("SOURCE must be a file ending (case-insensitively) with .tsv");
-        std::process::exit(1);
-    }
-
     // This has to be done multiple times so we declare a closure:
     let build_valve = |source: &str, destination: &str| -> Result<Valve> {
         let mut valve = block_on(Valve::build(&source, &destination)).unwrap();
@@ -150,6 +177,16 @@ async fn main() -> Result<()> {
         valve.set_interactive(cli.interactive);
         Ok(valve)
     };
+
+    // Although Valve::build() will accept a non-TSV argument (in which case it is ignored and
+    // a table called 'table' is looked up in the database instead), we do not allow this on the
+    // command line:
+    fn exit_unless_tsv(source: &str) {
+        if !source.to_lowercase().ends_with(".tsv") {
+            println!("SOURCE must be a file ending (case-insensitively) with .tsv");
+            std::process::exit(1);
+        }
+    }
 
     // Prints the table dependencies in either incoming or outgoing order.
     fn print_dependencies(valve: &Valve, incoming: bool) {
@@ -177,57 +214,76 @@ async fn main() -> Result<()> {
     match &cli.command {
         Commands::Load {
             initial_load,
+            source,
             destination,
         } => {
-            let mut valve = build_valve(&cli.source, destination).unwrap();
+            exit_unless_tsv(source);
+            let mut valve = build_valve(source, destination).unwrap();
             if *initial_load {
                 block_on(valve.configure_for_initial_load()).unwrap();
             }
             valve.load_all_tables(true).await.unwrap();
         }
-        Commands::Create { destination } => {
-            let valve = build_valve(&cli.source, destination).unwrap();
+        Commands::Create {
+            source,
+            destination,
+        } => {
+            exit_unless_tsv(source);
+            let valve = build_valve(source, destination).unwrap();
             valve.create_all_tables().await.unwrap();
         }
-        Commands::DropAll { destination } => {
-            let valve = build_valve(&cli.source, destination).unwrap();
+        Commands::DropAll {
+            source,
+            destination,
+        } => {
+            exit_unless_tsv(source);
+            let valve = build_valve(source, destination).unwrap();
             valve.drop_all_tables().await.unwrap();
         }
-        Commands::DumpConfig {} => {
-            let valve = build_valve(&cli.source, "").unwrap();
+        Commands::DumpConfig { source } => {
+            exit_unless_tsv(source);
+            let valve = build_valve(source, "").unwrap();
             println!("{}", valve.config);
         }
-        Commands::ShowTableOrder {} => {
-            let valve = build_valve(&cli.source, "").unwrap();
+        Commands::ShowTableOrder { source } => {
+            exit_unless_tsv(source);
+            let valve = build_valve(source, "").unwrap();
             let sorted_table_list = valve.get_sorted_table_list(false);
             println!("{}", sorted_table_list.join(", "));
         }
-        Commands::ShowIncomingDeps {} => {
-            let valve = build_valve(&cli.source, "").unwrap();
+        Commands::ShowIncomingDeps { source } => {
+            exit_unless_tsv(source);
+            let valve = build_valve(source, "").unwrap();
             print_dependencies(&valve, true);
         }
-        Commands::ShowOutgoingDeps {} => {
-            let valve = build_valve(&cli.source, "").unwrap();
+        Commands::ShowOutgoingDeps { source } => {
+            exit_unless_tsv(source);
+            let valve = build_valve(source, "").unwrap();
             print_dependencies(&valve, false);
         }
-        Commands::DumpSchema {} => {
-            let valve = build_valve(&cli.source, "").unwrap();
+        Commands::DumpSchema { source } => {
+            exit_unless_tsv(source);
+            let valve = build_valve(source, "").unwrap();
             let schema = valve.dump_schema().await.unwrap();
             println!("{}", schema);
         }
         Commands::SaveAll {
             save_dir,
+            source,
             destination,
         } => {
-            let valve = build_valve(&cli.source, destination).unwrap();
+            exit_unless_tsv(source);
+            let valve = build_valve(source, destination).unwrap();
             valve.save_all_tables(&save_dir).unwrap();
         }
         Commands::Save {
             save_dir,
+            source,
             destination,
             tables,
         } => {
-            let valve = build_valve(&cli.source, destination).unwrap();
+            exit_unless_tsv(source);
+            let valve = build_valve(source, destination).unwrap();
             let tables = tables
                 .iter()
                 .filter(|s| *s != "")
@@ -236,17 +292,27 @@ async fn main() -> Result<()> {
             valve.save_tables(&tables, &save_dir).unwrap();
         }
         Commands::Guess {
+            source,
             destination,
             guess_file,
         } => {
+            exit_unless_tsv(source);
             println!("DEST: {}, GUESS TABLE: {}", destination, guess_file);
         }
-        Commands::TestApi { destination } => {
-            let valve = build_valve(&cli.source, destination).unwrap();
+        Commands::TestApi {
+            source,
+            destination,
+        } => {
+            exit_unless_tsv(source);
+            let valve = build_valve(source, destination).unwrap();
             run_api_tests(&valve).await.unwrap();
         }
-        Commands::TestDtHierarchy { destination } => {
-            let valve = build_valve(&cli.source, destination).unwrap();
+        Commands::TestDtHierarchy {
+            source,
+            destination,
+        } => {
+            exit_unless_tsv(source);
+            let valve = build_valve(source, destination).unwrap();
             run_dt_hierarchy_tests(&valve).unwrap();
         }
     }
