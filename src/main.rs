@@ -4,8 +4,9 @@ use crate::tests::{run_api_tests, run_dt_hierarchy_tests};
 use anyhow::Result;
 use clap::{ArgAction, Parser, Subcommand};
 use futures::executor::block_on;
+use indexmap::IndexMap;
 use ontodev_valve::valve::Valve;
-use std::time::{SystemTime, UNIX_EPOCH};
+use rand::{random, rngs::StdRng, Rng, SeedableRng};
 
 // Help strings that are used in more than one subcommand:
 static SOURCE_HELP: &str = "The location of a TSV file, representing the 'table' table, \
@@ -153,11 +154,11 @@ enum Commands {
         #[arg(long, value_name = "SIZE", action = ArgAction::Set,
               help = "The maximum number of values to use for in(...) datatype conditions",
               default_value_t = 10)]
-        enum_size: u128,
+        enum_size: usize,
 
         #[arg(long, value_name = "SEED", action = ArgAction::Set,
-              help = "The seed to use for random sampling [default: current UNIX epoch time]")]
-        seed: Option<u128>,
+              help = "Use SEED for random sampling")]
+        seed: Option<u64>,
 
         #[arg(long, action = ArgAction::SetTrue,
               help = "Do not ask for confirmation before writing suggested modifications to the \
@@ -170,9 +171,10 @@ enum Commands {
         #[arg(value_name = "DESTINATION", action = ArgAction::Set, help = DESTINATION_HELP)]
         destination: String,
 
-        #[arg(value_name = "TSV", action = ArgAction::Set,
-              help = "The TSV file whose column configuration will be guessed.")]
-        guess_file: String,
+        #[arg(value_name = "TABLE_TSV", action = ArgAction::Set,
+              help = "The TSV file representing the table whose column configuration will be \
+                      guessed.")]
+        table_tsv: String,
     },
 
     /// Runs a set of predefined tests, on a specified pre-loaded database, that will test Valve's
@@ -240,6 +242,66 @@ async fn main() -> Result<()> {
             };
             println!("{}: {}", preamble, deps);
         }
+    }
+
+    // TODO: Add a comment here:
+    fn get_random_sample(
+        table_tsv: &str,
+        sample_size: usize,
+        rng: &mut StdRng,
+    ) -> Vec<Vec<String>> {
+        // Count the number of rows in the file and then generate a random sample of row numbers:
+        let sample_row_numbers = {
+            let total_rows = std::fs::read_to_string(table_tsv)
+                .expect(&format!("Error reading from {}", table_tsv))
+                .lines()
+                .count();
+
+            // If the total number of rows in the file is smaller than sample_size then sample
+            // everything, otherwise take a random sample of row_numbers from the file. Note that
+            // either way, we want to exclude the 0th index which is the header.
+            if total_rows <= sample_size {
+                (1..total_rows).collect::<Vec<_>>()
+            } else {
+                let mut samples = rng
+                    .sample_iter(rand::distributions::Uniform::new(1, total_rows))
+                    .take(sample_size)
+                    .collect::<Vec<_>>();
+                // We call sort here since, when we collect the actual sample rows, we will be
+                // using an iterator over the rows which we will need to consume in an ordered way.
+                samples.sort();
+                samples
+            }
+        };
+
+        // Create a CSV reader:
+        let mut rdr = match std::fs::File::open(table_tsv) {
+            Err(e) => panic!("Unable to open '{}': {}", table_tsv, e),
+            Ok(table_file) => csv::ReaderBuilder::new()
+                .has_headers(false)
+                .delimiter(b'\t')
+                .from_reader(table_file),
+        };
+
+        // Use the CSV reader and the sample row numbers collected above to construct the random
+        // sample of rows from the file:
+        let mut records = rdr.records();
+        let mut sample_rows = vec![];
+        let mut prev_rn = None;
+        for rn in &sample_row_numbers {
+            let nth = match prev_rn {
+                None => *rn,
+                Some(prev_rn) => *rn - prev_rn - 1,
+            };
+            let nth_sample = records
+                .nth(nth)
+                .expect(&format!("No record found at position {}", nth))
+                .expect(&format!("Error while reading {}th record", nth));
+            let nth_sample = nth_sample.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+            sample_rows.push(nth_sample);
+            prev_rn = Some(*rn);
+        }
+        sample_rows
     }
 
     match &cli.command {
@@ -330,19 +392,42 @@ async fn main() -> Result<()> {
             yes,
             source,
             destination,
-            guess_file,
+            table_tsv,
         } => {
+            // Build a Valve instance:
             exit_unless_tsv(source);
+            let valve = build_valve(source, destination).unwrap();
 
-            let seed = match seed {
-                Some(seed) => *seed,
-                None => SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .expect("Time went backwards!?")
-                    .as_millis(),
+            // If a seed was provided, use it to create the random number generator instead of
+            // creating it using fresh entropy:
+            let mut rng = match seed {
+                None => StdRng::from_entropy(),
+                Some(seed) => StdRng::seed_from_u64(*seed),
             };
 
-            println!("DEST: {}, GUESS TABLE: {}", destination, guess_file);
+            // Use the name of the TSV file to determine the table name:
+            let table = std::path::Path::new(table_tsv)
+                .file_stem()
+                .expect(&format!(
+                    "Error geting file stem for {}: Not a filename",
+                    table_tsv
+                ))
+                .to_str()
+                .expect(&format!(
+                    "Error getting file stem for {}: Not a valid UTF-8 string",
+                    table_tsv
+                ));
+
+            // TODO: Create a parser? Reuse the valve_grammar?
+
+            log::info!(
+                "Getting random sample of {} rows from {} ...",
+                sample_size,
+                table_tsv
+            );
+            let sample = get_random_sample(table_tsv, *sample_size, &mut rng);
+            println!("RANDOM SAMPLE: {:#?}", sample);
+            // YOU ARE HERE.
         }
         Commands::TestApi {
             source,
