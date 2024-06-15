@@ -20,6 +20,7 @@ crossbeam = "0.8"
 csv = "1.1"
 enquote = "1.1"
 env_logger = "0.10"
+fix_fn = "1.0"
 # Futures is not used directly but is needed for the python bindings in github.com/ontodev/valve.py.
 futures = "0.3"
 indexmap = { version = "1.9", features = [ "serde-1" ] }

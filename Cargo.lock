@@ -689,6 +689,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "fix_fn"
+version = "1.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "380f193e13417258cee0f6f750a1be449bfaa476874985fd6690be580086f7f1"
+
+[[package]]
 name = "fixedbitset"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1226,6 +1232,7 @@ dependencies = [
  "csv",
  "enquote",
  "env_logger",
+ "fix_fn",
  "futures",
  "indexmap",
  "indoc",

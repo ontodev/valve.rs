@@ -1,9 +1,11 @@
 //! Implementation of the column configuration guesser
 
+use fix_fn::fix_fn;
 use indexmap::IndexMap;
-use ontodev_valve::valve::{Valve, ValveConfig};
+use ontodev_valve::valve::{Valve, ValveConfig, ValveDatatypeConfig};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use regex::Regex;
+use std::collections::HashMap;
 
 /// TODO: Add a docstring here.
 // TODO: We probably don't need Debug here.
@@ -65,6 +67,69 @@ pub fn guess(
     }
 }
 
+/// TODO: Add docstring here.
+pub fn get_hierarchy_for_dt(
+    config: &ValveConfig,
+    primary_dt_name: &str,
+) -> Vec<ValveDatatypeConfig> {
+    let get_parents = fix_fn!(|get_parents, dt_name: &str| -> Vec<ValveDatatypeConfig> {
+        let mut datatypes = vec![];
+        if dt_name != "" {
+            let datatype = config
+                .datatype
+                .get(dt_name)
+                .expect(&format!("'{}' not found in datatype config", dt_name));
+            if datatype.datatype != primary_dt_name {
+                datatypes.push(datatype.clone())
+            }
+            datatypes.append(&mut get_parents(&datatype.parent));
+        }
+        datatypes
+    });
+
+    let mut hierarchy_for_dt = vec![config.datatype.get(primary_dt_name).unwrap().clone()];
+    hierarchy_for_dt.append(&mut get_parents(primary_dt_name));
+    hierarchy_for_dt
+}
+
+/// TODO: Add docstring here.
+pub fn get_dt_hierarchies(config: &ValveConfig) {
+    let get_higher_datatypes = || {
+        // TODO: ...
+    };
+
+    let dt_names = config.datatype.keys().collect::<Vec<_>>();
+    let mut dt_hierarchies = HashMap::from([(0, HashMap::new())]);
+    let mut universals = HashMap::new();
+    for dt_name in &dt_names {
+        // Add all the leaf datatypes (i.e., those without children) to dt_hierarchies at 0 depth:
+        if dt_names
+            .iter()
+            .filter(|child| &config.datatype.get(**child).unwrap().parent == *dt_name)
+            .collect::<Vec<_>>()
+            .is_empty()
+        {
+            dt_hierarchies
+                .get_mut(&0)
+                .unwrap()
+                .insert(dt_name.to_string(), get_hierarchy_for_dt(config, dt_name));
+        } else if config
+            .datatype
+            .get(*dt_name)
+            .expect(&format!("'{}' not found in datatype config", dt_name))
+            .parent
+            == ""
+            || config.datatype.get(*dt_name).unwrap().condition == ""
+        {
+            universals.insert(dt_name.to_string(), get_hierarchy_for_dt(config, dt_name));
+        }
+    }
+    println!("DT_HIERARCHIES: {:#?}", dt_hierarchies);
+    println!("UNIVERSALS: {:#?}", universals);
+
+    // YOU ARE HERE.
+}
+
 /// TODO: Add a docstring here.
 pub fn annotate(
     label: &str,
@@ -80,10 +145,13 @@ pub fn annotate(
         pct_empty > *error_rate
     };
 
+    // Use the data sample to guess whether the given column should allow empty values:
     if has_nulltype(&sample) {
         sample.nulltype = "empty".to_string();
     }
-    // YOU ARE HERE.
+
+    // Use the valve config to retrieve the valve datatype hierarchies:
+    let dt_hierarchies = get_dt_hierarchies(config);
 
     // TODO: The rest ...
 }
