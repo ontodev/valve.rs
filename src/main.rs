@@ -1,13 +1,14 @@
+mod guess;
 mod tests;
 
-use crate::tests::{run_api_tests, run_dt_hierarchy_tests};
+use crate::{
+    guess::guess,
+    tests::{run_api_tests, run_dt_hierarchy_tests},
+};
 use anyhow::Result;
 use clap::{ArgAction, Parser, Subcommand};
 use futures::executor::block_on;
-use indexmap::IndexMap;
 use ontodev_valve::valve::Valve;
-use rand::{random, rngs::StdRng, Rng, SeedableRng};
-use regex::Regex;
 
 // Help strings that are used in more than one subcommand:
 static SOURCE_HELP: &str = "The location of a TSV file, representing the 'table' table, \
@@ -36,13 +37,6 @@ struct Cli {
     // Subcommands:
     #[command(subcommand)]
     command: Commands,
-}
-
-// TODO: Move this struct to guess.rs
-#[derive(Debug)]
-struct Sample {
-    normalized: String,
-    values: Vec<String>,
 }
 
 #[derive(Subcommand)]
@@ -252,119 +246,6 @@ async fn main() -> Result<()> {
         }
     }
 
-    // TODO: Move this to its own file, guess.rs (but do it later).
-    // TODO: Add a comment here:
-    fn get_random_sample(
-        table_tsv: &str,
-        sample_size: usize,
-        rng: &mut StdRng,
-    ) -> IndexMap<String, Sample> {
-        // Count the number of rows in the file and then generate a random sample of row numbers:
-        let sample_row_numbers = {
-            let total_rows = std::fs::read_to_string(table_tsv)
-                .expect(&format!("Error reading from {}", table_tsv))
-                .lines()
-                .count();
-
-            // If the total number of rows in the file is smaller than sample_size then sample
-            // everything, otherwise take a random sample of row_numbers from the file. The reason
-            // that the range runs from 0 to (total_rows - 1) is that total_rows includes the
-            // header row, which is going to be removed in the first step below (as a result of
-            // calling next()).
-            if total_rows <= sample_size {
-                (0..total_rows - 1).collect::<Vec<_>>()
-            } else {
-                let mut samples = rng
-                    .sample_iter(rand::distributions::Uniform::new(0, total_rows - 1))
-                    .take(sample_size)
-                    .collect::<Vec<_>>();
-                // We call sort here since, when we collect the actual sample rows, we will be
-                // using an iterator over the rows which we will need to consume in an ordered way.
-                samples.sort();
-                samples
-            }
-        };
-
-        // Create a CSV reader:
-        let mut rdr = match std::fs::File::open(table_tsv) {
-            Err(e) => panic!("Unable to open '{}': {}", table_tsv, e),
-            Ok(table_file) => csv::ReaderBuilder::new()
-                .has_headers(false)
-                .delimiter(b'\t')
-                .from_reader(table_file),
-        };
-
-        // Use the CSV reader and the sample row numbers collected above to construct the random
-        // sample of rows from the file:
-        let mut records = rdr.records();
-        let headers = records
-            .next()
-            .expect("Header row not found.")
-            .expect("Error while reading header row")
-            .iter()
-            .map(|s| s.to_string())
-            .collect::<Vec<_>>();
-
-        // We use this pattern to normalize the labels represented by the column headers:
-        let pattern = Regex::new(r#"[^0-9a-zA-Z_]+"#).expect("Invalid regex pattern");
-        let mut samples: IndexMap<String, Sample> = IndexMap::new();
-        let mut prev_rn = None;
-        for rn in &sample_row_numbers {
-            let nth_record = {
-                let n = match prev_rn {
-                    None => *rn,
-                    Some(prev_rn) => *rn - prev_rn - 1,
-                };
-                records
-                    .nth(n)
-                    .expect(&format!("No record found at position {}", n))
-                    .expect(&format!("Error while reading record at position {}", n))
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect::<Vec<_>>()
-            };
-            for (i, label) in headers.iter().enumerate() {
-                // If samples doesn't already contain an entry for this label, add one:
-                if !samples.contains_key(label) {
-                    let ncolumn = {
-                        let mut ncolumn = pattern.replace_all(label, "_").to_lowercase();
-                        if ncolumn.starts_with("_") {
-                            ncolumn = ncolumn.strip_prefix("_").unwrap().to_string();
-                        }
-                        if ncolumn.ends_with("_") {
-                            ncolumn = ncolumn.strip_suffix("_").unwrap().to_string();
-                        }
-                        for (_label, sample) in samples.iter() {
-                            if sample.normalized == ncolumn {
-                                println!(
-                                    "The data has more than one column with the normalized name {}",
-                                    ncolumn
-                                );
-                                std::process::exit(1);
-                            }
-                        }
-                        ncolumn
-                    };
-                    samples.insert(
-                        label.to_string(),
-                        Sample {
-                            normalized: ncolumn,
-                            values: vec![],
-                        },
-                    );
-                }
-                // Add the ith entry of the nth_record to the sample under the entry for label:
-                samples
-                    .get_mut(label)
-                    .expect(&format!("Could not find label '{}' in sample", label))
-                    .values
-                    .push(nth_record[i].to_string());
-            }
-            prev_rn = Some(*rn);
-        }
-        samples
-    }
-
     match &cli.command {
         Commands::Load {
             initial_load,
@@ -455,40 +336,9 @@ async fn main() -> Result<()> {
             destination,
             table_tsv,
         } => {
-            // Build a Valve instance:
             exit_unless_tsv(source);
             let valve = build_valve(source, destination).unwrap();
-
-            // If a seed was provided, use it to create the random number generator instead of
-            // creating it using fresh entropy:
-            let mut rng = match seed {
-                None => StdRng::from_entropy(),
-                Some(seed) => StdRng::seed_from_u64(*seed),
-            };
-
-            // Use the name of the TSV file to determine the table name:
-            let table = std::path::Path::new(table_tsv)
-                .file_stem()
-                .expect(&format!(
-                    "Error geting file stem for {}: Not a filename",
-                    table_tsv
-                ))
-                .to_str()
-                .expect(&format!(
-                    "Error getting file stem for {}: Not a valid UTF-8 string",
-                    table_tsv
-                ));
-
-            // TODO: Create a parser? Reuse the valve_grammar?
-
-            log::info!(
-                "Getting random sample of {} rows from {} ...",
-                sample_size,
-                table_tsv
-            );
-            let sample = get_random_sample(table_tsv, *sample_size, &mut rng);
-            println!("RANDOM SAMPLE: {:#?}", sample);
-            // YOU ARE HERE.
+            guess(&valve, table_tsv, seed, sample_size);
         }
         Commands::TestApi {
             source,
