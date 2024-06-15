@@ -338,7 +338,14 @@ async fn main() -> Result<()> {
         } => {
             exit_unless_tsv(source);
             let valve = build_valve(source, destination).unwrap();
-            guess(&valve, table_tsv, seed, sample_size);
+            guess(
+                &valve,
+                cli.verbose,
+                table_tsv,
+                seed,
+                sample_size,
+                error_rate,
+            );
         }
         Commands::TestApi {
             source,

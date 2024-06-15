@@ -1,7 +1,7 @@
 //! Implementation of the column configuration guesser
 
 use indexmap::IndexMap;
-use ontodev_valve::valve::Valve;
+use ontodev_valve::valve::{Valve, ValveConfig};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use regex::Regex;
 
@@ -13,7 +13,14 @@ pub struct Sample {
 }
 
 /// TODO: Add a docstring here.
-pub fn guess(valve: &Valve, table_tsv: &str, seed: &Option<u64>, sample_size: &usize) {
+pub fn guess(
+    valve: &Valve,
+    verbose: bool,
+    table_tsv: &str,
+    seed: &Option<u64>,
+    sample_size: &usize,
+    error_rate: &f32,
+) {
     // If a seed was provided, use it to create the random number generator instead of
     // creating it using fresh entropy:
     let mut rng = match seed {
@@ -36,13 +43,34 @@ pub fn guess(valve: &Valve, table_tsv: &str, seed: &Option<u64>, sample_size: &u
 
     // TODO: Create a parser? Reuse the valve_grammar?
 
-    log::info!(
-        "Getting random sample of {} rows from {} ...",
-        sample_size,
-        table_tsv
-    );
+    if verbose {
+        println!(
+            "Getting random sample of {} rows from {} ...",
+            sample_size, table_tsv
+        );
+    }
     let sample = get_random_sample(table_tsv, *sample_size, &mut rng);
     println!("RANDOM SAMPLE: {:#?}", sample);
+    for (i, (label, _values)) in sample.iter().enumerate() {
+        if verbose {
+            println!("Annotating label '{}' ...", label);
+        }
+        annotate(label, &sample, &valve.config, error_rate, i == 0);
+        // TODO: The rest ...
+    }
+    if verbose {
+        println!("Done!");
+    }
+}
+
+/// TODO: Add a docstring here.
+pub fn annotate(
+    label: &str,
+    sample: &IndexMap<String, Sample>,
+    config: &ValveConfig,
+    error_rate: &f32,
+    is_primary_candidate: bool,
+) {
     // YOU ARE HERE.
 }
 
@@ -129,7 +157,7 @@ pub fn get_random_sample(
                     }
                     for (_label, sample) in samples.iter() {
                         if sample.normalized == ncolumn {
-                            println!(
+                            eprintln!(
                                 "The data has more than one column with the normalized name {}",
                                 ncolumn
                             );
