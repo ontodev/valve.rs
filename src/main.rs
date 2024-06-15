@@ -249,7 +249,7 @@ async fn main() -> Result<()> {
         table_tsv: &str,
         sample_size: usize,
         rng: &mut StdRng,
-    ) -> Vec<Vec<String>> {
+    ) -> Vec<IndexMap<String, String>> {
         // Count the number of rows in the file and then generate a random sample of row numbers:
         let sample_row_numbers = {
             let total_rows = std::fs::read_to_string(table_tsv)
@@ -258,13 +258,15 @@ async fn main() -> Result<()> {
                 .count();
 
             // If the total number of rows in the file is smaller than sample_size then sample
-            // everything, otherwise take a random sample of row_numbers from the file. Note that
-            // either way, we want to exclude the 0th index which is the header.
+            // everything, otherwise take a random sample of row_numbers from the file. The reason
+            // that the range runs from 0 to (total_rows - 1) is that total_rows includes the
+            // header row, which is going to be removed in the first step below (as a result of
+            // calling next()).
             if total_rows <= sample_size {
-                (1..total_rows).collect::<Vec<_>>()
+                (0..total_rows - 1).collect::<Vec<_>>()
             } else {
                 let mut samples = rng
-                    .sample_iter(rand::distributions::Uniform::new(1, total_rows))
+                    .sample_iter(rand::distributions::Uniform::new(0, total_rows - 1))
                     .take(sample_size)
                     .collect::<Vec<_>>();
                 // We call sort here since, when we collect the actual sample rows, we will be
@@ -286,6 +288,13 @@ async fn main() -> Result<()> {
         // Use the CSV reader and the sample row numbers collected above to construct the random
         // sample of rows from the file:
         let mut records = rdr.records();
+        let headers = records
+            .next()
+            .expect("Header row not found.")
+            .expect("Error while reading header row")
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>();
         let mut sample_rows = vec![];
         let mut prev_rn = None;
         for rn in &sample_row_numbers {
@@ -296,8 +305,12 @@ async fn main() -> Result<()> {
             let nth_sample = records
                 .nth(nth)
                 .expect(&format!("No record found at position {}", nth))
-                .expect(&format!("Error while reading {}th record", nth));
-            let nth_sample = nth_sample.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+                .expect(&format!("Error while reading {}th record", nth))
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>();
+            let nth_sample =
+                std::iter::zip(headers.clone(), nth_sample).collect::<IndexMap<_, _>>();
             sample_rows.push(nth_sample);
             prev_rn = Some(*rn);
         }
