@@ -6,9 +6,11 @@ use rand::{rngs::StdRng, Rng, SeedableRng};
 use regex::Regex;
 
 /// TODO: Add a docstring here.
-#[derive(Debug)]
+// TODO: We probably don't need Debug here.
+#[derive(Clone, Debug, Default)]
 pub struct Sample {
     pub normalized: String,
+    pub nulltype: String,
     pub values: Vec<String>,
 }
 
@@ -49,13 +51,13 @@ pub fn guess(
             sample_size, table_tsv
         );
     }
-    let sample = get_random_sample(table_tsv, *sample_size, &mut rng);
-    println!("RANDOM SAMPLE: {:#?}", sample);
-    for (i, (label, _values)) in sample.iter().enumerate() {
+    let mut samples = get_random_samples(table_tsv, *sample_size, &mut rng);
+    println!("RANDOM SAMPLES: {:#?}", samples);
+    for (i, (label, sample)) in samples.iter_mut().enumerate() {
         if verbose {
             println!("Annotating label '{}' ...", label);
         }
-        annotate(label, &sample, &valve.config, error_rate, i == 0);
+        annotate(label, sample, &valve.config, error_rate, i == 0);
         // TODO: The rest ...
     }
     if verbose {
@@ -66,16 +68,28 @@ pub fn guess(
 /// TODO: Add a docstring here.
 pub fn annotate(
     label: &str,
-    sample: &IndexMap<String, Sample>,
+    sample: &mut Sample,
     config: &ValveConfig,
     error_rate: &f32,
     is_primary_candidate: bool,
 ) {
+    let has_nulltype = |sample: &Sample| -> bool {
+        let num_values = sample.values.len();
+        let num_empties = sample.values.iter().filter(|v| *v == "").count();
+        let pct_empty = num_empties as f32 / num_values as f32;
+        pct_empty > *error_rate
+    };
+
+    if has_nulltype(&sample) {
+        sample.nulltype = "empty".to_string();
+    }
     // YOU ARE HERE.
+
+    // TODO: The rest ...
 }
 
 /// TODO: Add a docstring here.
-pub fn get_random_sample(
+pub fn get_random_samples(
     table_tsv: &str,
     sample_size: usize,
     rng: &mut StdRng,
@@ -171,6 +185,7 @@ pub fn get_random_sample(
                     Sample {
                         normalized: ncolumn,
                         values: vec![],
+                        ..Default::default()
                     },
                 );
             }
