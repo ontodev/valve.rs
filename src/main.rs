@@ -7,6 +7,7 @@ use futures::executor::block_on;
 use indexmap::IndexMap;
 use ontodev_valve::valve::Valve;
 use rand::{random, rngs::StdRng, Rng, SeedableRng};
+use regex::Regex;
 
 // Help strings that are used in more than one subcommand:
 static SOURCE_HELP: &str = "The location of a TSV file, representing the 'table' table, \
@@ -35,6 +36,13 @@ struct Cli {
     // Subcommands:
     #[command(subcommand)]
     command: Commands,
+}
+
+// TODO: Move this struct to guess.rs
+#[derive(Debug)]
+struct Sample {
+    normalized: String,
+    values: Vec<String>,
 }
 
 #[derive(Subcommand)]
@@ -244,12 +252,13 @@ async fn main() -> Result<()> {
         }
     }
 
+    // TODO: Move this to its own file, guess.rs (but do it later).
     // TODO: Add a comment here:
     fn get_random_sample(
         table_tsv: &str,
         sample_size: usize,
         rng: &mut StdRng,
-    ) -> Vec<IndexMap<String, String>> {
+    ) -> IndexMap<String, Sample> {
         // Count the number of rows in the file and then generate a random sample of row numbers:
         let sample_row_numbers = {
             let total_rows = std::fs::read_to_string(table_tsv)
@@ -295,26 +304,65 @@ async fn main() -> Result<()> {
             .iter()
             .map(|s| s.to_string())
             .collect::<Vec<_>>();
-        let mut sample_rows = vec![];
+
+        // We use this pattern to normalize the labels represented by the column headers:
+        let pattern = Regex::new(r#"[^0-9a-zA-Z_]+"#).expect("Invalid regex pattern");
+        let mut samples: IndexMap<String, Sample> = IndexMap::new();
         let mut prev_rn = None;
         for rn in &sample_row_numbers {
-            let nth = match prev_rn {
-                None => *rn,
-                Some(prev_rn) => *rn - prev_rn - 1,
+            let nth_record = {
+                let n = match prev_rn {
+                    None => *rn,
+                    Some(prev_rn) => *rn - prev_rn - 1,
+                };
+                records
+                    .nth(n)
+                    .expect(&format!("No record found at position {}", n))
+                    .expect(&format!("Error while reading record at position {}", n))
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>()
             };
-            let nth_sample = records
-                .nth(nth)
-                .expect(&format!("No record found at position {}", nth))
-                .expect(&format!("Error while reading {}th record", nth))
-                .iter()
-                .map(|s| s.to_string())
-                .collect::<Vec<_>>();
-            let nth_sample =
-                std::iter::zip(headers.clone(), nth_sample).collect::<IndexMap<_, _>>();
-            sample_rows.push(nth_sample);
+            for (i, label) in headers.iter().enumerate() {
+                // If samples doesn't already contain an entry for this label, add one:
+                if !samples.contains_key(label) {
+                    let ncolumn = {
+                        let mut ncolumn = pattern.replace_all(label, "_").to_lowercase();
+                        if ncolumn.starts_with("_") {
+                            ncolumn = ncolumn.strip_prefix("_").unwrap().to_string();
+                        }
+                        if ncolumn.ends_with("_") {
+                            ncolumn = ncolumn.strip_suffix("_").unwrap().to_string();
+                        }
+                        for (_label, sample) in samples.iter() {
+                            if sample.normalized == ncolumn {
+                                println!(
+                                    "The data has more than one column with the normalized name {}",
+                                    ncolumn
+                                );
+                                std::process::exit(1);
+                            }
+                        }
+                        ncolumn
+                    };
+                    samples.insert(
+                        label.to_string(),
+                        Sample {
+                            normalized: ncolumn,
+                            values: vec![],
+                        },
+                    );
+                }
+                // Add the ith entry of the nth_record to the sample under the entry for label:
+                samples
+                    .get_mut(label)
+                    .expect(&format!("Could not find label '{}' in sample", label))
+                    .values
+                    .push(nth_record[i].to_string());
+            }
             prev_rn = Some(*rn);
         }
-        sample_rows
+        samples
     }
 
     match &cli.command {
