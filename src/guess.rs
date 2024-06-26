@@ -13,6 +13,8 @@ use std::collections::HashMap;
 pub struct Sample {
     pub normalized: String,
     pub nulltype: String,
+    pub datatype: String,
+    pub structure: String,
     pub values: Vec<String>,
 }
 
@@ -45,8 +47,6 @@ pub fn guess(
             table_tsv
         ));
 
-    // TODO: Create a parser? Reuse the valve_grammar?
-
     if verbose {
         println!(
             "Getting random sample of {} rows from {} ...",
@@ -59,7 +59,7 @@ pub fn guess(
         if verbose {
             println!("Annotating label '{}' ...", label);
         }
-        annotate(label, sample, &valve.config, error_rate, i == 0);
+        annotate(label, sample, &valve, error_rate, i == 0);
         // TODO: The rest ...
     }
     if verbose {
@@ -93,7 +93,11 @@ pub fn get_hierarchy_for_dt(
 }
 
 /// TODO: Add docstring here.
-pub fn get_dt_hierarchies(config: &ValveConfig) {
+pub fn get_dt_hierarchies(
+    config: &ValveConfig,
+) -> HashMap<usize, HashMap<String, Vec<ValveDatatypeConfig>>> {
+    // Returns datatype hierarchies, from the given collections of datatype hierachies and
+    // universal datatypes, that are deeper in the hierarchy than `depth`.
     fn get_higher_datatypes(
         dt_hierarchies: &HashMap<usize, HashMap<String, Vec<ValveDatatypeConfig>>>,
         universals: &HashMap<String, Vec<ValveDatatypeConfig>>,
@@ -154,6 +158,7 @@ pub fn get_dt_hierarchies(config: &ValveConfig) {
     let mut dt_hierarchies = HashMap::from([(0, HashMap::new())]);
     let mut universals = HashMap::new();
     for dt_name in &dt_names {
+        // Check if this datatype has any children:
         if dt_names
             .iter()
             .filter(|child| &config.datatype.get(**child).unwrap().parent == *dt_name)
@@ -178,23 +183,60 @@ pub fn get_dt_hierarchies(config: &ValveConfig) {
             universals.insert(dt_name.to_string(), get_hierarchy_for_dt(config, dt_name));
         }
     }
-    //println!("DT_HIERARCHIES: {:#?}", dt_hierarchies);
-    //println!("UNIVERSALS: {:#?}", universals);
-    let depth = 0;
-    let higher_dts = get_higher_datatypes(&dt_hierarchies, &universals, depth);
-    println!("HIGHER DTS: {:#?}", higher_dts);
-
-    // YOU ARE HERE.
+    let mut depth = 0;
+    let mut higher_dts = get_higher_datatypes(&dt_hierarchies, &universals, depth);
+    while !higher_dts.is_empty() {
+        depth += 1;
+        dt_hierarchies.insert(depth, higher_dts.clone());
+        higher_dts = get_higher_datatypes(&dt_hierarchies, &universals, depth);
+    }
+    dt_hierarchies.insert(depth + 1, universals);
+    dt_hierarchies
 }
 
 /// TODO: Add a docstring here.
 pub fn annotate(
     label: &str,
     sample: &mut Sample,
-    config: &ValveConfig,
+    valve: &Valve,
     error_rate: &f32,
     is_primary_candidate: bool,
 ) {
+    // TODO: Add a comment here.
+    fn get_datatype(
+        valve: &Valve,
+        sample: &Sample,
+        dt_hierarchies: &HashMap<usize, HashMap<String, Vec<ValveDatatypeConfig>>>,
+        error_rate: &f32,
+    ) -> String {
+        let is_match = |datatype: &ValveDatatypeConfig| -> (bool, Option<f32>) {
+            // If the datatype has no associated condition then it matches anything:
+            if datatype.condition == "" {
+                return (true, None);
+            }
+            // If the SQL type is NULL this datatype is ruled out:
+            if datatype.sql_type.to_lowercase() == "null" {
+                return (false, None);
+            }
+
+            // Otherwise we test the datatype condition against all of the values in the sample:
+            let condition = &valve
+                .datatype_conditions
+                .get(&datatype.condition)
+                .expect(&format!(
+                    "Condition '{}' not found in datatype conditions",
+                    datatype.condition
+                ))
+                .compiled;
+            let num_values = sample.values.len();
+            let num_passed = sample.values.iter().filter(|v| condition(v)).count();
+            let success_rate = num_passed as f32 / num_values as f32;
+            return ((1 as f32 - success_rate) <= *error_rate, Some(success_rate));
+        };
+
+        String::new()
+    }
+
     let sample_has_nulltype = {
         let num_values = sample.values.len();
         let num_empties = sample.values.iter().filter(|v| *v == "").count();
@@ -208,7 +250,8 @@ pub fn annotate(
     }
 
     // Use the valve config to retrieve the valve datatype hierarchies:
-    let dt_hierarchies = get_dt_hierarchies(config);
+    let dt_hierarchies = get_dt_hierarchies(&valve.config);
+    sample.datatype = get_datatype(valve, &sample, &dt_hierarchies, error_rate);
 
     // TODO: The rest ...
 }
