@@ -54,7 +54,7 @@ pub fn guess(
         );
     }
     let mut samples = get_random_samples(table_tsv, *sample_size, &mut rng);
-    println!("RANDOM SAMPLES: {:#?}", samples);
+    //println!("RANDOM SAMPLES: {:#?}", samples);
     for (i, (label, sample)) in samples.iter_mut().enumerate() {
         if verbose {
             println!("Annotating label '{}' ...", label);
@@ -94,21 +94,73 @@ pub fn get_hierarchy_for_dt(
 
 /// TODO: Add docstring here.
 pub fn get_dt_hierarchies(config: &ValveConfig) {
-    let get_higher_datatypes = || {
-        // TODO: ...
-    };
+    fn get_higher_datatypes(
+        dt_hierarchies: &HashMap<usize, HashMap<String, Vec<ValveDatatypeConfig>>>,
+        universals: &HashMap<String, Vec<ValveDatatypeConfig>>,
+        depth: usize,
+    ) -> HashMap<String, Vec<ValveDatatypeConfig>> {
+        let current_datatypes = dt_hierarchies
+            .get(&depth)
+            .and_then(|d| {
+                Some(
+                    d.keys()
+                        //.cloned()
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .unwrap_or(vec![]);
+        let mut higher_datatypes = HashMap::new();
+        if !current_datatypes.is_empty() {
+            let universals = universals.keys().collect::<Vec<_>>();
+            let lower_datatypes = {
+                let mut lower_datatypes = vec![];
+                for i in 0..depth {
+                    lower_datatypes.append(
+                        &mut dt_hierarchies
+                            .get(&i)
+                            .and_then(|d| {
+                                Some(
+                                    d.keys()
+                                        //.cloned()
+                                        .collect::<Vec<_>>(),
+                                )
+                            })
+                            .unwrap_or(vec![]),
+                    );
+                }
+                lower_datatypes
+            };
+            for (dt_name, dt_hierarchy) in dt_hierarchies
+                .get(&depth)
+                .expect(&format!("No datatype hierarchies at depth: {}", depth,))
+                .iter()
+            {
+                if dt_hierarchy.len() > 1 {
+                    let parent_hierarchy = &dt_hierarchy[1..];
+                    let parent = &parent_hierarchy[0].datatype;
+                    if !current_datatypes.contains(&&parent)
+                        && !lower_datatypes.contains(&&parent)
+                        && !universals.contains(&&parent)
+                    {
+                        higher_datatypes.insert(parent.to_string(), parent_hierarchy.to_vec());
+                    }
+                }
+            }
+        }
+        higher_datatypes
+    }
 
     let dt_names = config.datatype.keys().collect::<Vec<_>>();
     let mut dt_hierarchies = HashMap::from([(0, HashMap::new())]);
     let mut universals = HashMap::new();
     for dt_name in &dt_names {
-        // Add all the leaf datatypes (i.e., those without children) to dt_hierarchies at 0 depth:
         if dt_names
             .iter()
             .filter(|child| &config.datatype.get(**child).unwrap().parent == *dt_name)
             .collect::<Vec<_>>()
             .is_empty()
         {
+            // Add all leaf datatypes (i.e., those without children) to dt_hierarchies at 0 depth:
             dt_hierarchies
                 .get_mut(&0)
                 .unwrap()
@@ -121,11 +173,16 @@ pub fn get_dt_hierarchies(config: &ValveConfig) {
             == ""
             || config.datatype.get(*dt_name).unwrap().condition == ""
         {
+            // Ungrounded and unconditioned datatypes go into the universals category, which are
+            // added to the top of dt_hierarchies later:
             universals.insert(dt_name.to_string(), get_hierarchy_for_dt(config, dt_name));
         }
     }
-    println!("DT_HIERARCHIES: {:#?}", dt_hierarchies);
-    println!("UNIVERSALS: {:#?}", universals);
+    //println!("DT_HIERARCHIES: {:#?}", dt_hierarchies);
+    //println!("UNIVERSALS: {:#?}", universals);
+    let depth = 0;
+    let higher_dts = get_higher_datatypes(&dt_hierarchies, &universals, depth);
+    println!("HIGHER DTS: {:#?}", higher_dts);
 
     // YOU ARE HERE.
 }
@@ -138,7 +195,7 @@ pub fn annotate(
     error_rate: &f32,
     is_primary_candidate: bool,
 ) {
-    let has_nulltype = |sample: &Sample| -> bool {
+    let sample_has_nulltype = {
         let num_values = sample.values.len();
         let num_empties = sample.values.iter().filter(|v| *v == "").count();
         let pct_empty = num_empties as f32 / num_values as f32;
@@ -146,7 +203,7 @@ pub fn annotate(
     };
 
     // Use the data sample to guess whether the given column should allow empty values:
-    if has_nulltype(&sample) {
+    if sample_has_nulltype {
         sample.nulltype = "empty".to_string();
     }
 
@@ -173,7 +230,7 @@ pub fn get_random_samples(
         // everything, otherwise take a random sample of row_numbers from the file. The reason
         // that the range runs from 0 to (total_rows - 1) is that total_rows includes the
         // header row, which is going to be removed in the first step below (as a result of
-        // calling next()).
+        // calling next()) when the headers are read.
         if total_rows <= sample_size {
             (0..total_rows - 1).collect::<Vec<_>>()
         } else {
