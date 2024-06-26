@@ -5,7 +5,7 @@ use indexmap::IndexMap;
 use ontodev_valve::valve::{Valve, ValveConfig, ValveDatatypeConfig};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use regex::Regex;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// TODO: Add a docstring here.
 // TODO: We probably don't need Debug here.
@@ -241,9 +241,36 @@ pub fn annotate(
             return ((1 as f32 - success_rate) <= *error_rate, success_rate);
         };
 
-        let tiebreak = |matches: &Vec<Match>| -> String {
+        let tiebreak = |dt_matches: &Vec<Match>| -> String {
+            //let mut in_types = vec![];
+            //let mut other_types = vec![];
+            let parents = dt_matches
+                .iter()
+                .filter(|dt_match| {
+                    if let Some(dt) = valve.config.datatype.get(&dt_match.datatype) {
+                        if dt.parent != "" {
+                            true
+                        }
+                    }
+                    false
+                })
+                .collect::<Vec<_>>();
+
+            //let parents = {
+            //    let mut parents = HashSet::new();
+            //    for dt_match in dt_matches {
+            //        if let Some(dt) = valve.config.datatype.get(&dt_match.datatype) {
+            //            if dt.parent != "" {
+            //                parents.insert(dt.parent.to_string());
+            //            }
+            //        }
+            //    }
+            //    parents
+            //};
+            println!("PARENTS: {:#?}", parents);
+
             // TODO: Implement this properly later.
-            return matches[0].datatype.to_string();
+            return dt_matches[0].datatype.to_string();
         };
 
         for depth in 0..dt_hierarchies.len() {
