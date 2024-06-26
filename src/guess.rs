@@ -19,6 +19,13 @@ pub struct Sample {
 }
 
 /// TODO: Add a docstring here.
+#[derive(Clone, Debug, Default)]
+pub struct Match {
+    datatype: String,
+    success_rate: f32,
+}
+
+/// TODO: Add a docstring here.
 pub fn guess(
     valve: &Valve,
     verbose: bool,
@@ -209,20 +216,20 @@ pub fn annotate(
         dt_hierarchies: &HashMap<usize, HashMap<String, Vec<ValveDatatypeConfig>>>,
         error_rate: &f32,
     ) -> String {
-        let is_match = |datatype: &ValveDatatypeConfig| -> (bool, Option<f32>) {
+        let is_match = |datatype: &ValveDatatypeConfig| -> (bool, f32) {
             // If the datatype has no associated condition then it matches anything:
             if datatype.condition == "" {
-                return (true, None);
+                return (true, 1 as f32);
             }
             // If the SQL type is NULL this datatype is ruled out:
             if datatype.sql_type.to_lowercase() == "null" {
-                return (false, None);
+                return (false, 0 as f32);
             }
 
             // Otherwise we test the datatype condition against all of the values in the sample:
             let condition = &valve
                 .datatype_conditions
-                .get(&datatype.condition)
+                .get(&datatype.datatype)
                 .expect(&format!(
                     "Condition '{}' not found in datatype conditions",
                     datatype.condition
@@ -231,10 +238,43 @@ pub fn annotate(
             let num_values = sample.values.len();
             let num_passed = sample.values.iter().filter(|v| condition(v)).count();
             let success_rate = num_passed as f32 / num_values as f32;
-            return ((1 as f32 - success_rate) <= *error_rate, Some(success_rate));
+            return ((1 as f32 - success_rate) <= *error_rate, success_rate);
         };
 
-        String::new()
+        let tiebreak = |matches: &Vec<Match>| -> String {
+            // TODO: Implement this properly later.
+            return matches[0].datatype.to_string();
+        };
+
+        for depth in 0..dt_hierarchies.len() {
+            let datatypes_to_check = dt_hierarchies
+                .get(&depth)
+                .unwrap()
+                .iter()
+                .map(|(dt_name, dt)| dt[0].clone())
+                .collect::<Vec<_>>();
+            let mut matching_datatypes = vec![];
+            for datatype in &datatypes_to_check {
+                let (success, success_rate) = is_match(datatype);
+                if success {
+                    matching_datatypes.push(Match {
+                        datatype: datatype.datatype.to_string(),
+                        success_rate: success_rate,
+                    });
+                }
+            }
+
+            println!("Matching datatypes: {:?}", matching_datatypes);
+
+            if matching_datatypes.len() == 1 {
+                return matching_datatypes[0].datatype.to_string();
+            } else if matching_datatypes.len() > 1 {
+                return tiebreak(&matching_datatypes);
+            }
+        }
+
+        // Return an empty string if nothing is found:
+        return String::new();
     }
 
     let sample_has_nulltype = {
@@ -252,6 +292,7 @@ pub fn annotate(
     // Use the valve config to retrieve the valve datatype hierarchies:
     let dt_hierarchies = get_dt_hierarchies(&valve.config);
     sample.datatype = get_datatype(valve, &sample, &dt_hierarchies, error_rate);
+    println!("SAMPLE DT: {}", sample.datatype);
 
     // TODO: The rest ...
 }
