@@ -242,35 +242,54 @@ pub fn annotate(
         };
 
         let tiebreak = |dt_matches: &Vec<Match>| -> String {
-            //let mut in_types = vec![];
-            //let mut other_types = vec![];
+            let mut in_types = vec![];
+            let mut other_types = vec![];
             let parents = dt_matches
                 .iter()
-                .filter(|dt_match| {
-                    if let Some(dt) = valve.config.datatype.get(&dt_match.datatype) {
-                        if dt.parent != "" {
-                            true
-                        }
+                .map(
+                    |dt_match| match valve.config.datatype.get(&dt_match.datatype) {
+                        Some(dt) => dt.parent.to_string(),
+                        None => String::new(),
+                    },
+                )
+                .filter(|parent| parent != "")
+                .collect::<HashSet<_>>();
+
+            for dt in dt_matches {
+                if !parents.contains(&dt.datatype) {
+                    let dt_config = valve.config.datatype.get(&dt.datatype).expect(&format!(
+                        "Could not find datatype config for '{}'",
+                        dt.datatype
+                    ));
+                    if dt_config
+                        .condition
+                        .trim_start()
+                        .to_lowercase()
+                        .starts_with("in(")
+                    {
+                        in_types.push(dt);
+                    } else {
+                        other_types.push(dt);
                     }
-                    false
-                })
-                .collect::<Vec<_>>();
+                }
+            }
 
-            //let parents = {
-            //    let mut parents = HashSet::new();
-            //    for dt_match in dt_matches {
-            //        if let Some(dt) = valve.config.datatype.get(&dt_match.datatype) {
-            //            if dt.parent != "" {
-            //                parents.insert(dt.parent.to_string());
-            //            }
-            //        }
-            //    }
-            //    parents
-            //};
-            println!("PARENTS: {:#?}", parents);
-
-            // TODO: Implement this properly later.
-            return dt_matches[0].datatype.to_string();
+            if in_types.len() == 1 {
+                return in_types[0].datatype.to_string();
+            } else if in_types.len() > 1 {
+                in_types
+                    .sort_unstable_by(|a, b| b.success_rate.partial_cmp(&a.success_rate).unwrap());
+                return in_types[0].datatype.to_string();
+            } else if other_types.len() == 1 {
+                return other_types[0].datatype.to_string();
+            } else if other_types.len() > 1 {
+                other_types
+                    .sort_unstable_by(|a, b| b.success_rate.partial_cmp(&a.success_rate).unwrap());
+                return other_types[0].datatype.to_string();
+            } else {
+                println!("Error tiebreaking datatypes: {:#?}", dt_matches);
+                std::process::exit(1);
+            }
         };
 
         for depth in 0..dt_hierarchies.len() {
@@ -321,7 +340,7 @@ pub fn annotate(
     sample.datatype = get_datatype(valve, &sample, &dt_hierarchies, error_rate);
     println!("SAMPLE DT: {}", sample.datatype);
 
-    // TODO: The rest ...
+    // YOU ARE HERE.
 }
 
 /// TODO: Add a docstring here.
