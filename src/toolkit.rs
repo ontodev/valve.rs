@@ -635,7 +635,7 @@ pub fn read_config_files(
             None => "",
         };
         let row_options = row_options.to_lowercase();
-        let row_options = row_options.as_str().split(",").collect::<Vec<_>>();
+        let row_options = row_options.as_str().split(" ").collect::<Vec<_>>();
         let (row_options, messages) = match normalize_options(&row_options, row_number) {
             Err(e) => {
                 return Err(ValveError::ConfigError(format!(
