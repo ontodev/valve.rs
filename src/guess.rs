@@ -1,10 +1,12 @@
 //! Implementation of the column configuration guesser
 
 use fix_fn::fix_fn;
+use futures::executor::block_on;
 use indexmap::IndexMap;
 use ontodev_valve::valve::{Valve, ValveConfig, ValveDatatypeConfig};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use regex::Regex;
+use sqlx::query as sqlx_query;
 use std::collections::{HashMap, HashSet};
 
 /// TODO: Add a docstring here.
@@ -18,11 +20,17 @@ pub struct Sample {
     pub values: Vec<String>,
 }
 
-/// TODO: Add a docstring here.
 #[derive(Clone, Debug, Default)]
-pub struct Match {
+pub struct DTMatch {
     datatype: String,
     success_rate: f32,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct FCMatch {
+    table: String,
+    column: String,
+    sql_type: String,
 }
 
 /// TODO: Add a docstring here.
@@ -67,11 +75,12 @@ pub fn guess(
             println!("Annotating label '{}' ...", label);
         }
         annotate(label, sample, &valve, error_rate, i == 0);
-        // TODO: The rest ...
     }
     if verbose {
         println!("Done!");
     }
+
+    // TODO: The rest ... YOU ARE HERE.
 }
 
 /// TODO: Add docstring here.
@@ -202,6 +211,52 @@ pub fn get_dt_hierarchies(
 }
 
 /// TODO: Add a docstring here.
+pub fn get_potential_foreign_columns(valve: &Valve, datatype: &str) -> Vec<FCMatch> {
+    // TODO: Add a comment here
+    fn get_sql_type(valve: &Valve, datatype: &str) -> String {
+        match valve.config.datatype.get(datatype) {
+            None => "".to_string(),
+            Some(dt_config) => {
+                if dt_config.sql_type != "" {
+                    dt_config.sql_type.to_string()
+                } else {
+                    get_sql_type(valve, &dt_config.parent)
+                }
+            }
+        }
+    }
+
+    fn get_coarser_sql_type(valve: &Valve, datatype: &str) -> String {
+        let sql_type = get_sql_type(valve, datatype).to_lowercase();
+        if !vec!["integer", "numeric", "real"].contains(&sql_type.as_str()) {
+            return "text".to_string();
+        } else {
+            return sql_type;
+        }
+    }
+
+    let mut potential_foreign_columns = vec![];
+    let this_sql_type = get_coarser_sql_type(valve, datatype);
+    for (table, table_config) in valve.config.table.iter() {
+        if !table_config.options.contains("internal") {
+            for (column, column_config) in table_config.column.iter() {
+                if vec!["primary", "unique"].contains(&column_config.structure.as_str()) {
+                    let foreign_sql_type = get_coarser_sql_type(valve, &column_config.datatype);
+                    if foreign_sql_type == this_sql_type {
+                        potential_foreign_columns.push(FCMatch {
+                            table: table.to_string(),
+                            column: column.to_string(),
+                            sql_type: foreign_sql_type.to_string(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    potential_foreign_columns
+}
+
+/// TODO: Add a docstring here.
 pub fn annotate(
     label: &str,
     sample: &mut Sample,
@@ -241,7 +296,7 @@ pub fn annotate(
             return ((1 as f32 - success_rate) <= *error_rate, success_rate);
         };
 
-        let tiebreak = |dt_matches: &Vec<Match>| -> String {
+        let tiebreak = |dt_matches: &Vec<DTMatch>| -> String {
             let mut in_types = vec![];
             let mut other_types = vec![];
             let parents = dt_matches
@@ -277,14 +332,12 @@ pub fn annotate(
             if in_types.len() == 1 {
                 return in_types[0].datatype.to_string();
             } else if in_types.len() > 1 {
-                in_types
-                    .sort_unstable_by(|a, b| b.success_rate.partial_cmp(&a.success_rate).unwrap());
+                in_types.sort_by(|a, b| b.success_rate.partial_cmp(&a.success_rate).unwrap());
                 return in_types[0].datatype.to_string();
             } else if other_types.len() == 1 {
                 return other_types[0].datatype.to_string();
             } else if other_types.len() > 1 {
-                other_types
-                    .sort_unstable_by(|a, b| b.success_rate.partial_cmp(&a.success_rate).unwrap());
+                other_types.sort_by(|a, b| b.success_rate.partial_cmp(&a.success_rate).unwrap());
                 return other_types[0].datatype.to_string();
             } else {
                 println!("Error tiebreaking datatypes: {:#?}", dt_matches);
@@ -303,7 +356,7 @@ pub fn annotate(
             for datatype in &datatypes_to_check {
                 let (success, success_rate) = is_match(datatype);
                 if success {
-                    matching_datatypes.push(Match {
+                    matching_datatypes.push(DTMatch {
                         datatype: datatype.datatype.to_string(),
                         success_rate: success_rate,
                     });
@@ -323,6 +376,53 @@ pub fn annotate(
         return String::new();
     }
 
+    // TODO: Add a comment here:
+    fn get_froms(
+        valve: &Valve,
+        sample: &Sample,
+        potential_foreign_columns: &Vec<FCMatch>,
+        error_rate: &f32,
+    ) -> Vec<String> {
+        // Regular expression to check for numbers:
+        let re = Regex::new(r"^-?\d+(\.\d+)?$").unwrap();
+        let mut candidate_froms = vec![];
+        for foreign in potential_foreign_columns {
+            let mut num_matches = 0;
+            let mut num_values = sample.values.len();
+            for value in &sample.values {
+                if sample.nulltype == "empty" && value == "" {
+                    // If this value is legitimately empty then it should not be taken into account
+                    // when counting the number of values in the target that are found in the
+                    // candidate foreign column:
+                    num_values -= 1;
+                    continue;
+                }
+                if foreign.sql_type != "text" && !re.is_match(value) {
+                    // If this value is of the wrong type then there is no need to explicitly check
+                    // if it exists in the foreign column:
+                    continue;
+                }
+                let value = {
+                    if foreign.sql_type == "text" {
+                        format!("'{}'", value)
+                    } else {
+                        value.to_string()
+                    }
+                };
+                let sql = format!(
+                    r#"SELECT 1 FROM "{}" WHERE "{}" = {} LIMIT 1"#,
+                    foreign.table, foreign.column, value
+                );
+                let query = sqlx_query(&sql);
+                num_matches += block_on(query.fetch_all(&valve.pool)).unwrap().len();
+                if ((num_values as f32 - num_matches as f32) / num_values as f32) < *error_rate {
+                    candidate_froms.push(format!("from({}.{})", foreign.table, foreign.column))
+                }
+            }
+        }
+        candidate_froms
+    }
+
     let sample_has_nulltype = {
         let num_values = sample.values.len();
         let num_empties = sample.values.iter().filter(|v| *v == "").count();
@@ -338,9 +438,45 @@ pub fn annotate(
     // Use the valve config to retrieve the valve datatype hierarchies:
     let dt_hierarchies = get_dt_hierarchies(&valve.config);
     sample.datatype = get_datatype(valve, &sample, &dt_hierarchies, error_rate);
-    println!("SAMPLE DT: {}", sample.datatype);
+    //println!("SAMPLE DT FOR LABEL: {}: {:#?}", label, sample);
 
-    // YOU ARE HERE.
+    // Use the valve config to get a list of columns already loaded to the database, then compare
+    // the contents of each column with the contents of the sampled column and possibly annotate
+    // the sample with a from() structure, if there is one and only candidate from().
+    let potential_foreign_columns = get_potential_foreign_columns(valve, &sample.datatype);
+    //println!("FCMatches: {:#?}", potential_foreign_columns);
+    let froms = get_froms(valve, sample, &potential_foreign_columns, error_rate);
+    //println!("FROMS: {:#?}", froms);
+    if froms.len() >= 1 {
+        if froms.len() > 1 {
+            println!(
+                "Warning: Column '{}' has multiple from() candidates: {:?}",
+                label, froms
+            );
+        }
+        sample.structure = froms[0].to_string();
+    }
+
+    // Check if the column is a unique/primary column:
+    if sample.structure == "" && sample.nulltype == "" {
+        let sample_has_duplicates = {
+            // Ignore empties:
+            let distinct_values = sample
+                .values
+                .iter()
+                .filter(|v| *v != "")
+                .collect::<HashSet<_>>();
+            (sample.values.len() as f32 - distinct_values.len() as f32)
+                > (error_rate * sample.values.len() as f32)
+        };
+        if !sample_has_duplicates {
+            if is_primary_candidate {
+                sample.structure = "primary".to_string();
+            } else {
+                sample.structure = "unique".to_string();
+            }
+        }
+    }
 }
 
 /// TODO: Add a docstring here.
