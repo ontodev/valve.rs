@@ -183,11 +183,9 @@ pub fn guess(
             println!("Not writing updated configuration to the database.");
             std::process::exit(1);
         }
-
-        println!("Updating table configuration in database ...");
-
-        // YOU ARE HERE.
     }
+
+    println!("Updating table configuration in database ...");
 
     // TODO: The rest ... YOU ARE HERE.
 }
