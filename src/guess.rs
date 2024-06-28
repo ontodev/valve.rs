@@ -4,28 +4,37 @@ use fix_fn::fix_fn;
 use futures::executor::block_on;
 use indexmap::IndexMap;
 use ontodev_valve::valve::{Valve, ValveConfig, ValveDatatypeConfig};
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use pad::{Alignment, PadStr};
+use rand::{distributions, rngs::StdRng, Rng, SeedableRng};
 use regex::Regex;
 use sqlx::query as sqlx_query;
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    fs::File,
+};
 
 /// TODO: Add a docstring here.
-// TODO: We probably don't need Debug here.
+// TODO: Remove Debug if not needed.
 #[derive(Clone, Debug, Default)]
 pub struct Sample {
     pub normalized: String,
     pub nulltype: String,
     pub datatype: String,
     pub structure: String,
+    pub description: String,
     pub values: Vec<String>,
 }
 
+/// TODO: Add a docstring here.
+// TODO: Remove Debug if not needed.
 #[derive(Clone, Debug, Default)]
 pub struct DTMatch {
     datatype: String,
     success_rate: f32,
 }
 
+/// TODO: Add a docstring here.
+// TODO: Remove Debug if not needed.
 #[derive(Clone, Debug, Default)]
 pub struct FCMatch {
     table: String,
@@ -41,6 +50,7 @@ pub fn guess(
     seed: &Option<u64>,
     sample_size: &usize,
     error_rate: &f32,
+    assume_yes: bool,
 ) {
     // If a seed was provided, use it to create the random number generator instead of
     // creating it using fresh entropy:
@@ -69,7 +79,6 @@ pub fn guess(
         );
     }
     let mut samples = get_random_samples(table_tsv, *sample_size, &mut rng);
-    //println!("RANDOM SAMPLES: {:#?}", samples);
     for (i, (label, sample)) in samples.iter_mut().enumerate() {
         if verbose {
             println!("Annotating label '{}' ...", label);
@@ -78,6 +87,106 @@ pub fn guess(
     }
     if verbose {
         println!("Done!");
+    }
+
+    //println!("SAMPLES: {:#?}", samples);
+    let required_table_table_headers = vec![
+        "table".to_string(),
+        "path".to_string(),
+        "type".to_string(),
+        "description".to_string(),
+    ];
+    let required_column_table_headers = vec![
+        "table".to_string(),
+        "column".to_string(),
+        "label".to_string(),
+        "nulltype".to_string(),
+        "datatype".to_string(),
+        "structure".to_string(),
+        "description".to_string(),
+    ];
+
+    if !assume_yes {
+        fn get_col_width(data: &Vec<Vec<String>>) -> usize {
+            let col_width = data
+                .iter()
+                .map(|row| {
+                    row.iter()
+                        .map(|column| column.len())
+                        .max()
+                        .expect(&format!("Could not determine longest word in {:?}", row))
+                })
+                .max()
+                .expect(&format!("Could not determine longest word in {:?}", data));
+            // We add +2 for padding:
+            col_width + 2
+        }
+
+        println!("\nThe following row will be inserted to \"table\":");
+        let data = vec![
+            required_table_table_headers,
+            vec![
+                format!("{}", table),
+                format!("{}", table_tsv),
+                "".to_string(),
+                "".to_string(),
+            ],
+        ];
+        let col_width = get_col_width(&data);
+        for row in &data {
+            for word in row {
+                print!(
+                    "{}",
+                    word.pad_to_width_with_alignment(col_width, Alignment::Left)
+                );
+            }
+            println!("");
+        }
+
+        println!("");
+
+        println!("The following row will be inserted to \"column\":");
+        let mut data = vec![required_column_table_headers];
+        for (label, sample) in &samples {
+            let row = vec![
+                format!("{}", table),
+                format!("{}", sample.normalized),
+                format!("{}", {
+                    if *label != sample.normalized {
+                        label
+                    } else {
+                        ""
+                    }
+                }),
+                format!("{}", sample.nulltype),
+                format!("{}", sample.datatype),
+                format!("{}", sample.structure),
+                format!("{}", sample.description),
+            ];
+            data.push(row);
+        }
+        let col_width = get_col_width(&data);
+        for row in &data {
+            for word in row {
+                print!(
+                    "{}",
+                    word.pad_to_width_with_alignment(col_width, Alignment::Left)
+                );
+            }
+            println!("");
+        }
+
+        println!("");
+
+        print!("Do you want to write this updated configuration to the database? [y/N] ");
+        if !proceed::proceed() {
+            println!("Not writing updated configuration to the database.");
+            std::process::exit(1);
+        }
+
+        println!("Updating table configuration in database ...");
+
+        // YOU ARE HERE.
     }
 
     // TODO: The rest ... YOU ARE HERE.
@@ -340,8 +449,7 @@ pub fn annotate(
                 other_types.sort_by(|a, b| b.success_rate.partial_cmp(&a.success_rate).unwrap());
                 return other_types[0].datatype.to_string();
             } else {
-                println!("Error tiebreaking datatypes: {:#?}", dt_matches);
-                std::process::exit(1);
+                panic!("Error tiebreaking datatypes: {:#?}", dt_matches);
             }
         };
 
@@ -500,19 +608,20 @@ pub fn get_random_samples(
         if total_rows <= sample_size {
             (0..total_rows - 1).collect::<Vec<_>>()
         } else {
-            let mut samples = rng
-                .sample_iter(rand::distributions::Uniform::new(0, total_rows - 1))
+            let mut sample_row_numbers = rng
+                .sample_iter(distributions::Uniform::new(0, total_rows - 1))
                 .take(sample_size)
                 .collect::<Vec<_>>();
             // We call sort here since, when we collect the actual sample rows, we will be
             // using an iterator over the rows which we will need to consume in an ordered way.
-            samples.sort();
-            samples
+            sample_row_numbers.sort();
+            sample_row_numbers
         }
     };
 
-    // Create a CSV reader:
-    let mut rdr = match std::fs::File::open(table_tsv) {
+    // Create a CSV reader. We set has_headers to false even though the file does have headers,
+    // since we are going to be reading them explicitly.
+    let mut rdr = match File::open(table_tsv) {
         Err(e) => panic!("Unable to open '{}': {}", table_tsv, e),
         Ok(table_file) => csv::ReaderBuilder::new()
             .has_headers(false)
@@ -550,7 +659,7 @@ pub fn get_random_samples(
                 .collect::<Vec<_>>()
         };
         for (i, label) in headers.iter().enumerate() {
-            // If samples doesn't already contain an entry for this label, add one:
+            // If samples doesn't already contain an entry for this label, initialize and add one:
             if !samples.contains_key(label) {
                 let ncolumn = {
                     let mut ncolumn = pattern.replace_all(label, "_").to_lowercase();
@@ -562,11 +671,10 @@ pub fn get_random_samples(
                     }
                     for (_label, sample) in samples.iter() {
                         if sample.normalized == ncolumn {
-                            eprintln!(
+                            panic!(
                                 "The data has more than one column with the normalized name {}",
                                 ncolumn
                             );
-                            std::process::exit(1);
                         }
                     }
                     ncolumn

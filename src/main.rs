@@ -345,6 +345,7 @@ async fn main() -> Result<()> {
                 seed,
                 sample_size,
                 error_rate,
+                *yes,
             );
         }
         Commands::TestApi {
