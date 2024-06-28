@@ -122,6 +122,18 @@ pub fn guess(
             col_width + 2
         }
 
+        fn print_data(data: &Vec<Vec<String>>, col_width: usize) {
+            for row in data {
+                for word in row {
+                    print!(
+                        "{}",
+                        word.pad_to_width_with_alignment(col_width, Alignment::Left)
+                    );
+                }
+                println!("");
+            }
+        }
+
         println!("\nThe following row will be inserted to \"table\":");
         let data = vec![
             required_table_table_headers,
@@ -133,15 +145,7 @@ pub fn guess(
             ],
         ];
         let col_width = get_col_width(&data);
-        for row in &data {
-            for word in row {
-                print!(
-                    "{}",
-                    word.pad_to_width_with_alignment(col_width, Alignment::Left)
-                );
-            }
-            println!("");
-        }
+        print_data(&data, col_width);
 
         println!("");
 
@@ -166,15 +170,7 @@ pub fn guess(
             data.push(row);
         }
         let col_width = get_col_width(&data);
-        for row in &data {
-            for word in row {
-                print!(
-                    "{}",
-                    word.pad_to_width_with_alignment(col_width, Alignment::Left)
-                );
-            }
-            println!("");
-        }
+        print_data(&data, col_width);
 
         println!("");
 
