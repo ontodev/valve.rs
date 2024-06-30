@@ -7,7 +7,7 @@ use ontodev_valve::valve::{Valve, ValveConfig, ValveDatatypeConfig};
 use pad::{Alignment, PadStr};
 use rand::{distributions, rngs::StdRng, Rng, SeedableRng};
 use regex::Regex;
-use sqlx::query as sqlx_query;
+use sqlx::{any::AnyRow, query as sqlx_query, Row, ValueRef};
 use std::{
     collections::{HashMap, HashSet},
     fs::File,
@@ -136,7 +136,7 @@ pub fn guess(
 
         println!("\nThe following row will be inserted to \"table\":");
         let data = vec![
-            required_table_table_headers,
+            required_table_table_headers.clone(),
             vec![
                 format!("{}", table),
                 format!("{}", table_tsv),
@@ -182,6 +182,33 @@ pub fn guess(
     }
 
     println!("Updating table configuration in database ...");
+    let row_number = {
+        let sql = r#"SELECT MAX("row_number") AS "row_number" FROM "table""#;
+        let query = sqlx_query(&sql);
+        let result = block_on(query.fetch_one(&valve.pool))
+            .expect(&format!("Error executing SQL: '{}'", sql));
+        let raw_row_number = result
+            .try_get_raw("row_number")
+            .expect("Error retrieving row_number");
+        let row_number = if raw_row_number.is_null() {
+            0 as i64
+        } else {
+            result.get("row_number")
+        };
+        (row_number + 1) as u32
+    };
+    let sql = {
+        let column_names = &required_table_table_headers
+            .iter()
+            .map(|h| format!(r#""{}""#, h))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            r#"INSERT INTO "table" ("row_number", {}) VALUES ({}, '{}', '{}', NULL, NULL)"#,
+            column_names, row_number, table, table_tsv
+        )
+    };
+    println!("SQL: {}", sql);
 
     // TODO: The rest ... YOU ARE HERE.
 }
