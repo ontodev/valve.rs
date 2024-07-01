@@ -1,9 +1,9 @@
 //! Implementation of the column configuration guesser
 
+use crate::valve::{Valve, ValveConfig, ValveDatatypeConfig};
 use fix_fn::fix_fn;
 use futures::executor::block_on;
 use indexmap::IndexMap;
-use ontodev_valve::valve::{Valve, ValveConfig, ValveDatatypeConfig};
 use pad::{Alignment, PadStr};
 use rand::{distributions, rngs::StdRng, Rng, SeedableRng};
 use regex::Regex;
@@ -707,6 +707,7 @@ pub fn annotate(
 /// random number generator. The sample is returned in the form of an index map with entries for
 /// every column, mapping column labels to the sample values for each column. For instance if
 /// sample_size is 3 and the column names are foo and bar, the map returned will look like:
+/// ```
 /// {
 ///   "foo": Sample {
 ///            values: [value1, value2, value3]
@@ -717,6 +718,7 @@ pub fn annotate(
 ///            [other fields ...],
 ///          },
 /// }
+/// ```
 pub fn get_random_samples(
     table_tsv: &str,
     sample_size: usize,

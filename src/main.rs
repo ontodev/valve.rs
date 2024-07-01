@@ -1,14 +1,10 @@
-mod guess;
 mod tests;
 
-use crate::{
-    guess::guess,
-    tests::{run_api_tests, run_dt_hierarchy_tests},
-};
+use crate::tests::{run_api_tests, run_dt_hierarchy_tests};
 use anyhow::Result;
 use clap::{ArgAction, Parser, Subcommand};
 use futures::executor::block_on;
-use ontodev_valve::valve::Valve;
+use ontodev_valve::{guess::guess, valve::Valve};
 
 // Help strings that are used in more than one subcommand:
 static SOURCE_HELP: &str = "The location of a TSV file, representing the 'table' table, \
