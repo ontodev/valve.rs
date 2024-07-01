@@ -13,9 +13,8 @@ use std::{
     fs::File,
 };
 
-/// TODO: Add a docstring here.
-// TODO: Remove Debug if not needed.
-#[derive(Clone, Debug, Default)]
+/// Represents a sample of values from a given column
+#[derive(Default)]
 pub struct Sample {
     pub normalized: String,
     pub nulltype: String,
@@ -25,24 +24,26 @@ pub struct Sample {
     pub values: Vec<String>,
 }
 
-/// TODO: Add a docstring here.
-// TODO: Remove Debug if not needed.
-#[derive(Clone, Debug, Default)]
+/// Represents a datatype match.
+#[derive(Debug)]
 pub struct DTMatch {
-    datatype: String,
-    success_rate: f32,
+    pub datatype: String,
+    pub success_rate: f32,
 }
 
-/// TODO: Add a docstring here.
-// TODO: Remove Debug if not needed.
-#[derive(Clone, Debug, Default)]
+/// Represents a foreign key column match
 pub struct FCMatch {
-    table: String,
-    column: String,
-    sql_type: String,
+    pub table: String,
+    pub column: String,
+    pub sql_type: String,
 }
 
-/// TODO: Add a docstring here.
+/// Given a valve instance and a tsv file containing the contents of a table, draw random samples
+/// of size `sample_size` from the table using the given random number generation seed, and use
+/// them, while considering the given error rate that should be tolerated, to try and guess the
+/// table and column configuration for the given table. If `verbose` is set to true progress
+/// messages will be written to STDOUT. if `assume_yes` is set to true the guessed configuration
+/// will be written to the database immediately without prompting the user.
 pub fn guess(
     valve: &Valve,
     verbose: bool,
@@ -52,26 +53,6 @@ pub fn guess(
     error_rate: &f32,
     assume_yes: bool,
 ) {
-    // Returns the largest row number in the given configured table:
-    fn get_max_row_number_from_table(valve: &Valve, table: &str) -> u32 {
-        let sql = format!(
-            r#"SELECT MAX("row_number") AS "row_number" FROM "{}""#,
-            table
-        );
-        let query = sqlx_query(&sql);
-        let result = block_on(query.fetch_one(&valve.pool))
-            .expect(&format!("Error executing SQL: '{}'", sql));
-        let raw_row_number = result
-            .try_get_raw("row_number")
-            .expect("Error retrieving row_number");
-        let row_number = if raw_row_number.is_null() {
-            0 as i64
-        } else {
-            result.get("row_number")
-        };
-        (row_number + 1) as u32
-    }
-
     // If a seed was provided, use it to create the random number generator instead of
     // creating it using fresh entropy:
     let mut rng = match seed {
@@ -92,19 +73,19 @@ pub fn guess(
             table_tsv
         ));
 
-    // Collect the random sample from the tsv file:
+    // Collect the random data samples from the tsv file:
     if verbose {
         println!(
-            "Getting random sample of {} rows from {} ...",
+            "Getting {} random samples of rows from {} ...",
             sample_size, table_tsv
         );
     }
     let mut samples = get_random_samples(table_tsv, *sample_size, &mut rng);
 
-    // Annotate the sample data:
+    // Annotate the samples:
     for (i, (label, sample)) in samples.iter_mut().enumerate() {
         if verbose {
-            println!("Annotating label '{}' ...", label);
+            println!("Annotating sample for label '{}' ...", label);
         }
         annotate(label, sample, &valve, error_rate, i == 0);
     }
@@ -124,6 +105,7 @@ pub fn guess(
     ];
 
     if !assume_yes {
+        // Given tabular data, find the longest cell and return its length.
         fn get_col_width(data: &Vec<Vec<String>>) -> usize {
             let col_width = data
                 .iter()
@@ -139,6 +121,7 @@ pub fn guess(
             col_width + 2
         }
 
+        // Given tabular data, print it to the console using the given column width.
         fn print_data(data: &Vec<Vec<String>>, col_width: usize) {
             for row in data {
                 for word in row {
@@ -202,6 +185,26 @@ pub fn guess(
             println!("Not writing updated configuration to the database.");
             std::process::exit(1);
         }
+    }
+
+    // Returns the largest row number in the given configured table:
+    fn get_max_row_number_from_table(valve: &Valve, table: &str) -> u32 {
+        let sql = format!(
+            r#"SELECT MAX("row_number") AS "row_number" FROM "{}""#,
+            table
+        );
+        let query = sqlx_query(&sql);
+        let result = block_on(query.fetch_one(&valve.pool))
+            .expect(&format!("Error executing SQL: '{}'", sql));
+        let raw_row_number = result
+            .try_get_raw("row_number")
+            .expect("Error retrieving row_number");
+        let row_number = if raw_row_number.is_null() {
+            0 as i64
+        } else {
+            result.get("row_number")
+        };
+        (row_number + 1) as u32
     }
 
     // Table configuration
@@ -288,179 +291,6 @@ pub fn guess(
     }
 }
 
-/// TODO: Add docstring here.
-pub fn get_hierarchy_for_dt(
-    config: &ValveConfig,
-    primary_dt_name: &str,
-) -> Vec<ValveDatatypeConfig> {
-    let get_parents = fix_fn!(|get_parents, dt_name: &str| -> Vec<ValveDatatypeConfig> {
-        let mut datatypes = vec![];
-        if dt_name != "" {
-            let datatype = config
-                .datatype
-                .get(dt_name)
-                .expect(&format!("'{}' not found in datatype config", dt_name));
-            if datatype.datatype != primary_dt_name {
-                datatypes.push(datatype.clone())
-            }
-            datatypes.append(&mut get_parents(&datatype.parent));
-        }
-        datatypes
-    });
-
-    let mut hierarchy_for_dt = vec![config.datatype.get(primary_dt_name).unwrap().clone()];
-    hierarchy_for_dt.append(&mut get_parents(primary_dt_name));
-    hierarchy_for_dt
-}
-
-/// TODO: Add docstring here.
-pub fn get_dt_hierarchies(
-    config: &ValveConfig,
-) -> HashMap<usize, HashMap<String, Vec<ValveDatatypeConfig>>> {
-    // Returns datatype hierarchies, from the given collections of datatype hierachies and
-    // universal datatypes, that are deeper in the hierarchy than `depth`.
-    fn get_higher_datatypes(
-        dt_hierarchies: &HashMap<usize, HashMap<String, Vec<ValveDatatypeConfig>>>,
-        universals: &HashMap<String, Vec<ValveDatatypeConfig>>,
-        depth: usize,
-    ) -> HashMap<String, Vec<ValveDatatypeConfig>> {
-        let current_datatypes = dt_hierarchies
-            .get(&depth)
-            .and_then(|d| {
-                Some(
-                    d.keys()
-                        //.cloned()
-                        .collect::<Vec<_>>(),
-                )
-            })
-            .unwrap_or(vec![]);
-        let mut higher_datatypes = HashMap::new();
-        if !current_datatypes.is_empty() {
-            let universals = universals.keys().collect::<Vec<_>>();
-            let lower_datatypes = {
-                let mut lower_datatypes = vec![];
-                for i in 0..depth {
-                    lower_datatypes.append(
-                        &mut dt_hierarchies
-                            .get(&i)
-                            .and_then(|d| {
-                                Some(
-                                    d.keys()
-                                        //.cloned()
-                                        .collect::<Vec<_>>(),
-                                )
-                            })
-                            .unwrap_or(vec![]),
-                    );
-                }
-                lower_datatypes
-            };
-            for (_dt_name, dt_hierarchy) in dt_hierarchies
-                .get(&depth)
-                .expect(&format!("No datatype hierarchies at depth: {}", depth,))
-                .iter()
-            {
-                if dt_hierarchy.len() > 1 {
-                    let parent_hierarchy = &dt_hierarchy[1..];
-                    let parent = &parent_hierarchy[0].datatype;
-                    if !current_datatypes.contains(&&parent)
-                        && !lower_datatypes.contains(&&parent)
-                        && !universals.contains(&&parent)
-                    {
-                        higher_datatypes.insert(parent.to_string(), parent_hierarchy.to_vec());
-                    }
-                }
-            }
-        }
-        higher_datatypes
-    }
-
-    let dt_names = config.datatype.keys().collect::<Vec<_>>();
-    let mut dt_hierarchies = HashMap::from([(0, HashMap::new())]);
-    let mut universals = HashMap::new();
-    for dt_name in &dt_names {
-        // Check if this datatype has any children:
-        if dt_names
-            .iter()
-            .filter(|child| &config.datatype.get(**child).unwrap().parent == *dt_name)
-            .collect::<Vec<_>>()
-            .is_empty()
-        {
-            // Add all leaf datatypes (i.e., those without children) to dt_hierarchies at 0 depth:
-            dt_hierarchies
-                .get_mut(&0)
-                .unwrap()
-                .insert(dt_name.to_string(), get_hierarchy_for_dt(config, dt_name));
-        } else if config
-            .datatype
-            .get(*dt_name)
-            .expect(&format!("'{}' not found in datatype config", dt_name))
-            .parent
-            == ""
-            || config.datatype.get(*dt_name).unwrap().condition == ""
-        {
-            // Ungrounded and unconditioned datatypes go into the universals category, which are
-            // added to the top of dt_hierarchies later:
-            universals.insert(dt_name.to_string(), get_hierarchy_for_dt(config, dt_name));
-        }
-    }
-    let mut depth = 0;
-    let mut higher_dts = get_higher_datatypes(&dt_hierarchies, &universals, depth);
-    while !higher_dts.is_empty() {
-        depth += 1;
-        dt_hierarchies.insert(depth, higher_dts.clone());
-        higher_dts = get_higher_datatypes(&dt_hierarchies, &universals, depth);
-    }
-    dt_hierarchies.insert(depth + 1, universals);
-    dt_hierarchies
-}
-
-/// TODO: Add a docstring here.
-pub fn get_potential_foreign_columns(valve: &Valve, datatype: &str) -> Vec<FCMatch> {
-    // TODO: Add a comment here
-    fn get_sql_type(valve: &Valve, datatype: &str) -> String {
-        match valve.config.datatype.get(datatype) {
-            None => "".to_string(),
-            Some(dt_config) => {
-                if dt_config.sql_type != "" {
-                    dt_config.sql_type.to_string()
-                } else {
-                    get_sql_type(valve, &dt_config.parent)
-                }
-            }
-        }
-    }
-
-    fn get_coarser_sql_type(valve: &Valve, datatype: &str) -> String {
-        let sql_type = get_sql_type(valve, datatype).to_lowercase();
-        if !vec!["integer", "numeric", "real"].contains(&sql_type.as_str()) {
-            return "text".to_string();
-        } else {
-            return sql_type;
-        }
-    }
-
-    let mut potential_foreign_columns = vec![];
-    let this_sql_type = get_coarser_sql_type(valve, datatype);
-    for (table, table_config) in valve.config.table.iter() {
-        if !table_config.options.contains("internal") {
-            for (column, column_config) in table_config.column.iter() {
-                if vec!["primary", "unique"].contains(&column_config.structure.as_str()) {
-                    let foreign_sql_type = get_coarser_sql_type(valve, &column_config.datatype);
-                    if foreign_sql_type == this_sql_type {
-                        potential_foreign_columns.push(FCMatch {
-                            table: table.to_string(),
-                            column: column.to_string(),
-                            sql_type: foreign_sql_type.to_string(),
-                        });
-                    }
-                }
-            }
-        }
-    }
-    potential_foreign_columns
-}
-
 /// Add annotations to the data sample indicating best guesses as to the datatype, nulltype,
 /// and structure associated with the column identified by the given label.
 pub fn annotate(
@@ -470,24 +300,28 @@ pub fn annotate(
     error_rate: &f32,
     is_primary_candidate: bool,
 ) {
-    // Guess the datatype of the column associated with the given sample:
+    // Guess the datatype of the column associated with the given sample, given the provided
+    // datatype hierarchy information:
     fn get_datatype(
         valve: &Valve,
         sample: &Sample,
         dt_hierarchies: &HashMap<usize, HashMap<String, Vec<ValveDatatypeConfig>>>,
         error_rate: &f32,
     ) -> String {
+        // Decides whether `sample` is a match for the given datatype and return true or false,
+        // as the case may be, along with the success rate when testing the datatype's condition
+        // against the sample.
         let is_match = |datatype: &ValveDatatypeConfig| -> (bool, f32) {
             // If the datatype has no associated condition then it matches anything:
             if datatype.condition == "" {
                 return (true, 1 as f32);
             }
-            // If the SQL type is NULL this datatype is ruled out:
+            // If the SQL type of the datatype is NULL then it cannot match anything:
             if datatype.sql_type.to_lowercase() == "null" {
                 return (false, 0 as f32);
             }
-
-            // Otherwise we test the datatype condition against all of the values in the sample:
+            // Otherwise we test the datatype condition against all of the values in the sample in
+            // order to decide whether the sample matches the given datatype:
             let condition = &valve
                 .datatype_conditions
                 .get(&datatype.datatype)
@@ -502,6 +336,8 @@ pub fn annotate(
             return ((1 as f32 - success_rate) <= *error_rate, success_rate);
         };
 
+        // Given a number of datatypes that match `sample`, uses a tiebreaking procedure to
+        // determine which one to use:
         let tiebreak = |dt_matches: &Vec<DTMatch>| -> String {
             let mut in_types = vec![];
             let mut other_types = vec![];
@@ -517,6 +353,8 @@ pub fn annotate(
                 .collect::<HashSet<_>>();
 
             for dt in dt_matches {
+                // We only want concrete matches, so any match that is a parent of a concrete match
+                // is ignored:
                 if !parents.contains(&dt.datatype) {
                     let dt_config = valve.config.datatype.get(&dt.datatype).expect(&format!(
                         "Could not find datatype config for '{}'",
@@ -535,15 +373,13 @@ pub fn annotate(
                 }
             }
 
-            if in_types.len() == 1 {
-                return in_types[0].datatype.to_string();
-            } else if in_types.len() > 1 {
+            // Datatypes whose condition is of the form "in(...)" are preferred over other
+            // datatypes:
+            if in_types.len() >= 1 {
                 in_types
                     .sort_unstable_by(|a, b| b.success_rate.partial_cmp(&a.success_rate).unwrap());
                 return in_types[0].datatype.to_string();
-            } else if other_types.len() == 1 {
-                return other_types[0].datatype.to_string();
-            } else if other_types.len() > 1 {
+            } else if other_types.len() >= 1 {
                 other_types
                     .sort_unstable_by(|a, b| b.success_rate.partial_cmp(&a.success_rate).unwrap());
                 return other_types[0].datatype.to_string();
@@ -552,6 +388,11 @@ pub fn annotate(
             }
         };
 
+        // For each level in the datatype hierachy, check whether one of the datatypes at that
+        // level is a good match for the sample, and if so add it to the list of matching datatypes
+        // found for that level. If any matching datatypes are found then return the best match,
+        // determined in accordance with a tiebreaking procedure (see above) in the case where there
+        // is more than one.
         for depth in 0..dt_hierarchies.len() {
             let datatypes_to_check = dt_hierarchies
                 .get(&depth)
@@ -581,8 +422,185 @@ pub fn annotate(
         return String::new();
     }
 
-    // TODO: Add a comment here:
-    fn get_froms(
+    // Uses the given valve config to get a list of the columns, other than those belonging to
+    // internal tables, which have a primary or unique key constraint and whose datatype is
+    // compatible with the given datatype.
+    fn get_potential_foreign_columns(valve: &Valve, datatype: &str) -> Vec<FCMatch> {
+        // Maps a given datatype name to its corresponding SQL type.
+        fn get_sql_type(valve: &Valve, datatype: &str) -> String {
+            match valve.config.datatype.get(datatype) {
+                None => "".to_string(),
+                Some(dt_config) => {
+                    if dt_config.sql_type != "" {
+                        dt_config.sql_type.to_string()
+                    } else {
+                        get_sql_type(valve, &dt_config.parent)
+                    }
+                }
+            }
+        }
+
+        // Gets the SQL type corresponding to the given datatype, then further maps the result as
+        // follows:
+        //   'integer' -> 'integer'
+        //   'numeric' -> 'numeric'
+        //   'real' -> 'real'
+        //   everything else -> 'text'
+        fn get_coarser_sql_type(valve: &Valve, datatype: &str) -> String {
+            let sql_type = get_sql_type(valve, datatype).to_lowercase();
+            if !vec!["integer", "numeric", "real"].contains(&sql_type.as_str()) {
+                return "text".to_string();
+            } else {
+                return sql_type;
+            }
+        }
+
+        let mut potential_foreign_columns = vec![];
+        let this_sql_type = get_coarser_sql_type(valve, datatype);
+        for (table, table_config) in valve.config.table.iter() {
+            if !table_config.options.contains("internal") {
+                for (column, column_config) in table_config.column.iter() {
+                    if vec!["primary", "unique"].contains(&column_config.structure.as_str()) {
+                        let foreign_sql_type = get_coarser_sql_type(valve, &column_config.datatype);
+                        if foreign_sql_type == this_sql_type {
+                            potential_foreign_columns.push(FCMatch {
+                                table: table.to_string(),
+                                column: column.to_string(),
+                                sql_type: foreign_sql_type.to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        potential_foreign_columns
+    }
+
+    // Given a Valve configuration, return a representation of the datatype hierarchy in the
+    // following form:
+    // {0: {'dt_name_1': [valve_datatype_config_a, valve_datatype_config_b, ...],
+    //      ...
+    //      'dt_name_n': [...]},
+    //  1: {...}
+    //  ...
+    // }
+    fn get_dt_hierarchies(
+        config: &ValveConfig,
+    ) -> HashMap<usize, HashMap<String, Vec<ValveDatatypeConfig>>> {
+        // Given a datatype, return its hierarchy in the form of a vector of datatype names ordered
+        // from the least to the most generic.
+        fn get_hierarchy_for_dt(
+            config: &ValveConfig,
+            primary_dt_name: &str,
+        ) -> Vec<ValveDatatypeConfig> {
+            let get_parents = fix_fn!(|get_parents, dt_name: &str| -> Vec<ValveDatatypeConfig> {
+                let mut datatypes = vec![];
+                if dt_name != "" {
+                    let datatype = config
+                        .datatype
+                        .get(dt_name)
+                        .expect(&format!("'{}' not found in datatype config", dt_name));
+                    if datatype.datatype != primary_dt_name {
+                        datatypes.push(datatype.clone())
+                    }
+                    datatypes.append(&mut get_parents(&datatype.parent));
+                }
+                datatypes
+            });
+            let mut hierarchy_for_dt = vec![config.datatype.get(primary_dt_name).unwrap().clone()];
+            hierarchy_for_dt.append(&mut get_parents(primary_dt_name));
+            hierarchy_for_dt
+        }
+
+        // Returns datatype hierarchies, from the given collections of datatype hierachies and
+        // universal datatypes, that are deeper in the hierarchy than `depth`.
+        fn get_higher_datatypes(
+            dt_hierarchies: &HashMap<usize, HashMap<String, Vec<ValveDatatypeConfig>>>,
+            universals: &HashMap<String, Vec<ValveDatatypeConfig>>,
+            depth: usize,
+        ) -> HashMap<String, Vec<ValveDatatypeConfig>> {
+            let datatypes_at_depth = dt_hierarchies
+                .get(&depth)
+                .and_then(|d| Some(d.keys().collect::<Vec<_>>()))
+                .unwrap_or(vec![]);
+            let mut higher_datatypes = HashMap::new();
+            if !datatypes_at_depth.is_empty() {
+                let universals = universals.keys().collect::<Vec<_>>();
+                let lower_datatypes = {
+                    let mut lower_datatypes = vec![];
+                    for i in 0..depth {
+                        lower_datatypes.append(
+                            &mut dt_hierarchies
+                                .get(&i)
+                                .and_then(|d| Some(d.keys().collect::<Vec<_>>()))
+                                .unwrap_or(vec![]),
+                        );
+                    }
+                    lower_datatypes
+                };
+                for (_dt_name, dt_hierarchy) in dt_hierarchies
+                    .get(&depth)
+                    .expect(&format!("No datatype hierarchies at depth: {}", depth,))
+                    .iter()
+                {
+                    if dt_hierarchy.len() > 1 {
+                        let parent_hierarchy = &dt_hierarchy[1..];
+                        let parent = &parent_hierarchy[0].datatype;
+                        if !datatypes_at_depth.contains(&&parent)
+                            && !lower_datatypes.contains(&&parent)
+                            && !universals.contains(&&parent)
+                        {
+                            higher_datatypes.insert(parent.to_string(), parent_hierarchy.to_vec());
+                        }
+                    }
+                }
+            }
+            higher_datatypes
+        }
+
+        let all_dt_names = config.datatype.keys().collect::<Vec<_>>();
+        let mut dt_hierarchies = HashMap::from([(0, HashMap::new())]);
+        let mut universals = HashMap::new();
+        for dt_name in &all_dt_names {
+            if all_dt_names
+                .iter()
+                .filter(|child| &config.datatype.get(**child).unwrap().parent == *dt_name)
+                .collect::<Vec<_>>()
+                .is_empty()
+            {
+                // Add all leaf datatypes (i.e., those without children) to dt_hierarchies at 0 depth:
+                dt_hierarchies
+                    .get_mut(&0)
+                    .unwrap()
+                    .insert(dt_name.to_string(), get_hierarchy_for_dt(config, dt_name));
+            } else if config
+                .datatype
+                .get(*dt_name)
+                .expect(&format!("'{}' not found in datatype config", dt_name))
+                .parent
+                == ""
+                || config.datatype.get(*dt_name).unwrap().condition == ""
+            {
+                // Ungrounded and unconditioned datatypes go into the universals category, which are
+                // added to the top of dt_hierarchies later:
+                universals.insert(dt_name.to_string(), get_hierarchy_for_dt(config, dt_name));
+            }
+        }
+        let mut depth = 0;
+        let mut higher_dts = get_higher_datatypes(&dt_hierarchies, &universals, depth);
+        while !higher_dts.is_empty() {
+            depth += 1;
+            dt_hierarchies.insert(depth, higher_dts);
+            higher_dts = get_higher_datatypes(&dt_hierarchies, &universals, depth);
+        }
+        dt_hierarchies.insert(depth + 1, universals);
+        dt_hierarchies
+    }
+
+    // Checks a list of potential foreign columns against the given sample, and return those
+    // columns from the list that are a good enough match, taking into consideration the given
+    // acceptable error rate.
+    fn get_candidate_froms(
         valve: &Valve,
         sample: &Sample,
         potential_foreign_columns: &Vec<FCMatch>,
@@ -604,7 +622,7 @@ pub fn annotate(
                 }
                 if foreign.sql_type != "text" && !re.is_match(value) {
                     // If this value is of the wrong type then there is no need to explicitly check
-                    // if it exists in the foreign column:
+                    // if it exists in the foreign column. It is automatically a failed match.
                     continue;
                 }
                 let value = {
@@ -619,7 +637,9 @@ pub fn annotate(
                     foreign.table, foreign.column, value
                 );
                 let query = sqlx_query(&sql);
-                num_matches += block_on(query.fetch_all(&valve.pool)).unwrap().len();
+                num_matches += block_on(query.fetch_all(&valve.pool))
+                    .expect(&format!("Error executing SQL: {}", sql))
+                    .len();
                 if ((num_values as f32 - num_matches as f32) / num_values as f32) < *error_rate {
                     candidate_froms.push(format!("from({}.{})", foreign.table, foreign.column))
                 }
@@ -640,29 +660,31 @@ pub fn annotate(
         sample.nulltype = "empty".to_string();
     }
 
-    // Use the valve config to retrieve the valve datatype hierarchies:
+    // Use the valve config to retrieve the valve datatype hierarchies and use them to guess the
+    // datatype of the sample:
     let dt_hierarchies = get_dt_hierarchies(&valve.config);
     sample.datatype = get_datatype(valve, &sample, &dt_hierarchies, error_rate);
 
-    // Use the valve config to get a list of columns already loaded to the database, then compare
-    // the contents of each column with the contents of the sampled column and possibly annotate
-    // the sample with a from() structure, if there is one and only candidate from().
+    // Use the valve config to get a list of columns that are allowed to be foreign columns for
+    // a column of the given datatype, then compare the contents of each column with the contents
+    // of the sampled column and possibly annotate the sample with a from() structure if there is
+    // one and only candidate from().
     let potential_foreign_columns = get_potential_foreign_columns(valve, &sample.datatype);
-    let froms = get_froms(valve, sample, &potential_foreign_columns, error_rate);
-    if froms.len() >= 1 {
-        if froms.len() > 1 {
-            println!(
-                "Warning: Column '{}' has multiple from() candidates: {:?}",
-                label, froms
-            );
-        }
+    let froms = get_candidate_froms(valve, sample, &potential_foreign_columns, error_rate);
+    if froms.len() == 1 {
         sample.structure = froms[0].to_string();
+    } else if froms.len() > 1 {
+        println!(
+            "Warning: Column '{}' has multiple from() candidates: {:?}. \
+             Declining to choose one.",
+            label, froms
+        );
     }
 
     // Check if the column is a unique/primary column:
     if sample.structure == "" && sample.nulltype == "" {
         let sample_has_duplicates = {
-            // Ignore empties:
+            // Ignore empties when looking for duplicates:
             let distinct_values = sample
                 .values
                 .iter()
@@ -706,7 +728,6 @@ pub fn get_random_samples(
             .expect(&format!("Error reading from {}", table_tsv))
             .lines()
             .count();
-
         // If the total number of rows in the file is smaller than sample_size then sample
         // everything, otherwise take a random sample of row_numbers from the file. The reason
         // that the range runs from 0 to (total_rows - 1) is that total_rows includes the
