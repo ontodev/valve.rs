@@ -216,7 +216,7 @@ perf_test_data: test/generate_random_test_data.py valve confirm_overwrite.sh $(p
 
 $(perf_test_db): valve perf_test_data $(perf_test_dir)/*.tsv | build $(perf_test_dir)/ontology
 	rm -f $@
-	time -p ./$< --verbose --interactive load $(perf_test_dir)/table.tsv --initial-load $@
+	time -p ./$< --verbose load $(perf_test_dir)/table.tsv --initial-load $@
 
 .PHONY: sqlite_perf_test
 sqlite_perf_test: $(perf_test_db) | test/output
@@ -224,7 +224,7 @@ sqlite_perf_test: $(perf_test_db) | test/output
 
 .PHONY: pg_perf_test
 pg_perf_test: valve $(perf_test_dir)/ontology | test/output
-	time -p ./$< --verbose --interactive load $(perf_test_dir)/table.tsv $(pg_connect_string)
+	time -p ./$< --verbose load $(perf_test_dir)/table.tsv $(pg_connect_string)
 	time -p scripts/export_messages.py $(pg_connect_string) $| $(tables_to_test)
 
 .PHONY: perf_test

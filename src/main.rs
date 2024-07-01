@@ -25,10 +25,10 @@ static SAVE_DIR_HELP: &str = "Save tables to DIR instead of to their configured 
           about = "Valve: A lightweight validation engine -- command line interface",
           long_about = None)]
 struct Cli {
-    /// Prompt the user before automatically making changes to the database that may be
-    /// required to satisfy table dependencies.
+    /// Use this option with caution. When set, Valve will not not ask the user for confirmation
+    /// before executing potentially destructive operations.
     #[arg(long, action = ArgAction::SetTrue)]
-    interactive: bool,
+    assume_yes: bool,
 
     /// Write more progress information to the terminal.
     #[arg(long, action = ArgAction::SetTrue)]
@@ -153,19 +153,9 @@ enum Commands {
               default_value_t = 0.1)]
         error_rate: f32,
 
-        #[arg(long, value_name = "SIZE", action = ArgAction::Set,
-              help = "The maximum number of values to use for in(...) datatype conditions",
-              default_value_t = 10)]
-        enum_size: usize,
-
         #[arg(long, value_name = "SEED", action = ArgAction::Set,
               help = "Use SEED for random sampling")]
         seed: Option<u64>,
-
-        #[arg(long, action = ArgAction::SetTrue,
-              help = "Do not ask for confirmation before writing suggested modifications to the \
-                      database")]
-        yes: bool,
 
         #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
         source: String,
@@ -205,11 +195,11 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // This has to be done multiple times so we declare a closure. We use a closure instead of a
-    // function so that the cli.verbose and cli.interactive fields are in scope:
+    // function so that the cli.verbose and cli.assume_yes fields are in scope:
     let build_valve = |source: &str, destination: &str| -> Result<Valve> {
         let mut valve = block_on(Valve::build(&source, &destination)).unwrap();
         valve.set_verbose(cli.verbose);
-        valve.set_interactive(cli.interactive);
+        valve.set_interactive(!cli.assume_yes);
         Ok(valve)
     };
 
@@ -329,9 +319,7 @@ async fn main() -> Result<()> {
         Commands::Guess {
             sample_size,
             error_rate,
-            enum_size,
             seed,
-            yes,
             source,
             destination,
             table_tsv,
@@ -345,7 +333,7 @@ async fn main() -> Result<()> {
                 seed,
                 sample_size,
                 error_rate,
-                *yes,
+                cli.assume_yes,
             );
         }
         Commands::TestApi {

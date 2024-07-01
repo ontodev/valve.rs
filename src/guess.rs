@@ -7,7 +7,7 @@ use ontodev_valve::valve::{Valve, ValveConfig, ValveDatatypeConfig};
 use pad::{Alignment, PadStr};
 use rand::{distributions, rngs::StdRng, Rng, SeedableRng};
 use regex::Regex;
-use sqlx::{any::AnyRow, query as sqlx_query, Row, ValueRef};
+use sqlx::{query as sqlx_query, Row, ValueRef};
 use std::{
     collections::{HashMap, HashSet},
     fs::File,
@@ -52,7 +52,7 @@ pub fn guess(
     error_rate: &f32,
     assume_yes: bool,
 ) {
-    // TODO: Add comment here:
+    // Returns the largest row number in the given configured table:
     fn get_max_row_number_from_table(valve: &Valve, table: &str) -> u32 {
         let sql = format!(
             r#"SELECT MAX("row_number") AS "row_number" FROM "{}""#,
@@ -92,6 +92,7 @@ pub fn guess(
             table_tsv
         ));
 
+    // Collect the random sample from the tsv file:
     if verbose {
         println!(
             "Getting random sample of {} rows from {} ...",
@@ -99,6 +100,8 @@ pub fn guess(
         );
     }
     let mut samples = get_random_samples(table_tsv, *sample_size, &mut rng);
+
+    // Annotate the sample data:
     for (i, (label, sample)) in samples.iter_mut().enumerate() {
         if verbose {
             println!("Annotating label '{}' ...", label);
@@ -352,7 +355,7 @@ pub fn get_dt_hierarchies(
                 }
                 lower_datatypes
             };
-            for (dt_name, dt_hierarchy) in dt_hierarchies
+            for (_dt_name, dt_hierarchy) in dt_hierarchies
                 .get(&depth)
                 .expect(&format!("No datatype hierarchies at depth: {}", depth,))
                 .iter()
@@ -534,12 +537,14 @@ pub fn annotate(
             if in_types.len() == 1 {
                 return in_types[0].datatype.to_string();
             } else if in_types.len() > 1 {
-                in_types.sort_by(|a, b| b.success_rate.partial_cmp(&a.success_rate).unwrap());
+                in_types
+                    .sort_unstable_by(|a, b| b.success_rate.partial_cmp(&a.success_rate).unwrap());
                 return in_types[0].datatype.to_string();
             } else if other_types.len() == 1 {
                 return other_types[0].datatype.to_string();
             } else if other_types.len() > 1 {
-                other_types.sort_by(|a, b| b.success_rate.partial_cmp(&a.success_rate).unwrap());
+                other_types
+                    .sort_unstable_by(|a, b| b.success_rate.partial_cmp(&a.success_rate).unwrap());
                 return other_types[0].datatype.to_string();
             } else {
                 panic!("Error tiebreaking datatypes: {:#?}", dt_matches);
@@ -551,7 +556,7 @@ pub fn annotate(
                 .get(&depth)
                 .unwrap()
                 .iter()
-                .map(|(dt_name, dt)| dt[0].clone())
+                .map(|(_dt_name, dt)| dt[0].clone())
                 .collect::<Vec<_>>();
             let mut matching_datatypes = vec![];
             for datatype in &datatypes_to_check {
@@ -675,7 +680,20 @@ pub fn annotate(
     }
 }
 
-/// TODO: Add a docstring here.
+/// Get a random sample of the data in the given table, of size `sample_size`, using `rng` as the
+/// random number generator. The sample is returned in the form of an index map with entries for
+/// every column, mapping column labels to the sample values for each column. For instance if
+/// sample_size is 3 and the column names are foo and bar, the map returned will look like:
+/// {
+///   "foo": Sample {
+///            values: [value1, value2, value3]
+///            [other fields ...],
+///          },
+///   "bar": Sample {
+///            values: [value1, value2, value3]
+///            [other fields ...],
+///          },
+/// }
 pub fn get_random_samples(
     table_tsv: &str,
     sample_size: usize,
@@ -718,7 +736,7 @@ pub fn get_random_samples(
     };
 
     // Use the CSV reader and the sample row numbers collected above to construct the random
-    // sample of rows from the file:
+    // sample of rows from the file. We begin by explicitly reading the header row:
     let mut records = rdr.records();
     let headers = records
         .next()
@@ -728,8 +746,10 @@ pub fn get_random_samples(
         .map(|s| s.to_string())
         .collect::<Vec<_>>();
 
-    // We use this pattern to normalize the labels represented by the column headers:
+    // We will use this pattern to normalize the labels represented by the column headers:
     let pattern = Regex::new(r#"[^0-9a-zA-Z_]+"#).expect("Invalid regex pattern");
+
+    // Read in the specified samples in order:
     let mut samples: IndexMap<String, Sample> = IndexMap::new();
     let mut prev_rn = None;
     for rn in &sample_row_numbers {
