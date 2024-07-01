@@ -52,6 +52,26 @@ pub fn guess(
     error_rate: &f32,
     assume_yes: bool,
 ) {
+    // TODO: Add comment here:
+    fn get_max_row_number_from_table(valve: &Valve, table: &str) -> u32 {
+        let sql = format!(
+            r#"SELECT MAX("row_number") AS "row_number" FROM "{}""#,
+            table
+        );
+        let query = sqlx_query(&sql);
+        let result = block_on(query.fetch_one(&valve.pool))
+            .expect(&format!("Error executing SQL: '{}'", sql));
+        let raw_row_number = result
+            .try_get_raw("row_number")
+            .expect("Error retrieving row_number");
+        let row_number = if raw_row_number.is_null() {
+            0 as i64
+        } else {
+            result.get("row_number")
+        };
+        (row_number + 1) as u32
+    }
+
     // If a seed was provided, use it to create the random number generator instead of
     // creating it using fresh entropy:
     let mut rng = match seed {
@@ -89,21 +109,15 @@ pub fn guess(
         println!("Done!");
     }
 
-    //println!("SAMPLES: {:#?}", samples);
-    let required_table_table_headers = vec![
-        "table".to_string(),
-        "path".to_string(),
-        "type".to_string(),
-        "description".to_string(),
-    ];
+    let required_table_table_headers = vec!["table", "path", "type", "description"];
     let required_column_table_headers = vec![
-        "table".to_string(),
-        "column".to_string(),
-        "label".to_string(),
-        "nulltype".to_string(),
-        "datatype".to_string(),
-        "structure".to_string(),
-        "description".to_string(),
+        "table",
+        "column",
+        "label",
+        "nulltype",
+        "datatype",
+        "structure",
+        "description",
     ];
 
     if !assume_yes {
@@ -136,7 +150,10 @@ pub fn guess(
 
         println!("\nThe following row will be inserted to \"table\":");
         let data = vec![
-            required_table_table_headers.clone(),
+            required_table_table_headers
+                .iter()
+                .map(|h| h.to_string())
+                .collect::<Vec<_>>(),
             vec![
                 format!("{}", table),
                 format!("{}", table_tsv),
@@ -150,7 +167,10 @@ pub fn guess(
         println!("");
 
         println!("The following row will be inserted to \"column\":");
-        let mut data = vec![required_column_table_headers];
+        let mut data = vec![required_column_table_headers
+            .iter()
+            .map(|h| h.to_string())
+            .collect::<Vec<_>>()];
         for (label, sample) in &samples {
             let row = vec![
                 format!("{}", table),
@@ -181,22 +201,11 @@ pub fn guess(
         }
     }
 
-    println!("Updating table configuration in database ...");
-    let row_number = {
-        let sql = r#"SELECT MAX("row_number") AS "row_number" FROM "table""#;
-        let query = sqlx_query(&sql);
-        let result = block_on(query.fetch_one(&valve.pool))
-            .expect(&format!("Error executing SQL: '{}'", sql));
-        let raw_row_number = result
-            .try_get_raw("row_number")
-            .expect("Error retrieving row_number");
-        let row_number = if raw_row_number.is_null() {
-            0 as i64
-        } else {
-            result.get("row_number")
-        };
-        (row_number + 1) as u32
-    };
+    // Table configuration
+    if verbose {
+        println!("Updating the table configuration in the database ...");
+    }
+    let row_number = get_max_row_number_from_table(valve, "table");
     let sql = {
         let column_names = &required_table_table_headers
             .iter()
@@ -208,9 +217,72 @@ pub fn guess(
             column_names, row_number, table, table_tsv
         )
     };
-    println!("SQL: {}", sql);
+    if verbose {
+        println!("Executing SQL: {}", sql);
+    }
+    let query = sqlx_query(&sql);
+    block_on(query.execute(&valve.pool)).expect(&format!("Error executing SQL '{}'", sql));
 
-    // TODO: The rest ... YOU ARE HERE.
+    // Column configuration
+    if verbose {
+        println!("Updating the column configuration in the database ...");
+    }
+    let mut row_number = get_max_row_number_from_table(valve, "column");
+    for (label, sample) in &samples {
+        let column_names = &required_column_table_headers
+            .iter()
+            .map(|h| format!(r#""{}""#, h))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let values = vec![
+            format!("{}", row_number),
+            format!("'{}'", table),
+            format!("'{}'", sample.normalized),
+            {
+                if *label != sample.normalized {
+                    format!("'{}'", label)
+                } else {
+                    "NULL".to_string()
+                }
+            },
+            {
+                if sample.nulltype != "" {
+                    format!("'{}'", sample.nulltype)
+                } else {
+                    "NULL".to_string()
+                }
+            },
+            format!("'{}'", sample.datatype),
+            {
+                if sample.structure != "" {
+                    format!("'{}'", sample.structure)
+                } else {
+                    "NULL".to_string()
+                }
+            },
+            {
+                if sample.description != "" {
+                    format!("'{}'", sample.description)
+                } else {
+                    "NULL".to_string()
+                }
+            },
+        ]
+        .join(", ");
+        let sql = format!(
+            r#"INSERT INTO "column" ("row_number", {}) VALUES ({})"#,
+            column_names, values
+        );
+        if verbose {
+            println!("Executing SQL: {}", sql);
+        }
+        let query = sqlx_query(&sql);
+        block_on(query.execute(&valve.pool)).expect(&format!("Error executing SQL '{}'", sql));
+        row_number += 1;
+    }
+    if verbose {
+        println!("Done!");
+    }
 }
 
 /// TODO: Add docstring here.
@@ -492,8 +564,6 @@ pub fn annotate(
                 }
             }
 
-            println!("Matching datatypes: {:?}", matching_datatypes);
-
             if matching_datatypes.len() == 1 {
                 return matching_datatypes[0].datatype.to_string();
             } else if matching_datatypes.len() > 1 {
@@ -567,15 +637,12 @@ pub fn annotate(
     // Use the valve config to retrieve the valve datatype hierarchies:
     let dt_hierarchies = get_dt_hierarchies(&valve.config);
     sample.datatype = get_datatype(valve, &sample, &dt_hierarchies, error_rate);
-    //println!("SAMPLE DT FOR LABEL: {}: {:#?}", label, sample);
 
     // Use the valve config to get a list of columns already loaded to the database, then compare
     // the contents of each column with the contents of the sampled column and possibly annotate
     // the sample with a from() structure, if there is one and only candidate from().
     let potential_foreign_columns = get_potential_foreign_columns(valve, &sample.datatype);
-    //println!("FCMatches: {:#?}", potential_foreign_columns);
     let froms = get_froms(valve, sample, &potential_foreign_columns, error_rate);
-    //println!("FROMS: {:#?}", froms);
     if froms.len() >= 1 {
         if froms.len() > 1 {
             println!(
