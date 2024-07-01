@@ -9,7 +9,7 @@ use rand::{distributions, rngs::StdRng, Rng, SeedableRng};
 use regex::Regex;
 use sqlx::{query as sqlx_query, Row, ValueRef};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     fs::File,
 };
 
@@ -461,7 +461,8 @@ pub fn get_potential_foreign_columns(valve: &Valve, datatype: &str) -> Vec<FCMat
     potential_foreign_columns
 }
 
-/// TODO: Add a docstring here.
+/// Add annotations to the data sample indicating best guesses as to the datatype, nulltype,
+/// and structure associated with the column identified by the given label.
 pub fn annotate(
     label: &str,
     sample: &mut Sample,
@@ -469,7 +470,7 @@ pub fn annotate(
     error_rate: &f32,
     is_primary_candidate: bool,
 ) {
-    // TODO: Add a comment here.
+    // Guess the datatype of the column associated with the given sample:
     fn get_datatype(
         valve: &Valve,
         sample: &Sample,
@@ -710,17 +711,15 @@ pub fn get_random_samples(
         // everything, otherwise take a random sample of row_numbers from the file. The reason
         // that the range runs from 0 to (total_rows - 1) is that total_rows includes the
         // header row, which is going to be removed in the first step below (as a result of
-        // calling next()) when the headers are read.
+        // calling next()) when the headers are read. Note also that we are using a BTreeSet so
+        // as to make sure that the elements of the set are always in sorted order.
         if total_rows <= sample_size {
-            (0..total_rows - 1).collect::<Vec<_>>()
+            (0..total_rows - 1).collect::<BTreeSet<_>>()
         } else {
-            let mut sample_row_numbers = rng
+            let sample_row_numbers = rng
                 .sample_iter(distributions::Uniform::new(0, total_rows - 1))
                 .take(sample_size)
-                .collect::<Vec<_>>();
-            // We call sort here since, when we collect the actual sample rows, we will be
-            // using an iterator over the rows which we will need to consume in an ordered way.
-            sample_row_numbers.sort();
+                .collect::<BTreeSet<_>>();
             sample_row_numbers
         }
     };
