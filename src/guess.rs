@@ -398,10 +398,9 @@ pub fn annotate(
                 .get(&depth)
                 .unwrap()
                 .iter()
-                .map(|(_dt_name, dt)| dt[0].clone())
-                .collect::<Vec<_>>();
+                .map(|(_dt_name, dt)| &dt[0]);
             let mut matching_datatypes = vec![];
-            for datatype in &datatypes_to_check {
+            for datatype in datatypes_to_check {
                 let (success, success_rate) = is_match(datatype);
                 if success {
                     matching_datatypes.push(DTMatch {
