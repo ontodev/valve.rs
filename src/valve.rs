@@ -6,8 +6,8 @@ use crate::{
     toolkit,
     toolkit::{
         add_message_counts, cast_column_sql_to_text, convert_undo_or_redo_record_to_change,
-        delete_row_tx, get_column_for_label, get_column_value, get_compiled_datatype_conditions,
-        get_compiled_rule_conditions, get_json_array_from_row, get_json_object_from_row,
+        delete_row_tx, generate_compiled_datatype_conditions, generate_compiled_rule_conditions,
+        get_column_for_label, get_column_value, get_json_array_from_row, get_json_object_from_row,
         get_label_for_column, get_parsed_structure_conditions, get_pool_from_connection_string,
         get_previous_row_tx, get_record_to_redo, get_record_to_undo, get_row_from_db,
         get_sql_for_standard_view, get_sql_for_text_view, get_sql_type,
@@ -18,7 +18,7 @@ use crate::{
     },
     validate::{validate_row_tx, validate_tree_foreign_keys, validate_under, with_tree_sql},
     valve_grammar::StartParser,
-    CHUNK_SIZE, SQL_PARAM, PRINTF_RE,
+    CHUNK_SIZE, PRINTF_RE, SQL_PARAM,
 };
 use anyhow::Result;
 use csv::{QuoteStyle, ReaderBuilder, WriterBuilder};
@@ -567,8 +567,9 @@ impl Valve {
             constraint: constraints_config,
         };
 
-        let datatype_conditions = get_compiled_datatype_conditions(&config, &parser)?;
-        let rule_conditions = get_compiled_rule_conditions(&config, &datatype_conditions, &parser)?;
+        let datatype_conditions = generate_compiled_datatype_conditions(&config, &parser)?;
+        let rule_conditions =
+            generate_compiled_rule_conditions(&config, &datatype_conditions, &parser)?;
         let structure_conditions = get_parsed_structure_conditions(&config, &parser)?;
 
         Ok(Self {

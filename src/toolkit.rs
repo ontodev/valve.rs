@@ -87,10 +87,20 @@ impl std::fmt::Debug for ParsedStructure {
     }
 }
 
+/// TODO: Add docstring here.
+#[derive(Clone, Debug)]
+pub enum ValueType {
+    /// TODO: Add docstring
+    Single,
+    /// TODO: Add docstring
+    List(String),
+}
+
 /// Represents a condition in three different ways: (i) in String format, (ii) as a parsed
 /// [Expression](ast/enum.Expression.html), and (iii) as a pre-compiled regular expression.
 #[derive(Clone)]
 pub struct CompiledCondition {
+    pub value_type: ValueType,
     pub original: String,
     pub parsed: Expression,
     pub compiled: Arc<dyn Fn(&str) -> bool + Sync + Send>,
@@ -1264,7 +1274,7 @@ pub fn read_config_files(
 /// Given the global configuration struct and a parser, compile all of the datatype conditions,
 /// add them to a hash map whose keys are the text versions of the conditions and whose values
 /// are the compiled conditions, and then finally return the hash map.
-pub fn get_compiled_datatype_conditions(
+pub fn generate_compiled_datatype_conditions(
     config: &ValveConfig,
     parser: &StartParser,
 ) -> Result<HashMap<String, CompiledCondition>> {
@@ -1292,7 +1302,7 @@ pub fn get_compiled_datatype_conditions(
 ///      ...
 /// }
 /// ```
-pub fn get_compiled_rule_conditions(
+pub fn generate_compiled_rule_conditions(
     config: &ValveConfig,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     parser: &StartParser,
@@ -3333,6 +3343,7 @@ pub fn compile_condition(
         // have to assign some closure in these cases, we use a constant closure that always
         // returns true:
         return Ok(CompiledCondition {
+            value_type: ValueType::Single,
             original: String::from(""),
             parsed: Expression::None,
             compiled: Arc::new(|_| true),
@@ -3361,6 +3372,7 @@ pub fn compile_condition(
                 if let Expression::Label(label) = &*args[0] {
                     let label = String::from(unquoted_re.replace(label, "$unquoted"));
                     return Ok(CompiledCondition {
+                        value_type: ValueType::Single,
                         original: condition.to_string(),
                         parsed: *parsed_condition.clone(),
                         compiled: Arc::new(move |x| x == label),
@@ -3384,6 +3396,7 @@ pub fn compile_condition(
                             pattern = format!("{}{}", flags, pattern);
                             let re = Regex::new(pattern.as_str())?;
                             return Ok(CompiledCondition {
+                                value_type: ValueType::Single,
                                 original: condition.to_string(),
                                 parsed: *parsed_condition.clone(),
                                 compiled: Arc::new(move |x| !re.is_match(x)),
@@ -3393,6 +3406,7 @@ pub fn compile_condition(
                             pattern = format!("^{}{}$", flags, pattern);
                             let re = Regex::new(pattern.as_str())?;
                             return Ok(CompiledCondition {
+                                value_type: ValueType::Single,
                                 original: condition.to_string(),
                                 parsed: *parsed_condition.clone(),
                                 compiled: Arc::new(move |x| re.is_match(x)),
@@ -3402,6 +3416,7 @@ pub fn compile_condition(
                             pattern = format!("{}{}", flags, pattern);
                             let re = Regex::new(pattern.as_str())?;
                             return Ok(CompiledCondition {
+                                value_type: ValueType::Single,
                                 original: condition.to_string(),
                                 parsed: *parsed_condition.clone(),
                                 compiled: Arc::new(move |x| re.is_match(x)),
@@ -3437,10 +3452,29 @@ pub fn compile_condition(
                     }
                 }
                 return Ok(CompiledCondition {
+                    value_type: ValueType::Single,
                     original: condition.to_string(),
                     parsed: *parsed_condition.clone(),
                     compiled: Arc::new(move |x| alternatives.contains(&x.to_string())),
                 });
+            } else if name == "list" {
+                let error =
+                    ValveError::InputError(format!("Invalid arguments for 'list': {:?}", args))
+                        .into();
+                match &*args[0] {
+                    Expression::Label(datatype) => match &*args[1] {
+                        Expression::Label(separator) => {
+                            return Ok(CompiledCondition {
+                                value_type: ValueType::List(separator.to_string()),
+                                original: condition.to_string(),
+                                parsed: *parsed_condition.clone(),
+                                compiled: todo!(),
+                            });
+                        }
+                        _ => return Err(error),
+                    },
+                    _ => return Err(error),
+                };
             } else {
                 return Err(ValveError::InputError(format!(
                     "Unrecognized function name: {}",
@@ -3456,6 +3490,7 @@ pub fn compile_condition(
                 .get(&value.to_string())
                 .unwrap();
             return Ok(CompiledCondition {
+                value_type: ValueType::Single,
                 original: value.to_string(),
                 parsed: compiled_datatype_condition.parsed.clone(),
                 compiled: compiled_datatype_condition.compiled.clone(),
