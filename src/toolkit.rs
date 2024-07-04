@@ -3480,16 +3480,15 @@ pub fn compile_condition(
                             "Datatype not found: '{}' in arguments for 'list': {:?}",
                             datatype, args
                         ));
-                        let (parsed, compiled) = match compiled_datatype_conditions.get(datatype) {
-                            Some(condition) => {
-                                (condition.parsed.clone(), condition.compiled.clone())
-                            }
+                        let compiled = match compiled_datatype_conditions.get(datatype) {
+                            Some(condition) => condition.compiled.clone(),
                             _ => return Err(datatype_not_found_error.into()),
                         };
+                        let separator = String::from(unquoted_re.replace(separator, "$unquoted"));
                         Ok(CompiledCondition {
                             value_type: ValueType::List(separator.to_string()),
                             original: condition.to_string(),
-                            parsed: parsed,
+                            parsed: *parsed_condition.clone(),
                             compiled: compiled,
                         })
                     }
@@ -3501,14 +3500,14 @@ pub fn compile_condition(
         Expression::Label(value)
             if compiled_datatype_conditions.contains_key(&value.to_string()) =>
         {
-            let compiled_datatype_condition = compiled_datatype_conditions
+            let condition = compiled_datatype_conditions
                 .get(&value.to_string())
                 .unwrap();
             Ok(CompiledCondition {
                 value_type: ValueType::Single,
                 original: value.to_string(),
-                parsed: compiled_datatype_condition.parsed.clone(),
-                compiled: compiled_datatype_condition.compiled.clone(),
+                parsed: condition.parsed.clone(),
+                compiled: condition.compiled.clone(),
             })
         }
         _ => Err(ValveError::InputError(format!("Unrecognized condition: {}", condition)).into()),

@@ -1,10 +1,11 @@
 //! Low-level validation functions
 
 use crate::{
+    ast::Expression,
     toolkit::{
         cast_sql_param_from_text, get_column_value, get_datatype_ancestors,
         get_sql_type_from_global_config, get_table_options, is_sql_type_error, local_sql_syntax,
-        ColumnRule, CompiledCondition, QueryAsIf, QueryAsIfKind,
+        ColumnRule, CompiledCondition, QueryAsIf, QueryAsIfKind, ValueType,
     },
     valve::{
         ValveCell, ValveCellMessage, ValveConfig, ValveRow, ValveRuleConfig, ValveTreeConstraint,
@@ -820,6 +821,44 @@ pub fn validate_cell_datatype(
     column_name: &String,
     cell: &mut ValveCell,
 ) {
+    fn construct_message(
+        value: &str,
+        condition: &CompiledCondition,
+        column: &str,
+        dt_name: &str,
+        dt_description: &str,
+    ) -> String {
+        match &condition.value_type {
+            ValueType::List(_) if dt_description == "" => {
+                let concrete_dt = match &condition.parsed {
+                    Expression::Function(name, args) if name == "list" => match &*args[0] {
+                        Expression::Label(datatype) => datatype,
+                        _ => unreachable!(
+                            "ValueType::List for a function with an invalid datatype argument"
+                        ),
+                    },
+                    _ => unreachable!("ValueType::List for a non-function condition"),
+                };
+                format!(
+                    "Value '{}' of column {} should be one of a list of tokens whose datatype is {}",
+                    value, column, concrete_dt
+                )
+            }
+            ValueType::List(_) => {
+                format!(
+                    "Value '{}' of column {} should be one of {}",
+                    value, column, dt_description
+                )
+            }
+            ValueType::Single if dt_description == "" => {
+                format!("{} should be of datatype {}", column, dt_name)
+            }
+            ValueType::Single => {
+                format!("{} should be {}", column, dt_description)
+            }
+        }
+    }
+
     let column = config
         .table
         .get(table_name)
@@ -829,31 +868,40 @@ pub fn validate_cell_datatype(
             table_name, column_name
         ));
     let primary_dt_name = &column.datatype;
-    let primary_datatype = &config
+    let primary_dt = &config
         .datatype
         .get(primary_dt_name)
         .expect(&format!("Undefined datatype '{}'", primary_dt_name));
-    let primary_dt_description = &primary_datatype.description;
-    if let Some(primary_dt_condition_func) = compiled_datatype_conditions.get(primary_dt_name) {
-        let primary_dt_condition_func = &primary_dt_condition_func.compiled;
-        if !primary_dt_condition_func(&cell.strvalue()) {
+    let primary_dt_desc = &primary_dt.description;
+    if let Some(primary_dt_cond) = compiled_datatype_conditions.get(primary_dt_name) {
+        let strvalue = cell.strvalue();
+        let values = match &primary_dt_cond.value_type {
+            ValueType::Single => vec![strvalue.as_str()],
+            ValueType::List(separator) => strvalue.split(separator).collect::<Vec<_>>(),
+        };
+        for value in &values {
+            if (primary_dt_cond.compiled)(&value) {
+                continue;
+            }
             cell.valid = false;
             let mut datatypes_to_check =
                 get_datatype_ancestors(config, compiled_datatype_conditions, primary_dt_name, true);
-            // If this datatype has any parents, check them beginning from the most general to the
-            // most specific. We use while and pop instead of a for loop so as to check the
+            // If this datatype has any parents, check them beginning from the most general to
+            // the most specific. We use while and pop instead of a for loop so as to check the
             // conditions in LIFO order.
             while !datatypes_to_check.is_empty() {
                 let datatype = datatypes_to_check.pop().unwrap();
                 let dt_name = &datatype.datatype;
                 let dt_description = &datatype.description;
                 let dt_condition = &compiled_datatype_conditions.get(dt_name).unwrap().compiled;
-                if !dt_condition(&cell.strvalue()) {
-                    let message = if dt_description == "" {
-                        format!("{} should be of datatype {}", column_name, dt_name)
-                    } else {
-                        format!("{} should be {}", column_name, dt_description)
-                    };
+                if !dt_condition(&value) {
+                    let message = construct_message(
+                        &value,
+                        primary_dt_cond,
+                        column_name,
+                        dt_name,
+                        dt_description,
+                    );
                     let message_info = ValveCellMessage {
                         rule: format!("datatype:{}", dt_name),
                         level: "error".to_string(),
@@ -863,11 +911,13 @@ pub fn validate_cell_datatype(
                 }
             }
 
-            let message = if primary_dt_description == "" {
-                format!("{} should be of datatype {}", column_name, primary_dt_name)
-            } else {
-                format!("{} should be {}", column_name, primary_dt_description)
-            };
+            let message = construct_message(
+                &value,
+                primary_dt_cond,
+                column_name,
+                primary_dt_name,
+                primary_dt_desc,
+            );
             let message_info = ValveCellMessage {
                 rule: format!("datatype:{}", primary_dt_name),
                 level: "error".to_string(),
