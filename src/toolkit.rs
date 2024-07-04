@@ -87,12 +87,10 @@ impl std::fmt::Debug for ParsedStructure {
     }
 }
 
-/// TODO: Add docstring here.
+/// The type of value the condition should be applied to.
 #[derive(Clone, Debug)]
 pub enum ValueType {
-    /// TODO: Add docstring
     Single,
-    /// TODO: Add docstring
     List(String),
 }
 
