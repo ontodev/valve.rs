@@ -1,4 +1,4 @@
-datatype	parent	transform	condition	structure	description	SQL type	RDF type	HTML type
+datatype	parent	transform	condition	structure	description	sql_type	RDF type	HTML type
 CURIE	nonspace		match(/\S+:\S+/)	concat(prefix, ":", suffix)	a Compact URI		CURIE	
 IRI	nonspace		exclude(/\s/)		an Internationalized Resource Identifier		IRI	
 column_name	trimmed_line		match(/\S([^\n]*\S)*/)		a column name			

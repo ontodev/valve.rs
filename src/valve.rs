@@ -2,35 +2,46 @@
 
 use crate::{
     ast::Expression,
+    internal::{generate_internal_table_ddl, INTERNAL_TABLES},
+    toolkit,
     toolkit::{
         add_message_counts, cast_column_sql_to_text, convert_undo_or_redo_record_to_change,
-        delete_row_tx, get_column_value, get_compiled_datatype_conditions,
-        get_compiled_rule_conditions, get_json_from_row, get_parsed_structure_conditions,
-        get_pool_from_connection_string, get_record_to_redo, get_record_to_undo, get_row_from_db,
+        delete_row_tx, get_column_for_label, get_column_value, get_compiled_datatype_conditions,
+        get_compiled_rule_conditions, get_json_array_from_row, get_json_object_from_row,
+        get_label_for_column, get_parsed_structure_conditions, get_pool_from_connection_string,
+        get_previous_row_tx, get_record_to_redo, get_record_to_undo, get_row_from_db,
         get_sql_for_standard_view, get_sql_for_text_view, get_sql_type,
         get_sql_type_from_global_config, get_table_ddl, insert_chunks, insert_new_row_tx,
-        local_sql_syntax, read_config_files, record_row_change, switch_undone_state, update_row_tx,
-        verify_table_deps_and_sort, ColumnRule, CompiledCondition, ParsedStructure,
+        local_sql_syntax, move_row_tx, read_config_files, record_row_change, record_row_move,
+        switch_undone_state, undo_or_redo_move, update_row_tx, verify_table_deps_and_sort,
+        ColumnRule, CompiledCondition, ParsedStructure,
     },
     validate::{validate_row_tx, validate_tree_foreign_keys, validate_under, with_tree_sql},
     valve_grammar::StartParser,
-    CHUNK_SIZE, SQL_PARAM,
+    CHUNK_SIZE, SQL_PARAM, PRINTF_RE,
 };
 use anyhow::Result;
 use csv::{QuoteStyle, ReaderBuilder, WriterBuilder};
 use enquote::unquote;
 use futures::{executor::block_on, TryStreamExt};
 use indexmap::IndexMap;
-use indoc::indoc;
 use itertools::Itertools;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as SerdeValue};
+use sprintf::sprintf;
 use sqlx::{
     any::{AnyKind, AnyPool},
     query as sqlx_query, Row, ValueRef,
 };
-use std::{collections::HashMap, error::Error, fmt, fs::File, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    error::Error,
+    fmt,
+    fs::File,
+    path::Path,
+    process::Command,
+};
 
 /// Alias for [Map](serde_json::map)<[String], [Value](serde_json::value)>.
 pub type JsonRow = serde_json::Map<String, SerdeValue>;
@@ -84,7 +95,7 @@ pub fn unfold_json_row(json_row: &JsonRow) -> Result<JsonRow> {
 /// Represents a particular row of data with validation results.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ValveRow {
-    /// The row number of the row.
+    /// The row number of this row. None indicates "unspecified".
     pub row_number: Option<u32>,
     /// A map from column names to the cells corresponding to each column in the row.
     pub contents: IndexMap<String, ValveCell>,
@@ -258,7 +269,7 @@ impl std::fmt::Display for ValveError {
 impl Error for ValveError {}
 
 /// Represents a message associated with a particular value of a particular column.
-#[derive(Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct ValveMessage {
     /// The name of the column
     pub column: String,
@@ -320,6 +331,8 @@ pub struct ValveTableConfig {
     pub table: String,
     /// The table's type
     pub table_type: String,
+    /// The options for this table
+    pub options: HashSet<String>,
     /// A description of the table
     pub description: String,
     /// The location of the TSV file representing the table in the filesystem
@@ -331,7 +344,7 @@ pub struct ValveTableConfig {
 }
 
 /// Configuration information for a particular column of a particular table
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub struct ValveColumnConfig {
     /// The table that the column belongs to
     pub table: String,
@@ -347,13 +360,15 @@ pub struct ValveColumnConfig {
     pub structure: String,
     /// The datatype of the column's nulltype (or the empty string if the column has none)
     pub nulltype: String,
+    /// The default for a column indicates which value should be inserted for the column in a given
+    /// row when the value of that column has not been specified in an INSERT database statement.
+    /// An empty string indicates that the column has no default.
+    pub default: SerdeValue,
 }
 
 /// Configuration information for a particular datatype
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct ValveDatatypeConfig {
-    /// The datatype's corresponding HTML type
-    pub html_type: String,
     /// The datatype's corresponding SQL type
     pub sql_type: String,
     /// The regular expression which all data values of this type must match
@@ -445,6 +460,8 @@ pub struct ValveConfig {
     pub special: ValveSpecialConfig,
     /// A map from table names to the configuration information for that table
     pub table: HashMap<String, ValveTableConfig>,
+    /// A list of table names in the order they appear in the "table" table.
+    pub table_order: Vec<String>,
     /// A map from datatype names to the configuration information for that datatype
     pub datatype: HashMap<String, ValveDatatypeConfig>,
     /// A map from table names to a further map, for each column in the given table, to the
@@ -494,6 +511,8 @@ pub struct Valve {
     /// A map from string representations of structure conditions to the parsed versions
     /// associated with them.
     pub structure_conditions: HashMap<String, ParsedStructure>,
+    /// The string used to connect to the database:
+    pub db_path: String,
     /// The database connection pool.
     pub pool: AnyPool,
     /// The user associated with this valve instance.
@@ -505,6 +524,11 @@ pub struct Valve {
     pub interactive: bool,
     /// Activates optimizations used for the initial loading of data.
     pub initial_load: bool,
+    /// Private field used to store startup error messages. Note that these are also accessible via
+    /// the 'message' database table. Startup messages represent errors and warnings that are
+    /// encountered while configuring Valve which cannot be handled at load time. They are always
+    /// associated with the 'table' table.
+    startup_table_messages: IndexMap<u32, Vec<ValveMessage>>,
 }
 
 impl Valve {
@@ -512,7 +536,7 @@ impl Valve {
     /// database should be configured for initial loading: Set up a database connection, configure
     /// VALVE, and return a new Valve struct.
     pub async fn build(table_path: &str, database: &str) -> Result<Self> {
-        env_logger::init();
+        let _ = env_logger::try_init();
         let pool = get_pool_from_connection_string(database).await?;
         if pool.any_kind() == AnyKind::Sqlite {
             sqlx_query("PRAGMA foreign_keys = ON")
@@ -524,17 +548,20 @@ impl Valve {
         let (
             specials_config,
             tables_config,
+            table_order,
             datatypes_config,
             rules_config,
             constraints_config,
             sorted_table_list,
             table_dependencies_in,
             table_dependencies_out,
+            startup_table_messages,
         ) = read_config_files(table_path, &parser, &pool)?;
 
         let config = ValveConfig {
             special: specials_config,
             table: tables_config,
+            table_order: table_order,
             datatype: datatypes_config,
             rule: rules_config,
             constraint: constraints_config,
@@ -552,11 +579,13 @@ impl Valve {
             datatype_conditions: datatype_conditions,
             rule_conditions: rule_conditions,
             structure_conditions: structure_conditions,
+            db_path: database.to_string(),
             pool: pool,
             user: String::from("VALVE"),
             verbose: false,
             interactive: false,
             initial_load: false,
+            startup_table_messages: startup_table_messages,
         })
     }
 
@@ -641,6 +670,69 @@ impl Valve {
         Ok(())
     }
 
+    /// (Private function.) Given a filename containing SQL statements, execute the statements
+    /// contained in the file.
+    async fn execute_sql_file(&self, path: &str) -> Result<()> {
+        let sql = std::fs::read_to_string(path)?;
+        let sql_lines = sql_split::split(&sql);
+        for line in &sql_lines {
+            self.execute_sql(&line).await?;
+        }
+        Ok(())
+    }
+
+    /// (Private function.) Given the filename of an executable script, execute it and return the
+    /// result.
+    pub fn execute_script(&self, path: &str, args: &Vec<&str>) -> Result<()> {
+        let mut command = Command::new(path);
+        if !args.is_empty() {
+            command.args(args);
+        }
+        let output = command.output()?;
+        let exit_code = output.status.code();
+        match exit_code {
+            None => {
+                let stdout = std::str::from_utf8(&output.stdout)?;
+                let stderr = std::str::from_utf8(&output.stdout)?;
+                Err(ValveError::DataError(format!(
+                    "Execution of '{}' was interrupted. STDOUT: '{}', STDERR: '{}'.",
+                    path, stdout, stderr
+                ))
+                .into())
+            }
+            Some(exit_code) if exit_code != 0 => {
+                let stdout = std::str::from_utf8(&output.stdout)?;
+                let stderr = std::str::from_utf8(&output.stdout)?;
+                Err(ValveError::DataError(format!(
+                    "Execution of '{}' failed with exit code {}. STDOUT: '{}', STDERR: '{}'.",
+                    path, exit_code, stdout, stderr
+                ))
+                .into())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Return the list of configured tables that have the given option in sorted order, or
+    /// reverse sorted order if the reverse flag is set.
+    pub fn get_sorted_table_list_with_option(&self, option: &str, reverse: bool) -> Vec<&str> {
+        let mut sorted_tables = self
+            .sorted_table_list
+            .iter()
+            .filter(|t| {
+                let table_options = self
+                    .get_table_options(t)
+                    .expect(&format!("Error getting options for table '{}'", t));
+                table_options.contains(option)
+            })
+            .map(|i| i.as_str())
+            .collect::<Vec<_>>();
+        if reverse {
+            sorted_tables.reverse();
+        }
+        sorted_tables
+    }
+
     /// Return the list of configured tables in sorted order, or reverse sorted order if the
     /// reverse flag is set.
     pub fn get_sorted_table_list(&self, reverse: bool) -> Vec<&str> {
@@ -653,6 +745,122 @@ impl Valve {
             sorted_tables.reverse();
         }
         sorted_tables
+    }
+
+    /// Given a subset of the configured tables, return them in sorted dependency order, or in
+    /// reverse dependency order if `reverse` is set to true.
+    pub fn sort_tables(&self, table_subset: &Vec<&str>, reverse: bool) -> Result<Vec<String>> {
+        let full_table_list = self.get_sorted_table_list(false);
+        if !table_subset
+            .iter()
+            .all(|item| full_table_list.contains(item))
+        {
+            return Err(ValveError::InputError(format!(
+                "[{}] contains tables that are not in the configured table list: [{}]",
+                table_subset.join(", "),
+                full_table_list.join(", ")
+            ))
+            .into());
+        }
+
+        // Filter out internal tables since they are not represented in the constraints config and
+        // anyway they will be added implicitly later when we call verify_table_deps_and_sort():
+        let filtered_subset = table_subset
+            .iter()
+            .filter(|m| !INTERNAL_TABLES.contains(m))
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>();
+
+        let (sorted_subset, _, _) =
+            verify_table_deps_and_sort(&filtered_subset, &self.config.constraint);
+
+        // Since the result of verify_table_deps_and_sort() will include dependencies of the tables
+        // in its input list, we filter those out here:
+        let mut sorted_subset = sorted_subset
+            .iter()
+            .filter(|m| table_subset.contains(&m.as_str()))
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>();
+
+        if reverse {
+            sorted_subset.reverse();
+        }
+        Ok(sorted_subset)
+    }
+
+    /// Get all the incoming (tables that depend on it) or outgoing (tables it depends on)
+    /// dependencies of the given table.
+    pub fn get_dependencies(&self, table: &str, incoming: bool) -> Result<Vec<String>> {
+        let mut dependent_tables = vec![];
+        if !INTERNAL_TABLES.contains(&table) {
+            let direct_deps = {
+                if incoming {
+                    self.table_dependencies_in
+                        .get(table)
+                        .ok_or(ValveError::InputError(format!(
+                            "Undefined table '{}'",
+                            table
+                        )))?
+                        .to_vec()
+                } else {
+                    self.table_dependencies_out
+                        .get(table)
+                        .ok_or(ValveError::InputError(format!(
+                            "Undefined table '{}'",
+                            table
+                        )))?
+                        .to_vec()
+                }
+            };
+            for direct_dep in direct_deps {
+                let mut indirect_deps = self.get_dependencies(&direct_dep, incoming)?;
+                dependent_tables.append(&mut indirect_deps);
+                dependent_tables.push(direct_dep);
+            }
+        }
+        Ok(dependent_tables)
+    }
+
+    /// Given a list of tables, fill it in with any further tables that are dependent upon tables
+    /// in the given list. If deletion_order is true, the tables are sorted as required for
+    /// deleting them all sequentially, otherwise they are ordered in reverse.
+    pub fn add_dependencies(
+        &self,
+        tables: &Vec<&str>,
+        deletion_order: bool,
+    ) -> Result<Vec<String>> {
+        let mut with_dups = vec![];
+        for table in tables {
+            let dependent_tables = self.get_dependencies(table, true)?;
+            for dep_table in dependent_tables {
+                with_dups.push(dep_table.to_string());
+            }
+            with_dups.push(table.to_string());
+        }
+        // The algorithm above gives the tables in the order needed for deletion. But we want
+        // this function to return the creation order by default so we reverse it unless
+        // the deletion_order flag is set to true.
+        if !deletion_order {
+            with_dups.reverse();
+        }
+
+        // Remove the duplicates from the returned table list:
+        let mut tables_in_order = vec![];
+        for table in with_dups.iter().unique() {
+            tables_in_order.push(table.to_string());
+        }
+        Ok(tables_in_order)
+    }
+
+    /// Returns an IndexMap, indexed by configured table, containing lists of their dependencies.
+    /// If incoming is true, the lists are incoming dependencies, else they are outgoing.
+    pub fn collect_dependencies(&self, incoming: bool) -> Result<IndexMap<String, Vec<String>>> {
+        let tables = self.get_sorted_table_list(false);
+        let mut dependencies = IndexMap::new();
+        for table in tables {
+            dependencies.insert(table.to_string(), self.get_dependencies(table, incoming)?);
+        }
+        Ok(dependencies)
     }
 
     /// Given the name of a table, determine whether its current instantiation in the database
@@ -834,15 +1042,8 @@ impl Valve {
             Ok(false)
         };
 
+        let table_config = self.get_table_config(table)?;
         let (columns_config, configured_column_order) = {
-            let table_config =
-                self.config
-                    .table
-                    .get(table)
-                    .ok_or(ValveError::ConfigError(format!(
-                        "Undefined table '{}'",
-                        table
-                    )))?;
             let columns_config = &table_config.column;
             let configured_column_order = {
                 let mut configured_column_order = {
@@ -852,7 +1053,7 @@ impl Valve {
                     } else if table == "history" {
                         vec!["history_id".to_string()]
                     } else {
-                        vec!["row_number".to_string()]
+                        vec!["row_number".to_string(), "row_order".to_string()]
                     }
                 };
                 configured_column_order.append(&mut table_config.column_order.clone());
@@ -965,6 +1166,7 @@ impl Valve {
                 || (table == "history" && cname == "timestamp")
                 || (table == "history" && cname == "row")
                 || cname == "row_number"
+                || cname == "row_order"
             {
                 continue;
             }
@@ -1046,6 +1248,14 @@ impl Valve {
         Ok(false)
     }
 
+    /// Given the name of a table, returns its table configuration.
+    pub fn get_table_config(&self, table: &str) -> Result<&ValveTableConfig> {
+        self.config
+            .table
+            .get(table)
+            .ok_or(ValveError::ConfigError(format!("Undefined table '{}'", table)).into())
+    }
+
     /// Generates and returns the DDL required to setup the database.
     pub async fn get_setup_statements(&self) -> Result<HashMap<String, Vec<String>>> {
         let tables_config = &self.config.table;
@@ -1056,89 +1266,32 @@ impl Valve {
         // and use that information to create the associated database tables, while saving
         // constraint information to constrains_config.
         let mut setup_statements = HashMap::new();
-        for table_name in tables_config.keys().cloned().collect::<Vec<_>>() {
-            // Generate the statements for creating the table and its corresponding conflict table:
+        for (table, table_config) in tables_config.iter() {
+            // Generate DDL for the table and its corresponding conflict table:
             let mut table_statements = vec![];
-            for table in vec![table_name.to_string(), format!("{}_conflict", table_name)] {
-                let mut statements =
-                    get_table_ddl(tables_config, datatypes_config, &parser, &table, &self.pool);
+            let mut statements = get_table_ddl(&self.config, &parser, &table, &self.pool)?;
+            table_statements.append(&mut statements);
+            if table_config.options.contains("conflict") {
+                let cable = format!("{}_conflict", table);
+                let mut statements = get_table_ddl(&self.config, &parser, &cable, &self.pool)?;
                 table_statements.append(&mut statements);
+
+                let create_view_sql = get_sql_for_standard_view(&table, &self.pool);
+                let create_text_view_sql = get_sql_for_text_view(tables_config, &table, &self.pool);
+                table_statements.push(create_view_sql);
+                table_statements.push(create_text_view_sql);
             }
-
-            let create_view_sql = get_sql_for_standard_view(&table_name, &self.pool);
-            let create_text_view_sql =
-                get_sql_for_text_view(tables_config, &table_name, &self.pool);
-            table_statements.push(create_view_sql);
-            table_statements.push(create_text_view_sql);
-
-            setup_statements.insert(table_name.to_string(), table_statements);
+            setup_statements.insert(table.to_string(), table_statements);
         }
 
         let text_type = get_sql_type(datatypes_config, &"text".to_string(), &self.pool);
 
-        // Generate DDL for the history table:
-        let mut history_statements = vec![];
-        history_statements.push(format!(
-            indoc! {r#"
-                CREATE TABLE "history" (
-                  {history_id}
-                  "table" {text_type},
-                  "row" BIGINT,
-                  "from" {text_type},
-                  "to" {text_type},
-                  "summary" {text_type},
-                  "user" {text_type},
-                  "undone_by" {text_type},
-                  {timestamp}
-                );
-              "#},
-            history_id = {
-                if self.pool.any_kind() == AnyKind::Sqlite {
-                    "\"history_id\" INTEGER PRIMARY KEY,"
-                } else {
-                    "\"history_id\" SERIAL PRIMARY KEY,"
-                }
-            },
-            text_type = text_type,
-            timestamp = {
-                if self.pool.any_kind() == AnyKind::Sqlite {
-                    "\"timestamp\" TIMESTAMP DEFAULT(STRFTIME('%Y-%m-%d %H:%M:%f', 'NOW'))"
-                } else {
-                    "\"timestamp\" TIMESTAMP DEFAULT CURRENT_TIMESTAMP"
-                }
-            },
-        ));
-        history_statements
-            .push(r#"CREATE INDEX "history_tr_idx" ON "history"("table", "row");"#.to_string());
+        // Generate DDL for the history and message tables:
+        let history_statements =
+            generate_internal_table_ddl("history", &self.pool.any_kind(), &text_type);
         setup_statements.insert("history".to_string(), history_statements);
-
-        // Generate DDL for the message table:
-        let mut message_statements = vec![];
-        message_statements.push(format!(
-            indoc! {r#"
-                CREATE TABLE "message" (
-                  {message_id}
-                  "table" {text_type},
-                  "row" BIGINT,
-                  "column" {text_type},
-                  "value" {text_type},
-                  "level" {text_type},
-                  "rule" {text_type},
-                  "message" {text_type}
-                );
-              "#},
-            message_id = {
-                if self.pool.any_kind() == AnyKind::Sqlite {
-                    "\"message_id\" INTEGER PRIMARY KEY,"
-                } else {
-                    "\"message_id\" SERIAL PRIMARY KEY,"
-                }
-            },
-            text_type = text_type,
-        ));
-        message_statements.push(
-            r#"CREATE INDEX "message_trc_idx" ON "message"("table", "row", "column");"#.to_string(),
-        );
+        let message_statements =
+            generate_internal_table_ddl("message", &self.pool.any_kind(), &text_type);
         setup_statements.insert("message".to_string(), message_statements);
 
         return Ok(setup_statements);
@@ -1148,7 +1301,7 @@ impl Valve {
     pub async fn dump_schema(&self) -> Result<String> {
         let setup_statements = self.get_setup_statements().await?;
         let mut output = String::from("");
-        for table in self.get_sorted_table_list(false) {
+        for table in self.get_sorted_table_list_with_option("edit", false) {
             let table_statements =
                 setup_statements
                     .get(table)
@@ -1158,6 +1311,7 @@ impl Valve {
                     )))?;
             let table_output = String::from(table_statements.join("\n"));
             output.push_str(&table_output);
+            output.push_str("\n\n");
         }
         Ok(output)
     }
@@ -1167,7 +1321,29 @@ impl Valve {
         let setup_statements = self.get_setup_statements().await?;
         let sorted_table_list = self.get_sorted_table_list(false);
         for table in &sorted_table_list {
-            if self.table_has_changed(*table).await? {
+            let table_config = self.get_table_config(table)?;
+            if table_config.options.contains("db_view") {
+                // If the path points to a .sql file, execute the statements that are contained in
+                // it against the database, trusting that the user has written the script correctly.
+                // Note that the SQL script, not Valve, is responsible for deciding whether the
+                // view actually needs to be recreated. In any case, once any specified scripts have
+                // been run (if the path is empty then Valve assumes that the view has already been
+                // set up in the database), Valve checks to make sure that the view now exists and
+                // returns an error if it does not.
+                if table_config.path.to_lowercase().ends_with(".sql") {
+                    self.execute_sql_file(&table_config.path).await?;
+                } else if table_config.path != "" {
+                    self.execute_script(&table_config.path, &vec![&self.db_path, table])?;
+                }
+                // Check to make sure that the view now exists:
+                if !self.view_exists(table).await? {
+                    return Err(ValveError::DataError(format!(
+                        "No view named '{}' exists in the database",
+                        table
+                    ))
+                    .into());
+                }
+            } else if self.table_has_changed(*table).await? {
                 self.drop_tables(&vec![table]).await?;
                 let table_statements =
                     setup_statements
@@ -1181,7 +1357,6 @@ impl Valve {
                 }
             }
         }
-
         Ok(self)
     }
 
@@ -1201,7 +1376,8 @@ impl Valve {
                     r#"SELECT 1
                        FROM "information_schema"."tables"
                        WHERE "table_schema" = 'public'
-                         AND "table_name" = '{}'"#,
+                         AND "table_name" = '{}'
+                         AND "table_type" LIKE '%TABLE'"#,
                     table
                 )
             }
@@ -1211,125 +1387,41 @@ impl Valve {
         return Ok(rows.len() > 0);
     }
 
-    /// Get all the incoming (tables that depend on it) or outgoing (tables it depends on)
-    /// dependencies of the given table.
-    pub fn get_dependencies(&self, table: &str, incoming: bool) -> Result<Vec<String>> {
-        let mut dependent_tables = vec![];
-        if table != "message" && table != "history" {
-            let direct_deps = {
-                if incoming {
-                    self.table_dependencies_in
-                        .get(table)
-                        .ok_or(ValveError::InputError(format!(
-                            "Undefined table '{}'",
-                            table
-                        )))?
-                        .to_vec()
-                } else {
-                    self.table_dependencies_out
-                        .get(table)
-                        .ok_or(ValveError::InputError(format!(
-                            "Undefined table '{}'",
-                            table
-                        )))?
-                        .to_vec()
-                }
-            };
-            for direct_dep in direct_deps {
-                let mut indirect_deps = self.get_dependencies(&direct_dep, incoming)?;
-                dependent_tables.append(&mut indirect_deps);
-                dependent_tables.push(direct_dep);
+    /// Checks whether the given view exists in the database.
+    pub async fn view_exists(&self, view: &str) -> Result<bool> {
+        let sql = {
+            if self.pool.any_kind() == AnyKind::Sqlite {
+                format!(
+                    r#"SELECT 1
+                       FROM "sqlite_master"
+                       WHERE "type" = 'view' AND name = '{}'
+                       LIMIT 1"#,
+                    view
+                )
+            } else {
+                format!(
+                    r#"SELECT 1
+                       FROM "information_schema"."tables"
+                       WHERE "table_schema" = 'public'
+                         AND "table_name" = '{}'
+                         AND "table_type" = 'VIEW'"#,
+                    view
+                )
             }
-        }
-        Ok(dependent_tables)
+        };
+        let query = sqlx_query(&sql);
+        let rows = query.fetch_all(&self.pool).await?;
+        return Ok(rows.len() > 0);
     }
 
-    /// Given a list of tables, fill it in with any further tables that are dependent upon tables
-    /// in the given list. If deletion_order is true, the tables are sorted as required for
-    /// deleting them all sequentially, otherwise they are ordered in reverse.
-    pub fn add_dependencies(
-        &self,
-        tables: &Vec<&str>,
-        deletion_order: bool,
-    ) -> Result<Vec<String>> {
-        let mut with_dups = vec![];
-        for table in tables {
-            let dependent_tables = self.get_dependencies(table, true)?;
-            for dep_table in dependent_tables {
-                with_dups.push(dep_table.to_string());
-            }
-            with_dups.push(table.to_string());
-        }
-        // The algorithm above gives the tables in the order needed for deletion. But we want
-        // this function to return the creation order by default so we reverse it unless
-        // the deletion_order flag is set to true.
-        if !deletion_order {
-            with_dups.reverse();
-        }
-
-        // Remove the duplicates from the returned table list:
-        let mut tables_in_order = vec![];
-        for table in with_dups.iter().unique() {
-            tables_in_order.push(table.to_string());
-        }
-        Ok(tables_in_order)
-    }
-
-    /// Given a subset of the configured tables, return them in sorted dependency order, or in
-    /// reverse dependency order if `reverse` is set to true.
-    pub fn sort_tables(&self, table_subset: &Vec<&str>, reverse: bool) -> Result<Vec<String>> {
-        let full_table_list = self.get_sorted_table_list(false);
-        if !table_subset
-            .iter()
-            .all(|item| full_table_list.contains(item))
-        {
-            return Err(ValveError::InputError(format!(
-                "[{}] contains tables that are not in the configured table list: [{}]",
-                table_subset.join(", "),
-                full_table_list.join(", ")
-            ))
-            .into());
-        }
-
-        // Filter out message and history since they are not represented in the constraints config.
-        // They will be added implicitly to the list returned by verify_table_deps_and_sort.
-        let filtered_subset = table_subset
-            .iter()
-            .filter(|m| **m != "history" && **m != "message")
-            .map(|s| s.to_string())
-            .collect::<Vec<_>>();
-
-        let (sorted_subset, _, _) =
-            verify_table_deps_and_sort(&filtered_subset, &self.config.constraint);
-
-        // Since the result of verify_table_deps_and_sort() will include dependencies of the tables
-        // in its input list, we filter those out here:
-        let mut sorted_subset = sorted_subset
-            .iter()
-            .filter(|m| table_subset.contains(&m.as_str()))
-            .map(|s| s.to_string())
-            .collect::<Vec<_>>();
-
-        if reverse {
-            sorted_subset.reverse();
-        }
-        Ok(sorted_subset)
-    }
-
-    /// Returns an IndexMap, indexed by configured table, containing lists of their dependencies.
-    /// If incoming is true, the lists are incoming dependencies, else they are outgoing.
-    pub fn collect_dependencies(&self, incoming: bool) -> Result<IndexMap<String, Vec<String>>> {
-        let tables = self.get_sorted_table_list(false);
-        let mut dependencies = IndexMap::new();
-        for table in tables {
-            dependencies.insert(table.to_string(), self.get_dependencies(table, incoming)?);
-        }
-        Ok(dependencies)
+    /// Given a table name, returns the options of the table.
+    pub fn get_table_options(&self, table: &str) -> Result<HashSet<String>> {
+        toolkit::get_table_options(&self.config, table)
     }
 
     /// Drop all configured tables, in reverse dependency order.
     pub async fn drop_all_tables(&self) -> Result<&Self> {
-        // Drop all of the database tables in the reverse of their sorted order:
+        // Drop all of the editable database tables in the reverse of their sorted order:
         self.drop_tables(&self.get_sorted_table_list(true)).await?;
         Ok(self)
     }
@@ -1339,16 +1431,23 @@ impl Valve {
     pub async fn drop_tables(&self, tables: &Vec<&str>) -> Result<&Self> {
         let drop_list = self.add_dependencies(tables, true)?;
         for table in &drop_list {
-            if *table != "message" && *table != "history" {
-                let sql = format!(r#"DROP VIEW IF EXISTS "{}_text_view""#, table);
-                self.execute_sql(&sql).await?;
-                let sql = format!(r#"DROP VIEW IF EXISTS "{}_view""#, table);
-                self.execute_sql(&sql).await?;
-                let sql = format!(r#"DROP TABLE IF EXISTS "{}_conflict""#, table);
+            let table_config = self.get_table_config(table)?;
+            if table_config.path != "" {
+                if table_config.options.contains("conflict") {
+                    let sql = format!(r#"DROP VIEW IF EXISTS "{}_text_view""#, table);
+                    self.execute_sql(&sql).await?;
+                    let sql = format!(r#"DROP VIEW IF EXISTS "{}_view""#, table);
+                    self.execute_sql(&sql).await?;
+                    let sql = format!(r#"DROP TABLE IF EXISTS "{}_conflict""#, table);
+                    self.execute_sql(&sql).await?;
+                }
+                let type_to_drop = match table_config.options.contains("db_view") {
+                    true => "VIEW",
+                    false => "TABLE",
+                };
+                let sql = format!(r#"DROP {} IF EXISTS "{}""#, type_to_drop, table);
                 self.execute_sql(&sql).await?;
             }
-            let sql = format!(r#"DROP TABLE IF EXISTS "{}""#, table);
-            self.execute_sql(&sql).await?;
         }
 
         Ok(self)
@@ -1356,7 +1455,7 @@ impl Valve {
 
     /// Truncate all configured tables, in reverse dependency order.
     pub async fn truncate_all_tables(&self) -> Result<&Self> {
-        self.truncate_tables(&self.get_sorted_table_list(true))
+        self.truncate_tables(&self.get_sorted_table_list_with_option("edit", true))
             .await?;
         Ok(self)
     }
@@ -1380,11 +1479,14 @@ impl Valve {
         };
 
         for table in &truncate_list {
-            let sql = truncate_sql(&table);
-            self.execute_sql(&sql).await?;
-            if *table != "message" && *table != "history" {
-                let sql = truncate_sql(&format!("{}_conflict", table));
+            let table_options = self.get_table_options(table)?;
+            if table_options.contains("truncate") {
+                let sql = truncate_sql(&table);
                 self.execute_sql(&sql).await?;
+                if table_options.contains("conflict") {
+                    let sql = truncate_sql(&format!("{}_conflict", table));
+                    self.execute_sql(&sql).await?;
+                }
             }
         }
 
@@ -1416,15 +1518,27 @@ impl Valve {
         )
         .await?;
 
+        // Insert any 'startup' messages into the message table. These are messages generated
+        // during the configuration stage.
+        for (row, messages) in self.startup_table_messages.iter() {
+            for msg in messages {
+                let msg_sql = format!(
+                    r#"INSERT INTO "message"
+                       ("table", "row", "column", "value", "level", "rule", "message")
+                       VALUES ('table', {}, '{}', '{}', '{}', '{}', '{}')"#,
+                    row, msg.column, msg.value, msg.level, msg.rule, msg.message
+                );
+                self.execute_sql(&msg_sql).await?;
+            }
+        }
+
         let num_tables = table_list.len();
         let mut total_errors = 0;
         let mut total_warnings = 0;
         let mut total_infos = 0;
         let mut table_num = 1;
-        for table_name in table_list {
-            if *table_name == "message" || *table_name == "history" {
-                continue;
-            }
+
+        let mut load_normal_table = |table_name: &str| -> Result<()> {
             let table_name = table_name.to_string();
             let path = String::from(
                 &self
@@ -1441,7 +1555,7 @@ impl Valve {
                 match File::open(path.clone()) {
                     Err(e) => {
                         log::warn!("Unable to open '{}': {}", path.clone(), e);
-                        continue;
+                        return Ok(());
                     }
                     Ok(table_file) => ReaderBuilder::new()
                         .has_headers(false)
@@ -1456,13 +1570,21 @@ impl Valve {
 
             // Extract the headers, which we will need later:
             let mut records = rdr.records();
-            let headers;
-            if let Some(result) = records.next() {
-                headers = result.unwrap();
-            } else {
-                return Err(ValveError::DataError(format!("'{}' is empty", path)).into());
-            }
-
+            let headers = {
+                let labels = {
+                    if let Some(result) = records.next() {
+                        result.unwrap()
+                    } else {
+                        return Err(ValveError::DataError(format!("'{}' is empty", path)).into());
+                    }
+                };
+                let column_config = &self.get_table_config(&table_name)?.column;
+                let mut headers = vec![];
+                for label in &labels {
+                    headers.push(get_column_for_label(&column_config, label, &table_name)?);
+                }
+                headers
+            };
             for header in headers.iter() {
                 if header.trim().is_empty() {
                     return Err(ValveError::DataError(format!(
@@ -1483,7 +1605,7 @@ impl Valve {
             // Split the data into chunks of size CHUNK_SIZE before passing them to the validation
             // logic:
             let chunks = records.chunks(CHUNK_SIZE);
-            insert_chunks(
+            block_on(insert_chunks(
                 &self.config,
                 &self.pool,
                 &self.datatype_conditions,
@@ -1494,22 +1616,29 @@ impl Valve {
                 &mut messages_stats,
                 self.verbose,
                 validate,
-            )
-            .await?;
+            ))?;
 
             if validate {
                 // We need to wait until all of the rows for a table have been loaded before
-                // validating the "foreign" constraints on a table's trees, since this checks if the
-                // values of one column (the tree's parent) are all contained in another column (the
-                // tree's child). We also need to wait before validating a table's "under"
-                // constraints. Although the tree associated with such a constraint need not be
-                // defined on the same table, it can be.
-                let mut recs_to_update =
-                    validate_tree_foreign_keys(&self.config, &self.pool, None, &table_name, None)
-                        .await?;
-                recs_to_update.append(
-                    &mut validate_under(&self.config, &self.pool, None, &table_name, None).await?,
-                );
+                // validating the "foreign" constraints on a table's trees, since this checks if
+                // the values of one column (the tree's parent) are all contained in another column
+                // (the tree's child). We also need to wait before validating a table's "under"
+                // constraints, because lthough the tree associated with such a constraint need not
+                // be defined on the same table, it can be.
+                let mut recs_to_update = block_on(validate_tree_foreign_keys(
+                    &self.config,
+                    &self.pool,
+                    None,
+                    &table_name,
+                    None,
+                ))?;
+                recs_to_update.append(&mut block_on(validate_under(
+                    &self.config,
+                    &self.pool,
+                    None,
+                    &table_name,
+                    None,
+                ))?);
 
                 for record in recs_to_update {
                     let row_number = record.get("row_number").unwrap();
@@ -1541,7 +1670,7 @@ impl Valve {
                     query = query.bind(&level);
                     query = query.bind(&rule);
                     query = query.bind(&message);
-                    query.execute(&self.pool).await?;
+                    block_on(query.execute(&self.pool))?;
 
                     if self.verbose {
                         // Add the generated message to messages_stats:
@@ -1569,6 +1698,28 @@ impl Valve {
                 total_warnings += warnings;
                 total_infos += infos;
             }
+
+            Ok(())
+        };
+
+        for table in table_list {
+            let table_config = self.get_table_config(&table)?;
+
+            if !table_config.options.contains("load") {
+                continue;
+            }
+            // For all others, how they are loaded depends on the path, such that an empty
+            // path implies that the table in question is not loaded by Valve at all.
+            if table_config.path.to_lowercase().ends_with(".sql") {
+                // SQL files:
+                self.execute_sql_file(&table_config.path).await?;
+            } else if table_config.path.to_lowercase().ends_with(".tsv") {
+                // TSV files:
+                load_normal_table(table)?;
+            } else if table_config.path != "" {
+                // Other types of scripts:
+                self.execute_script(&table_config.path, &vec![&self.db_path, table])?;
+            }
         }
 
         if self.verbose {
@@ -1580,10 +1731,10 @@ impl Valve {
         Ok(self)
     }
 
-    /// Save all configured tables to their configured paths, unless save_dir is specified,
+    /// Save all configured editable tables to their configured paths, unless save_dir is specified,
     /// in which case save them there instead.
     pub fn save_all_tables(&self, save_dir: &Option<String>) -> Result<&Self> {
-        let tables = self.get_sorted_table_list(false);
+        let tables = self.get_sorted_table_list_with_option("save", false);
         self.save_tables(&tables, save_dir)?;
         Ok(self)
     }
@@ -1596,7 +1747,7 @@ impl Valve {
             .table
             .iter()
             .filter(|(k, v)| {
-                !["message", "history"].contains(&k.as_str())
+                !INTERNAL_TABLES.contains(&k.as_str())
                     && tables.contains(&k.as_str())
                     && v.path != ""
             })
@@ -1613,16 +1764,27 @@ impl Valve {
                     .join(", ")
             );
         }
+
         for (table, path) in table_paths.iter() {
-            let columns: Vec<&str> = self
-                .config
-                .table
-                .get(table)
-                .and_then(|t| Some(t.column_order.iter().map(|i| i.as_str()).collect()))
-                .ok_or(ValveError::InputError(format!(
-                    "Undefined table '{}'",
-                    table
-                )))?;
+            let options = self.get_table_options(table)?;
+            if !options.contains("save") {
+                log::warn!("Saving '{}' is not supported", table,);
+                continue;
+            }
+
+            let table_config = self.get_table_config(table)?;
+            let column_config = &table_config.column;
+            let mut labels = vec![];
+            let columns: Vec<&str> = table_config
+                .column_order
+                .iter()
+                .map(|i| i.as_str())
+                .collect();
+            for column in &columns {
+                let label = get_label_for_column(&column_config, column, table)?;
+                labels.push(label);
+            }
+            let labels = labels.iter().map(|i| i.as_str()).collect();
 
             let path = match save_dir {
                 Some(s) => format!(
@@ -1634,45 +1796,210 @@ impl Valve {
                 ),
                 None => path.to_string(),
             };
-            self.save_table(table, &columns, &path)?;
+            self.save_table(table, &columns, &labels, &path)?;
         }
 
         Ok(self)
     }
 
+    /// Given the name of a datatype, find (in the database) the value of the optional configuration
+    /// parameter called 'format' corresponding to that datatype and return it, or an empty string
+    /// if no format parameter has been configured for that datatype or if the format parameter is
+    /// not defined. The format parameter indicates how values of the given column are to be
+    /// formatted when saving a table to an external file.
+    pub async fn get_datatype_format(&self, datatype: &str) -> Result<String> {
+        if !self
+            .config
+            .table
+            .get("datatype")
+            .and_then(|t| Some(&t.column))
+            .and_then(|c| Some(c.keys().collect::<Vec<_>>()))
+            .and_then(|v| Some(v.contains(&&"format".to_string())))
+            .expect("Could not find column configrations for the datatype table")
+        {
+            Ok("".to_string())
+        } else {
+            let sql = format!(
+                r#"SELECT "format" FROM "datatype" WHERE "datatype" = '{}'"#,
+                datatype,
+            );
+            let rows = sqlx_query(&sql).fetch_all(&self.pool).await?;
+            if rows.len() > 0 {
+                let format_string = rows[0]
+                    .try_get::<&str, &str>("format")
+                    .ok()
+                    .expect("No column 'format' in row.");
+                Ok(format_string.to_string())
+            } else {
+                Ok("".to_string())
+            }
+        }
+    }
+
+    /// Given a table name and the name of a column in that table, find (in the database) the value
+    /// of the optional configuration parameter called 'format' and return it, or an empty string
+    /// if no format parameter has been configured or if none has been defined for that column.
+    /// The format parameter indicates how values of the given column are to be formatted when
+    /// saving a table to an external file.
+    pub async fn get_column_format(&self, table: &str, column: &str) -> Result<String> {
+        if !self
+            .config
+            .table
+            .get("datatype")
+            .and_then(|t| Some(t.column.clone()))
+            .and_then(|c| Some(c.keys().cloned().collect::<Vec<_>>()))
+            .and_then(|v| Some(v.contains(&"format".to_string())))
+            .expect("Could not find column configrations for the datatype table")
+        {
+            Ok("".to_string())
+        } else {
+            let sql = format!(
+                r#"SELECT d."format"
+                     FROM "column" c, "datatype" d
+                    WHERE c."table" = '{}'
+                      AND c."column" = '{}'
+                      AND c."datatype" = d."datatype""#,
+                table, column
+            );
+            let rows = sqlx_query(&sql).fetch_all(&self.pool).await?;
+            if rows.len() > 1 {
+                panic!(
+                    "Multiple entries corresponding to '{}' in datatype table",
+                    column
+                );
+            }
+            let format_string = rows[0]
+                .try_get::<&str, &str>("format")
+                .ok()
+                .unwrap_or_default();
+            Ok(format_string.to_string())
+        }
+    }
+
     /// Save the given table with the given columns at the given path as a TSV file.
-    pub fn save_table(&self, table: &str, columns: &Vec<&str>, path: &str) -> Result<&Self> {
-        let mut quoted_columns = vec!["\"row_number\"".to_string()];
-        quoted_columns.append(
-            &mut columns
-                .iter()
-                .map(|v| enquote::enquote('"', v))
-                .collect::<Vec<_>>(),
-        );
-        let text_view = format!("\"{}_text_view\"", table);
+    pub fn save_table(
+        &self,
+        table: &str,
+        columns: &Vec<&str>,
+        labels: &Vec<&str>,
+        path: &str,
+    ) -> Result<&Self> {
+        // Uses the given (unverified) printf-style format string and the given compiled regular
+        // expression (which is used to verify the given format) to format the given cell.
+        fn format_cell(colformat: &str, format_regex: &Regex, cell: &str) -> String {
+            let conversion_spec = match format_regex.captures(colformat) {
+                Some(c) => c[1].to_lowercase(),
+                None => {
+                    log::warn!("Illegal format: '{}'", colformat);
+                    "s".to_string()
+                }
+            };
+            let generic_error = format!("Error applying format '{}' to '{}':", colformat, cell);
+            match conversion_spec.as_str() {
+                "d" | "i" | "c" => match cell.parse::<isize>() {
+                    Ok(cell) => match sprintf!(&colformat, cell) {
+                        Ok(cell) => {
+                            // For some reason sprintf converts signed ints to unsigned ints before
+                            // converting them to a string. So we have to workaround this here:
+                            let cell = cell.parse::<usize>().unwrap();
+                            let cell = cell as isize;
+                            cell.to_string()
+                        }
+                        Err(e) => {
+                            log::warn!("{}: {}", generic_error, e);
+                            cell.to_string()
+                        }
+                    },
+                    Err(e) => {
+                        log::warn!("{}: {}", generic_error, e);
+                        cell.to_string()
+                    }
+                },
+                "o" | "u" | "x" => match cell.parse::<usize>() {
+                    Ok(cell) => sprintf!(&colformat, cell).unwrap_or(cell.to_string()),
+                    Err(e) => {
+                        log::warn!("{}: {}", generic_error, e);
+                        cell.to_string()
+                    }
+                },
+                "e" | "f" | "g" | "a" => match cell.parse::<f64>() {
+                    Ok(cell) => sprintf!(&colformat, cell).unwrap_or(cell.to_string()),
+                    Err(e) => {
+                        log::warn!("{}: {}", generic_error, e);
+                        cell.to_string()
+                    }
+                },
+                "s" => sprintf!(&colformat, cell).unwrap_or(cell.to_string()),
+                _ => {
+                    log::warn!(
+                        "Unsupported conversion specifier '{}' in column format '{}'",
+                        conversion_spec,
+                        colformat
+                    );
+                    cell.to_string()
+                }
+            }
+        }
+
+        if columns.len() != labels.len() {
+            return Err(ValveError::InputError(format!(
+                "The column list: {:?} and label list: {:?} differ in length.",
+                columns, labels,
+            ))
+            .into());
+        }
+
+        let table_options = self.get_table_options(table)?;
+        if !table_options.contains("save") {
+            return Err(ValveError::InputError(format!(
+                "Unable to save '{}': Not supported",
+                table
+            ))
+            .into());
+        }
+
+        let mut formatted_columns = vec!["\"row_number\"".to_string()];
+        for column in columns {
+            formatted_columns.push(format!(r#""{}""#, column));
+        }
+        let query_table = format!("\"{}_text_view\"", table);
         let sql = format!(
-            r#"SELECT {} from {} ORDER BY "row_number""#,
-            quoted_columns.join(", "),
-            text_view
+            r#"SELECT {} FROM {} ORDER BY "row_number""#,
+            formatted_columns.join(", "),
+            query_table
         );
 
+        let format_regex = Regex::new(PRINTF_RE)?;
         let mut writer = WriterBuilder::new()
             .delimiter(b'\t')
             .quote_style(QuoteStyle::Never)
             .from_path(path)?;
-        writer.write_record(columns)?;
+        writer.write_record(labels)?;
         let mut stream = sqlx_query(&sql).fetch(&self.pool);
         while let Some(row) = block_on(stream.try_next())? {
-            let mut record: Vec<&str> = vec![];
+            let mut record: Vec<String> = vec![];
             for column in columns.iter() {
+                let colformat = block_on(self.get_column_format(table, column))?;
                 let cell = row.try_get::<&str, &str>(column).ok().unwrap_or_default();
-                record.push(cell);
+                if colformat != "" {
+                    let formatted_cell = format_cell(&colformat, &format_regex, &cell);
+                    record.push(formatted_cell.to_string());
+                } else {
+                    record.push(cell.to_string());
+                }
             }
             writer.write_record(record)?;
         }
         writer.flush()?;
 
         Ok(self)
+    }
+
+    /// Given a table name, a row number, and a transaction through which to access the database,
+    /// search for and return the row number of the row that is marked as previous to the given row.
+    pub async fn get_previous_row(&self, table: &str, row: &u32) -> Result<u32> {
+        let mut tx = self.pool.begin().await?;
+        get_previous_row_tx(table, row, &mut tx).await
     }
 
     /// Given a table name and a row, represented as a JSON object in the following ('simple')
@@ -1700,7 +2027,6 @@ impl Valve {
             None,
             table_name,
             &row,
-            row_number,
             None,
         )
         .await
@@ -1718,9 +2044,18 @@ impl Valve {
     /// validate and insert the row to the table and return the row number of the inserted row
     /// and the row itself in the form of a [ValveRow].
     pub async fn insert_row(&self, table_name: &str, row: &JsonRow) -> Result<(u32, ValveRow)> {
+        let table_options = &self.get_table_options(table_name)?;
+        if !table_options.contains("edit") {
+            return Err(ValveError::InputError(format!(
+                "Inserting to table '{}' is not allowed",
+                table_name
+            ))
+            .into());
+        }
+
         let mut tx = self.pool.begin().await?;
         let row = ValveRow::from_simple_json(row, None)?;
-        let row = validate_row_tx(
+        let mut row = validate_row_tx(
             &self.config,
             &self.datatype_conditions,
             &self.rule_conditions,
@@ -1728,7 +2063,6 @@ impl Valve {
             Some(&mut tx),
             table_name,
             &row,
-            None,
             None,
         )
         .await?;
@@ -1741,11 +2075,11 @@ impl Valve {
             &mut tx,
             table_name,
             &row,
-            None,
             true,
         )
         .await?;
 
+        row.row_number = Some(rn);
         let serde_row = row.contents_to_rich_json()?;
         record_row_change(&mut tx, table_name, &rn, None, Some(&serde_row), &self.user).await?;
 
@@ -1769,6 +2103,15 @@ impl Valve {
         row_number: &u32,
         row: &JsonRow,
     ) -> Result<ValveRow> {
+        let table_options = &self.get_table_options(table_name)?;
+        if !table_options.contains("edit") {
+            return Err(ValveError::InputError(format!(
+                "Updating table '{}' is not allowed",
+                table_name
+            ))
+            .into());
+        }
+
         let mut tx = self.pool.begin().await?;
 
         // Get the old version of the row from the database so that we can later record it to the
@@ -1785,7 +2128,6 @@ impl Valve {
             Some(&mut tx),
             table_name,
             &row,
-            Some(*row_number),
             None,
         )
         .await?;
@@ -1798,7 +2140,6 @@ impl Valve {
             &mut tx,
             table_name,
             &row,
-            row_number,
             true,
             false,
         )
@@ -1822,11 +2163,22 @@ impl Valve {
 
     /// Given a table name and a row number, delete that row from the table.
     pub async fn delete_row(&self, table_name: &str, row_number: &u32) -> Result<()> {
+        let table_options = &self.get_table_options(table_name)?;
+        if !table_options.contains("edit") {
+            return Err(ValveError::InputError(format!(
+                "Deleting from table '{}' is not allowed",
+                table_name
+            ))
+            .into());
+        }
+
         let mut tx = self.pool.begin().await?;
 
-        let row =
+        let mut row =
             get_row_from_db(&self.config, &self.pool, &mut tx, &table_name, row_number).await?;
 
+        let previous_row = get_previous_row_tx(table_name, row_number, &mut tx).await?;
+        row.insert("previous_row".into(), json!(previous_row));
         record_row_change(
             &mut tx,
             &table_name,
@@ -1845,6 +2197,35 @@ impl Valve {
             &mut tx,
             table_name,
             row_number,
+        )
+        .await?;
+
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Given a table name, `table`, a row number, `row`, and the number of the row, `previous_row`,
+    /// representing the row number that will come immediately before `row` in the ordering of rows
+    /// after the move has been completed: Set the `row_order` field corresponding to `row` in the
+    /// database so that `row` comes immediately after `previous_row` in the ordering of rows.
+    pub async fn move_row(&self, table: &str, row: &u32, previous_row: &u32) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        // Get the previous row, i.e., the row after which one will find the current row, which we
+        // will use later to record this change in the history table:
+        let old_previous_row = get_previous_row_tx(table, row, &mut tx).await?;
+
+        move_row_tx(&mut tx, table, row, previous_row).await?;
+
+        // Record the move in the history table unless we have been explicitly told not to:
+        record_row_move(
+            &self.config,
+            &self.pool,
+            &mut tx,
+            table,
+            row,
+            &old_previous_row,
+            &previous_row,
+            &self.user,
         )
         .await?;
 
@@ -1882,16 +2263,42 @@ impl Valve {
         let table: &str = last_change.get("table");
         let row_number: i64 = last_change.get("row");
         let row_number = row_number as u32;
-        let from = get_json_from_row(&last_change, "from");
-        let to = get_json_from_row(&last_change, "to");
+        let from = get_json_object_from_row(&last_change, "from");
+        let to = get_json_object_from_row(&last_change, "to");
+        let summary = get_json_array_from_row(&last_change, "summary");
+        if let Some(summary) = summary {
+            let num_moves = summary
+                .iter()
+                .filter(|o| {
+                    o.get("column").expect("No 'column' in summary") == "previous_row"
+                        && o.get("level").expect("No 'level' in summary") == "move"
+                })
+                .collect::<Vec<_>>()
+                .len();
+            if num_moves == 1 {
+                // Undo a move:
+                let mut tx = self.pool.begin().await?;
+
+                undo_or_redo_move(table, &last_change, history_id, &row_number, &mut tx, true)
+                    .await?;
+                switch_undone_state(&self.user, history_id, true, &mut tx, &self.pool).await?;
+
+                tx.commit().await?;
+                return Ok(None);
+            } else if num_moves > 1 {
+                return Err(ValveError::DataError(format!(
+                    "Invalid history record #{} indicated multiple moves",
+                    history_id
+                ))
+                .into());
+            }
+        }
 
         match (from, to) {
-            (None, None) => {
-                return Err(ValveError::DataError(
-                    "Cannot redo unknown operation from None to None".into(),
-                )
-                .into())
-            }
+            (None, None) => Err(ValveError::DataError(
+                "Cannot undo unknown operation from None to None".into(),
+            )
+            .into()),
             (None, Some(_)) => {
                 // Undo an insert:
                 let mut tx = self.pool.begin().await?;
@@ -1911,12 +2318,35 @@ impl Valve {
                 tx.commit().await?;
                 Ok(None)
             }
-            (Some(from), None) => {
+            (Some(mut from), None) => {
                 // Undo a delete:
                 let mut tx = self.pool.begin().await?;
 
+                let previous_row = match from.get("previous_row") {
+                    Some(SerdeValue::Number(n)) => {
+                        let number: u32 = n.to_string().parse()?;
+                        number
+                    }
+                    Some(v) => {
+                        return Err(ValveError::DataError(format!(
+                            "Unexpected value: {:?} for previous_row in history record",
+                            v
+                        ))
+                        .into())
+                    }
+                    None => {
+                        return Err(ValveError::DataError(
+                            "No previous_row found in history record".into(),
+                        )
+                        .into())
+                    }
+                };
+
+                // The previous_row field is no longer needed so we remove it here:
+                from.remove("previous_row");
+
                 let from = ValveRow::from_rich_json(Some(row_number), &from)?;
-                insert_new_row_tx(
+                let rn = insert_new_row_tx(
                     &self.config,
                     &self.datatype_conditions,
                     &self.rule_conditions,
@@ -1924,18 +2354,24 @@ impl Valve {
                     &mut tx,
                     table,
                     &from,
-                    Some(row_number),
                     false,
                 )
                 .await?;
+
+                // Move the row back to the position after `previous_row`, which is the position
+                // it was in before it was deleted:
+                move_row_tx(&mut tx, table, &rn, &previous_row).await?;
 
                 switch_undone_state(&self.user, history_id, true, &mut tx, &self.pool).await?;
                 tx.commit().await?;
                 Ok(Some(from))
             }
-            (Some(from), Some(_)) => {
+            (Some(mut from), Some(_)) => {
                 // Undo an an update:
                 let mut tx = self.pool.begin().await?;
+
+                // The previous_row field is not needed so we remove it here:
+                from.remove("previous_row");
 
                 let from = ValveRow::from_rich_json(Some(row_number), &from)?;
                 update_row_tx(
@@ -1946,7 +2382,6 @@ impl Valve {
                     &mut tx,
                     table,
                     &from,
-                    &row_number,
                     false,
                     false,
                 )
@@ -1980,19 +2415,50 @@ impl Valve {
         let table: &str = last_undo.get("table");
         let row_number: i64 = last_undo.get("row");
         let row_number = row_number as u32;
-        let from = get_json_from_row(&last_undo, "from");
-        let to = get_json_from_row(&last_undo, "to");
+        let from = get_json_object_from_row(&last_undo, "from");
+        let to = get_json_object_from_row(&last_undo, "to");
+        let summary = get_json_array_from_row(&last_undo, "summary");
+        if let Some(summary) = summary {
+            let num_moves = summary
+                .iter()
+                .filter(|o| {
+                    o.get("column").expect("No 'column' in summary") == "previous_row"
+                        && o.get("level").expect("No 'level' in summary") == "move"
+                })
+                .collect::<Vec<_>>()
+                .len();
+            if num_moves == 1 {
+                // Redo a move:
+                let mut tx = self.pool.begin().await?;
+
+                undo_or_redo_move(table, &last_undo, history_id, &row_number, &mut tx, false)
+                    .await?;
+                switch_undone_state(&self.user, history_id, false, &mut tx, &self.pool).await?;
+
+                tx.commit().await?;
+                return Ok(None);
+            } else if num_moves > 1 {
+                return Err(ValveError::DataError(format!(
+                    "Invalid history record #{} indicated multiple moves",
+                    history_id
+                ))
+                .into());
+            }
+        }
 
         match (from, to) {
             (None, None) => {
                 return Err(ValveError::DataError(
                     "Cannot redo unknown operation from None to None".into(),
                 )
-                .into())
+                .into());
             }
-            (None, Some(to)) => {
+            (None, Some(mut to)) => {
                 // Redo an insert:
                 let mut tx = self.pool.begin().await?;
+
+                // The previous_row field is not needed so we remove it here:
+                to.remove("previous_row");
 
                 let to = ValveRow::from_rich_json(Some(row_number), &to)?;
                 insert_new_row_tx(
@@ -2003,7 +2469,6 @@ impl Valve {
                     &mut tx,
                     table,
                     &to,
-                    Some(row_number),
                     false,
                 )
                 .await?;
@@ -2031,9 +2496,12 @@ impl Valve {
                 tx.commit().await?;
                 Ok(None)
             }
-            (Some(_), Some(to)) => {
+            (Some(_), Some(mut to)) => {
                 // Redo an an update:
                 let mut tx = self.pool.begin().await?;
+
+                // The previous_row field is not needed so we remove it here:
+                to.remove("previous_row");
 
                 let to = ValveRow::from_rich_json(Some(row_number), &to)?;
                 update_row_tx(
@@ -2044,7 +2512,6 @@ impl Valve {
                     &mut tx,
                     table,
                     &to,
-                    &row_number,
                     false,
                     false,
                 )
@@ -2055,6 +2522,20 @@ impl Valve {
                 Ok(Some(to))
             }
         }
+    }
+
+    /// Given the name of a datatype, returns the configuration information for all of its
+    /// ancestors.
+    pub fn get_datatype_ancestors(&self, datatype: &str) -> Vec<ValveDatatypeConfig> {
+        toolkit::get_datatype_ancestors(&self.config, &self.datatype_conditions, datatype, false)
+    }
+
+    /// Given the name of a datatype, returns the names of all of its ancestors.
+    pub fn get_datatype_ancestor_names(&self, datatype: &str) -> Vec<String> {
+        self.get_datatype_ancestors(datatype)
+            .iter()
+            .map(|d| d.datatype.to_string())
+            .collect::<Vec<_>>()
     }
 
     /// Given a table name, a column name, and (optionally) a string to match, return a JSON array

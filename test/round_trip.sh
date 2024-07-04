@@ -22,7 +22,8 @@ valve="./valve"
 ${valve} --save_all --save_dir ${output_dir} ${table_defs} $db
 
 num_tables=$(expr $(cat $table_defs | wc -l) - 1)
-table_paths=$(tail -$num_tables $table_defs | cut -f 2)
+table_paths=$(tail -$num_tables $table_defs | grep -Ev "(db_view|no-save)" | cut -f 2)
+echo $table_paths
 
 ret_value=0
 for table_path in $table_paths
