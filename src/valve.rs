@@ -7,16 +7,16 @@ use crate::{
     toolkit::{
         add_message_counts, cast_column_sql_to_text, convert_undo_or_redo_record_to_change,
         delete_row_tx, generate_compiled_datatype_conditions, generate_compiled_rule_conditions,
-        get_column_for_label, get_column_value, get_json_array_from_row, get_json_object_from_row,
-        get_label_for_column, get_parsed_structure_conditions, get_pool_from_connection_string,
-        get_previous_row_tx, get_record_to_redo, get_record_to_undo, get_row_from_db,
-        get_sql_for_standard_view, get_sql_for_text_view, get_sql_type,
-        get_sql_type_from_global_config, get_table_ddl, insert_chunks, insert_new_row_tx,
-        local_sql_syntax, move_row_tx, read_config_files, record_row_change, record_row_move,
-        switch_undone_state, undo_or_redo_move, update_row_tx, verify_table_deps_and_sort,
-        ColumnRule, CompiledCondition, ParsedStructure,
+        get_column_for_label, get_column_value_as_string, get_json_array_from_row,
+        get_json_object_from_row, get_label_for_column, get_parsed_structure_conditions,
+        get_pool_from_connection_string, get_previous_row_tx, get_record_to_redo,
+        get_record_to_undo, get_row_from_db, get_sql_for_standard_view, get_sql_for_text_view,
+        get_sql_type, get_sql_type_from_global_config, get_table_ddl, insert_chunks,
+        insert_new_row_tx, local_sql_syntax, move_row_tx, read_config_files, record_row_change,
+        record_row_move, switch_undone_state, undo_or_redo_move, update_row_tx,
+        verify_table_deps_and_sort, ColumnRule, CompiledCondition, ParsedStructure,
     },
-    validate::{validate_row_tx, validate_tree_foreign_keys, validate_under, with_tree_sql},
+    validate::{validate_row_tx, validate_tree_foreign_keys, with_tree_sql},
     valve_grammar::StartParser,
     CHUNK_SIZE, PRINTF_RE, SQL_PARAM,
 };
@@ -1626,20 +1626,13 @@ impl Valve {
                 // (the tree's child). We also need to wait before validating a table's "under"
                 // constraints, because lthough the tree associated with such a constraint need not
                 // be defined on the same table, it can be.
-                let mut recs_to_update = block_on(validate_tree_foreign_keys(
+                let recs_to_update = block_on(validate_tree_foreign_keys(
                     &self.config,
                     &self.pool,
                     None,
                     &table_name,
                     None,
                 ))?;
-                recs_to_update.append(&mut block_on(validate_under(
-                    &self.config,
-                    &self.pool,
-                    None,
-                    &table_name,
-                    None,
-                ))?);
 
                 for record in recs_to_update {
                     let row_number = record.get("row_number").unwrap();
@@ -2592,9 +2585,7 @@ impl Valve {
                 // If the datatype for the column does not correspond to an `in(...)` function, then
                 // we check the column's structure constraints. If they include a
                 // `from(foreign_table.foreign_column)` condition, then the values are taken from
-                // the foreign column. Otherwise if the structure includes an
-                // `under(tree_table.tree_column, value)` condition, then get the values from the
-                // tree column that are under `value`.
+                // the foreign column.
                 let structure = structure_conditions.get(
                     &config
                         .table
@@ -2641,7 +2632,9 @@ impl Valve {
                                         .fetch_all(pool)
                                         .await?;
                                     for row in rows.iter() {
-                                        values.push(get_column_value(&row, &fcolumn, &sql_type));
+                                        values.push(get_column_value_as_string(
+                                            &row, &fcolumn, &sql_type,
+                                        ));
                                     }
                                 }
                             }
@@ -2708,7 +2701,11 @@ impl Valve {
 
                                 let rows = query.fetch_all(pool).await?;
                                 for row in rows.iter() {
-                                    values.push(get_column_value(&row, &child_column, &sql_type));
+                                    values.push(get_column_value_as_string(
+                                        &row,
+                                        &child_column,
+                                        &sql_type,
+                                    ));
                                 }
                             }
                             _ => {

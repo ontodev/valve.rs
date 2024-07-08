@@ -60,6 +60,11 @@ pub static MOVE_INTERVAL: u32 = 1000;
 /// Used to match a printf-style format specifier (see <https://docs.rs/sprintf/latest/sprintf/#>)
 pub static PRINTF_RE: &str = r#"^%.*([\w%])$"#;
 
+/// The size of the datatype validation cache.
+static DT_CACHE_SIZE: usize = 10000;
+
+/// The size of the foreign key validation cache.
+static FKEY_CACHE_SIZE: usize = 10000;
 
 // Note that SQL_PARAM must be a 'word' (from the point of view of regular expressions) since in the
 // local_sql_syntax() function below we are matchng against it using '\b' which represents a word
@@ -69,5 +74,6 @@ pub static PRINTF_RE: &str = r#"^%.*([\w%])$"#;
 pub static SQL_PARAM: &str = "VALVEPARAM";
 
 lazy_static! {
-    pub static ref SQL_TYPES: Vec<&'static str> = vec!["text", "varchar", "numeric", "integer", "real"];
+    pub static ref SQL_TYPES: Vec<&'static str> =
+        vec!["text", "varchar", "numeric", "integer", "real"];
 }

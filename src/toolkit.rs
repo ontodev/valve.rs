@@ -3,9 +3,7 @@
 use crate::{
     ast::Expression,
     internal::{generate_internal_table_config, INTERNAL_TABLES},
-    validate::{
-        validate_row_tx, validate_rows_constraints, validate_rows_intra, validate_rows_trees,
-    },
+    validate::{validate_row_tx, validate_rows_constraints, validate_rows_intra},
     valve::{
         ValveCell, ValveCellMessage, ValveChange, ValveColumnConfig, ValveConfig,
         ValveConstraintConfig, ValveDatatypeConfig, ValveError, ValveForeignConstraint,
@@ -1722,7 +1720,7 @@ pub async fn get_affected_rows(
                 let raw_value = row.try_get_raw(format!(r#"{}"#, cname).as_str()).unwrap();
                 let value;
                 if !raw_value.is_null() {
-                    value = get_column_value(&row, &cname, "text");
+                    value = get_column_value_as_string(&row, &cname, "text");
                 } else {
                     value = String::from("");
                 }
@@ -1797,7 +1795,7 @@ pub async fn get_row_from_db(
             if !raw_value.is_null() {
                 // The extended query returned by query_with_message_values() casts all column
                 // values to text, so we pass "text" to get_column_value() for every column:
-                value = get_column_value(&sql_row, &cname, "text");
+                value = get_column_value_as_string(&sql_row, &cname, "text");
             } else {
                 value = String::from("");
             }
@@ -3327,7 +3325,7 @@ pub fn read_db_table_into_vector(pool: &AnyPool, config_table: &str) -> Result<V
             if cname != "row_number" && cname != "row_order" {
                 let raw_value = row.try_get_raw(format!(r#"{}"#, cname).as_str()).unwrap();
                 if !raw_value.is_null() {
-                    let value = get_column_value(&row, &cname, "text");
+                    let value = get_column_value_as_string(&row, &cname, "text");
                     table_row.insert(cname.to_string(), json!(value));
                 } else {
                     table_row.insert(cname.to_string(), json!(""));
@@ -3584,7 +3582,7 @@ pub fn cast_column_sql_to_text(column: &str, sql_type: &str) -> String {
 
 /// Given a database row, the name of a column, and it's SQL type, return the value of that column
 /// from the given row as a String.
-pub fn get_column_value(row: &AnyRow, column: &str, sql_type: &str) -> String {
+pub fn get_column_value_as_string(row: &AnyRow, column: &str, sql_type: &str) -> String {
     let s = sql_type.to_lowercase();
     if s == "numeric" {
         let value: f64 = row
@@ -3606,6 +3604,33 @@ pub fn get_column_value(row: &AnyRow, column: &str, sql_type: &str) -> String {
             .try_get(format!(r#"{}"#, column).as_str())
             .unwrap_or_default();
         value.to_string()
+    }
+}
+
+/// Given a database row, the name of a column, and it's SQL type, return the value of that column
+/// from the given row as a [SerdeValue].
+pub fn get_column_value(row: &AnyRow, column: &str, sql_type: &str) -> SerdeValue {
+    let s = sql_type.to_lowercase();
+    if s == "numeric" {
+        let value: f64 = row
+            .try_get(format!(r#"{}"#, column).as_str())
+            .unwrap_or_default();
+        json!(value)
+    } else if s == "integer" {
+        let value: i32 = row
+            .try_get(format!(r#"{}"#, column).as_str())
+            .unwrap_or_default();
+        json!(value)
+    } else if s == "real" {
+        let value: f64 = row
+            .try_get(format!(r#"{}"#, column).as_str())
+            .unwrap_or_default();
+        json!(value)
+    } else {
+        let value: &str = row
+            .try_get(format!(r#"{}"#, column).as_str())
+            .unwrap_or_default();
+        json!(value)
     }
 }
 
@@ -4552,10 +4577,6 @@ pub async fn insert_chunk(
     verbose: bool,
     validate: bool,
 ) -> Result<()> {
-    // Optional tree validation:
-    if validate {
-        validate_rows_trees(config, pool, table_name, rows).await?;
-    }
     // Insertion with optional inter-table validation:
     // Try to insert the rows to the db first without validating unique and foreign constraints.
     // If there are constraint violations this will cause a database error, in which case we then
