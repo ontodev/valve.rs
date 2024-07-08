@@ -10,13 +10,13 @@ table4	test/src/ontology/table4.tsv	The fourth data table
 table5	test/src/ontology/table5.tsv	The fifth data table		
 table6	test/src/ontology/table6.tsv	The sixth data table (like table2 but all numeric)		
 table7	test/src/ontology/table7.tsv	The seventh data table		
-table8	test/src/ontology/table8.tsv	The eightth data table		foo, validate_on_load, conflict, edit
+table8	test/src/ontology/table8.tsv	The eightth data table		foo validate_on_load conflict edit
 table9	test/src/ontology/table9.tsv	The ninth data table		
 table10	test/src/ontology/table10.tsv	The tenth data table		
 table11	test/src/ontology/table11.tsv	The eleventh data table		
-view1	test/output/view1.sql			db_table, db_view, internal
-view2	test/output/view2.sh			save, db_view
+view1	test/output/view1.sql			db_table db_view internal
+view2	test/output/view2.sh			save db_view
 view3				db_view
-readonly1	test/output/readonly1.sh			no-edit, no-save, no-conflict
-readonly2	test/src/ontology/readonly2.tsv			edit, save, no-edit, no-save, no-conflict
-readonly3	test/output/readonly3.sql			no-edit, no-save, no-conflict, no-validate_on_load
+readonly1	test/output/readonly1.sh			no-edit no-save no-conflict
+readonly2	test/src/ontology/readonly2.tsv			edit save no-edit no-save no-conflict
+readonly3	test/output/readonly3.sql			no-edit no-save no-conflict no-validate_on_load
