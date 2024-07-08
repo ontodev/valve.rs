@@ -628,9 +628,12 @@ pub fn read_config_files(
         let row_type = row.get("type").and_then(|t| t.as_str()).unwrap();
         let row_type = row_type.to_lowercase();
         let row_type = row_type.as_str();
-        let row_options = row.get("options").and_then(|t| t.as_str()).unwrap();
+        let row_options = match row.get("options") {
+            Some(o) => o.as_str().unwrap(),
+            None => "",
+        };
         let row_options = row_options.to_lowercase();
-        let row_options = row_options.as_str().split(",").collect::<Vec<_>>();
+        let row_options = row_options.as_str().split(" ").collect::<Vec<_>>();
         let (row_options, messages) = match normalize_options(&row_options, row_number) {
             Err(e) => {
                 return Err(ValveError::ConfigError(format!(
