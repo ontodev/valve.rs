@@ -196,18 +196,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "async-scoped"
-version = "0.7.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0e7a6a57c8aeb40da1ec037f5d455836852f7a57e69e1b1ad3d8f38ac1d6cadf"
-dependencies = [
- "async-std",
- "futures",
- "pin-project",
- "slab",
-]
-
-[[package]]
 name = "async-std"
 version = "1.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1101,6 +1089,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e2abad23fbc42b3700f2f279844dc832adb2b2eb069b2df918f455c4e18cc646"
 
 [[package]]
+name = "lfu_cache"
+version = "1.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "18333c3c9ae8f731098d650474d07785570bf5ab1e1f33750731b7c9ef562009"
+
+[[package]]
 name = "libc"
 version = "0.2.155"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1225,7 +1219,6 @@ version = "0.2.2"
 dependencies = [
  "anyhow",
  "async-recursion",
- "async-scoped",
  "async-std",
  "clap",
  "crossbeam",
@@ -1241,6 +1234,7 @@ dependencies = [
  "lalrpop",
  "lalrpop-util",
  "lazy_static",
+ "lfu_cache",
  "log",
  "num_cpus",
  "pad",

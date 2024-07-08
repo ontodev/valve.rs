@@ -80,7 +80,21 @@ def get_constrained_cell_value(config, table, column, row_num, prev_inserts):
 
     structure = get_column_structure(config, table, column)
     datatype = get_column_datatype(config, table, column).casefold()
-    if structure.startswith("from("):
+    table4_numerics = [
+        "623355055",
+        "534436633",
+        "399784475",
+        "877227330",
+        "398143301",
+        "394334137",
+        "708425682",
+        "508369551",
+        "241572254",
+        "256276245",
+    ]
+    if table == "table4" and column == "numeric_foreign_column":
+        cell = table4_numerics[random.randrange(len(table4_numerics))]
+    elif structure.startswith("from("):
         fkey = get_foreign_key(config, table, column)
         ftable = fkey["ftable"]
         fcolumn = fkey["fcolumn"]

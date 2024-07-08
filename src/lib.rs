@@ -62,6 +62,12 @@ pub static MOVE_INTERVAL: u32 = 1000;
 pub static PRINTF_RE: &str = r#"^%.*([\w%])$"#;
 
 
+/// The size of the datatype validation cache.
+static DT_CACHE_SIZE: usize = 10000;
+
+/// The size of the foreign key validation cache.
+static FKEY_CACHE_SIZE: usize = 10000;
+
 // Note that SQL_PARAM must be a 'word' (from the point of view of regular expressions) since in the
 // local_sql_syntax() function below we are matchng against it using '\b' which represents a word
 // boundary. If you want to use a non-word placeholder then you must also change '\b' in the regex
