@@ -4138,6 +4138,12 @@ pub fn get_table_ddl(
     // have an associated unique or primary index, create one implicitly here:
     for tree in trees {
         if !uniques.contains(&tree.child) && !primaries.contains(&tree.child) {
+            log::warn!(
+                "Table '{}' has a tree defined on column '{}' which therefore requires \
+                        a UNIQUE constraint. It will be implicitly created.",
+                table_name,
+                tree.child
+            );
             statements.push(format!(
                 r#"CREATE UNIQUE INDEX "{}_{}_idx" ON "{}"("{}");"#,
                 table_name, tree.child, table_name, tree.child
