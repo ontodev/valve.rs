@@ -4071,7 +4071,6 @@ pub fn get_table_constraints(
     return (primaries, uniques, foreigns, trees, unders);
 }
 
-// TODO: There is a bug in this function.
 /// Given a table configuration struct, a datatype configuration struct, a parser, a table name,
 /// and a database connection pool, return a list of DDL statements that can be used to create the
 /// database tables.
