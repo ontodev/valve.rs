@@ -14,6 +14,7 @@ table10	1	numeric_foreign_column	error	datatype:integer	numeric_foreign_column s
 table10	1	numeric_foreign_column	error	datatype:trimmed_line	numeric_foreign_column should be a line of text that does not begin or end with whitespace	
 table11	2	foo	error	key:primary	Values of foo must be unique	d
 table11	3	foo	error	key:primary	Values of foo must be unique	d
+table2	1	child	error	key:unique	Values of child must be unique	b
 table2	1	child	error	tree:child-unique	Values of child must be unique	b
 table2	2	foo	error	rule:foo-1	bar must be null whenever foo is null	
 table2	4	foo	error	rule:foo-4	bar must be 'y' or 'z' if foo = 5	5
@@ -41,10 +42,12 @@ table3	11	source	error	key:foreign	Value 'BFOBBER' of column source is not in ta
 table4	9	foreign_column	error	key:unique	Values of foreign_column must be unique	a
 table4	10	foreign_column	error	key:unique	Values of foreign_column must be unique	b
 table4	10	numeric_foreign_column	error	key:primary	Values of numeric_foreign_column must be unique	9
+table6	1	child	error	key:unique	Values of child must be unique	2
 table6	1	child	error	tree:child-unique	Values of child must be unique	2
 table6	2	foo	error	rule:foo-1	bar must be null whenever foo is null	
 table6	4	foo	error	rule:foo-4	bar must be 25 or 26 if foo = 'e'	e
 table6	9	child	error	key:foreign	Value '9' of column child exists only in table4_conflict.numeric_foreign_column	9
+table6	10	child	error	key:unique	Values of child must be unique	2
 table6	10	child	error	tree:child-unique	Values of child must be unique	2
 table7	3	planetfall	error	datatype:integer	planetfall should be a positive or negative integer	e
 table8	1	prefix	error	key:foreign	Value 'a' of column prefix is not in table10.foreign_column	a

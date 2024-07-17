@@ -1208,6 +1208,7 @@ pub fn read_config_files(
             &table_name,
             &pool,
         );
+
         constraints_config
             .primary
             .insert(table_name.to_string(), primaries);
@@ -1225,13 +1226,70 @@ pub fn read_config_files(
             .insert(table_name.to_string(), unders);
     }
 
-    // 6. Add internal table configuration to the table config:
+    // 6. Add implicit unique constraints for trees and foreign keys:
+    let add_permanent_structure = |table: &str, column: &str| {
+        let curr_structure = &tables_config
+            .get(table)
+            .expect(&format!("Undefined table '{}'", table))
+            .column
+            .get(column)
+            .expect(&format!(
+                "No column '{}' defined in config for table '{}'",
+                column, table
+            ))
+            .structure;
+        if curr_structure != "" {
+            log::warn!(
+                "Cannot permanently add 'unique' structure to '{}.{}': \
+                 Already has structure '{}'",
+                table,
+                column,
+                curr_structure
+            );
+        } else {
+            log::info!(
+                "Permanently adding structure 'unique' to '{}.{}'",
+                table,
+                column
+            );
+            // TODO: Implement this.
+            log::warn!("Not permamently adding structure as this feature is not yet implemented");
+        }
+    };
+    for (table, _) in &tables_config {
+        let table_trees = constraints_config
+            .tree
+            .get(table)
+            .expect(&format!("No tree constraints found for table '{}'", table));
+        let table_uniques = constraints_config.unique.get_mut(table).expect(&format!(
+            "No unique constraints found for table '{}'",
+            table
+        ));
+        let table_primaries = constraints_config.primary.get(table).expect(&format!(
+            "No primary constraints found for table '{}'",
+            table
+        ));
+        for tree in table_trees {
+            if !table_uniques.contains(&tree.child) && !table_primaries.contains(&tree.child) {
+                log::warn!(
+                    "Table '{}' has a tree defined on column '{}' which therefore requires \
+                     a UNIQUE constraint. It will be implicitly created.",
+                    table,
+                    tree.child
+                );
+                table_uniques.push(tree.child.to_string());
+                add_permanent_structure(table, &tree.child);
+            }
+        }
+    }
+
+    // 7. Add internal table configuration to the table config:
     for table in INTERNAL_TABLES.iter() {
         tables_config.insert(table.to_string(), generate_internal_table_config(table));
         table_order.push(table.to_string());
     }
 
-    // 7. Sort the tables (other than internal tables) according to their foreign key
+    // 8. Sort the tables (other than internal tables) according to their foreign key
     // dependencies so that tables are always loaded after the tables they depend on.
     let (sorted_tables, table_dependencies_in, table_dependencies_out) = verify_table_deps_and_sort(
         &table_order
@@ -1244,7 +1302,7 @@ pub fn read_config_files(
         &constraints_config,
     );
 
-    // 8. Finally, return all the configs:
+    // 9. Finally, return all the configs:
     Ok((
         specials_config,
         tables_config,
@@ -3872,6 +3930,7 @@ pub fn get_table_constraints(
     for (_, column) in columns.iter() {
         colvals.push(column.clone());
     }
+
     for row in colvals {
         let datatype = &row.datatype;
         let sql_type = get_sql_type(datatypes_config, datatype, pool);
@@ -3984,12 +4043,12 @@ pub fn get_table_constraints(
     return (primaries, uniques, foreigns, trees, unders);
 }
 
+// TODO: There is a bug in this function.
 /// Given a table configuration struct, a datatype configuration struct, a parser, a table name,
 /// and a database connection pool, return a list of DDL statements that can be used to create the
 /// database tables.
 pub fn get_table_ddl(
     config: &ValveConfig,
-    parser: &StartParser,
     table_name: &String,
     pool: &AnyPool,
 ) -> Result<Vec<String>> {
@@ -4026,18 +4085,18 @@ pub fn get_table_ddl(
             .collect::<Vec<_>>()
     };
 
-    let (primaries, uniques, foreigns, trees, _unders) = {
+    let (primaries, uniques, foreigns, _trees, _unders) = {
         // Conflict tables have no database constraints:
         if table_name.ends_with("_conflict") {
             (vec![], vec![], vec![], vec![], vec![])
         } else {
-            get_table_constraints(
-                &tables_config,
-                &datatypes_config,
-                parser,
-                &table_name,
-                &pool,
-            )
+            let cons = &config.constraint;
+            let primaries = cons.primary.get(table_name).cloned().unwrap_or(vec![]);
+            let uniques = cons.unique.get(table_name).cloned().unwrap_or(vec![]);
+            let foreigns = cons.foreign.get(table_name).cloned().unwrap_or(vec![]);
+            let trees = cons.tree.get(table_name).cloned().unwrap_or(vec![]);
+            let unders = cons.under.get(table_name).cloned().unwrap_or(vec![]);
+            (primaries, uniques, foreigns, trees, unders)
         }
     };
 
@@ -4133,23 +4192,6 @@ pub fn get_table_ddl(
     // We are done generating the lines for the 'create table' statement. Join them and add the
     // result to the statements to return:
     statements.push(String::from(create_lines.join("\n")));
-
-    // Loop through the tree constraints and if any of their associated child columns do not already
-    // have an associated unique or primary index, create one implicitly here:
-    for tree in trees {
-        if !uniques.contains(&tree.child) && !primaries.contains(&tree.child) {
-            log::warn!(
-                "Table '{}' has a tree defined on column '{}' which therefore requires \
-                        a UNIQUE constraint. It will be implicitly created.",
-                table_name,
-                tree.child
-            );
-            statements.push(format!(
-                r#"CREATE UNIQUE INDEX "{}_{}_idx" ON "{}"("{}");"#,
-                table_name, tree.child, table_name, tree.child
-            ));
-        }
-    }
 
     // Finally, create further unique indexes on row_number and row_order:
     statements.push(format!(

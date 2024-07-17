@@ -18,7 +18,7 @@ use crate::{
     },
     validate::{validate_row_tx, validate_tree_foreign_keys, with_tree_sql},
     valve_grammar::StartParser,
-    CHUNK_SIZE, SQL_PARAM, PRINTF_RE,
+    CHUNK_SIZE, PRINTF_RE, SQL_PARAM,
 };
 use anyhow::Result;
 use csv::{QuoteStyle, ReaderBuilder, WriterBuilder};
@@ -1260,7 +1260,6 @@ impl Valve {
     pub async fn get_setup_statements(&self) -> Result<HashMap<String, Vec<String>>> {
         let tables_config = &self.config.table;
         let datatypes_config = &self.config.datatype;
-        let parser = StartParser::new();
 
         // Begin by reading in the TSV files corresponding to the tables defined in tables_config,
         // and use that information to create the associated database tables, while saving
@@ -1269,11 +1268,11 @@ impl Valve {
         for (table, table_config) in tables_config.iter() {
             // Generate DDL for the table and its corresponding conflict table:
             let mut table_statements = vec![];
-            let mut statements = get_table_ddl(&self.config, &parser, &table, &self.pool)?;
+            let mut statements = get_table_ddl(&self.config, &table, &self.pool)?;
             table_statements.append(&mut statements);
             if table_config.options.contains("conflict") {
                 let cable = format!("{}_conflict", table);
-                let mut statements = get_table_ddl(&self.config, &parser, &cable, &self.pool)?;
+                let mut statements = get_table_ddl(&self.config, &cable, &self.pool)?;
                 table_statements.append(&mut statements);
 
                 let create_view_sql = get_sql_for_standard_view(&table, &self.pool);
