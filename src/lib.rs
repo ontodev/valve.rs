@@ -32,6 +32,7 @@
 extern crate lalrpop_util;
 
 pub mod ast;
+pub mod guess;
 pub mod internal;
 pub mod toolkit;
 pub mod validate;

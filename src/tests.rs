@@ -969,9 +969,7 @@ async fn test_move(valve: &Valve) -> Result<()> {
     Ok(())
 }
 
-pub async fn run_api_tests(table: &str, database: &str) -> Result<()> {
-    let valve = Valve::build(table, database).await?;
-
+pub async fn run_api_tests(valve: &Valve) -> Result<()> {
     // NOTE that you must use an external script to fetch the data from the database and run a diff
     // against a known good sample to verify that these tests yield the expected results:
     test_matching(&valve).await?;
@@ -990,7 +988,7 @@ pub async fn run_api_tests(table: &str, database: &str) -> Result<()> {
     // should be read from the database string (given by the second argument) instead, i.e., valve
     // will look in the given database and read the configuration from the "table" db table. Here
     // we just make sure that this is possible. If there is a problem an error will be returned.
-    let _valve = Valve::build("ignored", database).await?;
+    let _valve = Valve::build("ignored", &valve.db_path).await?;
 
     eprintln!("All done.");
     Ok(())

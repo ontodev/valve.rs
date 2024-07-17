@@ -2,243 +2,216 @@ mod tests;
 
 use crate::tests::{run_api_tests, run_dt_hierarchy_tests};
 use anyhow::Result;
-use argparse::{ArgumentParser, Store, StoreTrue};
+use clap::{ArgAction, Parser, Subcommand};
 use futures::executor::block_on;
-use ontodev_valve::valve::Valve;
-use std::{env, process};
+use ontodev_valve::{guess::guess, valve::Valve};
+
+// Help strings that are used in more than one subcommand:
+static SOURCE_HELP: &str = "The location of a TSV file, representing the 'table' table, \
+                            from which to read the Valve configuration.";
+
+static DESTINATION_HELP: &str = "Can be one of (A) A URL of the form `postgresql://...` \
+                                 or `sqlite://...` (B) The filename (including path) of \
+                                 a sqlite database.";
+
+static SAVE_DIR_HELP: &str = "Save tables to DIR instead of to their configured paths";
+
+#[derive(Parser)]
+#[command(version,
+          about = "Valve: A lightweight validation engine -- command line interface",
+          long_about = None)]
+struct Cli {
+    /// Use this option with caution. When set, Valve will not not ask the user for confirmation
+    /// before executing potentially destructive operations.
+    #[arg(long, action = ArgAction::SetTrue)]
+    assume_yes: bool,
+
+    /// Write more progress information to the terminal.
+    #[arg(long, action = ArgAction::SetTrue)]
+    verbose: bool,
+
+    // Subcommands:
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Loads a given database.
+    Load {
+        #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
+        source: String,
+
+        #[arg(value_name = "DESTINATION", action = ArgAction::Set, help = DESTINATION_HELP)]
+        destination: String,
+
+        #[arg(long,
+              action = ArgAction::SetTrue,
+              help = "(SQLite only) When this flag is set, the database \
+                      settings will be tuned for initial loading. Note that \
+                      these settings are unsafe and should be used for \
+                      initial loading only, as data integrity will not be \
+                      guaranteed in the case of an interrupted transaction.")]
+        initial_load: bool,
+        // TODO: Add a --dry-run flag.
+    },
+
+    /// Creates a database in a given location but does not load any of the tables.
+    Create {
+        #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
+        source: String,
+
+        #[arg(value_name = "DESTINATION", action = ArgAction::Set, help = DESTINATION_HELP)]
+        destination: String,
+    },
+
+    /// Drops all of the configured tables in the given database.
+    DropAll {
+        #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
+        source: String,
+
+        #[arg(value_name = "DESTINATION", action = ArgAction::Set, help = DESTINATION_HELP)]
+        destination: String,
+    },
+
+    /// Saves all configured data tables as TSV files.
+    SaveAll {
+        #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
+        source: String,
+
+        #[arg(value_name = "DESTINATION", action = ArgAction::Set, help = DESTINATION_HELP)]
+        destination: String,
+
+        #[arg(long, value_name = "DIR", action = ArgAction::Set, help = SAVE_DIR_HELP)]
+        save_dir: Option<String>,
+    },
+
+    /// Saves the configured data tables from the given list as TSV files.
+    Save {
+        #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
+        source: String,
+
+        #[arg(value_name = "DESTINATION", action = ArgAction::Set, help = DESTINATION_HELP)]
+        destination: String,
+
+        #[arg(value_name = "LIST",
+              action = ArgAction::Set,
+              value_delimiter = ',',
+              help = "A comma-separated list of tables to save. Note that table names with spaces \
+                      must be enclosed within quotes.")]
+        tables: Vec<String>,
+
+        #[arg(long, value_name = "DIR", action = ArgAction::Set, help = SAVE_DIR_HELP)]
+        save_dir: Option<String>,
+    },
+
+    /// Prints the Valve configuration as a JSON-formatted string to the terminal.
+    DumpConfig {
+        #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
+        source: String,
+    },
+
+    /// Prints the order in which the configured tables will be created, as determined by their
+    /// dependency relations, to the terminal.
+    ShowTableOrder {
+        #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
+        source: String,
+    },
+
+    /// Prints the incoming dependencies for each configured table to the terminal.
+    ShowIncomingDeps {
+        #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
+        source: String,
+    },
+
+    /// Prints the outgoing dependencies for each configured table to the terminal.
+    ShowOutgoingDeps {
+        #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
+        source: String,
+    },
+
+    /// Prints the SQL that will be used to create the database tables to the terminal.
+    DumpSchema {
+        #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
+        source: String,
+    },
+
+    /// Guess the Valve column configuration for the data table represented by a given TSV file.
+    Guess {
+        #[arg(long, value_name = "SIZE", action = ArgAction::Set,
+              help = "Sample size to use when guessing",
+              default_value_t = 10000)]
+        sample_size: usize,
+
+        #[arg(long, value_name = "RATE", action = ArgAction::Set,
+              help = "A number between 0 and 1 (inclusive) representing the proportion of errors \
+                      expected",
+              default_value_t = 0.1)]
+        error_rate: f32,
+
+        #[arg(long, value_name = "SEED", action = ArgAction::Set,
+              help = "Use SEED for random sampling")]
+        seed: Option<u64>,
+
+        #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
+        source: String,
+
+        #[arg(value_name = "DESTINATION", action = ArgAction::Set, help = DESTINATION_HELP)]
+        destination: String,
+
+        #[arg(value_name = "TABLE_TSV", action = ArgAction::Set,
+              help = "The TSV file representing the table whose column configuration will be \
+                      guessed.")]
+        table_tsv: String,
+    },
+
+    /// Runs a set of predefined tests, on a specified pre-loaded database, that will test Valve's
+    /// Application Programmer Interface.
+    TestApi {
+        #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
+        source: String,
+
+        #[arg(value_name = "DESTINATION", action = ArgAction::Set, help = DESTINATION_HELP)]
+        destination: String,
+    },
+
+    /// Runs a set of predefined tests, on a specified pre-loaded database, that will test the
+    /// validity of the configured datatype hierarchy.
+    TestDtHierarchy {
+        #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
+        source: String,
+
+        #[arg(value_name = "DESTINATION", action = ArgAction::Set, help = DESTINATION_HELP)]
+        destination: String,
+    },
+}
 
 #[async_std::main]
 async fn main() -> Result<()> {
-    // Command line parameters and their default values. See below for descriptions. Note that some
-    // of these are mutually exclusive. This is accounted for below.
+    let cli = Cli::parse();
 
-    // TODO: Use a more powerful command-line parser library that can automatically take care of
-    // things like mutually exclusive options, since argparse doesn't seem to be able to do it.
-
-    let mut api_test = false;
-    let mut test_dt_hierarchy = false;
-    let mut create_only = false;
-    let mut destination = String::new();
-    let mut drop_all = false;
-    let mut dump_config = false;
-    let mut dump_schema = false;
-    let mut initial_load = false;
-    let mut interactive = false;
-    let mut save_all = false;
-    let mut save_dir = String::new();
-    let mut save = String::new();
-    let mut show_deps_in = false;
-    let mut show_deps_out = false;
-    let mut source = String::new();
-    let mut table_order = false;
-    let mut verbose = false;
-    // TODO: Add a "dry_run" parameter.
-
-    {
-        // this block limits scope of borrows by ap.refer() method
-        let mut ap = ArgumentParser::new();
-        ap.set_description(r#"Valve is a lightweight validation engine written in rust."#);
-        ap.refer(&mut interactive).add_option(
-            &["--interactive"],
-            StoreTrue,
-            "Ask for confirmation before automatically dropping or truncating database tables in \
-             order to satisfy a dependency.",
-        );
-        ap.refer(&mut verbose).add_option(
-            &["--verbose"],
-            StoreTrue,
-            r#"Write informative messages about what Valve is doing to stderr."#,
-        );
-        ap.refer(&mut initial_load).add_option(
-            &["--initial_load"],
-            StoreTrue,
-            r#"(SQLite only) When this flag is set, the database settings will be tuned for initial
-               loading. Note that these settings are unsafe and should be used for initial loading
-               only, as data integrity will not be guaranteed in the case of an interrupted
-               transaction."#,
-        );
-        ap.refer(&mut dump_config).add_option(
-            &["--dump_config"],
-            StoreTrue,
-            r#"Read the configuration referred to by SOURCE and print it as a JSON-formatted
-               string."#,
-        );
-        ap.refer(&mut dump_schema).add_option(
-            &["--dump_schema"],
-            StoreTrue,
-            r#"Read the configuration referred to by SOURCE and print the SQL that will be used to
-               create the database to stdout."#,
-        );
-        ap.refer(&mut table_order).add_option(
-            &["--table_order"],
-            StoreTrue,
-            r#"Read the configuration referred to by SOURCE and print the order in which the
-               configured tables will be created, as determined by their dependency relations."#,
-        );
-        ap.refer(&mut show_deps_in).add_option(
-            &["--show_deps_in"],
-            StoreTrue,
-            r#"Read the configuration referred to by SOURCE and print the incoming dependencies
-               for each configured table."#,
-        );
-        ap.refer(&mut show_deps_out).add_option(
-            &["--show_deps_out"],
-            StoreTrue,
-            r#"Read the configuration referred to by SOURCE andprint the outgoing dependencies
-               for each configured table."#,
-        );
-        ap.refer(&mut drop_all).add_option(
-            &["--drop_all"],
-            StoreTrue,
-            r#"Read the configuration referred to by SOURCE and drop all of the configured tables
-               in the given database."#,
-        );
-        ap.refer(&mut create_only).add_option(
-            &["--create_only"],
-            StoreTrue,
-            r#"Read the configuration referred to by SOURCE, and create a corresponding database in
-               DESTINATION but do not load it."#,
-        );
-        ap.refer(&mut save).add_option(
-            &["--save"],
-            Store,
-            r#"Read the configuration referred to by SOURCE and save the configured data tables
-               from the given list as TSV files to their configured paths (as specified in the table
-               configuration). Optionally, specify --save-path to save the files at an alternative
-               location."#,
-        );
-        ap.refer(&mut save_all).add_option(
-            &["--save_all"],
-            StoreTrue,
-            r#"Read the configuration referred to by SOURCE and save the all configured data tables
-               as TSV files to their configured paths (as specified in the table configuration).
-               Optionally, specify --save-path to save the files at an alternative location."#,
-        );
-        ap.refer(&mut save_dir).add_option(
-            &["--save_dir"],
-            Store,
-            r#"Ignored if neither --save nor --save-all has been specified. Saves the tables to the
-               given path instead of to their configured paths."#,
-        );
-        ap.refer(&mut api_test).add_option(
-            &["--api_test"],
-            StoreTrue,
-            r#"Read the configuration referred to by SOURCE and run a set of predefined tests on the
-               existing, pre-loaded database indicated by DESTINATION."#,
-        );
-        ap.refer(&mut test_dt_hierarchy).add_option(
-            &["--test_dt_hierarchy"],
-            StoreTrue,
-            r#"Try to determine whether the managed data conforms to the configured datatype
-               hierarchy, in the sense that anything acceptable as a value of the child datatype
-               should also be acceptable as a value of the parent datatype. Internally, Valve will
-               randomly generate valid values of the child datatype and verify that the above
-               conditional holds for them."#,
-        );
-        ap.refer(&mut source).add_argument(
-            "SOURCE",
-            Store,
-            r#"The location of the valve configuration entrypoint. Can be one of (A) A URL of the
-               form `postgresql://...` or `sqlite://...` indicating a database connection where
-               the valve configuration can be read from a table named "table"; (B) The filename
-               (including path) of the table file (usually called table.tsv)."#,
-        );
-        ap.refer(&mut destination).add_argument(
-            "DESTINATION",
-            Store,
-            r#"Can be one of (A) A URL of the form `postgresql://...` or `sqlite://...`
-               (B) The filename (including path) of a sqlite database."#,
-        );
-
-        ap.parse_args_or_exit()
-    }
-
-    let args: Vec<String> = env::args().collect();
-    let program_name = &args[0];
-    let advice = format!("Run `{} --help` for command line usage.", program_name);
-
-    let mutually_exclusive_options = vec![
-        api_test,
-        test_dt_hierarchy,
-        dump_config,
-        dump_schema,
-        table_order,
-        show_deps_in,
-        show_deps_out,
-        drop_all,
-        create_only,
-        save != "" || save_all,
-    ];
-
-    if mutually_exclusive_options
-        .iter()
-        .filter(|&i| *i == true)
-        .count()
-        > 1
-    {
-        eprintln!(
-            "More than one mutually exclusive option specified. {}.",
-            advice
-        );
-        process::exit(1);
-    }
-
-    let destination_optional =
-        dump_config || dump_schema || table_order || show_deps_in || show_deps_out;
-
-    if source == "" {
-        eprintln!("Parameter SOURCE is required. {}", advice);
-        process::exit(1);
-    } else if !destination_optional && destination == "" {
-        eprintln!("Parameter DESTINATION is required. {}", advice);
-        process::exit(1);
-    }
-
-    let build_valve = || -> Result<Valve> {
+    // This has to be done multiple times so we declare a closure. We use a closure instead of a
+    // function so that the cli.verbose and cli.assume_yes fields are in scope:
+    let build_valve = |source: &str, destination: &str| -> Result<Valve> {
         let mut valve = block_on(Valve::build(&source, &destination)).unwrap();
-        valve.set_verbose(verbose);
-        valve.set_interactive(interactive);
-        if initial_load {
-            block_on(valve.configure_for_initial_load()).unwrap();
-        }
+        valve.set_verbose(cli.verbose);
+        valve.set_interactive(!cli.assume_yes);
         Ok(valve)
     };
 
-    if api_test {
-        run_api_tests(&source, &destination).await.unwrap();
-    } else if test_dt_hierarchy {
-        let valve = build_valve().unwrap();
-        valve.create_all_tables().await.unwrap();
-        run_dt_hierarchy_tests(&valve).unwrap();
-    } else if save_all || save != "" {
-        let valve = build_valve().unwrap();
-        let save_dir = {
-            if save_dir == "" {
-                None
-            } else {
-                Some(save_dir.clone())
-            }
-        };
-        if save_all {
-            valve.save_all_tables(&save_dir).unwrap();
-        } else {
-            let tables = save.split(',').collect::<Vec<_>>();
-            valve.save_tables(&tables, &save_dir).unwrap();
+    // Although Valve::build() will accept a non-TSV argument (in which case that argument is
+    // ignored and a table called 'table' is looked up in the given database instead), we do not
+    // allow non-TSV arguments on the command line:
+    fn exit_unless_tsv(source: &str) {
+        if !source.to_lowercase().ends_with(".tsv") {
+            println!("SOURCE must be a file ending (case-insensitively) with .tsv");
+            std::process::exit(1);
         }
-    } else if dump_config {
-        let valve = build_valve().unwrap();
-        println!("{}", valve.config);
-    } else if dump_schema {
-        let valve = build_valve().unwrap();
-        let schema = valve.dump_schema().await.unwrap();
-        println!("{}", schema);
-    } else if table_order {
-        let valve = build_valve().unwrap();
-        let sorted_table_list = valve.get_sorted_table_list(false);
-        println!("{}", sorted_table_list.join(", "));
-    } else if show_deps_in || show_deps_out {
-        let valve = build_valve().unwrap();
-        let dependencies = valve.collect_dependencies(show_deps_in).unwrap();
+    }
+
+    // Prints the table dependencies in either incoming or outgoing order.
+    fn print_dependencies(valve: &Valve, incoming: bool) {
+        let dependencies = valve.collect_dependencies(incoming).unwrap();
         for (table, deps) in dependencies.iter() {
             let deps = {
                 let deps = deps.iter().map(|s| format!("'{}'", s)).collect::<Vec<_>>();
@@ -249,7 +222,7 @@ async fn main() -> Result<()> {
                 }
             };
             let preamble = {
-                if show_deps_in {
+                if incoming {
                     format!("Tables that depend on '{}'", table)
                 } else {
                     format!("Table '{}' depends on", table)
@@ -257,15 +230,124 @@ async fn main() -> Result<()> {
             };
             println!("{}: {}", preamble, deps);
         }
-    } else if drop_all {
-        let valve = build_valve().unwrap();
-        valve.drop_all_tables().await.unwrap();
-    } else if create_only {
-        let valve = build_valve().unwrap();
-        valve.create_all_tables().await.unwrap();
-    } else {
-        let valve = build_valve().unwrap();
-        valve.load_all_tables(true).await.unwrap();
+    }
+
+    match &cli.command {
+        Commands::Load {
+            initial_load,
+            source,
+            destination,
+        } => {
+            exit_unless_tsv(source);
+            let mut valve = build_valve(source, destination).unwrap();
+            if *initial_load {
+                block_on(valve.configure_for_initial_load()).unwrap();
+            }
+            valve.load_all_tables(true).await.unwrap();
+        }
+        Commands::Create {
+            source,
+            destination,
+        } => {
+            exit_unless_tsv(source);
+            let valve = build_valve(source, destination).unwrap();
+            valve.create_all_tables().await.unwrap();
+        }
+        Commands::DropAll {
+            source,
+            destination,
+        } => {
+            exit_unless_tsv(source);
+            let valve = build_valve(source, destination).unwrap();
+            valve.drop_all_tables().await.unwrap();
+        }
+        Commands::DumpConfig { source } => {
+            exit_unless_tsv(source);
+            let valve = build_valve(source, "").unwrap();
+            println!("{}", valve.config);
+        }
+        Commands::ShowTableOrder { source } => {
+            exit_unless_tsv(source);
+            let valve = build_valve(source, "").unwrap();
+            let sorted_table_list = valve.get_sorted_table_list(false);
+            println!("{}", sorted_table_list.join(", "));
+        }
+        Commands::ShowIncomingDeps { source } => {
+            exit_unless_tsv(source);
+            let valve = build_valve(source, "").unwrap();
+            print_dependencies(&valve, true);
+        }
+        Commands::ShowOutgoingDeps { source } => {
+            exit_unless_tsv(source);
+            let valve = build_valve(source, "").unwrap();
+            print_dependencies(&valve, false);
+        }
+        Commands::DumpSchema { source } => {
+            exit_unless_tsv(source);
+            let valve = build_valve(source, "").unwrap();
+            let schema = valve.dump_schema().await.unwrap();
+            println!("{}", schema);
+        }
+        Commands::SaveAll {
+            save_dir,
+            source,
+            destination,
+        } => {
+            exit_unless_tsv(source);
+            let valve = build_valve(source, destination).unwrap();
+            valve.save_all_tables(&save_dir).unwrap();
+        }
+        Commands::Save {
+            save_dir,
+            source,
+            destination,
+            tables,
+        } => {
+            exit_unless_tsv(source);
+            let valve = build_valve(source, destination).unwrap();
+            let tables = tables
+                .iter()
+                .filter(|s| *s != "")
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>();
+            valve.save_tables(&tables, &save_dir).unwrap();
+        }
+        Commands::Guess {
+            sample_size,
+            error_rate,
+            seed,
+            source,
+            destination,
+            table_tsv,
+        } => {
+            exit_unless_tsv(source);
+            let valve = build_valve(source, destination).unwrap();
+            guess(
+                &valve,
+                cli.verbose,
+                table_tsv,
+                seed,
+                sample_size,
+                error_rate,
+                cli.assume_yes,
+            );
+        }
+        Commands::TestApi {
+            source,
+            destination,
+        } => {
+            exit_unless_tsv(source);
+            let valve = build_valve(source, destination).unwrap();
+            run_api_tests(&valve).await.unwrap();
+        }
+        Commands::TestDtHierarchy {
+            source,
+            destination,
+        } => {
+            exit_unless_tsv(source);
+            let valve = build_valve(source, destination).unwrap();
+            run_dt_hierarchy_tests(&valve).unwrap();
+        }
     }
 
     Ok(())

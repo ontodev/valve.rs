@@ -18,7 +18,7 @@ use crate::{
     },
     validate::{validate_row_tx, validate_tree_foreign_keys, with_tree_sql},
     valve_grammar::StartParser,
-    CHUNK_SIZE, SQL_PARAM, PRINTF_RE,
+    CHUNK_SIZE, PRINTF_RE, SQL_PARAM,
 };
 use anyhow::Result;
 use csv::{QuoteStyle, ReaderBuilder, WriterBuilder};
@@ -534,7 +534,9 @@ pub struct Valve {
 impl Valve {
     /// Given a path to a table table, a path to a database, and a flag indicating whether the
     /// database should be configured for initial loading: Set up a database connection, configure
-    /// VALVE, and return a new Valve struct.
+    /// VALVE, and return a new Valve struct. Note that when `table_path` does not end
+    /// (case-insensitively) in .tsv this argument is ignored, and the Valve configuration is read,
+    /// instead, from a table called 'table' in the given `database`.
     pub async fn build(table_path: &str, database: &str) -> Result<Self> {
         let _ = env_logger::try_init();
         let pool = get_pool_from_connection_string(database).await?;
