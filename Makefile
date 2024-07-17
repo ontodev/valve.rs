@@ -57,7 +57,7 @@ pg_connect_string := postgresql:///valve_postgres
 .PHONY: sqlite_test
 sqlite_test: build/valve.db test/src/table.tsv | test/output
 	@echo "Testing valve on sqlite ..."
-	./valve test/src/table.tsv build/valve.db
+	./valve --assume-yes load test/src/table.tsv build/valve.db
 	test/round_trip.sh $^
 	scripts/export_messages.py $< $| $(tables_to_test)
 	diff --strip-trailing-cr -q test/expected/messages.tsv test/output/messages.tsv
@@ -78,7 +78,7 @@ pg_test: valve test/src/table.tsv | test/output
 	cp -f test/src/ontology/readonly3_postgresql_load.sql test/output/readonly3.sql
 	chmod u+x test/output/readonly1.sh
 	psql $(pg_connect_string) < test/src/ontology/view3_postgresql.sql
-	./$^ $(pg_connect_string)
+	./$< --assume-yes load $(word 2,$^) $(pg_connect_string)
 	test/round_trip.sh $(pg_connect_string) $(word 2,$^)
 	scripts/export_messages.py $(pg_connect_string) $| $(tables_to_test)
 	diff --strip-trailing-cr -q test/expected/messages.tsv test/output/messages.tsv
@@ -95,7 +95,7 @@ api_test: sqlite_api_test pg_api_test
 .PHONY: sqlite_api_test
 sqlite_api_test: valve test/src/table.tsv build/valve.db test/insert_update.sh | test/output
 	@echo "Testing API functions on sqlite ..."
-	./$< --api_test $(word 2,$^) $(word 3,$^)
+	./$< --assume-yes test-api $(word 2,$^) $(word 3,$^)
 	$(word 4,$^) $(word 3,$^) $(word 2,$^)
 	scripts/export_messages.py $(word 3,$^) $| $(tables_to_test)
 	diff --strip-trailing-cr -q test/expected/messages_after_api_test.tsv test/output/messages.tsv
@@ -103,14 +103,14 @@ sqlite_api_test: valve test/src/table.tsv build/valve.db test/insert_update.sh |
 	diff --strip-trailing-cr -q test/expected/history.tsv test/output/history.tsv
 	# We drop all of the db tables because the schema for the next test (random test) is different
 	# from the schema used for this test.
-	./$< --drop_all $(word 2,$^) $(word 3,$^)
+	./$< --assume-yes drop-all $(word 2,$^) $(word 3,$^)
 	@echo "Test succeeded!"
 
 .PHONY: pg_api_test
 pg_api_test: valve test/src/table.tsv test/insert_update.sh | test/output
 	@echo "Testing API functions on postgresql ..."
-	./$< $(word 2,$^) $(pg_connect_string)
-	./$< --api_test $(word 2,$^) $(pg_connect_string)
+	./$< --assume-yes load $(word 2,$^) $(pg_connect_string)
+	./$< --assume-yes test-api $(word 2,$^) $(pg_connect_string)
 	$(word 3,$^) $(pg_connect_string) $(word 2,$^)
 	scripts/export_messages.py $(pg_connect_string) $| $(tables_to_test)
 	diff --strip-trailing-cr -q test/expected/messages_after_api_test.tsv test/output/messages.tsv
@@ -118,7 +118,7 @@ pg_api_test: valve test/src/table.tsv test/insert_update.sh | test/output
 	tail -n +2 test/expected/history.tsv | diff --strip-trailing-cr -q test/output/history.tsv -
 	# We drop all of the db tables because the schema for the next test (random test) is different
 	# from the schema used for this test.
-	./$< --drop_all $(word 2,$^) $(pg_connect_string)
+	./$< --assume-yes drop-all $(word 2,$^) $(pg_connect_string)
 	@echo "Test succeeded!"
 
 sqlite_random_db = build/valve_random.db
@@ -137,14 +137,14 @@ random_test_data: test/generate_random_test_data.py valve valve test/random_test
 .PHONY: sqlite_random_test
 sqlite_random_test: valve random_test_data | build test/output
 	@echo "Testing with random data on sqlite ..."
-	./$< $(random_test_dir)/table.tsv $(sqlite_random_db)
+	./$< --assume-yes load $(random_test_dir)/table.tsv $(sqlite_random_db)
 	test/round_trip.sh $(sqlite_random_db) $(random_test_dir)/table.tsv
 	@echo "Test succeeded!"
 
 .PHONY: pg_random_test
 pg_random_test: valve random_test_data | build test/output
 	@echo "Testing with random data on postgresql ..."
-	./$< $(random_test_dir)/table.tsv $(pg_connect_string)
+	./$< --assume-yes load $(random_test_dir)/table.tsv $(pg_connect_string)
 	test/round_trip.sh $(pg_connect_string) $(random_test_dir)/table.tsv
 	@echo "Test succeeded!"
 
@@ -153,9 +153,9 @@ test/penguins/src/data:
 
 penguin_test_threshold = 60
 num_penguin_rows = 100000
-penguin_command_sqlite = ./valve --initial_load src/schema/table.tsv penguins.db
-penguin_command_pg = ./valve --initial_load src/schema/table.tsv $(pg_connect_string)
-penguin_command_pg_drop = ./valve --drop_all src/schema/table.tsv $(pg_connect_string)
+penguin_command_sqlite = ./valve --assume-yes load src/schema/table.tsv --initial-load penguins.db
+penguin_command_pg = ./valve --assume-yes load src/schema/table.tsv $(pg_connect_string)
+penguin_command_pg_drop = ./valve --assume-yes drop-all src/schema/table.tsv $(pg_connect_string)
 
 .PHONY: penguin_test
 penguin_test: valve | test/penguins/src/data
@@ -198,10 +198,12 @@ guess_test_data: test/generate_random_test_data.py $(guess_test_dir)/table1.tsv 
 
 $(guess_test_db): valve guess_test_data $(guess_test_dir)/*.tsv | build $(guess_test_dir)/ontology
 	rm -f $@
-	./$< $(guess_test_dir)/table.tsv $@
+	./$< --assume-yes load $(guess_test_dir)/table.tsv $@
 
 perf_test_dir = test/perf_test_data
 perf_test_db = build/valve_perf.db
+num_perf_test_rows = 1000
+perf_test_error_rate = 5
 
 $(perf_test_dir)/ontology:
 	mkdir -p $@
@@ -210,11 +212,11 @@ $(perf_test_dir)/ontology:
 perf_test_data: test/generate_random_test_data.py valve confirm_overwrite.sh $(perf_test_dir)/*.tsv | $(perf_test_dir)/ontology
 	./confirm_overwrite.sh $(perf_test_dir)/ontology
 	rm -f $(perf_test_dir)/ontology/*.tsv
-	./$< $$(date +"%s") 1000 5 $(perf_test_dir)/table.tsv $|
+	./$< $$(date +"%s") $(num_perf_test_rows) $(perf_test_error_rate) $(perf_test_dir)/table.tsv $|
 
 $(perf_test_db): valve perf_test_data $(perf_test_dir)/*.tsv | build $(perf_test_dir)/ontology
 	rm -f $@
-	time -p ./$< --verbose --interactive --initial_load $(perf_test_dir)/table.tsv $@
+	time -p ./$< --verbose load $(perf_test_dir)/table.tsv --initial-load $@
 
 .PHONY: sqlite_perf_test
 sqlite_perf_test: $(perf_test_db) | test/output
@@ -222,7 +224,7 @@ sqlite_perf_test: $(perf_test_db) | test/output
 
 .PHONY: pg_perf_test
 pg_perf_test: valve $(perf_test_dir)/ontology | test/output
-	time -p ./$< --verbose --interactive $(perf_test_dir)/table.tsv $(pg_connect_string)
+	time -p ./$< --verbose load $(perf_test_dir)/table.tsv $(pg_connect_string)
 	time -p scripts/export_messages.py $(pg_connect_string) $| $(tables_to_test)
 
 .PHONY: perf_test

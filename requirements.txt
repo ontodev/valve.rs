@@ -1,2 +1,4 @@
 # Required for `scripts/export.py`
-psycopg2==2.9.3 
+psycopg2==2.9.3
+# Required for `scripts/guess.py`
+lark==1.1.9

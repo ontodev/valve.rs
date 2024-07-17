@@ -6,8 +6,8 @@ use crate::{
     toolkit,
     toolkit::{
         add_message_counts, cast_column_sql_to_text, convert_undo_or_redo_record_to_change,
-        delete_row_tx, get_column_for_label, get_column_value_as_string,
-        get_compiled_datatype_conditions, get_compiled_rule_conditions, get_json_array_from_row,
+        delete_row_tx, generate_compiled_datatype_conditions, generate_compiled_rule_conditions,
+        get_column_for_label, get_column_value_as_string, get_json_array_from_row,
         get_json_object_from_row, get_label_for_column, get_parsed_structure_conditions,
         get_pool_from_connection_string, get_previous_row_tx, get_record_to_redo,
         get_record_to_undo, get_row_from_db, get_sql_for_standard_view, get_sql_for_text_view,
@@ -534,7 +534,9 @@ pub struct Valve {
 impl Valve {
     /// Given a path to a table table, a path to a database, and a flag indicating whether the
     /// database should be configured for initial loading: Set up a database connection, configure
-    /// VALVE, and return a new Valve struct.
+    /// VALVE, and return a new Valve struct. Note that when `table_path` does not end
+    /// (case-insensitively) in .tsv this argument is ignored, and the Valve configuration is read,
+    /// instead, from a table called 'table' in the given `database`.
     pub async fn build(table_path: &str, database: &str) -> Result<Self> {
         let _ = env_logger::try_init();
         let pool = get_pool_from_connection_string(database).await?;
@@ -567,8 +569,9 @@ impl Valve {
             constraint: constraints_config,
         };
 
-        let datatype_conditions = get_compiled_datatype_conditions(&config, &parser)?;
-        let rule_conditions = get_compiled_rule_conditions(&config, &datatype_conditions, &parser)?;
+        let datatype_conditions = generate_compiled_datatype_conditions(&config, &parser)?;
+        let rule_conditions =
+            generate_compiled_rule_conditions(&config, &datatype_conditions, &parser)?;
         let structure_conditions = get_parsed_structure_conditions(&config, &parser)?;
 
         Ok(Self {

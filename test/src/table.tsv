@@ -14,6 +14,7 @@ table8	test/src/ontology/table8.tsv	The eightth data table		foo validate_on_load
 table9	test/src/ontology/table9.tsv	The ninth data table		
 table10	test/src/ontology/table10.tsv	The tenth data table		
 table11	test/src/ontology/table11.tsv	The eleventh data table		
+table12	test/src/ontology/table12.tsv	The twelvth data table		
 view1	test/output/view1.sql			db_table db_view internal
 view2	test/output/view2.sh			save db_view
 view3				db_view

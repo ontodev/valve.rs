@@ -85,10 +85,18 @@ impl std::fmt::Debug for ParsedStructure {
     }
 }
 
+/// The type of value the condition should be applied to.
+#[derive(Clone, Debug)]
+pub enum ValueType {
+    Single,
+    List(String),
+}
+
 /// Represents a condition in three different ways: (i) in String format, (ii) as a parsed
 /// [Expression](ast/enum.Expression.html), and (iii) as a pre-compiled regular expression.
 #[derive(Clone)]
 pub struct CompiledCondition {
+    pub value_type: ValueType,
     pub original: String,
     pub parsed: Expression,
     pub compiled: Arc<dyn Fn(&str) -> bool + Sync + Send>,
@@ -1317,18 +1325,31 @@ pub fn read_config_files(
 /// Given the global configuration struct and a parser, compile all of the datatype conditions,
 /// add them to a hash map whose keys are the text versions of the conditions and whose values
 /// are the compiled conditions, and then finally return the hash map.
-pub fn get_compiled_datatype_conditions(
+pub fn generate_compiled_datatype_conditions(
     config: &ValveConfig,
     parser: &StartParser,
 ) -> Result<HashMap<String, CompiledCondition>> {
-    let mut compiled_datatype_conditions: HashMap<String, CompiledCondition> = HashMap::new();
+    // We go through the datatypes one by one, compiling any non-list types first and saving the
+    // list types, which are higher level types that refer to non-list types, for later.
+    let mut saved_for_last = HashMap::new();
+    let mut compiled_datatype_conditions = HashMap::new();
     for (dt_name, dt_config) in config.datatype.iter() {
-        let condition = dt_config.condition.as_str();
+        let condition = &dt_config.condition;
         if condition != "" {
-            let compiled_condition =
-                compile_condition(condition, parser, &compiled_datatype_conditions)?;
-            compiled_datatype_conditions.insert(dt_name.to_string(), compiled_condition);
+            if condition.starts_with("list(") {
+                saved_for_last.insert(dt_name, dt_config);
+            } else {
+                let compiled_condition =
+                    compile_condition(condition, parser, &compiled_datatype_conditions)?;
+                compiled_datatype_conditions.insert(dt_name.to_string(), compiled_condition);
+            }
         }
+    }
+    for (dt_name, dt_config) in saved_for_last.iter() {
+        let condition = &dt_config.condition;
+        let compiled_condition =
+            compile_condition(&condition, parser, &compiled_datatype_conditions)?;
+        compiled_datatype_conditions.insert(dt_name.to_string(), compiled_condition);
     }
     Ok(compiled_datatype_conditions)
 }
@@ -1345,7 +1366,7 @@ pub fn get_compiled_datatype_conditions(
 ///      ...
 /// }
 /// ```
-pub fn get_compiled_rule_conditions(
+pub fn generate_compiled_rule_conditions(
     config: &ValveConfig,
     compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     parser: &StartParser,
@@ -3386,6 +3407,7 @@ pub fn compile_condition(
         // have to assign some closure in these cases, we use a constant closure that always
         // returns true:
         return Ok(CompiledCondition {
+            value_type: ValueType::Single,
             original: String::from(""),
             parsed: Expression::None,
             compiled: Arc::new(|_| true),
@@ -3393,13 +3415,14 @@ pub fn compile_condition(
     }
 
     let unquoted_re = Regex::new(r#"^['"](?P<unquoted>.*)['"]$"#)?;
-    let parsed_condition = parser.parse(condition);
-    if let Err(_) = parsed_condition {
-        return Err(
-            ValveError::InputError(format!("Could not parse condition: {}", condition)).into(),
-        );
-    }
-    let parsed_condition = parsed_condition.unwrap();
+    let parsed_condition = match parser.parse(condition) {
+        Err(_) => {
+            return Err(
+                ValveError::InputError(format!("Could not parse condition: {}", condition)).into(),
+            )
+        }
+        Ok(parsed_condition) => parsed_condition,
+    };
     if parsed_condition.len() != 1 {
         return Err(ValveError::InputError(format!(
             "Invalid condition: '{}'. Only one condition per column is allowed.",
@@ -3409,117 +3432,137 @@ pub fn compile_condition(
     }
     let parsed_condition = &parsed_condition[0];
     match &**parsed_condition {
-        Expression::Function(name, args) => {
-            if name == "equals" {
-                if let Expression::Label(label) = &*args[0] {
-                    let label = String::from(unquoted_re.replace(label, "$unquoted"));
-                    return Ok(CompiledCondition {
-                        original: condition.to_string(),
-                        parsed: *parsed_condition.clone(),
-                        compiled: Arc::new(move |x| x == label),
-                    });
-                } else {
-                    return Err(ValveError::InputError(format!(
-                        "ERROR: Invalid condition: {}",
-                        condition
-                    ))
-                    .into());
-                }
-            } else if vec!["exclude", "match", "search"].contains(&name.as_str()) {
-                if let Expression::RegexMatch(pattern, flags) = &*args[0] {
-                    let mut pattern = String::from(unquoted_re.replace(pattern, "$unquoted"));
-                    let mut flags = String::from(flags);
-                    if flags != "" {
-                        flags = format!("(?{})", flags.as_str());
-                    }
-                    match name.as_str() {
-                        "exclude" => {
-                            pattern = format!("{}{}", flags, pattern);
-                            let re = Regex::new(pattern.as_str())?;
-                            return Ok(CompiledCondition {
-                                original: condition.to_string(),
-                                parsed: *parsed_condition.clone(),
-                                compiled: Arc::new(move |x| !re.is_match(x)),
-                            });
-                        }
-                        "match" => {
-                            pattern = format!("^{}{}$", flags, pattern);
-                            let re = Regex::new(pattern.as_str())?;
-                            return Ok(CompiledCondition {
-                                original: condition.to_string(),
-                                parsed: *parsed_condition.clone(),
-                                compiled: Arc::new(move |x| re.is_match(x)),
-                            });
-                        }
-                        "search" => {
-                            pattern = format!("{}{}", flags, pattern);
-                            let re = Regex::new(pattern.as_str())?;
-                            return Ok(CompiledCondition {
-                                original: condition.to_string(),
-                                parsed: *parsed_condition.clone(),
-                                compiled: Arc::new(move |x| re.is_match(x)),
-                            });
-                        }
-                        _ => {
-                            return Err(ValveError::InputError(format!(
-                                "Unrecognized function name: {}",
-                                name
-                            ))
-                            .into())
-                        }
-                    };
-                } else {
-                    return Err(ValveError::InputError(format!(
-                        "Argument to condition: {} is not a regular expression",
-                        condition
-                    ))
-                    .into());
-                }
-            } else if name == "in" {
-                let mut alternatives: Vec<String> = vec![];
-                for arg in args {
-                    if let Expression::Label(value) = &**arg {
-                        let value = unquoted_re.replace(value, "$unquoted");
-                        alternatives.push(value.to_string());
-                    } else {
-                        return Err(ValveError::InputError(format!(
-                            "Argument: {:?} to function 'in' is not a label",
-                            arg
-                        ))
-                        .into());
-                    }
-                }
-                return Ok(CompiledCondition {
+        Expression::Function(name, args) if name == "equals" => match &*args[0] {
+            Expression::Label(label) => {
+                let label = String::from(unquoted_re.replace(label, "$unquoted"));
+                Ok(CompiledCondition {
+                    value_type: ValueType::Single,
                     original: condition.to_string(),
                     parsed: *parsed_condition.clone(),
-                    compiled: Arc::new(move |x| alternatives.contains(&x.to_string())),
-                });
+                    compiled: Arc::new(move |x| x == label),
+                })
+            }
+            _ => Err(
+                ValveError::InputError(format!("ERROR: Invalid condition: {}", condition)).into(),
+            ),
+        },
+        Expression::Function(name, args)
+            if vec!["exclude", "match", "search"].contains(&name.as_str()) =>
+        {
+            if let Expression::RegexMatch(pattern, flags) = &*args[0] {
+                let mut pattern = String::from(unquoted_re.replace(pattern, "$unquoted"));
+                let mut flags = String::from(flags);
+                if flags != "" {
+                    flags = format!("(?{})", flags.as_str());
+                }
+                match name.as_str() {
+                    "exclude" => {
+                        pattern = format!("{}{}", flags, pattern);
+                        let re = Regex::new(pattern.as_str())?;
+                        Ok(CompiledCondition {
+                            value_type: ValueType::Single,
+                            original: condition.to_string(),
+                            parsed: *parsed_condition.clone(),
+                            compiled: Arc::new(move |x| !re.is_match(x)),
+                        })
+                    }
+                    "match" => {
+                        pattern = format!("^{}{}$", flags, pattern);
+                        let re = Regex::new(pattern.as_str())?;
+                        Ok(CompiledCondition {
+                            value_type: ValueType::Single,
+                            original: condition.to_string(),
+                            parsed: *parsed_condition.clone(),
+                            compiled: Arc::new(move |x| re.is_match(x)),
+                        })
+                    }
+                    "search" => {
+                        pattern = format!("{}{}", flags, pattern);
+                        let re = Regex::new(pattern.as_str())?;
+                        Ok(CompiledCondition {
+                            value_type: ValueType::Single,
+                            original: condition.to_string(),
+                            parsed: *parsed_condition.clone(),
+                            compiled: Arc::new(move |x| re.is_match(x)),
+                        })
+                    }
+                    _ => Err(ValveError::InputError(format!(
+                        "Unrecognized function name: {}",
+                        name
+                    ))
+                    .into()),
+                }
             } else {
-                return Err(ValveError::InputError(format!(
-                    "Unrecognized function name: {}",
-                    name
+                Err(ValveError::InputError(format!(
+                    "Argument to condition: {} is not a regular expression",
+                    condition
                 ))
-                .into());
+                .into())
+            }
+        }
+        Expression::Function(name, args) if name == "in" => {
+            let mut alternatives: Vec<String> = vec![];
+            for arg in args {
+                if let Expression::Label(value) = &**arg {
+                    let value = unquoted_re.replace(value, "$unquoted");
+                    alternatives.push(value.to_string());
+                } else {
+                    return Err(ValveError::InputError(format!(
+                        "Argument: {:?} to function 'in' is not a label",
+                        arg
+                    ))
+                    .into());
+                }
+            }
+            Ok(CompiledCondition {
+                value_type: ValueType::Single,
+                original: condition.to_string(),
+                parsed: *parsed_condition.clone(),
+                compiled: Arc::new(move |x| alternatives.contains(&x.to_string())),
+            })
+        }
+        Expression::Function(name, args) if name == "list" => {
+            let syntax_error =
+                ValveError::InputError(format!("Invalid arguments for 'list': {:?}", args));
+            match &*args[0] {
+                Expression::Label(datatype) => match &*args[1] {
+                    Expression::Label(separator) => {
+                        let datatype_not_found_error = ValveError::InputError(format!(
+                            "Datatype not found: '{}' in arguments for 'list': {:?}",
+                            datatype, args
+                        ));
+                        let compiled = match compiled_datatype_conditions.get(datatype) {
+                            Some(condition) => condition.compiled.clone(),
+                            _ => return Err(datatype_not_found_error.into()),
+                        };
+                        let separator = String::from(unquoted_re.replace(separator, "$unquoted"));
+                        Ok(CompiledCondition {
+                            value_type: ValueType::List(separator.to_string()),
+                            original: condition.to_string(),
+                            parsed: *parsed_condition.clone(),
+                            compiled: compiled,
+                        })
+                    }
+                    _ => Err(syntax_error.into()),
+                },
+                _ => Err(syntax_error.into()),
             }
         }
         Expression::Label(value)
             if compiled_datatype_conditions.contains_key(&value.to_string()) =>
         {
-            let compiled_datatype_condition = compiled_datatype_conditions
+            let condition = compiled_datatype_conditions
                 .get(&value.to_string())
                 .unwrap();
-            return Ok(CompiledCondition {
+            Ok(CompiledCondition {
+                value_type: ValueType::Single,
                 original: value.to_string(),
-                parsed: compiled_datatype_condition.parsed.clone(),
-                compiled: compiled_datatype_condition.compiled.clone(),
-            });
+                parsed: condition.parsed.clone(),
+                compiled: condition.compiled.clone(),
+            })
         }
-        _ => {
-            return Err(
-                ValveError::InputError(format!("Unrecognized condition: {}", condition)).into(),
-            );
-        }
-    };
+        _ => Err(ValveError::InputError(format!("Unrecognized condition: {}", condition)).into()),
+    }
 }
 
 /// Given the config map, the name of a datatype, and a database connection pool used to determine

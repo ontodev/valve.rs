@@ -71,7 +71,7 @@ def get_random_sample(table, sample_size):
 
 
 def get_valve_config(valve_table):
-    result = subprocess.run(["./valve", "--dump_config", valve_table], capture_output=True)
+    result = subprocess.run(["./valve", "dump-config", valve_table], capture_output=True)
     if result.returncode != 0:
         error = result.stderr.decode()
         output = result.stdout.decode()
@@ -85,7 +85,7 @@ def get_valve_config(valve_table):
 def get_hierarchy_for_dt(config, primary_dt_name):
     def get_parents(dt_name):
         datatypes = []
-        if dt_name is not None:
+        if dt_name is not None and dt_name != "":
             datatype = config["datatype"][dt_name]
             if datatype["datatype"] != primary_dt_name:
                 datatypes.append(datatype)
