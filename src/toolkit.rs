@@ -1227,35 +1227,6 @@ pub fn read_config_files(
     }
 
     // 6. Add implicit unique constraints for trees and foreign keys:
-    let add_permanent_structure = |table: &str, column: &str| {
-        let curr_structure = &tables_config
-            .get(table)
-            .expect(&format!("Undefined table '{}'", table))
-            .column
-            .get(column)
-            .expect(&format!(
-                "No column '{}' defined in config for table '{}'",
-                column, table
-            ))
-            .structure;
-        if curr_structure != "" {
-            log::warn!(
-                "Cannot permanently add 'unique' structure to '{}.{}': \
-                 Already has structure '{}'",
-                table,
-                column,
-                curr_structure
-            );
-        } else {
-            log::info!(
-                "Permanently adding structure 'unique' to '{}.{}'",
-                table,
-                column
-            );
-            // TODO: Implement this.
-            log::warn!("Not permamently adding structure as this feature is not yet implemented");
-        }
-    };
     for (table, _) in &tables_config {
         let table_trees = constraints_config
             .tree
@@ -1278,7 +1249,6 @@ pub fn read_config_files(
                     tree.child
                 );
                 table_uniques.push(tree.child.to_string());
-                add_permanent_structure(table, &tree.child);
             }
         }
 
@@ -1306,7 +1276,6 @@ pub fn read_config_files(
                     table,
                 );
                 funiques.push(fcolumn.to_string());
-                add_permanent_structure(ftable, fcolumn);
             }
         }
     }
