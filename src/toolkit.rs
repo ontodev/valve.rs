@@ -1281,6 +1281,34 @@ pub fn read_config_files(
                 add_permanent_structure(table, &tree.child);
             }
         }
+
+        let table_foreigns = constraints_config.foreign.get(table).expect(&format!(
+            "No foreign constraints found for table '{}'",
+            table
+        ));
+        for foreign in table_foreigns {
+            let ftable = &foreign.ftable;
+            let funiques = constraints_config.unique.get_mut(ftable).expect(&format!(
+                "No unique constraints found for table '{}'",
+                ftable
+            ));
+            let fprimaries = constraints_config.primary.get(ftable).expect(&format!(
+                "No primary constraints found for table '{}'",
+                ftable
+            ));
+            let fcolumn = &foreign.fcolumn;
+            if !funiques.contains(fcolumn) && !fprimaries.contains(fcolumn) {
+                log::warn!(
+                    "Column '{}.{}' is a foreign key for table '{}' and therefore requires \
+                     a UNIQUE constraint. It will be implicitly created.",
+                    ftable,
+                    fcolumn,
+                    table,
+                );
+                funiques.push(fcolumn.to_string());
+                add_permanent_structure(ftable, fcolumn);
+            }
+        }
     }
 
     // 7. Add internal table configuration to the table config:
