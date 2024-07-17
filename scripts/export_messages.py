@@ -168,7 +168,7 @@ def export_messages(cursor, is_sqlite, args):
                 SELECT "table", "row", "column", "level", "rule", "message", "value"
                 FROM "message"
                 WHERE "table" in ({in_clause})
-                ORDER by "table", "row", "column", "rule", "level", "value"
+                ORDER by "table", "row", "column", "rule", "level", "value", "message"
                 """
                 if not a1:
                     cursor.execute(message_select)

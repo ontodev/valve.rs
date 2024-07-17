@@ -61,7 +61,6 @@ pub static MOVE_INTERVAL: u32 = 1000;
 /// Used to match a printf-style format specifier (see <https://docs.rs/sprintf/latest/sprintf/#>)
 pub static PRINTF_RE: &str = r#"^%.*([\w%])$"#;
 
-
 /// The size of the datatype validation cache.
 static DT_CACHE_SIZE: usize = 10000;
 
@@ -76,5 +75,6 @@ static FKEY_CACHE_SIZE: usize = 10000;
 pub static SQL_PARAM: &str = "VALVEPARAM";
 
 lazy_static! {
-    pub static ref SQL_TYPES: Vec<&'static str> = vec!["text", "varchar", "numeric", "integer", "real"];
+    pub static ref SQL_TYPES: Vec<&'static str> =
+        vec!["text", "varchar", "numeric", "integer", "real"];
 }
