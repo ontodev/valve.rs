@@ -8,7 +8,7 @@ use crate::{
         ValveCell, ValveCellMessage, ValveChange, ValveColumnConfig, ValveConfig,
         ValveConstraintConfig, ValveDatatypeConfig, ValveError, ValveForeignConstraint,
         ValveMessage, ValveRow, ValveRowChange, ValveRuleConfig, ValveSpecialConfig,
-        ValveTableConfig, ValveTreeConstraint, ValveUnderConstraint,
+        ValveTableConfig, ValveTreeConstraint,
     },
     valve_grammar::StartParser,
     CHUNK_SIZE, MAX_DB_CONNECTIONS, MOVE_INTERVAL, MULTI_THREADED, SQL_PARAM, SQL_TYPES,
@@ -1209,7 +1209,7 @@ pub fn read_config_files(
             .and_then(|t| Some(t.column_order = column_order));
 
         // Populate the table constraints for this table:
-        let (primaries, uniques, foreigns, trees, unders) = get_table_constraints(
+        let (primaries, uniques, foreigns, trees) = get_table_constraints(
             &tables_config,
             &datatypes_config,
             parser,
@@ -1229,9 +1229,6 @@ pub fn read_config_files(
         constraints_config
             .tree
             .insert(table_name.to_string(), trees);
-        constraints_config
-            .under
-            .insert(table_name.to_string(), unders);
     }
 
     // 6. Add implicit unique constraints for trees and foreign keys:
@@ -2115,9 +2112,6 @@ pub async fn get_rows_to_update(
         };
         rows_to_update_intra.insert(table.to_string(), updates);
     }
-
-    // TODO: Collect the dependencies for under constraints similarly to the way we
-    // collect foreign constraints (see just above).
 
     Ok((
         rows_to_update_before,
@@ -3724,8 +3718,8 @@ pub fn local_sql_syntax(pool: &AnyPool, sql: &String) -> String {
 }
 
 /// Takes as arguments a list of tables and a configuration struct describing all of the constraints
-/// between tables. After validating that there are no cycles amongst the foreign, tree, and
-/// under dependencies, returns (i) the list of tables sorted according to their foreign key
+/// between tables. After validating that there are no cycles amongst the foreign, and tree
+/// dependencies, returns (i) the list of tables sorted according to their foreign key
 /// dependencies, such that if table_a depends on table_b, then table_b comes before table_a in the
 /// list; (ii) A map from table names to the lists of tables that depend on a given table; (iii) a
 /// map from table names to the lists of tables that a given table depends on.
@@ -3813,7 +3807,6 @@ pub fn verify_table_deps_and_sort(
 
     // Check for inter-table cycles:
     let foreign_keys = &constraints.foreign;
-    let under_keys = &constraints.under;
     let mut dependency_graph = DiGraphMap::<&str, ()>::new();
     for table_name in table_list {
         let t_index = dependency_graph.add_node(table_name);
@@ -3824,31 +3817,6 @@ pub fn verify_table_deps_and_sort(
             let ftable = &fkey.ftable;
             let f_index = dependency_graph.add_node(&ftable);
             dependency_graph.add_edge(t_index, f_index, ());
-        }
-
-        let ukeys = under_keys
-            .get(table_name)
-            .expect(&format!("Undefined table '{}'", table_name));
-        for ukey in ukeys {
-            let ttable = &ukey.ttable;
-            let tcolumn = &ukey.tcolumn;
-            let value = &ukey.value;
-            if ttable != table_name {
-                let ttable_trees = trees.get(ttable).unwrap();
-                if ttable_trees
-                    .iter()
-                    .filter(|d| d.child == *tcolumn)
-                    .collect::<Vec<_>>()
-                    .is_empty()
-                {
-                    panic!(
-                        "under({}.{}, {}) refers to a non-existent tree",
-                        ttable, tcolumn, value
-                    );
-                }
-                let tt_index = dependency_graph.add_node(&ttable);
-                dependency_graph.add_edge(t_index, tt_index, ());
-            }
         }
     }
 
@@ -3893,7 +3861,6 @@ pub fn verify_table_deps_and_sort(
                     if i < end_index {
                         let dep_name = cycle.get(i + 1).unwrap().as_str();
                         let fkeys = foreign_keys.get(table).unwrap();
-                        let ukeys = under_keys.get(table).unwrap();
                         let column;
                         let ref_table;
                         let ref_column;
@@ -3901,10 +3868,6 @@ pub fn verify_table_deps_and_sort(
                             column = &dep.column;
                             ref_table = &dep.ftable;
                             ref_column = &dep.fcolumn;
-                        } else if let Some(dep) = ukeys.iter().find(|d| d.ttable == *dep_name) {
-                            column = &dep.column;
-                            ref_table = &dep.ttable;
-                            ref_column = &dep.tcolumn;
                         } else {
                             panic!("{}. Unable to retrieve the details.", message);
                         }
@@ -3942,7 +3905,7 @@ pub fn get_table_options(config: &ValveConfig, table: &str) -> Result<HashSet<St
 
 /// Given a table configuration map and a datatype configuration map, a parser, a table name, and a
 /// database connection pool, return lists of: primary keys, unique constraints, foreign keys,
-/// trees, and under keys.
+/// and trees.
 pub fn get_table_constraints(
     tables_config: &HashMap<String, ValveTableConfig>,
     datatypes_config: &HashMap<String, ValveDatatypeConfig>,
@@ -3954,13 +3917,11 @@ pub fn get_table_constraints(
     Vec<String>,
     Vec<ValveForeignConstraint>,
     Vec<ValveTreeConstraint>,
-    Vec<ValveUnderConstraint>,
 ) {
     let mut primaries = vec![];
     let mut uniques = vec![];
     let mut foreigns = vec![];
     let mut trees = vec![];
-    let mut unders = vec![];
 
     let columns = tables_config
         .get(table_name)
@@ -4051,26 +4012,6 @@ pub fn get_table_constraints(
                             }
                         };
                     }
-                    Expression::Function(name, args) if name == "under" => {
-                        let generic_error = format!(
-                            "Invalid 'under' constraint: {} for: {}",
-                            structure, table_name
-                        );
-                        if args.len() != 2 {
-                            panic!("{}", generic_error);
-                        }
-                        match (&*args[0], &*args[1]) {
-                            (Expression::Field(ttable, tcolumn), Expression::Label(value)) => {
-                                unders.push(ValveUnderConstraint {
-                                    column: column_name.to_string(),
-                                    ttable: ttable.to_string(),
-                                    tcolumn: tcolumn.to_string(),
-                                    value: json!(value),
-                                });
-                            }
-                            (_, _) => panic!("{}", generic_error),
-                        };
-                    }
                     _ => panic!(
                         "Unrecognized structure: {} for {}.{}",
                         structure, table_name, column_name
@@ -4080,7 +4021,7 @@ pub fn get_table_constraints(
         }
     }
 
-    return (primaries, uniques, foreigns, trees, unders);
+    return (primaries, uniques, foreigns, trees);
 }
 
 /// Given a table configuration struct, a datatype configuration struct, a parser, a table name,
@@ -4124,18 +4065,17 @@ pub fn get_table_ddl(
             .collect::<Vec<_>>()
     };
 
-    let (primaries, uniques, foreigns, _trees, _unders) = {
+    let (primaries, uniques, foreigns, _trees) = {
         // Conflict tables have no database constraints:
         if table_name.ends_with("_conflict") {
-            (vec![], vec![], vec![], vec![], vec![])
+            (vec![], vec![], vec![], vec![])
         } else {
             let cons = &config.constraint;
             let primaries = cons.primary.get(table_name).cloned().unwrap_or(vec![]);
             let uniques = cons.unique.get(table_name).cloned().unwrap_or(vec![]);
             let foreigns = cons.foreign.get(table_name).cloned().unwrap_or(vec![]);
             let trees = cons.tree.get(table_name).cloned().unwrap_or(vec![]);
-            let unders = cons.under.get(table_name).cloned().unwrap_or(vec![]);
-            (primaries, uniques, foreigns, trees, unders)
+            (primaries, uniques, foreigns, trees)
         }
     };
 
