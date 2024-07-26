@@ -2563,9 +2563,25 @@ impl Valve {
             )))?
             .datatype;
 
-        let dt_condition = datatype_conditions
+        let mut dt_condition = datatype_conditions
             .get(dt_name)
             .and_then(|d| Some(d.parsed.clone()));
+
+        // If the condition is a list(subcondition, sep), use the subcondition.
+        if let Some(Expression::Function(name, args)) = dt_condition.clone() {
+            if name == "list" {
+                for arg in args {
+                    if let Expression::Label(arg) = *arg {
+                        let label = unquote(&arg).unwrap_or_else(|_| arg);
+                        dt_condition = datatype_conditions
+                            .get(&label)
+                            .and_then(|d| Some(d.parsed.clone()));
+                        // println!("NEW DT CONDITION: {label}");
+                    }
+                    break;
+                }
+            }
+        }
 
         let mut values = vec![];
         match dt_condition {
