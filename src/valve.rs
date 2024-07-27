@@ -11,14 +11,14 @@ use crate::{
         get_json_object_from_row, get_label_for_column, get_parsed_structure_conditions,
         get_pool_from_connection_string, get_previous_row_tx, get_record_to_redo,
         get_record_to_undo, get_row_from_db, get_sql_for_standard_view, get_sql_for_text_view,
-        get_sql_type, get_sql_type_from_global_config, get_table_ddl, insert_chunks,
-        insert_new_row_tx, local_sql_syntax, move_row_tx, read_config_files, record_row_change,
-        record_row_move, switch_undone_state, undo_or_redo_move, update_row_tx,
-        verify_table_deps_and_sort, ColumnRule, CompiledCondition, ParsedStructure,
+        get_sql_type, get_sql_type_from_global_config, insert_chunks, insert_new_row_tx,
+        local_sql_syntax, move_row_tx, read_config_files, record_row_change, record_row_move,
+        switch_undone_state, undo_or_redo_move, update_row_tx, verify_table_deps_and_sort,
+        ColumnRule, CompiledCondition, ParsedStructure,
     },
     validate::{validate_row_tx, validate_tree_foreign_keys, with_tree_sql},
     valve_grammar::StartParser,
-    CHUNK_SIZE, PRINTF_RE, SQL_PARAM,
+    CHUNK_SIZE, PRINTF_RE, SQL_PARAM, SQL_TYPES,
 };
 use anyhow::Result;
 use csv::{QuoteStyle, ReaderBuilder, WriterBuilder};
@@ -1259,6 +1259,164 @@ impl Valve {
             .ok_or(ValveError::ConfigError(format!("Undefined table '{}'", table)).into())
     }
 
+    /// Given a table configuration struct, a datatype configuration struct, a parser, a table name,
+    /// and a database connection pool, return a list of DDL statements that can be used to create
+    /// the database tables.
+    pub fn get_table_ddl(&self, table_name: &String, pool: &AnyPool) -> Result<Vec<String>> {
+        let tables_config = &self.config.table;
+        let datatypes_config = &self.config.datatype;
+
+        let mut statements = vec![];
+        let mut create_lines = vec![
+            format!(r#"CREATE TABLE "{}" ("#, table_name),
+            String::from(r#"  "row_number" BIGINT,"#),
+            String::from(r#"  "row_order" BIGINT,"#),
+        ];
+
+        let normal_table_name;
+        if let Some(s) = table_name.strip_suffix("_conflict") {
+            normal_table_name = String::from(s);
+        } else {
+            normal_table_name = table_name.to_string();
+        }
+
+        let column_configs = {
+            let column_order = &tables_config
+                .get(&normal_table_name)
+                .expect(&format!("Undefined table '{}'", normal_table_name))
+                .column_order;
+            let columns = &tables_config
+                .get(&normal_table_name)
+                .expect(&format!("Undefined table '{}'", normal_table_name))
+                .column;
+
+            column_order
+                .iter()
+                .map(|column_name| columns.get(column_name).unwrap())
+                .collect::<Vec<_>>()
+        };
+
+        let (primaries, uniques, foreigns, _trees, _unders) = {
+            // Conflict tables have no database constraints:
+            if table_name.ends_with("_conflict") {
+                (vec![], vec![], vec![], vec![], vec![])
+            } else {
+                let cons = &self.config.constraint;
+                let primaries = cons.primary.get(table_name).cloned().unwrap_or(vec![]);
+                let uniques = cons.unique.get(table_name).cloned().unwrap_or(vec![]);
+                let foreigns = cons.foreign.get(table_name).cloned().unwrap_or(vec![]);
+                let trees = cons.tree.get(table_name).cloned().unwrap_or(vec![]);
+                let unders = cons.under.get(table_name).cloned().unwrap_or(vec![]);
+                (primaries, uniques, foreigns, trees, unders)
+            }
+        };
+
+        let c = column_configs.len();
+        let mut r = 0;
+        for column_config in column_configs {
+            r += 1;
+            let sql_type = get_sql_type(&datatypes_config, &column_config.datatype, pool);
+
+            let short_sql_type = {
+                if sql_type.to_lowercase().as_str().starts_with("varchar(") {
+                    "VARCHAR"
+                } else {
+                    &sql_type
+                }
+            };
+
+            if !SQL_TYPES.contains(&short_sql_type.to_lowercase().as_str()) {
+                panic!(
+                    "Unrecognized SQL type '{}' for datatype: '{}'. Accepted SQL types are: {}",
+                    sql_type,
+                    column_config.datatype,
+                    SQL_TYPES.join(", ")
+                );
+            }
+
+            let column_name = &column_config.column;
+            let mut line = format!(r#"  "{}" {}"#, column_name, sql_type);
+
+            // Check if the column is a primary key and indicate this in the DDL if so:
+            if primaries.contains(&column_name) {
+                line.push_str(" PRIMARY KEY");
+            }
+
+            // Check if the column has a unique constraint and indicate this in the DDL if so:
+            if uniques.contains(&column_name) {
+                line.push_str(" UNIQUE");
+            }
+
+            // Check if the column has a default value and indicate this in the DDL if it does:
+            let default_value = match &column_config.default {
+                SerdeValue::String(s) if s == "" => "".to_string(),
+                SerdeValue::String(s) => format!("'{}'", s),
+                SerdeValue::Number(n) => n.to_string(),
+                SerdeValue::Null => "".to_string(),
+                _ => panic!(
+                    "Configured default value, {:?}, of column '{}' is neither \
+                     a number nor a string.",
+                    column_config.default, column_name
+                ),
+            };
+            if default_value != "" {
+                line.push_str(&format!(" DEFAULT {}", default_value));
+            }
+
+            // If there are foreign constraints add a column to the end of the statement which we will
+            // finish after this for loop is done (but don't do this for views):
+            let applicable_foreigns = foreigns
+                .iter()
+                .filter(|fkey| {
+                    let table_config = &tables_config
+                        .get(&fkey.ftable)
+                        .expect(&format!("Undefined table '{}'", fkey.ftable));
+                    !table_config.options.contains("db_view")
+                })
+                .collect::<Vec<_>>();
+            if !(r >= c && applicable_foreigns.is_empty()) {
+                line.push_str(",");
+            }
+            create_lines.push(line);
+        }
+
+        // Add the SQL to indicate any foreign constraints:
+        let num_fkeys = foreigns.len();
+        for (i, fkey) in foreigns.iter().enumerate() {
+            let ftable_options = {
+                let table_config = &tables_config
+                    .get(&fkey.ftable)
+                    .expect(&format!("Undefined table '{}'", fkey.ftable));
+                table_config.options.clone()
+            };
+            if !ftable_options.contains("db_view") {
+                create_lines.push(format!(
+                    r#"  FOREIGN KEY ("{}") REFERENCES "{}"("{}"){}"#,
+                    fkey.column,
+                    fkey.ftable,
+                    fkey.fcolumn,
+                    if i < (num_fkeys - 1) { "," } else { "" }
+                ));
+            }
+        }
+        create_lines.push(String::from(");"));
+        // We are done generating the lines for the 'create table' statement. Join them and add the
+        // result to the statements to return:
+        statements.push(String::from(create_lines.join("\n")));
+
+        // Finally, create further unique indexes on row_number and row_order:
+        statements.push(format!(
+            r#"CREATE UNIQUE INDEX "{}_row_number_idx" ON "{}"("row_number");"#,
+            table_name, table_name
+        ));
+        statements.push(format!(
+            r#"CREATE UNIQUE INDEX "{}_row_order_idx" ON "{}"("row_order");"#,
+            table_name, table_name
+        ));
+
+        Ok(statements)
+    }
+
     /// Generates and returns the DDL required to setup the database.
     pub async fn get_setup_statements(&self) -> Result<HashMap<String, Vec<String>>> {
         let tables_config = &self.config.table;
@@ -1271,11 +1429,11 @@ impl Valve {
         for (table, table_config) in tables_config.iter() {
             // Generate DDL for the table and its corresponding conflict table:
             let mut table_statements = vec![];
-            let mut statements = get_table_ddl(&self.config, &table, &self.pool)?;
+            let mut statements = self.get_table_ddl(&table, &self.pool)?;
             table_statements.append(&mut statements);
             if table_config.options.contains("conflict") {
                 let cable = format!("{}_conflict", table);
-                let mut statements = get_table_ddl(&self.config, &cable, &self.pool)?;
+                let mut statements = self.get_table_ddl(&cable, &self.pool)?;
                 table_statements.append(&mut statements);
 
                 let create_view_sql = get_sql_for_standard_view(&table, &self.pool);
