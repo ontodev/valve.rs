@@ -4452,6 +4452,7 @@ pub async fn make_inserts(
 pub async fn insert_chunk(
     config: &ValveConfig,
     pool: &AnyPool,
+    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     table_name: &String,
     rows: &mut Vec<ValveRow>,
     chunk_number: usize,
@@ -4527,7 +4528,14 @@ pub async fn insert_chunk(
         }
         Err(e) => {
             if validate {
-                validate_rows_constraints(config, pool, table_name, rows).await?;
+                validate_rows_constraints(
+                    config,
+                    pool,
+                    compiled_datatype_conditions,
+                    table_name,
+                    rows,
+                )
+                .await?;
                 let (
                     main_sql,
                     main_params,
@@ -4613,6 +4621,7 @@ pub async fn insert_chunks(
             insert_chunk(
                 config,
                 pool,
+                compiled_datatype_conditions,
                 table_name,
                 &mut intra_validated_rows,
                 chunk_number,
@@ -4668,6 +4677,7 @@ pub async fn insert_chunks(
                 insert_chunk(
                     config,
                     pool,
+                    compiled_datatype_conditions,
                     table_name,
                     &mut intra_validated_rows,
                     chunk_number,

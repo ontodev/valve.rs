@@ -1311,6 +1311,41 @@ impl Valve {
             }
         };
 
+        // A closure to get the value type of the datatype condition corresponding to given column:
+        let get_value_type = |column: &str| -> ValueType {
+            let datatype = &self
+                .config
+                .table
+                .get(&normal_table_name)
+                .expect(&format!(
+                    "No config found for table '{}'",
+                    normal_table_name
+                ))
+                .column
+                .get(column)
+                .expect(&format!(
+                    "No config found for column '{}' of table '{}'",
+                    column, normal_table_name
+                ))
+                .datatype;
+            // Some datatypes (like 'text' have no associated conditions). These are singles:
+            match self.datatype_conditions.get(datatype) {
+                None => ValueType::Single,
+                Some(condition) => condition.value_type.clone(),
+            }
+        };
+
+        let applicable_foreigns = foreigns
+            .iter()
+            .filter(|fkey| {
+                let vtype = get_value_type(&fkey.column);
+                let table_config = &tables_config
+                    .get(&fkey.ftable)
+                    .expect(&format!("Undefined table '{}'", fkey.ftable));
+                vtype == ValueType::Single && !table_config.options.contains("db_view")
+            })
+            .collect::<Vec<_>>();
+
         let c = column_configs.len();
         let mut r = 0;
         for column_config in column_configs {
@@ -1365,48 +1400,16 @@ impl Valve {
 
             // If there are foreign constraints add a column to the end of the statement which we will
             // finish after this for loop is done (but don't do this for views):
-            let applicable_foreigns = foreigns
-                .iter()
-                .filter(|fkey| {
-                    let table_config = &tables_config
-                        .get(&fkey.ftable)
-                        .expect(&format!("Undefined table '{}'", fkey.ftable));
-                    !table_config.options.contains("db_view")
-                })
-                .collect::<Vec<_>>();
             if !(r >= c && applicable_foreigns.is_empty()) {
                 line.push_str(",");
             }
             create_lines.push(line);
         }
 
-        // A closure to get the value type of the datatype condition corresponding to given column:
-        let get_value_type = |column: &str| -> ValueType {
-            let datatype = &self
-                .config
-                .table
-                .get(&normal_table_name)
-                .expect(&format!(
-                    "No config found for table '{}'",
-                    normal_table_name
-                ))
-                .column
-                .get(column)
-                .expect(&format!(
-                    "No config found for column '{}' of table '{}'",
-                    column, normal_table_name
-                ))
-                .datatype;
-            // Some datatypes (like 'text' have no associated conditions). These are singles:
-            match self.datatype_conditions.get(datatype) {
-                None => ValueType::Single,
-                Some(condition) => condition.value_type.clone(),
-            }
-        };
-
         // Add the SQL to indicate any foreign constraints:
-        let num_fkeys = foreigns.len();
-        for (i, fkey) in foreigns.iter().enumerate() {
+        let num_fkeys = applicable_foreigns.len();
+        let mut foreigns_added = 0;
+        for fkey in foreigns.iter() {
             if get_value_type(&fkey.column) == ValueType::Single {
                 let ftable_options = {
                     let table_config = &tables_config
@@ -1420,8 +1423,13 @@ impl Valve {
                         fkey.column,
                         fkey.ftable,
                         fkey.fcolumn,
-                        if i < (num_fkeys - 1) { "," } else { "" }
+                        if foreigns_added < (num_fkeys - 1) {
+                            ","
+                        } else {
+                            ""
+                        }
                     ));
+                    foreigns_added += 1;
                 }
             }
         }

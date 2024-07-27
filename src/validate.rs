@@ -91,6 +91,7 @@ pub async fn validate_row_tx(
                     config,
                     pool,
                     Some(tx),
+                    compiled_datatype_conditions,
                     &table_name.to_string(),
                     column_name,
                     cell,
@@ -445,6 +446,7 @@ pub async fn validate_tree_foreign_keys(
 pub async fn validate_rows_constraints(
     config: &ValveConfig,
     pool: &AnyPool,
+    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     table_name: &String,
     rows: &mut Vec<ValveRow>,
 ) -> Result<()> {
@@ -486,6 +488,7 @@ pub async fn validate_rows_constraints(
                     config,
                     pool,
                     None,
+                    compiled_datatype_conditions,
                     table_name,
                     &column_name,
                     cell,
@@ -1124,6 +1127,7 @@ pub async fn validate_cell_foreign_constraints(
     config: &ValveConfig,
     pool: &AnyPool,
     mut tx: Option<&mut Transaction<'_, sqlx::Any>>,
+    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
     table_name: &String,
     column_name: &String,
     cell: &mut ValveCell,
@@ -1176,109 +1180,127 @@ pub async fn validate_cell_foreign_constraints(
         Ok(!frows.is_empty())
     }
 
-    for fkey in fkeys {
-        let ftable = &fkey.ftable;
-        let (as_if_clause, ftable_alias) = match query_as_if {
-            Some(query_as_if) if *ftable == query_as_if.table => {
-                (as_if_clause.to_string(), query_as_if.alias.to_string())
-            }
-            _ => ("".to_string(), ftable.to_string()),
-        };
-        let fcolumn = &fkey.fcolumn;
-        let sql_type =
-            get_sql_type_from_global_config(&config, ftable, fcolumn, pool).to_lowercase();
-        let sql_param = cast_sql_param_from_text(&sql_type);
-        let fsql = local_sql_syntax(
-            &pool,
-            &format!(
-                r#"{}SELECT 1 FROM "{}" WHERE "{}" = {} LIMIT 1"#,
-                as_if_clause,
-                ftable_alias,
-                fcolumn,
-                {
-                    if sql_type == "text" || sql_type.starts_with("varchar(") {
-                        format!("'{}'", cell.strvalue())
-                    } else {
-                        format!("{}", cell.strvalue())
-                    }
-                }
-            ),
-        );
-
-        let fkey_satisfied = match fkey_cache {
-            Some(ref mut fkey_cache) => match fkey_cache.get(&cell.strvalue()) {
-                Some(in_db) => *in_db,
-                None => {
-                    let in_db = fkey_in_db(pool, &mut tx, cell, &fsql).await?;
-                    let key = cell.strvalue();
-                    fkey_cache.insert(key.clone(), in_db);
-                    in_db
-                }
-            },
-            None => fkey_in_db(pool, &mut tx, cell, &fsql).await?,
-        };
-
-        if !fkey_satisfied {
-            cell.valid = false;
-            let mut message = ValveCellMessage {
-                rule: "key:foreign".to_string(),
-                level: "error".to_string(),
-                message: format!(
-                    "Value '{}' of column {} is not in {}.{}",
-                    cell.strvalue(),
-                    column_name,
-                    ftable,
-                    fcolumn
-                ),
-            };
-            let foptions = &config
+    let strvalue = cell.strvalue();
+    let values = {
+        let value_type = {
+            let datatype = &config
                 .table
-                .get(ftable)
+                .get(table_name)
+                .expect(&format!("No config found for table '{}'", table_name))
+                .column
+                .get(column_name)
                 .expect(&format!(
-                    "Foreign table: '{}' is not in table config",
-                    ftable
+                    "No config found for column '{}' of table '{}'",
+                    column_name, table_name
                 ))
-                .options;
-
-            if foptions.contains("conflict") {
-                let (as_if_clause_for_conflict, ftable_alias) = match query_as_if {
-                    Some(query_as_if) if *ftable == query_as_if.table => (
-                        as_if_clause_for_conflict.to_string(),
-                        query_as_if.alias.to_string(),
-                    ),
-                    _ => ("".to_string(), ftable.to_string()),
-                };
-                let fsql = local_sql_syntax(
-                    &pool,
-                    &format!(
-                        r#"{}SELECT 1 FROM "{}_conflict" WHERE "{}" = {} LIMIT 1"#,
-                        as_if_clause_for_conflict, ftable_alias, fcolumn, sql_param
-                    ),
-                );
-                let frows = {
-                    if let None = tx {
-                        sqlx_query(&fsql)
-                            .bind(cell.strvalue())
-                            .fetch_all(pool)
-                            .await?
-                    } else {
-                        sqlx_query(&fsql)
-                            .bind(cell.strvalue())
-                            .fetch_all(tx.as_mut().unwrap().acquire().await?)
-                            .await?
-                    }
-                };
-                if !frows.is_empty() {
-                    message.message = format!(
-                        "Value '{}' of column {} exists only in {}_conflict.{}",
-                        cell.strvalue(),
-                        column_name,
-                        ftable,
-                        fcolumn
-                    );
-                }
+                .datatype;
+            match compiled_datatype_conditions.get(datatype) {
+                None => ValueType::Single,
+                Some(condition) => condition.value_type.clone(),
             }
-            cell.messages.push(message);
+        };
+        match value_type {
+            ValueType::Single => vec![strvalue.as_str()],
+            ValueType::List(separator) => strvalue.split(&separator).collect::<Vec<_>>(),
+        }
+    };
+
+    for value in &values {
+        for fkey in &fkeys {
+            let ftable = &fkey.ftable;
+            let (as_if_clause, ftable_alias) = match query_as_if {
+                Some(query_as_if) if *ftable == query_as_if.table => {
+                    (as_if_clause.to_string(), query_as_if.alias.to_string())
+                }
+                _ => ("".to_string(), ftable.to_string()),
+            };
+            let fcolumn = &fkey.fcolumn;
+            let sql_type =
+                get_sql_type_from_global_config(&config, ftable, fcolumn, pool).to_lowercase();
+            let sql_param = cast_sql_param_from_text(&sql_type);
+            let fsql = local_sql_syntax(
+                &pool,
+                &format!(
+                    r#"{}SELECT 1 FROM "{}" WHERE "{}" = {} LIMIT 1"#,
+                    as_if_clause,
+                    ftable_alias,
+                    fcolumn,
+                    {
+                        if sql_type == "text" || sql_type.starts_with("varchar(") {
+                            format!("'{}'", value)
+                        } else {
+                            format!("{}", value)
+                        }
+                    }
+                ),
+            );
+
+            let fkey_satisfied = match fkey_cache {
+                Some(ref mut fkey_cache) => match fkey_cache.get(&value.to_string()) {
+                    Some(in_db) => *in_db,
+                    None => {
+                        let in_db = fkey_in_db(pool, &mut tx, cell, &fsql).await?;
+                        let key = value;
+                        fkey_cache.insert(key.to_string(), in_db);
+                        in_db
+                    }
+                },
+                None => fkey_in_db(pool, &mut tx, cell, &fsql).await?,
+            };
+
+            if !fkey_satisfied {
+                cell.valid = false;
+                let mut message = ValveCellMessage {
+                    rule: "key:foreign".to_string(),
+                    level: "error".to_string(),
+                    message: format!(
+                        "Value '{}' of column {} is not in {}.{}",
+                        value, column_name, ftable, fcolumn
+                    ),
+                };
+                let foptions = &config
+                    .table
+                    .get(ftable)
+                    .expect(&format!(
+                        "Foreign table: '{}' is not in table config",
+                        ftable
+                    ))
+                    .options;
+
+                if foptions.contains("conflict") {
+                    let (as_if_clause_for_conflict, ftable_alias) = match query_as_if {
+                        Some(query_as_if) if *ftable == query_as_if.table => (
+                            as_if_clause_for_conflict.to_string(),
+                            query_as_if.alias.to_string(),
+                        ),
+                        _ => ("".to_string(), ftable.to_string()),
+                    };
+                    let fsql = local_sql_syntax(
+                        &pool,
+                        &format!(
+                            r#"{}SELECT 1 FROM "{}_conflict" WHERE "{}" = {} LIMIT 1"#,
+                            as_if_clause_for_conflict, ftable_alias, fcolumn, sql_param
+                        ),
+                    );
+                    let frows = {
+                        if let None = tx {
+                            sqlx_query(&fsql).bind(value).fetch_all(pool).await?
+                        } else {
+                            sqlx_query(&fsql)
+                                .bind(value)
+                                .fetch_all(tx.as_mut().unwrap().acquire().await?)
+                                .await?
+                        }
+                    };
+                    if !frows.is_empty() {
+                        message.message = format!(
+                            "Value '{}' of column {} exists only in {}_conflict.{}",
+                            value, column_name, ftable, fcolumn
+                        );
+                    }
+                }
+                cell.messages.push(message);
+            }
         }
     }
 
