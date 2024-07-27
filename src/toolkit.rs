@@ -86,7 +86,7 @@ impl std::fmt::Debug for ParsedStructure {
 }
 
 /// The type of value the condition should be applied to.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum ValueType {
     Single,
     List(String),

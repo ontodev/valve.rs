@@ -72,7 +72,10 @@ table11	parent				text
 table11	xyzzy				text		
 table11	foo				text	primary	
 table11	bar	barmatic			text	from(view1.bar)	
-table12	foo				custom_b		
+table12	foo				custom_b	from(table13.foo)	
+table12	bar				word	from(table13.bar)	
+table13	foo				text		
+table13	bar				text		
 view1	foo		empty		trimmed_line		
 view1	bar		empty		trimmed_line		
 view2	foo		empty		trimmed_line		

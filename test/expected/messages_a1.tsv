@@ -1,11 +1,11 @@
 table	cell	level	rule	message	value
 table	D3	error	datatype:table_type	type should be a table type	rule
 table	E12	error	option:unrecognized	unrecognized option	foo
-table	E17	warning	option:overrides	overrides db_table	db_view
-table	E17	error	option:reserved	reserved for internal use	internal
-table	E18	warning	option:overrides	overrides save	db_view
-table	E21	warning	option:overrides	overrides edit	no-edit
-table	E21	warning	option:overrides	overrides save	no-save
+table	E18	warning	option:overrides	overrides db_table	db_view
+table	E18	error	option:reserved	reserved for internal use	internal
+table	E19	warning	option:overrides	overrides save	db_view
+table	E22	warning	option:overrides	overrides edit	no-edit
+table	E22	warning	option:overrides	overrides save	no-save
 table1	B5	error	key:unique	Values of base must be unique	http://purl.obolibrary.org/obo/VO_
 table1	A5	error	key:primary	Values of prefix must be unique	VO
 table1	B10	error	key:unique	Values of base must be unique	http://www.w3.org/1999/02/22-rdf-syntax-ns#

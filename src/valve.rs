@@ -14,7 +14,7 @@ use crate::{
         get_sql_type, get_sql_type_from_global_config, insert_chunks, insert_new_row_tx,
         local_sql_syntax, move_row_tx, read_config_files, record_row_change, record_row_move,
         switch_undone_state, undo_or_redo_move, update_row_tx, verify_table_deps_and_sort,
-        ColumnRule, CompiledCondition, ParsedStructure,
+        ColumnRule, CompiledCondition, ParsedStructure, ValueType,
     },
     validate::{validate_row_tx, validate_tree_foreign_keys, with_tree_sql},
     valve_grammar::StartParser,
@@ -1380,23 +1380,49 @@ impl Valve {
             create_lines.push(line);
         }
 
+        // A closure to get the value type of the datatype condition corresponding to given column:
+        let get_value_type = |column: &str| -> ValueType {
+            let datatype = &self
+                .config
+                .table
+                .get(&normal_table_name)
+                .expect(&format!(
+                    "No config found for table '{}'",
+                    normal_table_name
+                ))
+                .column
+                .get(column)
+                .expect(&format!(
+                    "No config found for column '{}' of table '{}'",
+                    column, normal_table_name
+                ))
+                .datatype;
+            // Some datatypes (like 'text' have no associated conditions). These are singles:
+            match self.datatype_conditions.get(datatype) {
+                None => ValueType::Single,
+                Some(condition) => condition.value_type.clone(),
+            }
+        };
+
         // Add the SQL to indicate any foreign constraints:
         let num_fkeys = foreigns.len();
         for (i, fkey) in foreigns.iter().enumerate() {
-            let ftable_options = {
-                let table_config = &tables_config
-                    .get(&fkey.ftable)
-                    .expect(&format!("Undefined table '{}'", fkey.ftable));
-                table_config.options.clone()
-            };
-            if !ftable_options.contains("db_view") {
-                create_lines.push(format!(
-                    r#"  FOREIGN KEY ("{}") REFERENCES "{}"("{}"){}"#,
-                    fkey.column,
-                    fkey.ftable,
-                    fkey.fcolumn,
-                    if i < (num_fkeys - 1) { "," } else { "" }
-                ));
+            if get_value_type(&fkey.column) == ValueType::Single {
+                let ftable_options = {
+                    let table_config = &tables_config
+                        .get(&fkey.ftable)
+                        .expect(&format!("Undefined table '{}'", fkey.ftable));
+                    table_config.options.clone()
+                };
+                if !ftable_options.contains("db_view") {
+                    create_lines.push(format!(
+                        r#"  FOREIGN KEY ("{}") REFERENCES "{}"("{}"){}"#,
+                        fkey.column,
+                        fkey.ftable,
+                        fkey.fcolumn,
+                        if i < (num_fkeys - 1) { "," } else { "" }
+                    ));
+                }
             }
         }
         create_lines.push(String::from(");"));
