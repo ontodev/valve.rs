@@ -27,8 +27,8 @@ use std::collections::HashMap;
 /// parameter. Note that this function is idempotent.
 pub async fn validate_row_tx(
     config: &ValveConfig,
-    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
-    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    datatype_conditions: &HashMap<String, CompiledCondition>,
+    rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     pool: &AnyPool,
     tx: Option<&mut Transaction<'_, sqlx::Any>>,
     table_name: &str,
@@ -55,7 +55,7 @@ pub async fn validate_row_tx(
     for (column_name, cell) in valve_row.contents.iter_mut() {
         validate_cell_nulltype(
             config,
-            compiled_datatype_conditions,
+            datatype_conditions,
             &table_name.to_string(),
             column_name,
             cell,
@@ -66,7 +66,7 @@ pub async fn validate_row_tx(
     for (column_name, cell) in valve_row.contents.iter_mut() {
         validate_cell_rules(
             config,
-            compiled_rule_conditions,
+            rule_conditions,
             &table_name.to_string(),
             column_name,
             &context,
@@ -76,7 +76,7 @@ pub async fn validate_row_tx(
         if cell.nulltype == None {
             validate_cell_datatype(
                 config,
-                compiled_datatype_conditions,
+                datatype_conditions,
                 &table_name.to_string(),
                 column_name,
                 cell,
@@ -91,7 +91,7 @@ pub async fn validate_row_tx(
                     config,
                     pool,
                     Some(tx),
-                    compiled_datatype_conditions,
+                    datatype_conditions,
                     &table_name.to_string(),
                     column_name,
                     cell,
@@ -446,7 +446,7 @@ pub async fn validate_tree_foreign_keys(
 pub async fn validate_rows_constraints(
     config: &ValveConfig,
     pool: &AnyPool,
-    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
+    datatype_conditions: &HashMap<String, CompiledCondition>,
     table_name: &String,
     rows: &mut Vec<ValveRow>,
 ) -> Result<()> {
@@ -488,7 +488,7 @@ pub async fn validate_rows_constraints(
                     config,
                     pool,
                     None,
-                    compiled_datatype_conditions,
+                    datatype_conditions,
                     table_name,
                     &column_name,
                     cell,
@@ -527,8 +527,8 @@ pub async fn validate_rows_constraints(
 /// return the validated versions.
 pub fn validate_rows_intra(
     config: &ValveConfig,
-    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
-    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    datatype_conditions: &HashMap<String, CompiledCondition>,
+    rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     table_name: &String,
     headers: &Vec<String>,
     rows: &Vec<Result<csv::StringRecord, csv::Error>>,
@@ -574,7 +574,7 @@ pub fn validate_rows_intra(
                     let cell = valve_row.contents.get_mut(column_name).unwrap();
                     validate_cell_nulltype(
                         config,
-                        compiled_datatype_conditions,
+                        datatype_conditions,
                         table_name,
                         &column_name,
                         cell,
@@ -587,7 +587,7 @@ pub fn validate_rows_intra(
                         let cell = valve_row.contents.get_mut(column_name).unwrap();
                         validate_cell_rules(
                             config,
-                            compiled_rule_conditions,
+                            rule_conditions,
                             table_name,
                             &column_name,
                             &context,
@@ -622,7 +622,7 @@ pub fn validate_rows_intra(
                                     None => {
                                         validate_cell_datatype(
                                             config,
-                                            compiled_datatype_conditions,
+                                            datatype_conditions,
                                             table_name,
                                             &column_name,
                                             cell,
@@ -639,7 +639,7 @@ pub fn validate_rows_intra(
                             } else {
                                 validate_cell_datatype(
                                     config,
-                                    compiled_datatype_conditions,
+                                    datatype_conditions,
                                     table_name,
                                     &column_name,
                                     cell,
@@ -648,7 +648,7 @@ pub fn validate_rows_intra(
                         } else {
                             validate_cell_datatype(
                                 config,
-                                compiled_datatype_conditions,
+                                datatype_conditions,
                                 table_name,
                                 &column_name,
                                 cell,
@@ -786,7 +786,7 @@ pub fn with_tree_sql(
 /// cell.
 pub fn validate_cell_nulltype(
     config: &ValveConfig,
-    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
+    datatype_conditions: &HashMap<String, CompiledCondition>,
     table_name: &String,
     column_name: &String,
     cell: &mut ValveCell,
@@ -802,7 +802,7 @@ pub fn validate_cell_nulltype(
 
     if column.nulltype != "" {
         let nt_name = &column.nulltype;
-        let nt_condition = &compiled_datatype_conditions.get(nt_name).unwrap().compiled;
+        let nt_condition = &datatype_conditions.get(nt_name).unwrap().compiled;
         let value = &cell.strvalue();
         if nt_condition(&value) {
             cell.nulltype = Some(nt_name.to_string());
@@ -814,7 +814,7 @@ pub fn validate_cell_nulltype(
 /// validate, validate the cell's datatype and return the validated cell.
 pub fn validate_cell_datatype(
     config: &ValveConfig,
-    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
+    datatype_conditions: &HashMap<String, CompiledCondition>,
     table_name: &String,
     column_name: &String,
     cell: &mut ValveCell,
@@ -871,7 +871,7 @@ pub fn validate_cell_datatype(
         .get(primary_dt_name)
         .expect(&format!("Undefined datatype '{}'", primary_dt_name));
     let primary_dt_desc = &primary_dt.description;
-    if let Some(primary_dt_cond) = compiled_datatype_conditions.get(primary_dt_name) {
+    if let Some(primary_dt_cond) = datatype_conditions.get(primary_dt_name) {
         let strvalue = cell.strvalue();
         let values = match &primary_dt_cond.value_type {
             ValueType::Single => vec![strvalue.as_str()],
@@ -883,7 +883,7 @@ pub fn validate_cell_datatype(
             }
             cell.valid = false;
             let mut datatypes_to_check =
-                get_datatype_ancestors(config, compiled_datatype_conditions, primary_dt_name, true);
+                get_datatype_ancestors(config, datatype_conditions, primary_dt_name, true);
             // If this datatype has any parents, check them beginning from the most general to
             // the most specific. We use while and pop instead of a for loop so as to check the
             // conditions in LIFO order.
@@ -891,7 +891,7 @@ pub fn validate_cell_datatype(
                 let datatype = datatypes_to_check.pop().unwrap();
                 let dt_name = &datatype.datatype;
                 let dt_description = &datatype.description;
-                let dt_condition = &compiled_datatype_conditions.get(dt_name).unwrap().compiled;
+                let dt_condition = &datatype_conditions.get(dt_name).unwrap().compiled;
                 if !dt_condition(&value) {
                     let message = construct_message(
                         &value,
@@ -931,7 +931,7 @@ pub fn validate_cell_datatype(
 /// to any applicable rules.
 pub fn validate_cell_rules(
     config: &ValveConfig,
-    compiled_rules: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    rules: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     table_name: &String,
     column_name: &String,
     context: &ValveRow,
@@ -943,7 +943,7 @@ pub fn validate_cell_rules(
         rule: &ValveRuleConfig,
         table_name: &String,
         column_name: &String,
-        compiled_rules: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+        rules: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     ) -> bool {
         let condition = {
             if condition_type == "when" {
@@ -959,7 +959,7 @@ pub fn validate_cell_rules(
             return (condition == "null" && cell.nulltype != None)
                 || (condition == "not null" && cell.nulltype == None);
         } else {
-            let compiled_condition = compiled_rules
+            let compiled_condition = rules
                 .get(table_name)
                 .and_then(|t| t.get(column_name))
                 .and_then(|v| {
@@ -992,16 +992,9 @@ pub fn validate_cell_rules(
         // enumerate() begins at 0 by default but we need to begin with 1:
         let rule_number = rule_number + 1;
         // Check the then condition only if the when condition is satisfied:
-        if check_condition("when", cell, rule, table_name, column_name, compiled_rules) {
+        if check_condition("when", cell, rule, table_name, column_name, rules) {
             let then_cell = context.contents.get(&rule.then_column).unwrap();
-            if !check_condition(
-                "then",
-                then_cell,
-                rule,
-                table_name,
-                column_name,
-                compiled_rules,
-            ) {
+            if !check_condition("then", then_cell, rule, table_name, column_name, rules) {
                 cell.valid = false;
                 cell.messages.push(ValveCellMessage {
                     rule: format!("rule:{}-{}", column_name, rule_number),
@@ -1127,7 +1120,7 @@ pub async fn validate_cell_foreign_constraints(
     config: &ValveConfig,
     pool: &AnyPool,
     mut tx: Option<&mut Transaction<'_, sqlx::Any>>,
-    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
+    datatype_conditions: &HashMap<String, CompiledCondition>,
     table_name: &String,
     column_name: &String,
     cell: &mut ValveCell,
@@ -1194,7 +1187,7 @@ pub async fn validate_cell_foreign_constraints(
                     column_name, table_name
                 ))
                 .datatype;
-            match compiled_datatype_conditions.get(datatype) {
+            match datatype_conditions.get(datatype) {
                 None => ValueType::Single,
                 Some(condition) => condition.value_type.clone(),
             }

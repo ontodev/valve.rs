@@ -6,7 +6,7 @@ use crate::{
     toolkit,
     toolkit::{
         add_message_counts, cast_column_sql_to_text, convert_undo_or_redo_record_to_change,
-        delete_row_tx, generate_compiled_datatype_conditions, generate_compiled_rule_conditions,
+        delete_row_tx, generate_datatype_conditions, generate_rule_conditions,
         get_column_for_label, get_column_value_as_string, get_json_array_from_row,
         get_json_object_from_row, get_label_for_column, get_parsed_structure_conditions,
         get_pool_from_connection_string, get_previous_row_tx, get_record_to_redo,
@@ -569,9 +569,8 @@ impl Valve {
             constraint: constraints_config,
         };
 
-        let datatype_conditions = generate_compiled_datatype_conditions(&config, &parser)?;
-        let rule_conditions =
-            generate_compiled_rule_conditions(&config, &datatype_conditions, &parser)?;
+        let datatype_conditions = generate_datatype_conditions(&config, &parser)?;
+        let rule_conditions = generate_rule_conditions(&config, &datatype_conditions, &parser)?;
         let structure_conditions = get_parsed_structure_conditions(&config, &parser)?;
 
         Ok(Self {
