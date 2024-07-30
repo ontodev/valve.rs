@@ -19,9 +19,8 @@ table12	2	foo	error	datatype:custom_b	Value 'beta' of column foo should be one o
 table12	2	foo	error	datatype:custom_b	Value 'phi' of column foo should be one of a list of custom_a tokens separated by spaces	_alpha_ beta _delta_ _gamma_ phi
 table12	2	foo	error	key:foreign	Value 'beta' of column foo is not in table13.foo	_alpha_ beta _delta_ _gamma_ phi
 table12	2	foo	error	key:foreign	Value 'phi' of column foo is not in table13.foo	_alpha_ beta _delta_ _gamma_ phi
+table12	3	bar	error	key:foreign	Value 'plorgo' of column bar is not in table13.bar	plorgo
 table12	3	foo	error	key:foreign	Value '_schmeagol_' of column foo is not in table13.foo	_schmeagol_
-table12	4	bar	error	key:foreign	Value 'slorgop' of column bar is not in table13.bar	slorgop
-table12	4	foo	error	key:foreign	Value '_louis_' of column foo is not in table13.foo	_phi_ _delta_ _louis_
 table2	1	child	error	key:unique	Values of child must be unique	b
 table2	1	child	error	tree:child-unique	Values of child must be unique	b
 table2	2	foo	error	rule:foo-1	bar must be null whenever foo is null	

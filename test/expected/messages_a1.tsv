@@ -18,9 +18,8 @@ table12	A2	error	datatype:custom_b	Value 'beta' of column foo should be one of a
 table12	A2	error	datatype:custom_b	Value 'phi' of column foo should be one of a list of custom_a tokens separated by spaces	_alpha_ beta _delta_ _gamma_ phi
 table12	A2	error	key:foreign	Value 'beta' of column foo is not in table13.foo	_alpha_ beta _delta_ _gamma_ phi
 table12	A2	error	key:foreign	Value 'phi' of column foo is not in table13.foo	_alpha_ beta _delta_ _gamma_ phi
+table12	B3	error	key:foreign	Value 'plorgo' of column bar is not in table13.bar	plorgo
 table12	A3	error	key:foreign	Value '_schmeagol_' of column foo is not in table13.foo	_schmeagol_
-table12	B4	error	key:foreign	Value 'slorgop' of column bar is not in table13.bar	slorgop
-table12	A4	error	key:foreign	Value '_louis_' of column foo is not in table13.foo	_phi_ _delta_ _louis_
 table2	D1	error	rule:foo-2	bar cannot be null if foo is not null	5
 table2	D1	error	rule:foo-4	bar must be 'y' or 'z' if foo = 5	5
 table2	D2	error	rule:foo-1	bar must be null whenever foo is null	

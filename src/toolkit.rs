@@ -4455,17 +4455,27 @@ pub async fn insert_chunk(
     verbose: bool,
     validate: bool,
 ) -> Result<()> {
-    if validate {
-        validate_rows_constraints(config, pool, datatype_conditions, table_name, rows).await?;
-    }
-
+    // Insertion with optional inter-table validation:
+    // Try to insert the rows to the db first without validating unique and foreign constraints.
+    // If there are constraint violations this will cause a database error, in which case we then
+    // explicitly do the constraint validation and insert the resulting rows.
+    // Note that instead of passing messages_stats here, we are going to initialize an empty map
+    // and pass that instead. The reason is that if a database error gets thrown, and then we
+    // redo the validation later, some of the messages will be double-counted. So to avoid that
+    // we send an empty map here, and in the case of no database error, we will just add the
+    // contents of the temporary map to messages_stats (in the Ok branch of the match statement
+    // below).
+    let mut tmp_messages_stats = HashMap::new();
+    tmp_messages_stats.insert("error".to_string(), 0);
+    tmp_messages_stats.insert("warning".to_string(), 0);
+    tmp_messages_stats.insert("info".to_string(), 0);
     let (main_sql, main_params, conflict_sql, conflict_params, message_sql, message_params) =
         make_inserts(
             config,
             table_name,
             rows,
             chunk_number,
-            messages_stats,
+            &mut tmp_messages_stats,
             verbose,
             pool,
         )
@@ -4476,21 +4486,96 @@ pub async fn insert_chunk(
     for param in &main_params {
         main_query = main_query.bind(param);
     }
-    main_query.execute(pool).await?;
+    let main_result = main_query.execute(pool).await;
 
-    let conflict_sql = local_sql_syntax(&pool, &conflict_sql);
-    let mut conflict_query = sqlx_query(&conflict_sql);
-    for param in &conflict_params {
-        conflict_query = conflict_query.bind(param);
-    }
-    conflict_query.execute(pool).await?;
+    // TODO: Now that we allow list types there is a problem with our current algorithm. Previously
+    // we relied on the database constraints to generate an error in the case of a from() violation.
+    // Because every from() corresponded to a foreign key we could rely on this. Now, however,
+    // because not every from() corresponds to a foreign key in the database, then as long as
+    // there are no other database issues with a given row, a violation of a from() in the case
+    // of a list type will not generate an error and therefore those problems will go unreported
+    // until you revalidate those rows.
+    match main_result {
+        Ok(_) => {
+            let conflict_sql = local_sql_syntax(&pool, &conflict_sql);
+            let mut conflict_query = sqlx_query(&conflict_sql);
+            for param in &conflict_params {
+                conflict_query = conflict_query.bind(param);
+            }
+            conflict_query.execute(pool).await?;
 
-    let message_sql = local_sql_syntax(&pool, &message_sql);
-    let mut message_query = sqlx_query(&message_sql);
-    for param in &message_params {
-        message_query = message_query.bind(param);
-    }
-    message_query.execute(pool).await?;
+            let message_sql = local_sql_syntax(&pool, &message_sql);
+            let mut message_query = sqlx_query(&message_sql);
+            for param in &message_params {
+                message_query = message_query.bind(param);
+            }
+            message_query.execute(pool).await?;
+
+            if verbose {
+                let curr_errors = messages_stats.get("error").unwrap();
+                messages_stats.insert(
+                    "error".to_string(),
+                    curr_errors + tmp_messages_stats.get("error").unwrap(),
+                );
+                let curr_warnings = messages_stats.get("warning").unwrap();
+                messages_stats.insert(
+                    "warning".to_string(),
+                    curr_warnings + tmp_messages_stats.get("warning").unwrap(),
+                );
+                let curr_infos = messages_stats.get("info").unwrap();
+                messages_stats.insert(
+                    "info".to_string(),
+                    curr_infos + tmp_messages_stats.get("info").unwrap(),
+                );
+            }
+        }
+        Err(e) => {
+            if validate {
+                validate_rows_constraints(config, pool, datatype_conditions, table_name, rows)
+                    .await?;
+                let (
+                    main_sql,
+                    main_params,
+                    conflict_sql,
+                    conflict_params,
+                    message_sql,
+                    message_params,
+                ) = make_inserts(
+                    config,
+                    table_name,
+                    rows,
+                    chunk_number,
+                    messages_stats,
+                    verbose,
+                    pool,
+                )
+                .await?;
+
+                let main_sql = local_sql_syntax(&pool, &main_sql);
+                let mut main_query = sqlx_query(&main_sql);
+                for param in &main_params {
+                    main_query = main_query.bind(param);
+                }
+                main_query.execute(pool).await?;
+
+                let conflict_sql = local_sql_syntax(&pool, &conflict_sql);
+                let mut conflict_query = sqlx_query(&conflict_sql);
+                for param in &conflict_params {
+                    conflict_query = conflict_query.bind(param);
+                }
+                conflict_query.execute(pool).await?;
+
+                let message_sql = local_sql_syntax(&pool, &message_sql);
+                let mut message_query = sqlx_query(&message_sql);
+                for param in &message_params {
+                    message_query = message_query.bind(param);
+                }
+                message_query.execute(pool).await?;
+            } else {
+                return Err(ValveError::DatabaseError(e).into());
+            }
+        }
+    };
 
     Ok(())
 }
