@@ -4480,116 +4480,151 @@ pub async fn insert_chunk(
     verbose: bool,
     validate: bool,
 ) -> Result<()> {
-    // Insertion with optional inter-table validation:
-    // Try to insert the rows to the db first without validating unique and foreign constraints.
-    // If there are constraint violations this will cause a database error, in which case we then
-    // explicitly do the constraint validation and insert the resulting rows.
-    // Note that instead of passing messages_stats here, we are going to initialize an empty map
-    // and pass that instead. The reason is that if a database error gets thrown, and then we
-    // redo the validation later, some of the messages will be double-counted. So to avoid that
-    // we send an empty map here, and in the case of no database error, we will just add the
-    // contents of the temporary map to messages_stats (in the Ok branch of the match statement
-    // below).
-    let mut tmp_messages_stats = HashMap::new();
-    tmp_messages_stats.insert("error".to_string(), 0);
-    tmp_messages_stats.insert("warning".to_string(), 0);
-    tmp_messages_stats.insert("info".to_string(), 0);
-    let (main_sql, main_params, conflict_sql, conflict_params, message_sql, message_params) =
-        make_inserts(
+    // This function implements the full validation process without any shortcuts. It will be
+    // called only in the last resort. Otherwise we try to use the database to tell us whether
+    // validation needs to be done and only do it in that case.
+    async fn validate_and_insert(
+        config: &ValveConfig,
+        pool: &AnyPool,
+        datatype_conditions: &HashMap<String, CompiledCondition>,
+        table_name: &String,
+        rows: &mut Vec<ValveRow>,
+        chunk_number: usize,
+        messages_stats: &mut HashMap<String, usize>,
+        verbose: bool,
+    ) -> Result<()> {
+        // Validate all remaining constraints:
+        validate_rows_constraints(config, pool, datatype_conditions, table_name, rows).await?;
+        // Construct the SQL statements and corresponding parameters for the database update:
+        let (main_sql, main_params, conflict_sql, conflict_params, message_sql, message_params) =
+            make_inserts(
+                config,
+                table_name,
+                rows,
+                chunk_number,
+                messages_stats,
+                verbose,
+                pool,
+            )
+            .await?;
+
+        // Add data to the main table:
+        let main_sql = local_sql_syntax(&pool, &main_sql);
+        let mut main_query = sqlx_query(&main_sql);
+        for param in &main_params {
+            main_query = main_query.bind(param);
+        }
+        main_query.execute(pool).await?;
+
+        // Add data to the conflict table:
+        let conflict_sql = local_sql_syntax(&pool, &conflict_sql);
+        let mut conflict_query = sqlx_query(&conflict_sql);
+        for param in &conflict_params {
+            conflict_query = conflict_query.bind(param);
+        }
+        conflict_query.execute(pool).await?;
+
+        // Add data to the message table:
+        let message_sql = local_sql_syntax(&pool, &message_sql);
+        let mut message_query = sqlx_query(&message_sql);
+        for param in &message_params {
+            message_query = message_query.bind(param);
+        }
+        message_query.execute(pool).await?;
+        Ok(())
+    }
+
+    // Determine whether any of the columns of this table are list types constrained by from()
+    // structures, or are the basis for a tree() constraint. Such columns are not tied to foreign
+    // keys in the database and therefore we cannot rely on the database to complain when they are
+    // violated:
+    let has_list_with_from = {
+        let table_config = config
+            .table
+            .get(table_name)
+            .expect(&format!("Cannot find config for table '{}'", table_name));
+        // Check, for each column, whether it is a list type, and if it is, check if the table
+        // has a foreign constraint on that column:
+        table_config.column.keys().any(|column_name| {
+            match get_value_type(config, datatype_conditions, table_name, column_name) {
+                ValueType::List(_) => {
+                    let foreigns = config.constraint.foreign.get(table_name).expect(&format!(
+                        "Cannot find foreign constraints for table '{}'",
+                        table_name
+                    ));
+                    foreigns
+                        .iter()
+                        .any(|foreign| foreign.column == *column_name)
+                }
+                ValueType::Single => false,
+            }
+        })
+    };
+    let has_trees = {
+        let trees = config
+            .constraint
+            .tree
+            .get(table_name)
+            .expect(&format!("Cannot find trees for table '{}'", table_name));
+        !trees.is_empty()
+    };
+
+    // If the validation flag is set, then if the table has a list column with a from() structure,
+    // or if the table has a tree, we always perform validation. Otherwise we rely on the database
+    // to complain when we try to insert the data, and only do the full validation when it does.
+    if validate && (has_list_with_from || has_trees) {
+        validate_and_insert(
             config,
+            pool,
+            datatype_conditions,
             table_name,
             rows,
             chunk_number,
-            &mut tmp_messages_stats,
+            messages_stats,
             verbose,
-            pool,
         )
-        .await?;
+        .await
+    } else {
+        // Insertion with optional inter-table validation:
+        // Try to insert the rows to the db first without validating unique and foreign constraints.
+        // If there are constraint violations this will cause a database error, in which case we
+        // then explicitly do the constraint validation and insert the resulting rows. Note that
+        // instead of passing messages_stats here, we are going to initialize an empty map and pass
+        // that instead. The reason is that if a database error gets thrown, and then we
+        // redo the validation later, some of the messages will be double-counted. So to avoid
+        // that we send an empty map here, and in the case of no database error, we will just add
+        // the contents of the temporary map to messages_stats (in the Ok branch of the match
+        // statement below).
+        let mut tmp_messages_stats = HashMap::new();
+        tmp_messages_stats.insert("error".to_string(), 0);
+        tmp_messages_stats.insert("warning".to_string(), 0);
+        tmp_messages_stats.insert("info".to_string(), 0);
+        let (main_sql, main_params, conflict_sql, conflict_params, message_sql, message_params) =
+            make_inserts(
+                config,
+                table_name,
+                rows,
+                chunk_number,
+                &mut tmp_messages_stats,
+                verbose,
+                pool,
+            )
+            .await?;
 
-    // TODO:
-    // 1. Make a new API function: get_value_type() and possibly refactor a bit in the places
-    //    where something like this function is called currently.
-    // 2. Then, here, do the following: If any of the columns in the table have a list type,
-    //    then always validate the constraints. Otherwise do the two-step thing. Note: In addition
-    //    to list types, we should also check to see if the table has a tree for a similar reason.
-
-    let main_sql = local_sql_syntax(&pool, &main_sql);
-    let mut main_query = sqlx_query(&main_sql);
-    for param in &main_params {
-        main_query = main_query.bind(param);
-    }
-    let main_result = main_query.execute(pool).await;
-
-    // TODO: Now that we allow list types there is a problem with our current algorithm. Previously
-    // we relied on the database constraints to generate an error in the case of a from() violation.
-    // Because every from() corresponded to a foreign key we could rely on this. Now, however,
-    // because not every from() corresponds to a foreign key in the database, then as long as
-    // there are no other database issues with a given row, a violation of a from() in the case
-    // of a list type will not generate an error and therefore those problems will go unreported
-    // until you revalidate those rows.
-    match main_result {
-        Ok(_) => {
-            let conflict_sql = local_sql_syntax(&pool, &conflict_sql);
-            let mut conflict_query = sqlx_query(&conflict_sql);
-            for param in &conflict_params {
-                conflict_query = conflict_query.bind(param);
-            }
-            conflict_query.execute(pool).await?;
-
-            let message_sql = local_sql_syntax(&pool, &message_sql);
-            let mut message_query = sqlx_query(&message_sql);
-            for param in &message_params {
-                message_query = message_query.bind(param);
-            }
-            message_query.execute(pool).await?;
-
-            if verbose {
-                let curr_errors = messages_stats.get("error").unwrap();
-                messages_stats.insert(
-                    "error".to_string(),
-                    curr_errors + tmp_messages_stats.get("error").unwrap(),
-                );
-                let curr_warnings = messages_stats.get("warning").unwrap();
-                messages_stats.insert(
-                    "warning".to_string(),
-                    curr_warnings + tmp_messages_stats.get("warning").unwrap(),
-                );
-                let curr_infos = messages_stats.get("info").unwrap();
-                messages_stats.insert(
-                    "info".to_string(),
-                    curr_infos + tmp_messages_stats.get("info").unwrap(),
-                );
-            }
+        let main_sql = local_sql_syntax(&pool, &main_sql);
+        let mut main_query = sqlx_query(&main_sql);
+        for param in &main_params {
+            main_query = main_query.bind(param);
         }
-        Err(e) => {
-            if validate {
-                validate_rows_constraints(config, pool, datatype_conditions, table_name, rows)
-                    .await?;
-                let (
-                    main_sql,
-                    main_params,
-                    conflict_sql,
-                    conflict_params,
-                    message_sql,
-                    message_params,
-                ) = make_inserts(
-                    config,
-                    table_name,
-                    rows,
-                    chunk_number,
-                    messages_stats,
-                    verbose,
-                    pool,
-                )
-                .await?;
+        let main_result = main_query.execute(pool).await;
 
-                let main_sql = local_sql_syntax(&pool, &main_sql);
-                let mut main_query = sqlx_query(&main_sql);
-                for param in &main_params {
-                    main_query = main_query.bind(param);
-                }
-                main_query.execute(pool).await?;
-
+        // Because every from() corresponded to a foreign key we could rely on this. Now, however,
+        // because not every from() corresponds to a foreign key in the database, then as long as
+        // there are no other database issues with a given row, a violation of a from() in the case
+        // of a list type will not generate an error and therefore those problems will go unreported
+        // until you revalidate those rows.
+        match main_result {
+            Ok(_) => {
                 let conflict_sql = local_sql_syntax(&pool, &conflict_sql);
                 let mut conflict_query = sqlx_query(&conflict_sql);
                 for param in &conflict_params {
@@ -4603,13 +4638,45 @@ pub async fn insert_chunk(
                     message_query = message_query.bind(param);
                 }
                 message_query.execute(pool).await?;
-            } else {
-                return Err(ValveError::DatabaseError(e).into());
+
+                if verbose {
+                    let curr_errors = messages_stats.get("error").unwrap();
+                    messages_stats.insert(
+                        "error".to_string(),
+                        curr_errors + tmp_messages_stats.get("error").unwrap(),
+                    );
+                    let curr_warnings = messages_stats.get("warning").unwrap();
+                    messages_stats.insert(
+                        "warning".to_string(),
+                        curr_warnings + tmp_messages_stats.get("warning").unwrap(),
+                    );
+                    let curr_infos = messages_stats.get("info").unwrap();
+                    messages_stats.insert(
+                        "info".to_string(),
+                        curr_infos + tmp_messages_stats.get("info").unwrap(),
+                    );
+                }
+                Ok(())
+            }
+            Err(e) => {
+                if validate {
+                    validate_and_insert(
+                        config,
+                        pool,
+                        datatype_conditions,
+                        table_name,
+                        rows,
+                        chunk_number,
+                        messages_stats,
+                        verbose,
+                    )
+                    .await
+                } else {
+                    Err(ValveError::DatabaseError(e).into())
+                }
             }
         }
-    };
-
-    Ok(())
+    }
 }
 
 /// Given a configuration map, a database connection pool, maps for compiled datatype and rule
