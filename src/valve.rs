@@ -1310,34 +1310,10 @@ impl Valve {
             }
         };
 
-        // A closure to get the value type of the datatype condition corresponding to given column:
-        let get_value_type = |column: &str| -> ValueType {
-            let datatype = &self
-                .config
-                .table
-                .get(&normal_table_name)
-                .expect(&format!(
-                    "No config found for table '{}'",
-                    normal_table_name
-                ))
-                .column
-                .get(column)
-                .expect(&format!(
-                    "No config found for column '{}' of table '{}'",
-                    column, normal_table_name
-                ))
-                .datatype;
-            // Some datatypes (like 'text' have no associated conditions). These are singles:
-            match self.datatype_conditions.get(datatype) {
-                None => ValueType::Single,
-                Some(condition) => condition.value_type.clone(),
-            }
-        };
-
         let applicable_foreigns = foreigns
             .iter()
             .filter(|fkey| {
-                let vtype = get_value_type(&fkey.column);
+                let vtype = self.get_value_type(&normal_table_name, &fkey.column);
                 let table_config = &tables_config
                     .get(&fkey.ftable)
                     .expect(&format!("Undefined table '{}'", fkey.ftable));
@@ -1409,7 +1385,7 @@ impl Valve {
         let num_fkeys = applicable_foreigns.len();
         let mut foreigns_added = 0;
         for fkey in foreigns.iter() {
-            if get_value_type(&fkey.column) == ValueType::Single {
+            if self.get_value_type(&normal_table_name, &fkey.column) == ValueType::Single {
                 let ftable_options = {
                     let table_config = &tables_config
                         .get(&fkey.ftable)
@@ -1988,80 +1964,6 @@ impl Valve {
         Ok(self)
     }
 
-    /// Given the name of a datatype, find (in the database) the value of the optional configuration
-    /// parameter called 'format' corresponding to that datatype and return it, or an empty string
-    /// if no format parameter has been configured for that datatype or if the format parameter is
-    /// not defined. The format parameter indicates how values of the given column are to be
-    /// formatted when saving a table to an external file.
-    pub async fn get_datatype_format(&self, datatype: &str) -> Result<String> {
-        if !self
-            .config
-            .table
-            .get("datatype")
-            .and_then(|t| Some(&t.column))
-            .and_then(|c| Some(c.keys().collect::<Vec<_>>()))
-            .and_then(|v| Some(v.contains(&&"format".to_string())))
-            .expect("Could not find column configrations for the datatype table")
-        {
-            Ok("".to_string())
-        } else {
-            let sql = format!(
-                r#"SELECT "format" FROM "datatype" WHERE "datatype" = '{}'"#,
-                datatype,
-            );
-            let rows = sqlx_query(&sql).fetch_all(&self.pool).await?;
-            if rows.len() > 0 {
-                let format_string = rows[0]
-                    .try_get::<&str, &str>("format")
-                    .ok()
-                    .expect("No column 'format' in row.");
-                Ok(format_string.to_string())
-            } else {
-                Ok("".to_string())
-            }
-        }
-    }
-
-    /// Given a table name and the name of a column in that table, find (in the database) the value
-    /// of the optional configuration parameter called 'format' and return it, or an empty string
-    /// if no format parameter has been configured or if none has been defined for that column.
-    /// The format parameter indicates how values of the given column are to be formatted when
-    /// saving a table to an external file.
-    pub async fn get_column_format(&self, table: &str, column: &str) -> Result<String> {
-        if !self
-            .config
-            .table
-            .get("datatype")
-            .and_then(|t| Some(t.column.clone()))
-            .and_then(|c| Some(c.keys().cloned().collect::<Vec<_>>()))
-            .and_then(|v| Some(v.contains(&"format".to_string())))
-            .expect("Could not find column configrations for the datatype table")
-        {
-            Ok("".to_string())
-        } else {
-            let sql = format!(
-                r#"SELECT d."format"
-                     FROM "column" c, "datatype" d
-                    WHERE c."table" = '{}'
-                      AND c."column" = '{}'
-                      AND c."datatype" = d."datatype""#,
-                table, column
-            );
-            let rows = sqlx_query(&sql).fetch_all(&self.pool).await?;
-            if rows.len() > 1 {
-                panic!(
-                    "Multiple entries corresponding to '{}' in datatype table",
-                    column
-                );
-            }
-            let format_string = rows[0]
-                .try_get::<&str, &str>("format")
-                .ok()
-                .unwrap_or_default();
-            Ok(format_string.to_string())
-        }
-    }
-
     /// Save the given table with the given columns at the given path as a TSV file.
     pub fn save_table(
         &self,
@@ -2179,6 +2081,85 @@ impl Valve {
         writer.flush()?;
 
         Ok(self)
+    }
+
+    /// Given a table name and a column name, get the value type of the column.
+    pub fn get_value_type(&self, table: &str, column: &str) -> ValueType {
+        toolkit::get_value_type(&self.config, &self.datatype_conditions, table, column)
+    }
+
+    /// Given the name of a datatype, find (in the database) the value of the optional configuration
+    /// parameter called 'format' corresponding to that datatype and return it, or an empty string
+    /// if no format parameter has been configured for that datatype or if the format parameter is
+    /// not defined. The format parameter indicates how values of the given column are to be
+    /// formatted when saving a table to an external file.
+    pub async fn get_datatype_format(&self, datatype: &str) -> Result<String> {
+        if !self
+            .config
+            .table
+            .get("datatype")
+            .and_then(|t| Some(&t.column))
+            .and_then(|c| Some(c.keys().collect::<Vec<_>>()))
+            .and_then(|v| Some(v.contains(&&"format".to_string())))
+            .expect("Could not find column configrations for the datatype table")
+        {
+            Ok("".to_string())
+        } else {
+            let sql = format!(
+                r#"SELECT "format" FROM "datatype" WHERE "datatype" = '{}'"#,
+                datatype,
+            );
+            let rows = sqlx_query(&sql).fetch_all(&self.pool).await?;
+            if rows.len() > 0 {
+                let format_string = rows[0]
+                    .try_get::<&str, &str>("format")
+                    .ok()
+                    .expect("No column 'format' in row.");
+                Ok(format_string.to_string())
+            } else {
+                Ok("".to_string())
+            }
+        }
+    }
+
+    /// Given a table name and the name of a column in that table, find (in the database) the value
+    /// of the optional configuration parameter called 'format' and return it, or an empty string
+    /// if no format parameter has been configured or if none has been defined for that column.
+    /// The format parameter indicates how values of the given column are to be formatted when
+    /// saving a table to an external file.
+    pub async fn get_column_format(&self, table: &str, column: &str) -> Result<String> {
+        if !self
+            .config
+            .table
+            .get("datatype")
+            .and_then(|t| Some(t.column.clone()))
+            .and_then(|c| Some(c.keys().cloned().collect::<Vec<_>>()))
+            .and_then(|v| Some(v.contains(&"format".to_string())))
+            .expect("Could not find column configrations for the datatype table")
+        {
+            Ok("".to_string())
+        } else {
+            let sql = format!(
+                r#"SELECT d."format"
+                     FROM "column" c, "datatype" d
+                    WHERE c."table" = '{}'
+                      AND c."column" = '{}'
+                      AND c."datatype" = d."datatype""#,
+                table, column
+            );
+            let rows = sqlx_query(&sql).fetch_all(&self.pool).await?;
+            if rows.len() > 1 {
+                panic!(
+                    "Multiple entries corresponding to '{}' in datatype table",
+                    column
+                );
+            }
+            let format_string = rows[0]
+                .try_get::<&str, &str>("format")
+                .ok()
+                .unwrap_or_default();
+            Ok(format_string.to_string())
+        }
     }
 
     /// Given a table name, a row number, and a transaction through which to access the database,

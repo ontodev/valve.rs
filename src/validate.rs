@@ -4,8 +4,8 @@ use crate::{
     ast::Expression,
     toolkit::{
         cast_sql_param_from_text, get_column_value_as_string, get_datatype_ancestors,
-        get_sql_type_from_global_config, get_table_options, is_sql_type_error, local_sql_syntax,
-        ColumnRule, CompiledCondition, QueryAsIf, QueryAsIfKind, ValueType,
+        get_sql_type_from_global_config, get_table_options, get_value_type, is_sql_type_error,
+        local_sql_syntax, ColumnRule, CompiledCondition, QueryAsIf, QueryAsIfKind, ValueType,
     },
     valve::{
         ValveCell, ValveCellMessage, ValveConfig, ValveRow, ValveRuleConfig, ValveTreeConstraint,
@@ -1188,29 +1188,12 @@ pub async fn validate_cell_foreign_constraints(
 
     let strvalue = cell.strvalue();
     let values = {
-        let value_type = {
-            let datatype = &config
-                .table
-                .get(table_name)
-                .expect(&format!("No config found for table '{}'", table_name))
-                .column
-                .get(column_name)
-                .expect(&format!(
-                    "No config found for column '{}' of table '{}'",
-                    column_name, table_name
-                ))
-                .datatype;
-            match datatype_conditions.get(datatype) {
-                None => ValueType::Single,
-                Some(condition) => condition.value_type.clone(),
-            }
-        };
+        let value_type = get_value_type(config, datatype_conditions, table_name, column_name);
         match value_type {
             ValueType::Single => vec![strvalue.as_str()],
             ValueType::List(separator) => strvalue.split(&separator).collect::<Vec<_>>(),
         }
     };
-
     for value in &values {
         for fkey in &fkeys {
             let ftable = &fkey.ftable;

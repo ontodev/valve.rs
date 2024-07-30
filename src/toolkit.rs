@@ -3684,6 +3684,31 @@ pub fn get_column_value(row: &AnyRow, column: &str, sql_type: &str) -> SerdeValu
     }
 }
 
+/// Given a global config map, a map of compiled datatype conditions, a table name and a column
+/// name, get the value type of the column.
+pub fn get_value_type(
+    config: &ValveConfig,
+    datatype_conditions: &HashMap<String, CompiledCondition>,
+    table_name: &str,
+    column_name: &str,
+) -> ValueType {
+    let datatype = &config
+        .table
+        .get(table_name)
+        .expect(&format!("No config found for table '{}'", table_name))
+        .column
+        .get(column_name)
+        .expect(&format!(
+            "No config found for column '{}' of table '{}'",
+            column_name, table_name
+        ))
+        .datatype;
+    match datatype_conditions.get(datatype) {
+        None => ValueType::Single,
+        Some(condition) => condition.value_type.clone(),
+    }
+}
+
 /// Given a SQL string, possibly with unbound parameters represented by the placeholder string
 /// SQL_PARAM, and given a database pool, if the pool is of type Sqlite, then change the syntax used
 /// for unbound parameters to Sqlite syntax, which uses "?", otherwise use Postgres syntax, which
