@@ -495,7 +495,11 @@ pub async fn validate_rows_constraints(
                     None,
                     fkey_cache,
                 )
-                .await?;
+                .await
+                .expect(&format!(
+                    "Unable to validate foreign constraints for row number: {:?}, column '{}.{}'",
+                    row.row_number, table_name, column_name
+                ));
                 validate_cell_unique_constraints(
                     config,
                     pool,
@@ -506,7 +510,11 @@ pub async fn validate_rows_constraints(
                     &valve_rows,
                     None,
                 )
-                .await?;
+                .await
+                .expect(&format!(
+                    "Unable to validate unique constraints for row number: {:?}, column '{}.{}'",
+                    row.row_number, table_name, column_name
+                ));
             }
             valve_row
                 .contents
@@ -1135,6 +1143,11 @@ pub async fn validate_cell_foreign_constraints(
         .iter()
         .filter(|t| t.column == *column_name)
         .collect::<Vec<_>>();
+
+    // If there are no foreign keys, then just return:
+    if fkeys.is_empty() {
+        return Ok(());
+    }
 
     let as_if_clause = match query_as_if {
         Some(query_as_if) => {

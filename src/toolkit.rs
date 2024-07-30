@@ -4481,6 +4481,13 @@ pub async fn insert_chunk(
         )
         .await?;
 
+    // TODO:
+    // 1. Make a new API function: get_value_type() and possibly refactor a bit in the places
+    //    where something like this function is called currently.
+    // 2. Then, here, do the following: If any of the columns in the table have a list type,
+    //    then always validate the constraints. Otherwise do the two-step thing. Note: In addition
+    //    to list types, we should also check to see if the table has a tree for a similar reason.
+
     let main_sql = local_sql_syntax(&pool, &main_sql);
     let mut main_query = sqlx_query(&main_sql);
     for param in &main_params {
