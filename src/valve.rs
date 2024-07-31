@@ -2744,9 +2744,10 @@ impl Valve {
             Some(Expression::Function(name, args)) if name == "list" => match &*args[0] {
                 Expression::Label(arg) => {
                     let label = unquote(arg).unwrap_or_else(|_| arg.to_string());
-                    datatype_conditions
-                        .get(&label)
-                        .and_then(|d| Some(d.parsed.clone()))
+                    match datatype_conditions.get(&label) {
+                        Some(c) => Some(c.parsed.clone()),
+                        None => None,
+                    }
                 }
                 _ => None,
             },

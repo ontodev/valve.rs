@@ -4480,10 +4480,10 @@ pub async fn insert_chunk(
     verbose: bool,
     validate: bool,
 ) -> Result<()> {
-    // This function implements the full validation process without any shortcuts. It will be
-    // called only in the last resort. Otherwise we try to use the database to tell us whether
-    // validation needs to be done and only do it in that case.
     async fn validate_and_insert(
+        // This function implements the full validation process without any shortcuts. It will be
+        // called only in the last resort. Otherwise we try to use the database to tell us whether
+        // validation needs to be done and only do it in that case.
         config: &ValveConfig,
         pool: &AnyPool,
         datatype_conditions: &HashMap<String, CompiledCondition>,
@@ -4617,12 +4617,6 @@ pub async fn insert_chunk(
             main_query = main_query.bind(param);
         }
         let main_result = main_query.execute(pool).await;
-
-        // Because every from() corresponded to a foreign key we could rely on this. Now, however,
-        // because not every from() corresponds to a foreign key in the database, then as long as
-        // there are no other database issues with a given row, a violation of a from() in the case
-        // of a list type will not generate an error and therefore those problems will go unreported
-        // until you revalidate those rows.
         match main_result {
             Ok(_) => {
                 let conflict_sql = local_sql_syntax(&pool, &conflict_sql);
