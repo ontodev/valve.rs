@@ -10,7 +10,7 @@ use crate::{
     valve::{
         ValveCell, ValveCellMessage, ValveConfig, ValveRow, ValveRuleConfig, ValveTreeConstraint,
     },
-    DT_CACHE_SIZE, FKEY_CACHE_SIZE,
+    DT_CACHE_SIZE,
 };
 use anyhow::Result;
 use indexmap::IndexMap;
@@ -96,7 +96,6 @@ pub async fn validate_row_tx(
                     column_name,
                     cell,
                     query_as_if,
-                    None,
                 )
                 .await?;
                 validate_cell_unique_constraints(
@@ -456,17 +455,6 @@ pub async fn validate_rows_constraints(
         .expect(&format!("Undefined table '{}'", table_name))
         .column_order;
 
-    let mut fkey_caches = match FKEY_CACHE_SIZE {
-        0 => None,
-        _ => {
-            let mut cache = HashMap::new();
-            for column in column_names {
-                cache.insert(column.to_string(), LfuCache::with_capacity(FKEY_CACHE_SIZE));
-            }
-            Some(cache)
-        }
-    };
-
     let mut valve_rows = vec![];
     for row in rows.iter_mut() {
         let mut valve_row = ValveRow {
@@ -480,10 +468,6 @@ pub async fn validate_rows_constraints(
             // database errors when, for instance, we compare a numeric with a non-numeric type.
             let sql_type = get_sql_type_from_global_config(config, table_name, &column_name, pool);
             if cell.nulltype == None && !is_sql_type_error(&sql_type, &cell.strvalue()) {
-                let fkey_cache = match &mut fkey_caches {
-                    None => None,
-                    Some(fkey_caches) => fkey_caches.get_mut(column_name),
-                };
                 validate_cell_foreign_constraints(
                     config,
                     pool,
@@ -493,7 +477,6 @@ pub async fn validate_rows_constraints(
                     &column_name,
                     cell,
                     None,
-                    fkey_cache,
                 )
                 .await
                 .expect(&format!(
@@ -1133,7 +1116,6 @@ pub async fn validate_cell_foreign_constraints(
     column_name: &String,
     cell: &mut ValveCell,
     query_as_if: Option<&QueryAsIf>,
-    mut fkey_cache: Option<&mut LfuCache<String, bool>>,
 ) -> Result<()> {
     let fkeys = config
         .constraint
@@ -1224,20 +1206,7 @@ pub async fn validate_cell_foreign_constraints(
                 ),
             );
 
-            let fkey_satisfied = match fkey_cache {
-                Some(ref mut fkey_cache) => match fkey_cache.get(&value.to_string()) {
-                    Some(in_db) => *in_db,
-                    None => {
-                        let in_db = fkey_in_db(pool, &mut tx, cell, &fsql).await?;
-                        let key = value;
-                        fkey_cache.insert(key.to_string(), in_db);
-                        in_db
-                    }
-                },
-                None => fkey_in_db(pool, &mut tx, cell, &fsql).await?,
-            };
-
-            if !fkey_satisfied {
+            if !fkey_in_db(pool, &mut tx, cell, &fsql).await? {
                 cell.valid = false;
                 let mut message = ValveCellMessage {
                     rule: "key:foreign".to_string(),
