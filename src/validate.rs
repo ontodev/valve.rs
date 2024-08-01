@@ -3,9 +3,10 @@
 use crate::{
     ast::Expression,
     toolkit::{
-        cast_sql_param_from_text, get_column_value_as_string, get_datatype_ancestors,
-        get_sql_type_from_global_config, get_table_options, get_value_type, is_sql_type_error,
-        local_sql_syntax, ColumnRule, CompiledCondition, QueryAsIf, QueryAsIfKind, ValueType,
+        cast_sql_param_from_text, get_column_value, get_column_value_as_string,
+        get_datatype_ancestors, get_sql_type_from_global_config, get_table_options, get_value_type,
+        is_sql_type_error, local_sql_syntax, ColumnRule, CompiledCondition, QueryAsIf,
+        QueryAsIfKind, ValueType,
     },
     valve::{
         ValveCell, ValveCellMessage, ValveConfig, ValveRow, ValveRuleConfig, ValveTreeConstraint,
@@ -449,11 +450,105 @@ pub async fn validate_rows_constraints(
     table_name: &String,
     rows: &mut Vec<ValveRow>,
 ) -> Result<()> {
-    let column_names = &config
+    async fn get_allowed_values(
+        config: &ValveConfig,
+        pool: &AnyPool,
+        table: &str,
+        column: &str,
+    ) -> Result<Option<Vec<SerdeValue>>> {
+        // TODO: We need to send back two lists: One with allowed values from the normal foreign
+        // table, and one with allowed values from the conflict table. The reason is that we
+        // want to report, as an error, the case where a value is allowed only because it exists
+        // in the conflict table. See the validate_cell_foreign() function for details.
+
+        let fconstraint = {
+            let mut fconstraints = config
+                .constraint
+                .foreign
+                .get(table)
+                .expect(&format!(
+                    "Could not retrieve foreign constraints for table '{}'",
+                    table
+                ))
+                .iter()
+                .filter(|fkey| fkey.column == column)
+                .collect::<Vec<_>>();
+            if fconstraints.len() > 1 {
+                log::warn!(
+                    "There is more than one foreign constraint defined for '{}.{}'.",
+                    table,
+                    column
+                );
+            }
+            // Take the last one:
+            fconstraints.pop()
+        };
+
+        match fconstraint {
+            None => Ok(None),
+            Some(fkey) => {
+                // Foreign keys always correspond to columns with unique constraints so we do not
+                // need to use the keyword 'DISTINCT' here:
+                let sql = format!(r#"SELECT "{}" FROM "{}""#, fkey.fcolumn, fkey.ftable);
+                let allowed_values = sqlx_query(&sql)
+                    .fetch_all(pool)
+                    .await?
+                    .iter()
+                    .map(|row| {
+                        let sql_type = get_sql_type_from_global_config(
+                            config,
+                            &fkey.ftable,
+                            &fkey.fcolumn,
+                            pool,
+                        );
+                        get_column_value(row, &fkey.fcolumn, &sql_type)
+                    })
+                    .collect::<Vec<_>>();
+                Ok(Some(allowed_values))
+            }
+        }
+    }
+
+    async fn get_forbidden_values(
+        config: &ValveConfig,
+        pool: &AnyPool,
+        table: &str,
+        column: &str,
+    ) -> Result<Option<Vec<SerdeValue>>> {
+        // TODO: We need to also consider the conflict table. See the current validate_cell_unique()
+        // function for how to do this.
+
+        let primaries = &config
+            .constraint
+            .primary
+            .get(table)
+            .expect(&format!("Undefined table '{}'", table));
+        let uniques = &config
+            .constraint
+            .unique
+            .get(table)
+            .expect(&format!("Undefined table '{}'", table));
+        if primaries.iter().any(|p| p == column) || uniques.iter().any(|p| p == column) {
+            let sql = format!(r#"SELECT "{}" FROM "{}""#, column, table);
+            let forbidden_values = sqlx_query(&sql)
+                .fetch_all(pool)
+                .await?
+                .iter()
+                .map(|row| {
+                    let sql_type = get_sql_type_from_global_config(config, &table, &column, pool);
+                    get_column_value(row, &column, &sql_type)
+                })
+                .collect::<Vec<_>>();
+            Ok(Some(forbidden_values))
+        } else {
+            Ok(None)
+        }
+    }
+
+    let table_config = &config
         .table
         .get(table_name)
-        .expect(&format!("Undefined table '{}'", table_name))
-        .column_order;
+        .expect(&format!("Undefined table '{}'", table_name));
 
     let mut valve_rows = vec![];
     for row in rows.iter_mut() {
@@ -461,13 +556,32 @@ pub async fn validate_rows_constraints(
             row_number: None,
             contents: IndexMap::new(),
         };
-        for column_name in column_names {
+        for column_name in &table_config.column_order {
             let cell = row.contents.get_mut(column_name).unwrap();
             // We don't do any further validation on cells that are legitimately empty, or on cells
             // that have SQL type violations. We exclude the latter because they can result in
             // database errors when, for instance, we compare a numeric with a non-numeric type.
             let sql_type = get_sql_type_from_global_config(config, table_name, &column_name, pool);
             if cell.nulltype == None && !is_sql_type_error(&sql_type, &cell.strvalue()) {
+                // TODO: define allowed_values and forbidden_values *before* the beginning of the
+                // for loop over rows, since evertimg you process a row you need to add to those
+                // lists.
+
+                // Prefetch the values that are allowed and/or forbidden for this particular
+                // column given the current state of the given table:
+                let allowed_values =
+                    get_allowed_values(config, pool, table_name, column_name).await?;
+                println!(
+                    "ALLOWED VALUES FOR '{}.{}': {:?}",
+                    table_name, column_name, allowed_values
+                );
+                let forbidden_values =
+                    get_forbidden_values(config, pool, table_name, column_name).await?;
+                println!(
+                    "FORBIDDEN VALUES FOR '{}.{}': {:?}",
+                    table_name, column_name, forbidden_values
+                );
+
                 validate_cell_foreign_constraints(
                     config,
                     pool,
