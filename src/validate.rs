@@ -97,6 +97,7 @@ pub async fn validate_row_tx(
                     column_name,
                     cell,
                     query_as_if,
+                    &None,
                 )
                 .await?;
                 validate_cell_unique_constraints(
@@ -460,6 +461,7 @@ pub async fn validate_rows_constraints(
         pool: &AnyPool,
         table: &str,
         column: &str,
+        received_values: &HashMap<&str, Vec<SerdeValue>>,
     ) -> Result<Option<(Vec<SerdeValue>, Vec<SerdeValue>)>> {
         let fconstraint = {
             let mut fconstraints = config
@@ -486,22 +488,39 @@ pub async fn validate_rows_constraints(
         match fconstraint {
             None => Ok(None),
             Some(fkey) => {
+                let sql_type =
+                    get_sql_type_from_global_config(config, &fkey.ftable, &fkey.fcolumn, pool)
+                        .to_lowercase();
+
+                let sql_values = received_values
+                    .get(&*fkey.column)
+                    .unwrap()
+                    .iter()
+                    .map(|value| {
+                        let value = value
+                            .as_str()
+                            .expect(&format!("'{}' is not a string", value));
+                        if vec!["integer", "numeric", "real"].contains(&sql_type.as_str()) {
+                            format!("{}", value)
+                        } else {
+                            format!("'{}'", value)
+                        }
+                    })
+                    .filter(|value| value != "" && value != "''")
+                    .collect::<Vec<_>>()
+                    .join(", ");
+
                 // Foreign keys always correspond to columns with unique constraints so we do not
                 // need to use the keyword 'DISTINCT' when querying the normal version of the table:
-                let sql = format!(r#"SELECT "{}" FROM "{}""#, fkey.fcolumn, fkey.ftable);
+                let sql = format!(
+                    r#"SELECT "{}" FROM "{}" WHERE "{}" IN ({})"#,
+                    fkey.fcolumn, fkey.ftable, fkey.fcolumn, sql_values
+                );
                 let allowed_values = sqlx_query(&sql)
                     .fetch_all(pool)
                     .await?
                     .iter()
-                    .map(|row| {
-                        let sql_type = get_sql_type_from_global_config(
-                            config,
-                            &fkey.ftable,
-                            &fkey.fcolumn,
-                            pool,
-                        );
-                        get_column_value(row, &fkey.fcolumn, &sql_type)
-                    })
+                    .map(|row| get_column_value(row, &fkey.fcolumn, &sql_type))
                     .collect::<Vec<_>>();
 
                 let allowed_values_conflict = {
@@ -515,8 +534,8 @@ pub async fn validate_rows_constraints(
                         // it could have duplicate values of the foreign constraint, therefore we
                         // add the DISTINCT keyword here:
                         let sql = format!(
-                            r#"SELECT DISTINCT "{}" FROM "{}_conflict""#,
-                            fkey.fcolumn, fkey.ftable
+                            r#"SELECT DISTINCT "{}" FROM "{}_conflict" WHERE "{}" IN ({})"#,
+                            fkey.fcolumn, fkey.ftable, fkey.fcolumn, sql_values
                         );
                         sqlx_query(&sql)
                             .fetch_all(pool)
@@ -552,6 +571,7 @@ pub async fn validate_rows_constraints(
         pool: &AnyPool,
         table: &str,
         column: &str,
+        received_values: &HashMap<&str, Vec<SerdeValue>>,
     ) -> Result<Option<Vec<SerdeValue>>> {
         let primaries = &config
             .constraint
@@ -577,18 +597,38 @@ pub async fn validate_rows_constraints(
                     (format!("{}_view", table), "DISTINCT".to_string())
                 }
             };
+
+            let sql_type =
+                get_sql_type_from_global_config(config, &table, &column, pool).to_lowercase();
+            let sql_values = received_values
+                .get(&*column)
+                .unwrap()
+                .iter()
+                .map(|value| {
+                    let value = value
+                        .as_str()
+                        .expect(&format!("'{}' is not a string", value));
+                    if vec!["integer", "numeric", "real"].contains(&sql_type.as_str()) {
+                        format!("{}", value)
+                    } else {
+                        format!("'{}'", value)
+                    }
+                })
+                .filter(|value| value != "" && value != "''")
+                .collect::<Vec<_>>()
+                .join(", ");
+
             let sql = format!(
-                r#"SELECT {} "{}" FROM "{}""#,
-                query_modifier, column, query_table
+                r#"SELECT {} "{}" FROM "{}" WHERE "{}" IN ({})"#,
+                query_modifier, column, query_table, column, sql_values
             );
+            println!("SQL: {}", sql);
+
             let forbidden_values = sqlx_query(&sql)
                 .fetch_all(pool)
                 .await?
                 .iter()
-                .map(|row| {
-                    let sql_type = get_sql_type_from_global_config(config, &table, &column, pool);
-                    get_column_value(row, &column, &sql_type)
-                })
+                .map(|row| get_column_value(row, &column, &sql_type))
                 .collect::<Vec<_>>();
             Ok(Some(forbidden_values))
         } else {
@@ -600,6 +640,25 @@ pub async fn validate_rows_constraints(
         .table
         .get(table_name)
         .expect(&format!("Undefined table '{}'", table_name));
+
+    let received_values = {
+        let mut received_values = table_config
+            .column_order
+            .iter()
+            .map(|column| (column.as_str(), vec![]))
+            .collect::<HashMap<_, _>>();
+        for row in rows.iter_mut() {
+            for (column, values) in &mut received_values {
+                let cell = row
+                    .contents
+                    .get(&column.to_string())
+                    .expect(&format!("No column '{}' in row", column));
+                values.push(cell.value.clone());
+            }
+        }
+
+        received_values
+    };
 
     let mut valve_rows = vec![];
     for row in rows.iter_mut() {
@@ -617,17 +676,17 @@ pub async fn validate_rows_constraints(
                 // Prefetch the values that are allowed and/or forbidden for this particular
                 // column given the current state of the given table:
                 let allowed_values =
-                    get_allowed_values(config, pool, table_name, column_name).await?;
-                println!(
-                    "ALLOWED VALUES FOR '{}.{}': {:?}",
-                    table_name, column_name, allowed_values
-                );
+                    get_allowed_values(config, pool, table_name, column_name, &received_values)
+                        .await?;
+                //println!("ALLOWED VALUES: {:?}", allowed_values);
+
+                // TODO: YOU ARE HERE. get_allowed_values() seems to be working fine, but I am less
+                // sure yet whether get_forbidden_values() is also working. I believe so but
+                // double-check.
                 let forbidden_values =
-                    get_forbidden_values(config, pool, table_name, column_name).await?;
-                println!(
-                    "FORBIDDEN VALUES FOR '{}.{}': {:?}",
-                    table_name, column_name, forbidden_values
-                );
+                    get_forbidden_values(config, pool, table_name, column_name, &received_values)
+                        .await?;
+                println!("FORBIDDEN VALUES: {:?}", forbidden_values);
 
                 validate_cell_foreign_constraints(
                     config,
@@ -638,6 +697,7 @@ pub async fn validate_rows_constraints(
                     &column_name,
                     cell,
                     None,
+                    &allowed_values,
                 )
                 .await
                 .expect(&format!(
@@ -1267,7 +1327,10 @@ pub fn as_if_to_sql(
 /// Given a config map, a db connection pool, a table name, a column name, and a cell to validate,
 /// check the cell value against any foreign keys that have been defined for the column. If there is
 /// a violation, indicate it with an error message attached to the cell. Optionally, if a
-/// transaction is given, use that instead of the pool for database access.
+/// transaction is given, use that instead of the pool for database access. Optionally, if
+/// query_as_if is given, use it to query the table counterfactually. Optionally, if a cache is
+/// given, use it to determine foreign key violations instead of querying the database. Caching is
+/// normally used only for batch processing.
 pub async fn validate_cell_foreign_constraints(
     config: &ValveConfig,
     pool: &AnyPool,
@@ -1277,6 +1340,7 @@ pub async fn validate_cell_foreign_constraints(
     column_name: &String,
     cell: &mut ValveCell,
     query_as_if: Option<&QueryAsIf>,
+    cache: &Option<(Vec<SerdeValue>, Vec<SerdeValue>)>,
 ) -> Result<()> {
     let fkeys = config
         .constraint
@@ -1305,23 +1369,21 @@ pub async fn validate_cell_foreign_constraints(
         None => "".to_string(),
     };
 
-    /// Use the given SQL statement to determine whether the value associated with the given cell
-    /// is in the database. Use the given transaction if it is set, otherwise use the pool.
+    /// Apply the given SQL statement template to the given parameter value in order to determine
+    /// whether it exists in the database. Optionally use the given transaction, otherwise use
+    /// the given pool.
     async fn fkey_in_db(
         pool: &AnyPool,
         tx: &mut Option<&mut Transaction<'_, sqlx::Any>>,
-        cell: &mut ValveCell,
+        param: &str,
         fsql: &str,
     ) -> Result<bool> {
         let frows = {
             if let None = tx {
-                sqlx_query(&fsql)
-                    .bind(&cell.strvalue())
-                    .fetch_all(pool)
-                    .await?
+                sqlx_query(&fsql).bind(param).fetch_all(pool).await?
             } else {
                 sqlx_query(&fsql)
-                    .bind(&cell.strvalue())
+                    .bind(param)
                     .fetch_all(tx.as_mut().unwrap().acquire().await?)
                     .await?
             }
@@ -1367,7 +1429,7 @@ pub async fn validate_cell_foreign_constraints(
                 ),
             );
 
-            if !fkey_in_db(pool, &mut tx, cell, &fsql).await? {
+            if !fkey_in_db(pool, &mut tx, &cell.strvalue(), &fsql).await? {
                 cell.valid = false;
                 let mut message = ValveCellMessage {
                     rule: "key:foreign".to_string(),
@@ -1401,17 +1463,7 @@ pub async fn validate_cell_foreign_constraints(
                             as_if_clause_for_conflict, ftable_alias, fcolumn, sql_param
                         ),
                     );
-                    let frows = {
-                        if let None = tx {
-                            sqlx_query(&fsql).bind(value).fetch_all(pool).await?
-                        } else {
-                            sqlx_query(&fsql)
-                                .bind(value)
-                                .fetch_all(tx.as_mut().unwrap().acquire().await?)
-                                .await?
-                        }
-                    };
-                    if !frows.is_empty() {
+                    if fkey_in_db(pool, &mut tx, value, &fsql).await? {
                         message.message = format!(
                             "Value '{}' of column {} exists only in {}_conflict.{}",
                             value, column_name, ftable, fcolumn
