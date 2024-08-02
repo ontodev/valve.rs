@@ -450,17 +450,17 @@ pub async fn validate_rows_constraints(
     table_name: &String,
     rows: &mut Vec<ValveRow>,
 ) -> Result<()> {
+    // Given a config map, a pool, and a table and column name, then if the column is not
+    // constrained by a foreign constraint, return None. Otherwise if there is a constraint on,
+    // say, the column "fcolumn" of the table "ftable", then return two vectors of SerdeValues,
+    // where the first contains the contents of ftable.fcolumn, and the second contains the contents
+    // of ftable_conflict.fcolumn, or is empty if no conflict table exists.
     async fn get_allowed_values(
         config: &ValveConfig,
         pool: &AnyPool,
         table: &str,
         column: &str,
-    ) -> Result<Option<Vec<SerdeValue>>> {
-        // TODO: We need to send back two lists: One with allowed values from the normal foreign
-        // table, and one with allowed values from the conflict table. The reason is that we
-        // want to report, as an error, the case where a value is allowed only because it exists
-        // in the conflict table. See the validate_cell_foreign() function for details.
-
+    ) -> Result<Option<(Vec<SerdeValue>, Vec<SerdeValue>)>> {
         let fconstraint = {
             let mut fconstraints = config
                 .constraint
@@ -483,12 +483,11 @@ pub async fn validate_rows_constraints(
             // Take the last one:
             fconstraints.pop()
         };
-
         match fconstraint {
             None => Ok(None),
             Some(fkey) => {
                 // Foreign keys always correspond to columns with unique constraints so we do not
-                // need to use the keyword 'DISTINCT' here:
+                // need to use the keyword 'DISTINCT' when querying the normal version of the table:
                 let sql = format!(r#"SELECT "{}" FROM "{}""#, fkey.fcolumn, fkey.ftable);
                 let allowed_values = sqlx_query(&sql)
                     .fetch_all(pool)
@@ -504,20 +503,56 @@ pub async fn validate_rows_constraints(
                         get_column_value(row, &fkey.fcolumn, &sql_type)
                     })
                     .collect::<Vec<_>>();
-                Ok(Some(allowed_values))
+
+                let allowed_values_conflict = {
+                    let foptions = &config
+                        .table
+                        .get(&fkey.ftable)
+                        .expect(&format!("No config for table: '{}'", fkey.ftable))
+                        .options;
+                    if foptions.contains("conflict") {
+                        // The conflict table has no keys other than on row_number so in principle
+                        // it could have duplicate values of the foreign constraint, therefore we
+                        // add the DISTINCT keyword here:
+                        let sql = format!(
+                            r#"SELECT DISTINCT "{}" FROM "{}_conflict""#,
+                            fkey.fcolumn, fkey.ftable
+                        );
+                        sqlx_query(&sql)
+                            .fetch_all(pool)
+                            .await?
+                            .iter()
+                            .map(|row| {
+                                let sql_type = get_sql_type_from_global_config(
+                                    config,
+                                    &fkey.ftable,
+                                    &fkey.fcolumn,
+                                    pool,
+                                );
+                                get_column_value(row, &fkey.fcolumn, &sql_type)
+                            })
+                            .collect::<Vec<_>>()
+                    } else {
+                        // If there is no conflict table just return an empty vector.
+                        vec![]
+                    }
+                };
+
+                Ok(Some((allowed_values, allowed_values_conflict)))
             }
         }
     }
 
+    // Given a config map, a pool, and a table and column name, then if the column is not
+    // constrained by a unique or primary key constraint, return None. Otherwise return a vector
+    // of SerdeValues containing the (distinct) values of the column in question. In the case where
+    // the table has a conflict version, conflict values will also be included.
     async fn get_forbidden_values(
         config: &ValveConfig,
         pool: &AnyPool,
         table: &str,
         column: &str,
     ) -> Result<Option<Vec<SerdeValue>>> {
-        // TODO: We need to also consider the conflict table. See the current validate_cell_unique()
-        // function for how to do this.
-
         let primaries = &config
             .constraint
             .primary
@@ -528,8 +563,24 @@ pub async fn validate_rows_constraints(
             .unique
             .get(table)
             .expect(&format!("Undefined table '{}'", table));
+
         if primaries.iter().any(|p| p == column) || uniques.iter().any(|p| p == column) {
-            let sql = format!(r#"SELECT "{}" FROM "{}""#, column, table);
+            let options = &config
+                .table
+                .get(table)
+                .expect(&format!("No config for table: '{}'", table))
+                .options;
+            let (query_table, query_modifier) = {
+                if !options.contains("conflict") {
+                    (table.to_string(), String::new())
+                } else {
+                    (format!("{}_view", table), "DISTINCT".to_string())
+                }
+            };
+            let sql = format!(
+                r#"SELECT {} "{}" FROM "{}""#,
+                query_modifier, column, query_table
+            );
             let forbidden_values = sqlx_query(&sql)
                 .fetch_all(pool)
                 .await?
@@ -563,10 +614,6 @@ pub async fn validate_rows_constraints(
             // database errors when, for instance, we compare a numeric with a non-numeric type.
             let sql_type = get_sql_type_from_global_config(config, table_name, &column_name, pool);
             if cell.nulltype == None && !is_sql_type_error(&sql_type, &cell.strvalue()) {
-                // TODO: define allowed_values and forbidden_values *before* the beginning of the
-                // for loop over rows, since evertimg you process a row you need to add to those
-                // lists.
-
                 // Prefetch the values that are allowed and/or forbidden for this particular
                 // column given the current state of the given table:
                 let allowed_values =
