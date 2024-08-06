@@ -1365,15 +1365,34 @@ pub async fn validate_cell_foreign_constraints(
     async fn fkey_in_db(
         pool: &AnyPool,
         tx: &mut Option<&mut Transaction<'_, sqlx::Any>>,
-        param: &str,
-        fsql: &str,
+        as_if_clause: &str,
+        table: &str,
+        column: &str,
+        sql_type: &str,
+        value: &str,
     ) -> Result<bool> {
+        let fsql = local_sql_syntax(
+            pool,
+            &format!(
+                r#"{}SELECT 1 FROM "{}" WHERE "{}" = {} LIMIT 1"#,
+                as_if_clause,
+                table,
+                column,
+                {
+                    if sql_type == "text" || sql_type.starts_with("varchar(") {
+                        format!("'{}'", value)
+                    } else {
+                        format!("{}", value)
+                    }
+                }
+            ),
+        );
+
         let frows = {
             if let None = tx {
-                sqlx_query(&fsql).bind(param).fetch_all(pool).await?
+                sqlx_query(&fsql).fetch_all(pool).await?
             } else {
                 sqlx_query(&fsql)
-                    .bind(param)
                     .fetch_all(tx.as_mut().unwrap().acquire().await?)
                     .await?
             }
@@ -1402,24 +1421,17 @@ pub async fn validate_cell_foreign_constraints(
             let sql_type =
                 get_sql_type_from_global_config(&config, ftable, fcolumn, pool).to_lowercase();
             let sql_param = cast_sql_param_from_text(&sql_type);
-            let fsql = local_sql_syntax(
-                &pool,
-                &format!(
-                    r#"{}SELECT 1 FROM "{}" WHERE "{}" = {} LIMIT 1"#,
-                    as_if_clause,
-                    ftable_alias,
-                    fcolumn,
-                    {
-                        if sql_type == "text" || sql_type.starts_with("varchar(") {
-                            format!("'{}'", value)
-                        } else {
-                            format!("{}", value)
-                        }
-                    }
-                ),
-            );
-
-            if !fkey_in_db(pool, &mut tx, &cell.strvalue(), &fsql).await? {
+            if !fkey_in_db(
+                pool,
+                &mut tx,
+                &as_if_clause,
+                &ftable_alias,
+                fcolumn,
+                &sql_type,
+                value,
+            )
+            .await?
+            {
                 cell.valid = false;
                 let mut message = ValveCellMessage {
                     rule: "key:foreign".to_string(),
@@ -1446,14 +1458,17 @@ pub async fn validate_cell_foreign_constraints(
                         ),
                         _ => ("".to_string(), ftable.to_string()),
                     };
-                    let fsql = local_sql_syntax(
-                        &pool,
-                        &format!(
-                            r#"{}SELECT 1 FROM "{}_conflict" WHERE "{}" = {} LIMIT 1"#,
-                            as_if_clause_for_conflict, ftable_alias, fcolumn, sql_param
-                        ),
-                    );
-                    if fkey_in_db(pool, &mut tx, value, &fsql).await? {
+                    if fkey_in_db(
+                        pool,
+                        &mut tx,
+                        &as_if_clause_for_conflict,
+                        &format!("{}_conflict", ftable_alias),
+                        fcolumn,
+                        &sql_type,
+                        value,
+                    )
+                    .await?
+                    {
                         message.message = format!(
                             "Value '{}' of column {} exists only in {}_conflict.{}",
                             value, column_name, ftable, fcolumn
