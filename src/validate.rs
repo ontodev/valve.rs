@@ -638,7 +638,7 @@ pub async fn validate_rows_constraints(
         .get(table_name)
         .expect(&format!("Undefined table '{}'", table_name));
 
-    let received_values = {
+    let mut get_received_values = |split: bool| -> HashMap<&str, Vec<SerdeValue>> {
         let mut received_values = table_config
             .column_order
             .iter()
@@ -650,12 +650,32 @@ pub async fn validate_rows_constraints(
                     .contents
                     .get(&column.to_string())
                     .expect(&format!("No column '{}' in row", column));
-                values.push(cell.value.clone());
+                if !split {
+                    values.push(cell.value.clone());
+                } else {
+                    let list = {
+                        let value_type =
+                            get_value_type(config, datatype_conditions, table_name, column);
+                        match &value_type {
+                            ValueType::Single => vec![cell.value.clone()],
+                            ValueType::List(separator) => cell
+                                .strvalue()
+                                .split(separator)
+                                .map(|s| json!(s))
+                                .collect::<Vec<_>>(),
+                        }
+                    };
+                    for value in &list {
+                        values.push(value.clone());
+                    }
+                }
             }
         }
-
         received_values
     };
+
+    let received_values_split = get_received_values(true);
+    let received_values_unsplit = get_received_values(false);
 
     let mut valve_rows = vec![];
     for row in rows.iter_mut() {
@@ -672,12 +692,22 @@ pub async fn validate_rows_constraints(
             if cell.nulltype == None && !is_sql_type_error(&sql_type, &cell.strvalue()) {
                 // Prefetch the values that are allowed and/or forbidden for this particular
                 // column given the current state of the given table:
-                let allowed_values =
-                    get_allowed_values(config, pool, table_name, column_name, &received_values)
-                        .await?;
-                let forbidden_values =
-                    get_forbidden_values(config, pool, table_name, column_name, &received_values)
-                        .await?;
+                let allowed_values = get_allowed_values(
+                    config,
+                    pool,
+                    table_name,
+                    column_name,
+                    &received_values_split,
+                )
+                .await?;
+                let forbidden_values = get_forbidden_values(
+                    config,
+                    pool,
+                    table_name,
+                    column_name,
+                    &received_values_unsplit,
+                )
+                .await?;
                 validate_cell_foreign_constraints(
                     config,
                     pool,
@@ -1370,42 +1400,59 @@ pub async fn validate_cell_foreign_constraints(
         column: &str,
         sql_type: &str,
         value: &str,
+        cache: &Option<(Vec<SerdeValue>, Vec<SerdeValue>)>,
     ) -> Result<bool> {
-        let fsql = local_sql_syntax(
-            pool,
-            &format!(
-                r#"{}SELECT 1 FROM "{}" WHERE "{}" = {} LIMIT 1"#,
-                as_if_clause,
-                table,
-                column,
-                {
-                    if sql_type == "text" || sql_type.starts_with("varchar(") {
-                        format!("'{}'", value)
+        match cache {
+            Some((values, conflict_values)) => {
+                let values = {
+                    if table.ends_with("_conflict") {
+                        conflict_values
                     } else {
-                        format!("{}", value)
+                        values
                     }
-                }
-            ),
-        );
-
-        let frows = {
-            if let None = tx {
-                sqlx_query(&fsql).fetch_all(pool).await?
-            } else {
-                sqlx_query(&fsql)
-                    .fetch_all(tx.as_mut().unwrap().acquire().await?)
-                    .await?
+                };
+                Ok(values.iter().any(|cached_value| match cached_value {
+                    SerdeValue::String(s) => s == value,
+                    _ => cached_value.to_string() == value,
+                }))
             }
-        };
-        Ok(!frows.is_empty())
+            None => {
+                let fsql = local_sql_syntax(
+                    pool,
+                    &format!(
+                        r#"{}SELECT 1 FROM "{}" WHERE "{}" = {} LIMIT 1"#,
+                        as_if_clause,
+                        table,
+                        column,
+                        {
+                            if sql_type == "text" || sql_type.starts_with("varchar(") {
+                                format!("'{}'", value)
+                            } else {
+                                format!("{}", value)
+                            }
+                        }
+                    ),
+                );
+                let frows = {
+                    if let None = tx {
+                        sqlx_query(&fsql).fetch_all(pool).await?
+                    } else {
+                        sqlx_query(&fsql)
+                            .fetch_all(tx.as_mut().unwrap().acquire().await?)
+                            .await?
+                    }
+                };
+                Ok(!frows.is_empty())
+            }
+        }
     }
 
     let strvalue = cell.strvalue();
     let values = {
         let value_type = get_value_type(config, datatype_conditions, table_name, column_name);
-        match value_type {
+        match &value_type {
             ValueType::Single => vec![strvalue.as_str()],
-            ValueType::List(separator) => strvalue.split(&separator).collect::<Vec<_>>(),
+            ValueType::List(separator) => strvalue.split(separator).collect::<Vec<_>>(),
         }
     };
     for value in &values {
@@ -1420,7 +1467,6 @@ pub async fn validate_cell_foreign_constraints(
             let fcolumn = &fkey.fcolumn;
             let sql_type =
                 get_sql_type_from_global_config(&config, ftable, fcolumn, pool).to_lowercase();
-            let sql_param = cast_sql_param_from_text(&sql_type);
             if !fkey_in_db(
                 pool,
                 &mut tx,
@@ -1429,6 +1475,7 @@ pub async fn validate_cell_foreign_constraints(
                 fcolumn,
                 &sql_type,
                 value,
+                cache,
             )
             .await?
             {
@@ -1466,6 +1513,7 @@ pub async fn validate_cell_foreign_constraints(
                         fcolumn,
                         &sql_type,
                         value,
+                        cache,
                     )
                     .await?
                     {
