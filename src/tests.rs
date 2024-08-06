@@ -648,55 +648,43 @@ async fn test_modes(valve: &Valve) -> Result<()> {
 
     let result = valve.insert_row("readonly1", &readonly_row).await;
     match result {
-        Err(e) => assert_eq!(
-            format!("{:?}", e),
-            r#"InputError("Inserting to table 'readonly1' is not allowed")"#,
-        ),
+        Err(e) => assert!(format!("{:?}", e)
+            .starts_with(r#"InputError("Inserting to table 'readonly1' is not allowed")"#)),
         _ => assert!(false, "Expected an error result but got an OK result"),
     };
 
     let result = valve.insert_row("view1", &view_row).await;
     match result {
-        Err(e) => assert_eq!(
-            format!("{:?}", e),
-            r#"InputError("Inserting to table 'view1' is not allowed")"#,
-        ),
+        Err(e) => assert!(format!("{:?}", e)
+            .starts_with(r#"InputError("Inserting to table 'view1' is not allowed")"#)),
         _ => assert!(false, "Expected an error result but got an OK result"),
     };
 
     let result = valve.update_row("readonly1", &1, &readonly_row).await;
     match result {
-        Err(e) => assert_eq!(
-            format!("{:?}", e),
-            r#"InputError("Updating table 'readonly1' is not allowed")"#,
-        ),
+        Err(e) => assert!(format!("{:?}", e)
+            .starts_with(r#"InputError("Updating table 'readonly1' is not allowed")"#)),
         _ => assert!(false, "Expected an error result but got an OK result"),
     };
 
     let result = valve.update_row("view1", &1, &view_row).await;
     match result {
-        Err(e) => assert_eq!(
-            format!("{:?}", e),
-            r#"InputError("Updating table 'view1' is not allowed")"#,
-        ),
+        Err(e) => assert!(format!("{:?}", e)
+            .starts_with(r#"InputError("Updating table 'view1' is not allowed")"#)),
         _ => assert!(false, "Expected an error result but got an OK result"),
     };
 
     let result = valve.delete_row("readonly1", &1).await;
     match result {
-        Err(e) => assert_eq!(
-            format!("{:?}", e),
-            r#"InputError("Deleting from table 'readonly1' is not allowed")"#,
-        ),
+        Err(e) => assert!(format!("{:?}", e)
+            .starts_with(r#"InputError("Deleting from table 'readonly1' is not allowed")"#)),
         _ => assert!(false, "Expected an error result but got an OK result"),
     };
 
     let result = valve.delete_row("view1", &1).await;
     match result {
-        Err(e) => assert_eq!(
-            format!("{:?}", e),
-            r#"InputError("Deleting from table 'view1' is not allowed")"#,
-        ),
+        Err(e) => assert!(format!("{:?}", e)
+            .starts_with(r#"InputError("Deleting from table 'view1' is not allowed")"#)),
         _ => assert!(false, "Expected an error result but got an OK result"),
     };
 

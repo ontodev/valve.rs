@@ -492,7 +492,7 @@ pub async fn validate_rows_constraints(
                     get_sql_type_from_global_config(config, &fkey.ftable, &fkey.fcolumn, pool)
                         .to_lowercase();
 
-                let sql_values = received_values
+                let values_str = received_values
                     .get(&*fkey.column)
                     .unwrap()
                     .iter()
@@ -506,7 +506,9 @@ pub async fn validate_rows_constraints(
                             format!("'{}'", value)
                         }
                     })
-                    .filter(|value| value != "" && value != "''")
+                    .filter(|value| {
+                        value != "" && value != "''" && !is_sql_type_error(&sql_type, value)
+                    })
                     .collect::<Vec<_>>()
                     .join(", ");
 
@@ -514,8 +516,9 @@ pub async fn validate_rows_constraints(
                 // need to use the keyword 'DISTINCT' when querying the normal version of the table:
                 let sql = format!(
                     r#"SELECT "{}" FROM "{}" WHERE "{}" IN ({})"#,
-                    fkey.fcolumn, fkey.ftable, fkey.fcolumn, sql_values
+                    fkey.fcolumn, fkey.ftable, fkey.fcolumn, values_str
                 );
+
                 let allowed_values = sqlx_query(&sql)
                     .fetch_all(pool)
                     .await?
@@ -535,21 +538,13 @@ pub async fn validate_rows_constraints(
                         // add the DISTINCT keyword here:
                         let sql = format!(
                             r#"SELECT DISTINCT "{}" FROM "{}_conflict" WHERE "{}" IN ({})"#,
-                            fkey.fcolumn, fkey.ftable, fkey.fcolumn, sql_values
+                            fkey.fcolumn, fkey.ftable, fkey.fcolumn, values_str
                         );
                         sqlx_query(&sql)
                             .fetch_all(pool)
                             .await?
                             .iter()
-                            .map(|row| {
-                                let sql_type = get_sql_type_from_global_config(
-                                    config,
-                                    &fkey.ftable,
-                                    &fkey.fcolumn,
-                                    pool,
-                                );
-                                get_column_value(row, &fkey.fcolumn, &sql_type)
-                            })
+                            .map(|row| get_column_value(row, &fkey.fcolumn, &sql_type))
                             .collect::<Vec<_>>()
                     } else {
                         // If there is no conflict table just return an empty vector.
@@ -590,6 +585,7 @@ pub async fn validate_rows_constraints(
                 .get(table)
                 .expect(&format!("No config for table: '{}'", table))
                 .options;
+
             let (query_table, query_modifier) = {
                 if !options.contains("conflict") {
                     (table.to_string(), String::new())
@@ -600,7 +596,7 @@ pub async fn validate_rows_constraints(
 
             let sql_type =
                 get_sql_type_from_global_config(config, &table, &column, pool).to_lowercase();
-            let sql_values = received_values
+            let values_str = received_values
                 .get(&*column)
                 .unwrap()
                 .iter()
@@ -614,15 +610,16 @@ pub async fn validate_rows_constraints(
                         format!("'{}'", value)
                     }
                 })
-                .filter(|value| value != "" && value != "''")
+                .filter(|value| {
+                    value != "" && value != "''" && !is_sql_type_error(&sql_type, value)
+                })
                 .collect::<Vec<_>>()
                 .join(", ");
 
             let sql = format!(
                 r#"SELECT {} "{}" FROM "{}" WHERE "{}" IN ({})"#,
-                query_modifier, column, query_table, column, sql_values
+                query_modifier, column, query_table, column, values_str
             );
-            println!("SQL: {}", sql);
 
             let forbidden_values = sqlx_query(&sql)
                 .fetch_all(pool)
@@ -678,16 +675,9 @@ pub async fn validate_rows_constraints(
                 let allowed_values =
                     get_allowed_values(config, pool, table_name, column_name, &received_values)
                         .await?;
-                //println!("ALLOWED VALUES: {:?}", allowed_values);
-
-                // TODO: YOU ARE HERE. get_allowed_values() seems to be working fine, but I am less
-                // sure yet whether get_forbidden_values() is also working. I believe so but
-                // double-check.
                 let forbidden_values =
                     get_forbidden_values(config, pool, table_name, column_name, &received_values)
                         .await?;
-                println!("FORBIDDEN VALUES: {:?}", forbidden_values);
-
                 validate_cell_foreign_constraints(
                     config,
                     pool,
