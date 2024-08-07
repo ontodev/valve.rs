@@ -1561,7 +1561,7 @@ pub async fn validate_cell_foreign_constraints(
 pub async fn validate_cell_unique_constraints(
     config: &ValveConfig,
     pool: &AnyPool,
-    mut tx: Option<&mut Transaction<'_, sqlx::Any>>,
+    tx: Option<&mut Transaction<'_, sqlx::Any>>,
     table_name: &String,
     column_name: &String,
     cell: &mut ValveCell,
@@ -1604,44 +1604,71 @@ pub async fn validate_cell_unique_constraints(
         }
     }
 
-    if is_primary || is_unique || is_tree_child {
-        let table_options = get_table_options(config, table_name)?;
-        let mut query_table = {
-            if !table_options.contains("conflict") {
-                table_name.to_string()
-            } else {
-                format!("{}_view", table_name)
+    async fn in_db(
+        config: &ValveConfig,
+        pool: &AnyPool,
+        mut tx: Option<&mut Transaction<'_, sqlx::Any>>,
+        table_name: &String,
+        column_name: &String,
+        cell: &mut ValveCell,
+        row_number: Option<u32>,
+        cache: &Option<Vec<SerdeValue>>,
+    ) -> Result<bool> {
+        match cache {
+            Some(values) => Ok(values
+                .iter()
+                .any(|cached_value| *cached_value == cell.value)),
+            None => {
+                let table_options = get_table_options(config, table_name)?;
+                let mut query_table = {
+                    if !table_options.contains("conflict") {
+                        table_name.to_string()
+                    } else {
+                        format!("{}_view", table_name)
+                    }
+                };
+                let mut with_sql = String::new();
+                let except_table = format!("{}_exc", query_table);
+                if let Some(row_number) = row_number {
+                    with_sql = format!(
+                        r#"WITH "{}" AS (
+                               SELECT * FROM "{}"
+                               WHERE "row_number" != {}
+                           ) "#,
+                        except_table, query_table, row_number
+                    );
+                }
+
+                if !with_sql.is_empty() {
+                    query_table = except_table;
+                }
+
+                let sql_type =
+                    get_sql_type_from_global_config(&config, &table_name, &column_name, pool);
+                let sql_param = cast_sql_param_from_text(&sql_type);
+                let sql = local_sql_syntax(
+                    &pool,
+                    &format!(
+                        r#"{} SELECT 1 FROM "{}" WHERE "{}" = {} LIMIT 1"#,
+                        with_sql, query_table, column_name, sql_param
+                    ),
+                );
+                let strvalue = cell.strvalue();
+                let query = sqlx_query(&sql).bind(&strvalue);
+                if let None = tx {
+                    Ok(!query.fetch_all(pool).await?.is_empty())
+                } else {
+                    Ok(!query
+                        .fetch_all(tx.as_mut().unwrap().acquire().await?)
+                        .await?
+                        .is_empty())
+                }
             }
-        };
-        let mut with_sql = String::new();
-        let except_table = format!("{}_exc", query_table);
-        if let Some(row_number) = row_number {
-            with_sql = format!(
-                r#"WITH "{}" AS (
-                       SELECT * FROM "{}"
-                       WHERE "row_number" != {}
-                   ) "#,
-                except_table, query_table, row_number
-            );
         }
+    }
 
-        if !with_sql.is_empty() {
-            query_table = except_table;
-        }
-
-        let sql_type = get_sql_type_from_global_config(&config, &table_name, &column_name, pool);
-        let sql_param = cast_sql_param_from_text(&sql_type);
-        let sql = local_sql_syntax(
-            &pool,
-            &format!(
-                r#"{} SELECT 1 FROM "{}" WHERE "{}" = {} LIMIT 1"#,
-                with_sql, query_table, column_name, sql_param
-            ),
-        );
-        let strvalue = cell.strvalue();
-        let query = sqlx_query(&sql).bind(&strvalue);
-
-        let contained_in_prev_results = !prev_results
+    if is_primary || is_unique || is_tree_child {
+        let in_prev_results = !prev_results
             .iter()
             .filter(|p| {
                 p.contents.get(column_name).unwrap().value == cell.value
@@ -1650,17 +1677,18 @@ pub async fn validate_cell_unique_constraints(
             .collect::<Vec<_>>()
             .is_empty();
 
-        if contained_in_prev_results
-            || !{
-                if let None = tx {
-                    query.fetch_all(pool).await?.is_empty()
-                } else {
-                    query
-                        .fetch_all(tx.as_mut().unwrap().acquire().await?)
-                        .await?
-                        .is_empty()
-                }
-            }
+        if in_prev_results
+            || in_db(
+                config,
+                pool,
+                tx,
+                table_name,
+                column_name,
+                cell,
+                row_number,
+                cache,
+            )
+            .await?
         {
             cell.valid = false;
             if is_primary || is_unique {
