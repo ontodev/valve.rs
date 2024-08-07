@@ -579,8 +579,19 @@ pub async fn validate_rows_constraints(
             .unique
             .get(table)
             .expect(&format!("Undefined table '{}'", table));
+        let trees = &config
+            .constraint
+            .tree
+            .get(table)
+            .expect(&format!("Undefined table '{}'", table))
+            .iter()
+            .map(|t| &t.child)
+            .collect::<Vec<_>>();
 
-        if primaries.iter().any(|p| p == column) || uniques.iter().any(|p| p == column) {
+        if primaries.iter().any(|c| c == column)
+            || uniques.iter().any(|c| c == column)
+            || trees.iter().any(|c| *c == column)
+        {
             let options = &config
                 .table
                 .get(table)
@@ -676,6 +687,8 @@ pub async fn validate_rows_constraints(
 
     let received_values_split = get_received_values(true);
     let received_values_unsplit = get_received_values(false);
+    // Prefetch the values that are allowed and/or forbidden for this particular
+    // column given the current state of the given table:
     let allowed_values = {
         let mut allowed_values = HashMap::new();
         for column in &table_config.column_order {
@@ -710,8 +723,6 @@ pub async fn validate_rows_constraints(
             // database errors when, for instance, we compare a numeric with a non-numeric type.
             let sql_type = get_sql_type_from_global_config(config, table, &column, pool);
             if cell.nulltype == None && !is_sql_type_error(&sql_type, &cell.strvalue()) {
-                // Prefetch the values that are allowed and/or forbidden for this particular
-                // column given the current state of the given table:
                 let (allowed_values, forbidden_values) = {
                     let error_msg = format!("Could not retrieve values for column '{}'", column);
                     let allowed_values = allowed_values.get(column).expect(&error_msg);
