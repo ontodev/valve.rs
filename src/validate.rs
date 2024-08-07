@@ -507,9 +507,7 @@ pub async fn validate_rows_constraints(
                             format!("'{}'", value)
                         }
                     })
-                    .filter(|value| {
-                        value != "" && value != "''" && !is_sql_type_error(&sql_type, value)
-                    })
+                    .filter(|value| !is_sql_type_error(&sql_type, value))
                     .collect::<Vec<_>>()
                     .join(", ");
 
@@ -622,9 +620,7 @@ pub async fn validate_rows_constraints(
                         format!("'{}'", value)
                     }
                 })
-                .filter(|value| {
-                    value != "" && value != "''" && !is_sql_type_error(&sql_type, value)
-                })
+                .filter(|value| !is_sql_type_error(&sql_type, value))
                 .collect::<Vec<_>>()
                 .join(", ");
 
