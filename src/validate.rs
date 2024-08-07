@@ -109,6 +109,7 @@ pub async fn validate_row_tx(
                     cell,
                     &vec![],
                     row_number,
+                    &None,
                 )
                 .await?;
             }
@@ -448,7 +449,7 @@ pub async fn validate_rows_constraints(
     config: &ValveConfig,
     pool: &AnyPool,
     datatype_conditions: &HashMap<String, CompiledCondition>,
-    table_name: &String,
+    table: &String,
     rows: &mut Vec<ValveRow>,
 ) -> Result<()> {
     // Given a config map, a pool, and a table and column name, then if the column is not
@@ -635,8 +636,8 @@ pub async fn validate_rows_constraints(
 
     let table_config = &config
         .table
-        .get(table_name)
-        .expect(&format!("Undefined table '{}'", table_name));
+        .get(table)
+        .expect(&format!("Undefined table '{}'", table));
 
     let mut get_received_values = |split: bool| -> HashMap<&str, Vec<SerdeValue>> {
         let mut received_values = table_config
@@ -654,8 +655,7 @@ pub async fn validate_rows_constraints(
                     values.push(cell.value.clone());
                 } else {
                     let list = {
-                        let value_type =
-                            get_value_type(config, datatype_conditions, table_name, column);
+                        let value_type = get_value_type(config, datatype_conditions, table, column);
                         match &value_type {
                             ValueType::Single => vec![cell.value.clone()],
                             ValueType::List(separator) => cell
@@ -676,6 +676,26 @@ pub async fn validate_rows_constraints(
 
     let received_values_split = get_received_values(true);
     let received_values_unsplit = get_received_values(false);
+    let allowed_values = {
+        let mut allowed_values = HashMap::new();
+        for column in &table_config.column_order {
+            allowed_values.insert(
+                column.to_string(),
+                get_allowed_values(config, pool, table, column, &received_values_split).await?,
+            );
+        }
+        allowed_values
+    };
+    let forbidden_values = {
+        let mut forbidden_values = HashMap::new();
+        for column in &table_config.column_order {
+            forbidden_values.insert(
+                column.to_string(),
+                get_forbidden_values(config, pool, table, column, &received_values_unsplit).await?,
+            );
+        }
+        forbidden_values
+    };
 
     let mut valve_rows = vec![];
     for row in rows.iter_mut() {
@@ -683,38 +703,28 @@ pub async fn validate_rows_constraints(
             row_number: None,
             contents: IndexMap::new(),
         };
-        for column_name in &table_config.column_order {
-            let cell = row.contents.get_mut(column_name).unwrap();
+        for column in &table_config.column_order {
+            let cell = row.contents.get_mut(column).unwrap();
             // We don't do any further validation on cells that are legitimately empty, or on cells
             // that have SQL type violations. We exclude the latter because they can result in
             // database errors when, for instance, we compare a numeric with a non-numeric type.
-            let sql_type = get_sql_type_from_global_config(config, table_name, &column_name, pool);
+            let sql_type = get_sql_type_from_global_config(config, table, &column, pool);
             if cell.nulltype == None && !is_sql_type_error(&sql_type, &cell.strvalue()) {
                 // Prefetch the values that are allowed and/or forbidden for this particular
                 // column given the current state of the given table:
-                let allowed_values = get_allowed_values(
-                    config,
-                    pool,
-                    table_name,
-                    column_name,
-                    &received_values_split,
-                )
-                .await?;
-                let forbidden_values = get_forbidden_values(
-                    config,
-                    pool,
-                    table_name,
-                    column_name,
-                    &received_values_unsplit,
-                )
-                .await?;
+                let (allowed_values, forbidden_values) = {
+                    let error_msg = format!("Could not retrieve values for column '{}'", column);
+                    let allowed_values = allowed_values.get(column).expect(&error_msg);
+                    let forbidden_values = forbidden_values.get(column).expect(&error_msg);
+                    (allowed_values, forbidden_values)
+                };
                 validate_cell_foreign_constraints(
                     config,
                     pool,
                     None,
                     datatype_conditions,
-                    table_name,
-                    &column_name,
+                    table,
+                    &column,
                     cell,
                     None,
                     &allowed_values,
@@ -722,27 +732,26 @@ pub async fn validate_rows_constraints(
                 .await
                 .expect(&format!(
                     "Unable to validate foreign constraints for row number: {:?}, column '{}.{}'",
-                    row.row_number, table_name, column_name
+                    row.row_number, table, column
                 ));
                 validate_cell_unique_constraints(
                     config,
                     pool,
                     None,
-                    table_name,
-                    &column_name,
+                    table,
+                    &column,
                     cell,
                     &valve_rows,
                     None,
+                    &forbidden_values,
                 )
                 .await
                 .expect(&format!(
                     "Unable to validate unique constraints for row number: {:?}, column '{}.{}'",
-                    row.row_number, table_name, column_name
+                    row.row_number, table, column
                 ));
             }
-            valve_row
-                .contents
-                .insert(column_name.to_string(), cell.clone());
+            valve_row.contents.insert(column.to_string(), cell.clone());
         }
         // Note that in this implementation, the result rows are never actually returned, but we
         // still need them because the validate_cell_unique_constraints() function needs a list of
@@ -1547,6 +1556,7 @@ pub async fn validate_cell_unique_constraints(
     cell: &mut ValveCell,
     prev_results: &Vec<ValveRow>,
     row_number: Option<u32>,
+    cache: &Option<Vec<SerdeValue>>,
 ) -> Result<()> {
     // If the column has a primary or unique key constraint, or if it is the child associated with
     // a tree, then if the value of the cell is a duplicate either of one of the previously
