@@ -442,9 +442,10 @@ pub async fn validate_tree_foreign_keys(
     Ok(results)
 }
 
-/// Given a config map, a database connection pool, a table name, and a number of rows to validate,
-/// validate foreign and unique constraints, where the latter include primary and "tree child" keys
-/// (which imply unique constraints) and return the validated results.
+/// Given a config map, a database connection pool, a hashmap describing datatype conditions, a
+/// table name, and a number of rows to validate, validate foreign and unique constraints, where
+/// the latter include unique, primary and "tree child" constraints  (which imply unique
+/// constraints) and modify the given rows with the validation results.
 pub async fn validate_rows_constraints(
     config: &ValveConfig,
     pool: &AnyPool,
@@ -557,9 +558,9 @@ pub async fn validate_rows_constraints(
     }
 
     // Given a config map, a pool, and a table and column name, then if the column is not
-    // constrained by a unique or primary key constraint, return None. Otherwise return a vector
-    // of SerdeValues containing the (distinct) values of the column in question. In the case where
-    // the table has a conflict version, conflict values will also be included.
+    // constrained by a unique, primary, or "tree child" constraint, return None. Otherwise
+    // return a vector of SerdeValues containing the (distinct) values of the column in question,
+    // regardless of their validity (except when the invalidity would result in a SQL error).
     async fn get_forbidden_values(
         config: &ValveConfig,
         pool: &AnyPool,
@@ -641,11 +642,17 @@ pub async fn validate_rows_constraints(
         }
     }
 
+    // Begin by getting the table config for this table:
     let table_config = &config
         .table
         .get(table)
         .expect(&format!("Undefined table '{}'", table));
 
+    // A closure for constructing a HashMap from column names (looked up in table_config) to
+    // vectors of the values of those columns in the row. The closure accepts an argument, split,
+    // which, if set, indicates that the value of a column which has the special list() datatype
+    // is to be interpreted, not as itself a value, but as a list of values, each of which should
+    // individually be represented as "received".
     let mut get_received_values = |split: bool| -> HashMap<&str, Vec<SerdeValue>> {
         let mut received_values = table_config
             .column_order
@@ -1365,8 +1372,8 @@ pub fn as_if_to_sql(
 /// a violation, indicate it with an error message attached to the cell. Optionally, if a
 /// transaction is given, use that instead of the pool for database access. Optionally, if
 /// query_as_if is given, use it to query the table counterfactually. Optionally, if a cache is
-/// given, use it to determine foreign key violations instead of querying the database. Caching is
-/// normally used only for batch processing.
+/// given, use the cache to determine foreign key violations instead of querying the database. Note
+/// that caching is normally used only in the context of batch processing.
 pub async fn validate_cell_foreign_constraints(
     config: &ValveConfig,
     pool: &AnyPool,
@@ -1405,9 +1412,12 @@ pub async fn validate_cell_foreign_constraints(
         None => "".to_string(),
     };
 
-    /// Apply the given SQL statement template to the given parameter value in order to determine
-    /// whether it exists in the database. Optionally use the given transaction, otherwise use
-    /// the given pool.
+    // Given a db pool, optionally a transaction, and an as_if clause, checks whether the given
+    // value is in the given column, which has the given sql_type, of the given table. If the
+    // optional cache is provided, use it to look up the values of the column instead of accessing
+    // the database. This cache has the form of a tuple of vectors of SerdeValues, such that the
+    // vector in the first position is used if the table name does not end in '_conflict', and the
+    // vector in the second position is used if it does.
     async fn fkey_in_db(
         pool: &AnyPool,
         tx: &mut Option<&mut Transaction<'_, sqlx::Any>>,
@@ -1463,6 +1473,8 @@ pub async fn validate_cell_foreign_constraints(
         }
     }
 
+    // Check if the column has the list() datatype. If so parse the values in the list and
+    // iterate over them.
     let strvalue = cell.strvalue();
     let values = {
         let value_type = get_value_type(config, datatype_conditions, table_name, column_name);
@@ -1548,12 +1560,12 @@ pub async fn validate_cell_foreign_constraints(
 }
 
 /// Given a config map, a db connection pool, a table name, a column name, a cell to validate,
-/// the row, `context`, to which the cell belongs, and a list of previously validated rows,
-/// check the cell value against any unique-type keys that have been defined for the column.
-/// If there is a violation, indicate it with an error message attached to the cell. If
-/// `row_number` is set to None, then no row corresponding to the given cell is assumed to exist
-/// in the table. Optionally, if a transaction is given, use that instead of the pool for database
-/// access.
+/// and a list of previously validated rows, check the cell value against any unique-type keys that
+/// have been defined for the column. If there is a violation, indicate it with an error message
+/// attached to the cell. If `row_number` is set to None, then no row corresponding to the given
+/// cell is assumed to exist in the table. Optionally, if a transaction is given, use that
+/// instead of the pool for database access. Optionally, if a cache is given, use that to determine
+/// the validity of the cell rather than accessing the database.
 pub async fn validate_cell_unique_constraints(
     config: &ValveConfig,
     pool: &AnyPool,
@@ -1610,6 +1622,7 @@ pub async fn validate_cell_unique_constraints(
         row_number: Option<u32>,
         cache: &Option<Vec<SerdeValue>>,
     ) -> Result<bool> {
+        // If a cache is given, just check it, otherwise access the database.
         match cache {
             Some(values) => Ok(values.iter().any(|cached_value| match cached_value {
                 SerdeValue::String(s) => *s == cell.value,
@@ -1617,6 +1630,8 @@ pub async fn validate_cell_unique_constraints(
             })),
             None => {
                 let table_options = get_table_options(config, table_name)?;
+                // If the table does not have a conflict table then there is no view to check, so
+                // we check the table itself.
                 let mut query_table = {
                     if !table_options.contains("conflict") {
                         table_name.to_string()
