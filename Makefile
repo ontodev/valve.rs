@@ -212,7 +212,7 @@ $(perf_test_dir)/ontology:
 perf_test_data: test/generate_random_test_data.py valve confirm_overwrite.sh $(perf_test_dir)/*.tsv | $(perf_test_dir)/ontology
 	./confirm_overwrite.sh $(perf_test_dir)/ontology
 	rm -f $(perf_test_dir)/ontology/*.tsv
-	./$< $$(date +"%s") $(num_perf_test_rows) $(perf_test_error_rate) $(perf_test_dir)/table.tsv $|
+	./$< 0 $(num_perf_test_rows) $(perf_test_error_rate) $(perf_test_dir)/table.tsv $|
 
 $(perf_test_db): valve perf_test_data $(perf_test_dir)/*.tsv | build $(perf_test_dir)/ontology
 	rm -f $@

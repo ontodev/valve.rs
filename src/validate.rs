@@ -1611,9 +1611,10 @@ pub async fn validate_cell_unique_constraints(
         cache: &Option<Vec<SerdeValue>>,
     ) -> Result<bool> {
         match cache {
-            Some(values) => Ok(values
-                .iter()
-                .any(|cached_value| *cached_value == cell.value)),
+            Some(values) => Ok(values.iter().any(|cached_value| match cached_value {
+                SerdeValue::String(s) => *s == cell.value,
+                _ => cached_value.to_string() == cell.value,
+            })),
             None => {
                 let table_options = get_table_options(config, table_name)?;
                 let mut query_table = {
