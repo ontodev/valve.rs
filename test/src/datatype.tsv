@@ -25,3 +25,4 @@ trimmed_text	text	exclude(/^\s+|\s+$/)	text that does not begin or end with whit
 word	nonspace	exclude(/\W/)	a single word: letters, numbers, underscore			%s
 custom_a	text	match(/_\w+_/)	a word surrounded by underscores			
 custom_b	text	list(custom_a, ' ')	a list of custom_a tokens separated by spaces			
+integer_list	text	list(integer, ' ')	a list of positive or negative integers separated by spaces			

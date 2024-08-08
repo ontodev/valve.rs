@@ -76,6 +76,8 @@ table12	foo				custom_b	from(table13.foo)
 table12	bar				word	from(table13.bar)	
 table13	foo				text		
 table13	bar				text		
+table14	foo				integer_list	from(table15.foo)	
+table15	foo				integer	primary	
 view1	foo		empty		trimmed_line		
 view1	bar		empty		trimmed_line		
 view2	foo		empty		trimmed_line		
