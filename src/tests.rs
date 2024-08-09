@@ -130,6 +130,25 @@ async fn test_insert_2(valve: &Valve) -> Result<()> {
     Ok(())
 }
 
+async fn test_insert_3(valve: &Valve) -> Result<()> {
+    eprint!("Running test_insert_3() ... ");
+
+    let row = json!({
+        "id": "BFO:0000099",
+        "label": "jafar",
+        "parent": "mar",
+        "source": "COB",
+        "type": "owl:Class",
+    });
+    let (_new_row_num, _new_row) = valve.insert_row("table3", row.as_object().unwrap()).await?;
+
+    // The result of this insertion is that the tree:foreign error message will be resolved
+    // for table3 row 5 column parent: "Value 'jafar' of column parent is not in column label"
+
+    eprintln!("done.");
+    Ok(())
+}
+
 async fn test_dependencies(valve: &Valve) -> Result<()> {
     eprint!("Running test_dependencies() ... ");
 
@@ -977,6 +996,7 @@ pub async fn run_api_tests(valve: &Valve) -> Result<()> {
     test_insert_1(&valve).await?;
     test_update_2(&valve).await?;
     test_insert_2(&valve).await?;
+    test_insert_3(&valve).await?;
     test_dependencies(&valve).await?;
     test_undo_redo(&valve).await?;
     test_randomized_api_test_with_undo_redo(&valve).await?;

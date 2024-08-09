@@ -2054,6 +2054,7 @@ impl Valve {
             table_name,
             &row,
             true,
+            false,
         )
         .await?;
 
@@ -2333,6 +2334,7 @@ impl Valve {
                     table,
                     &from,
                     false,
+                    false,
                 )
                 .await?;
 
@@ -2447,6 +2449,7 @@ impl Valve {
                     &mut tx,
                     table,
                     &to,
+                    false,
                     false,
                 )
                 .await?;
