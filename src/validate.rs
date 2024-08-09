@@ -648,12 +648,11 @@ pub async fn validate_rows_constraints(
         .get(table)
         .expect(&format!("Undefined table '{}'", table));
 
-    // A closure for constructing a HashMap from column names (looked up in table_config) to
+    // Declare a closure for constructing a HashMap from column names (looked up in table_config) to
     // vectors of the values of those columns in the row. The closure accepts an argument, split,
     // which, if set, indicates that the value of a column which has the special list() datatype
-    // is to be interpreted, not as itself a value, but as a list of values, each of which should
-    // individually be represented as "received".
-    let mut get_received_values = |split: bool| -> HashMap<&str, Vec<SerdeValue>> {
+    // is to be interpreted, not as itself a value, but as a list of individual values.
+    let mut get_values_by_column_from_rows = |split: bool| -> HashMap<&str, Vec<SerdeValue>> {
         let mut received_values = table_config
             .column_order
             .iter()
@@ -668,7 +667,7 @@ pub async fn validate_rows_constraints(
                 if !split {
                     values.push(cell.value.clone());
                 } else {
-                    let list = {
+                    let value_list = {
                         let value_type = get_value_type(config, datatype_conditions, table, column);
                         match &value_type {
                             ValueType::Single => vec![cell.value.clone()],
@@ -679,7 +678,7 @@ pub async fn validate_rows_constraints(
                                 .collect::<Vec<_>>(),
                         }
                     };
-                    for value in &list {
+                    for value in &value_list {
                         values.push(value.clone());
                     }
                 }
@@ -688,8 +687,8 @@ pub async fn validate_rows_constraints(
         received_values
     };
 
-    let received_values_split = get_received_values(true);
-    let received_values_unsplit = get_received_values(false);
+    let received_values_split = get_values_by_column_from_rows(true);
+    let received_values_unsplit = get_values_by_column_from_rows(false);
     // Prefetch the values that are allowed and/or forbidden for this particular
     // column given the current state of the given table:
     let allowed_values = {
