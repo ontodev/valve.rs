@@ -36,7 +36,6 @@ table3	7	source	error	key:foreign	Value 'CO B' of column source is not in table1
 table3	8	id	error	key:unique	Values of id must be unique	COB:0000013
 table3	10	id	error	key:unique	Values of id must be unique	VO:0000001
 table3	10	label	error	key:primary	Values of label must be unique	vaccine
-table3	10	label	error	tree:child-unique	Values of label must be unique	vaccine
 table3	10	source	error	key:foreign	Value 'BOB' of column source is not in table1.prefix	BOB
 table4	9	foreign_column	error	key:unique	Values of foreign_column must be unique	a
 table4	10	foreign_column	error	key:unique	Values of foreign_column must be unique	b

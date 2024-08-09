@@ -2050,8 +2050,82 @@ pub async fn get_rows_to_update(
         rows_to_update_after.insert(dependent_table.to_string(), updates_after);
     }
 
-    // Collect the intra-table dependencies:
-    // TODO: Consider also the tree intra-table dependencies.
+    /*
+    // Collect tree-foreign dependencies and use them to generate a set of "virtual" foreign
+    // constraints:
+    let trees = config
+        .constraint
+        .tree
+        .get(table)
+        .expect(&format!("Undefined table '{}'", table));
+
+    for tree in trees {
+        let dependent_column = &tree.parent;
+        let target_column = &tree.child;
+        // Query the database using `row_number` to get the current value of the column for
+        // the row.
+        let updates_before = match query_as_if.kind {
+            QueryAsIfKind::Add => {
+                if let None = query_as_if.row {
+                    log::warn!(
+                        "No row in query_as_if: {:?} for {:?}",
+                        query_as_if,
+                        query_as_if.kind
+                    );
+                }
+                vec![]
+            }
+            _ => {
+                let current_value =
+                    get_db_value(table, target_column, &query_as_if.row_number, pool, tx).await?;
+
+                // Query dependent_table.dependent_column for the rows that will be affected by the
+                // change from the current value:
+                get_affected_rows(
+                    table,
+                    dependent_column,
+                    &current_value,
+                    Some(&query_as_if.row_number),
+                    config,
+                    pool,
+                    tx,
+                )
+                .await?
+            }
+        };
+
+        let updates_after = match &query_as_if.row {
+            None => {
+                if query_as_if.kind != QueryAsIfKind::Remove {
+                    log::warn!(
+                        "No row in query_as_if: {:?} for {:?}",
+                        query_as_if,
+                        query_as_if.kind
+                    );
+                }
+                vec![]
+            }
+            Some(row) => {
+                // Fetch the cell corresponding to `column` from `row`, and the value of that cell,
+                // which is the new value for the row.
+                let new_value = get_cell_value(&row, target_column)?;
+                get_affected_rows(
+                    table,
+                    dependent_column,
+                    &new_value,
+                    Some(&query_as_if.row_number),
+                    config,
+                    pool,
+                    tx,
+                )
+                .await?
+            }
+        };
+        rows_to_update_before.insert(table.to_string(), updates_before);
+        rows_to_update_after.insert(table.to_string(), updates_after);
+    }
+    */
+
     let primaries = config
         .constraint
         .primary
@@ -2071,7 +2145,7 @@ pub async fn get_rows_to_update(
         .map(|k| k.to_string())
         .collect::<Vec<_>>();
 
-    let mut rows_to_update_intra = IndexMap::new();
+    let mut rows_to_update_unique = IndexMap::new();
     for column in &columns {
         if !uniques.contains(column) && !primaries.contains(column) {
             continue;
@@ -2110,13 +2184,13 @@ pub async fn get_rows_to_update(
                 .await?
             }
         };
-        rows_to_update_intra.insert(table.to_string(), updates);
+        rows_to_update_unique.insert(table.to_string(), updates);
     }
 
     Ok((
         rows_to_update_before,
         rows_to_update_after,
-        rows_to_update_intra,
+        rows_to_update_unique,
     ))
 }
 
@@ -3123,7 +3197,7 @@ pub async fn delete_row_tx(
     // Look through the valve config to see which tables are dependent on this table and find the
     // rows that need to be updated. Since this is a delete there will only be rows to update
     // before and none after the delete:
-    let (updates_before, _, updates_intra) =
+    let (updates_before, _, updates_unique) =
         get_rows_to_update(config, pool, tx, table, &query_as_if).await?;
 
     // Process the updates that need to be performed before the update of the target row:
@@ -3168,7 +3242,7 @@ pub async fn delete_row_tx(
         compiled_rule_conditions,
         pool,
         tx,
-        &updates_intra,
+        &updates_unique,
         &query_as_if,
         true,
     )
@@ -3208,7 +3282,7 @@ pub async fn update_row_tx(
         row_number: row_number,
         row: Some(row.clone()),
     };
-    let (updates_before, updates_after, updates_intra) = {
+    let (updates_before, updates_after, updates_unique) = {
         if do_not_recurse {
             (IndexMap::new(), IndexMap::new(), IndexMap::new())
         } else {
@@ -3286,7 +3360,7 @@ pub async fn update_row_tx(
         compiled_rule_conditions,
         pool,
         tx,
-        &updates_intra,
+        &updates_unique,
         &query_as_if,
         true,
     )

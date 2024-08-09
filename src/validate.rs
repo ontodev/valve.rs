@@ -1108,18 +1108,9 @@ pub async fn validate_cell_unique_constraints(
         .unique
         .get(table_name)
         .expect(&format!("Undefined table '{}'", table_name));
-    let trees = config
-        .constraint
-        .tree
-        .get(table_name)
-        .expect(&format!("Undefined table '{}'", table_name))
-        .iter()
-        .map(|t| &t.child)
-        .collect::<Vec<_>>();
 
     let is_primary = primaries.contains(column_name);
     let is_unique = !is_primary && uniques.contains(column_name);
-    let is_tree_child = trees.contains(&column_name);
 
     fn make_error(rule: &str, column_name: &String) -> ValveCellMessage {
         ValveCellMessage {
@@ -1129,7 +1120,7 @@ pub async fn validate_cell_unique_constraints(
         }
     }
 
-    if is_primary || is_unique || is_tree_child {
+    if is_primary || is_unique {
         let table_options = get_table_options(config, table_name)?;
         let mut query_table = {
             if !table_options.contains("conflict") {
@@ -1195,10 +1186,6 @@ pub async fn validate_cell_unique_constraints(
                 } else {
                     error_message = make_error("key:unique", column_name);
                 }
-                cell.messages.push(error_message);
-            }
-            if is_tree_child {
-                let error_message = make_error("tree:child-unique", column_name);
                 cell.messages.push(error_message);
             }
         }
