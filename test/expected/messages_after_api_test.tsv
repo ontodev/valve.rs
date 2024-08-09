@@ -25,7 +25,6 @@ table14	2	foo	error	datatype:integer_list	Value 'a' of column foo should be one 
 table14	2	foo	error	key:foreign	Value 'a' of column foo is not in table15.foo	-1 a 5
 table14	3	foo	error	key:foreign	Value '9' of column foo is not in table15.foo	3 4 9
 table2	1	child	error	key:unique	Values of child must be unique	b
-table2	1	child	error	tree:child-unique	Values of child must be unique	b
 table2	2	foo	error	rule:foo-1	bar must be null whenever foo is null	
 table2	4	foo	error	rule:foo-4	bar must be 'y' or 'z' if foo = 5	5
 table2	9	child	error	key:foreign	Value 'i' of column child exists only in table4_conflict.other_foreign_column	i
@@ -45,7 +44,6 @@ table3	7	source	error	key:foreign	Value 'CO B' of column source is not in table1
 table3	8	id	error	key:unique	Values of id must be unique	COB:0000013
 table3	10	id	error	key:unique	Values of id must be unique	VO:0000001
 table3	10	label	error	key:primary	Values of label must be unique	vaccine
-table3	10	label	error	tree:child-unique	Values of label must be unique	vaccine
 table3	10	source	error	key:foreign	Value 'BOB' of column source is not in table1.prefix	BOB
 table3	11	parent	error	tree:foreign	Value 'barrie' of column parent is not in column label	barrie
 table3	11	source	error	key:foreign	Value 'BFOBBER' of column source is not in table1.prefix	BFOBBER
@@ -53,12 +51,10 @@ table4	9	foreign_column	error	key:unique	Values of foreign_column must be unique
 table4	10	foreign_column	error	key:unique	Values of foreign_column must be unique	b
 table4	10	numeric_foreign_column	error	key:primary	Values of numeric_foreign_column must be unique	9
 table6	1	child	error	key:unique	Values of child must be unique	2
-table6	1	child	error	tree:child-unique	Values of child must be unique	2
 table6	2	foo	error	rule:foo-1	bar must be null whenever foo is null	
 table6	4	foo	error	rule:foo-4	bar must be 25 or 26 if foo = 'e'	e
 table6	9	child	error	key:foreign	Value '9' of column child exists only in table4_conflict.numeric_foreign_column	9
 table6	10	child	error	key:unique	Values of child must be unique	2
-table6	10	child	error	tree:child-unique	Values of child must be unique	2
 table7	3	planetfall	error	datatype:integer	planetfall should be a positive or negative integer	e
 table8	1	prefix	error	key:foreign	Value 'a' of column prefix is not in table10.foreign_column	a
 table8	2	prefix	error	key:foreign	Value 'w' of column prefix exists only in table10_conflict.foreign_column	w

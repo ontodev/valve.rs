@@ -44,7 +44,6 @@ table3	A7	error	key:foreign	Value 'CO B' of column source is not in table1.prefi
 table3	B8	error	key:unique	Values of id must be unique	COB:0000013
 table3	B10	error	key:unique	Values of id must be unique	VO:0000001
 table3	C10	error	key:primary	Values of label must be unique	vaccine
-table3	C10	error	tree:child-unique	Values of label must be unique	vaccine
 table3	A10	error	key:foreign	Value 'BOB' of column source is not in table1.prefix	BOB
 table4	A9	error	key:unique	Values of foreign_column must be unique	a
 table4	A10	error	key:unique	Values of foreign_column must be unique	b
