@@ -151,7 +151,13 @@ pg_random_test: valve random_test_data | build test/output
 test/penguins/src/data:
 	mkdir -p $@
 
-penguin_test_threshold = 60
+# At last check, the penguin performance test was running on GitHub's runner
+# (Ubuntu 22.04.4 LTS, runner version 2.317.0) in just under 30s. GitHub
+# sometimes changes the runner version, however, thus if we set the threshold
+# too low we might get a failure. The threshold below is about 10s more than the time
+# it takes using postgresql on my laptop (unplugged), and about 15s more than it takes
+# using sqlite.
+penguin_test_threshold = 75
 num_penguin_rows = 100000
 penguin_command_sqlite = ./valve --assume-yes load src/schema/table.tsv --initial-load penguins.db
 penguin_command_pg = ./valve --assume-yes load src/schema/table.tsv $(pg_connect_string)
@@ -200,9 +206,16 @@ $(guess_test_db): valve guess_test_data $(guess_test_dir)/*.tsv | build $(guess_
 	rm -f $@
 	./$< --assume-yes load $(guess_test_dir)/table.tsv $@
 
+# At last check, the performance test was running on GitHub's runner
+# (Ubuntu 22.04.4 LTS, runner version 2.317.0) in just over 20s. GitHub
+# sometimes changes the runner version, however, thus if we set the threshold
+# too low we might get a failure. The threshold below is about 10s more than the time
+# it takes using postgresql on my laptop (unplugged), and about 20s more than it takes
+# using sqlite.
+perf_test_threshold = 70
 perf_test_dir = test/perf_test_data
 perf_test_db = build/valve_perf.db
-num_perf_test_rows = 1000
+num_perf_test_rows = 10000
 perf_test_error_rate = 5
 
 $(perf_test_dir)/ontology:
@@ -212,11 +225,13 @@ $(perf_test_dir)/ontology:
 perf_test_data: test/generate_random_test_data.py valve confirm_overwrite.sh $(perf_test_dir)/*.tsv | $(perf_test_dir)/ontology
 	./confirm_overwrite.sh $(perf_test_dir)/ontology
 	rm -f $(perf_test_dir)/ontology/*.tsv
-	./$< $$(date +"%s") $(num_perf_test_rows) $(perf_test_error_rate) $(perf_test_dir)/table.tsv $|
+	./$< 0 $(num_perf_test_rows) $(perf_test_error_rate) $(perf_test_dir)/table.tsv $|
 
 $(perf_test_db): valve perf_test_data $(perf_test_dir)/*.tsv | build $(perf_test_dir)/ontology
 	rm -f $@
-	time -p ./$< --verbose load $(perf_test_dir)/table.tsv --initial-load $@
+	timeout $(perf_test_threshold) time -p ./$< --assume-yes --verbose load $(perf_test_dir)/table.tsv --initial-load $@ || \
+		(echo "Performance test (SQLite) took longer than $(perf_test_threshold) seconds." && false)
+
 
 .PHONY: sqlite_perf_test
 sqlite_perf_test: $(perf_test_db) | test/output
@@ -224,7 +239,8 @@ sqlite_perf_test: $(perf_test_db) | test/output
 
 .PHONY: pg_perf_test
 pg_perf_test: valve $(perf_test_dir)/ontology | test/output
-	time -p ./$< --verbose load $(perf_test_dir)/table.tsv $(pg_connect_string)
+	timeout $(perf_test_threshold) time -p ./$< --assume-yes --verbose load $(perf_test_dir)/table.tsv $(pg_connect_string) || \
+        (echo "Performance test (PostgreSQL) took longer than $(perf_test_threshold) seconds." && false)
 	time -p scripts/export_messages.py $(pg_connect_string) $| $(tables_to_test)
 
 .PHONY: perf_test

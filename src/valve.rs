@@ -6,19 +6,19 @@ use crate::{
     toolkit,
     toolkit::{
         add_message_counts, cast_column_sql_to_text, convert_undo_or_redo_record_to_change,
-        delete_row_tx, generate_compiled_datatype_conditions, generate_compiled_rule_conditions,
+        delete_row_tx, generate_datatype_conditions, generate_rule_conditions,
         get_column_for_label, get_column_value_as_string, get_json_array_from_row,
         get_json_object_from_row, get_label_for_column, get_parsed_structure_conditions,
         get_pool_from_connection_string, get_previous_row_tx, get_record_to_redo,
         get_record_to_undo, get_row_from_db, get_sql_for_standard_view, get_sql_for_text_view,
-        get_sql_type, get_sql_type_from_global_config, get_table_ddl, insert_chunks,
-        insert_new_row_tx, local_sql_syntax, move_row_tx, read_config_files, record_row_change,
-        record_row_move, switch_undone_state, undo_or_redo_move, update_row_tx,
-        verify_table_deps_and_sort, ColumnRule, CompiledCondition, ParsedStructure,
+        get_sql_type, get_sql_type_from_global_config, insert_chunks, insert_new_row_tx,
+        local_sql_syntax, move_row_tx, read_config_files, record_row_change, record_row_move,
+        switch_undone_state, undo_or_redo_move, update_row_tx, verify_table_deps_and_sort,
+        ColumnRule, CompiledCondition, ParsedStructure, ValueType,
     },
     validate::{validate_row_tx, validate_tree_foreign_keys, with_tree_sql},
     valve_grammar::StartParser,
-    CHUNK_SIZE, PRINTF_RE, SQL_PARAM,
+    CHUNK_SIZE, PRINTF_RE, SQL_PARAM, SQL_TYPES,
 };
 use anyhow::Result;
 use csv::{QuoteStyle, ReaderBuilder, WriterBuilder};
@@ -569,9 +569,8 @@ impl Valve {
             constraint: constraints_config,
         };
 
-        let datatype_conditions = generate_compiled_datatype_conditions(&config, &parser)?;
-        let rule_conditions =
-            generate_compiled_rule_conditions(&config, &datatype_conditions, &parser)?;
+        let datatype_conditions = generate_datatype_conditions(&config, &parser)?;
+        let rule_conditions = generate_rule_conditions(&config, &datatype_conditions, &parser)?;
         let structure_conditions = get_parsed_structure_conditions(&config, &parser)?;
 
         Ok(Self {
@@ -1259,6 +1258,174 @@ impl Valve {
             .ok_or(ValveError::ConfigError(format!("Undefined table '{}'", table)).into())
     }
 
+    /// Given a table configuration struct, a datatype configuration struct, a parser, a table name,
+    /// and a database connection pool, return a list of DDL statements that can be used to create
+    /// the database tables.
+    pub fn get_table_ddl(&self, table_name: &String, pool: &AnyPool) -> Result<Vec<String>> {
+        let tables_config = &self.config.table;
+        let datatypes_config = &self.config.datatype;
+
+        let mut statements = vec![];
+        let mut create_lines = vec![
+            format!(r#"CREATE TABLE "{}" ("#, table_name),
+            String::from(r#"  "row_number" BIGINT,"#),
+            String::from(r#"  "row_order" BIGINT,"#),
+        ];
+
+        let normal_table_name;
+        if let Some(s) = table_name.strip_suffix("_conflict") {
+            normal_table_name = String::from(s);
+        } else {
+            normal_table_name = table_name.to_string();
+        }
+
+        let column_configs = {
+            let column_order = &tables_config
+                .get(&normal_table_name)
+                .expect(&format!("Undefined table '{}'", normal_table_name))
+                .column_order;
+            let columns = &tables_config
+                .get(&normal_table_name)
+                .expect(&format!("Undefined table '{}'", normal_table_name))
+                .column;
+
+            column_order
+                .iter()
+                .map(|column_name| columns.get(column_name).unwrap())
+                .collect::<Vec<_>>()
+        };
+
+        let (primaries, uniques, foreigns, _trees, _unders) = {
+            // Conflict tables have no database constraints:
+            if table_name.ends_with("_conflict") {
+                (vec![], vec![], vec![], vec![], vec![])
+            } else {
+                let cons = &self.config.constraint;
+                let primaries = cons.primary.get(table_name).cloned().unwrap_or(vec![]);
+                let uniques = cons.unique.get(table_name).cloned().unwrap_or(vec![]);
+                let foreigns = cons.foreign.get(table_name).cloned().unwrap_or(vec![]);
+                let trees = cons.tree.get(table_name).cloned().unwrap_or(vec![]);
+                let unders = cons.under.get(table_name).cloned().unwrap_or(vec![]);
+                (primaries, uniques, foreigns, trees, unders)
+            }
+        };
+
+        let applicable_foreigns = foreigns
+            .iter()
+            .filter(|fkey| {
+                let vtype = self.get_value_type(&normal_table_name, &fkey.column);
+                let table_config = &tables_config
+                    .get(&fkey.ftable)
+                    .expect(&format!("Undefined table '{}'", fkey.ftable));
+                vtype == ValueType::Single && !table_config.options.contains("db_view")
+            })
+            .collect::<Vec<_>>();
+
+        let c = column_configs.len();
+        let mut r = 0;
+        for column_config in column_configs {
+            r += 1;
+            let sql_type = get_sql_type(&datatypes_config, &column_config.datatype, pool);
+
+            let short_sql_type = {
+                if sql_type.to_lowercase().as_str().starts_with("varchar(") {
+                    "VARCHAR"
+                } else {
+                    &sql_type
+                }
+            };
+
+            if !SQL_TYPES.contains(&short_sql_type.to_lowercase().as_str()) {
+                panic!(
+                    "Unrecognized SQL type '{}' for datatype: '{}'. Accepted SQL types are: {}",
+                    sql_type,
+                    column_config.datatype,
+                    SQL_TYPES.join(", ")
+                );
+            }
+
+            let column_name = &column_config.column;
+            let mut line = format!(r#"  "{}" {}"#, column_name, sql_type);
+
+            // Check if the column is a primary key and indicate this in the DDL if so:
+            if primaries.contains(&column_name) {
+                line.push_str(" PRIMARY KEY");
+            }
+
+            // Check if the column has a unique constraint and indicate this in the DDL if so:
+            if uniques.contains(&column_name) {
+                line.push_str(" UNIQUE");
+            }
+
+            // Check if the column has a default value and indicate this in the DDL if it does:
+            let default_value = match &column_config.default {
+                SerdeValue::String(s) if s == "" => "".to_string(),
+                SerdeValue::String(s) => format!("'{}'", s),
+                SerdeValue::Number(n) => n.to_string(),
+                SerdeValue::Null => "".to_string(),
+                _ => panic!(
+                    "Configured default value, {:?}, of column '{}' is neither \
+                     a number nor a string.",
+                    column_config.default, column_name
+                ),
+            };
+            if default_value != "" {
+                line.push_str(&format!(" DEFAULT {}", default_value));
+            }
+
+            // If there are foreign constraints add a column to the end of the statement which we will
+            // finish after this for loop is done (but don't do this for views):
+            if !(r >= c && applicable_foreigns.is_empty()) {
+                line.push_str(",");
+            }
+            create_lines.push(line);
+        }
+
+        // Add the SQL to indicate any foreign constraints:
+        let num_fkeys = applicable_foreigns.len();
+        let mut foreigns_added = 0;
+        for fkey in foreigns.iter() {
+            if self.get_value_type(&normal_table_name, &fkey.column) == ValueType::Single {
+                let ftable_options = {
+                    let table_config = &tables_config
+                        .get(&fkey.ftable)
+                        .expect(&format!("Undefined table '{}'", fkey.ftable));
+                    table_config.options.clone()
+                };
+                if !ftable_options.contains("db_view") {
+                    create_lines.push(format!(
+                        r#"  FOREIGN KEY ("{}") REFERENCES "{}"("{}"){}"#,
+                        fkey.column,
+                        fkey.ftable,
+                        fkey.fcolumn,
+                        if foreigns_added < (num_fkeys - 1) {
+                            ","
+                        } else {
+                            ""
+                        }
+                    ));
+                    foreigns_added += 1;
+                }
+            }
+        }
+        create_lines.push(String::from(");"));
+        // We are done generating the lines for the 'create table' statement. Join them and add the
+        // result to the statements to return:
+        statements.push(String::from(create_lines.join("\n")));
+
+        // Finally, create further unique indexes on row_number and row_order:
+        statements.push(format!(
+            r#"CREATE UNIQUE INDEX "{}_row_number_idx" ON "{}"("row_number");"#,
+            table_name, table_name
+        ));
+        statements.push(format!(
+            r#"CREATE UNIQUE INDEX "{}_row_order_idx" ON "{}"("row_order");"#,
+            table_name, table_name
+        ));
+
+        Ok(statements)
+    }
+
     /// Generates and returns the DDL required to setup the database.
     pub async fn get_setup_statements(&self) -> Result<HashMap<String, Vec<String>>> {
         let tables_config = &self.config.table;
@@ -1271,11 +1438,11 @@ impl Valve {
         for (table, table_config) in tables_config.iter() {
             // Generate DDL for the table and its corresponding conflict table:
             let mut table_statements = vec![];
-            let mut statements = get_table_ddl(&self.config, &table, &self.pool)?;
+            let mut statements = self.get_table_ddl(&table, &self.pool)?;
             table_statements.append(&mut statements);
             if table_config.options.contains("conflict") {
                 let cable = format!("{}_conflict", table);
-                let mut statements = get_table_ddl(&self.config, &cable, &self.pool)?;
+                let mut statements = self.get_table_ddl(&cable, &self.pool)?;
                 table_statements.append(&mut statements);
 
                 let create_view_sql = get_sql_for_standard_view(&table, &self.pool);
@@ -1797,80 +1964,6 @@ impl Valve {
         Ok(self)
     }
 
-    /// Given the name of a datatype, find (in the database) the value of the optional configuration
-    /// parameter called 'format' corresponding to that datatype and return it, or an empty string
-    /// if no format parameter has been configured for that datatype or if the format parameter is
-    /// not defined. The format parameter indicates how values of the given column are to be
-    /// formatted when saving a table to an external file.
-    pub async fn get_datatype_format(&self, datatype: &str) -> Result<String> {
-        if !self
-            .config
-            .table
-            .get("datatype")
-            .and_then(|t| Some(&t.column))
-            .and_then(|c| Some(c.keys().collect::<Vec<_>>()))
-            .and_then(|v| Some(v.contains(&&"format".to_string())))
-            .expect("Could not find column configrations for the datatype table")
-        {
-            Ok("".to_string())
-        } else {
-            let sql = format!(
-                r#"SELECT "format" FROM "datatype" WHERE "datatype" = '{}'"#,
-                datatype,
-            );
-            let rows = sqlx_query(&sql).fetch_all(&self.pool).await?;
-            if rows.len() > 0 {
-                let format_string = rows[0]
-                    .try_get::<&str, &str>("format")
-                    .ok()
-                    .expect("No column 'format' in row.");
-                Ok(format_string.to_string())
-            } else {
-                Ok("".to_string())
-            }
-        }
-    }
-
-    /// Given a table name and the name of a column in that table, find (in the database) the value
-    /// of the optional configuration parameter called 'format' and return it, or an empty string
-    /// if no format parameter has been configured or if none has been defined for that column.
-    /// The format parameter indicates how values of the given column are to be formatted when
-    /// saving a table to an external file.
-    pub async fn get_column_format(&self, table: &str, column: &str) -> Result<String> {
-        if !self
-            .config
-            .table
-            .get("datatype")
-            .and_then(|t| Some(t.column.clone()))
-            .and_then(|c| Some(c.keys().cloned().collect::<Vec<_>>()))
-            .and_then(|v| Some(v.contains(&"format".to_string())))
-            .expect("Could not find column configrations for the datatype table")
-        {
-            Ok("".to_string())
-        } else {
-            let sql = format!(
-                r#"SELECT d."format"
-                     FROM "column" c, "datatype" d
-                    WHERE c."table" = '{}'
-                      AND c."column" = '{}'
-                      AND c."datatype" = d."datatype""#,
-                table, column
-            );
-            let rows = sqlx_query(&sql).fetch_all(&self.pool).await?;
-            if rows.len() > 1 {
-                panic!(
-                    "Multiple entries corresponding to '{}' in datatype table",
-                    column
-                );
-            }
-            let format_string = rows[0]
-                .try_get::<&str, &str>("format")
-                .ok()
-                .unwrap_or_default();
-            Ok(format_string.to_string())
-        }
-    }
-
     /// Save the given table with the given columns at the given path as a TSV file.
     pub fn save_table(
         &self,
@@ -1988,6 +2081,85 @@ impl Valve {
         writer.flush()?;
 
         Ok(self)
+    }
+
+    /// Given a table name and a column name, get the value type of the column.
+    pub fn get_value_type(&self, table: &str, column: &str) -> ValueType {
+        toolkit::get_value_type(&self.config, &self.datatype_conditions, table, column)
+    }
+
+    /// Given the name of a datatype, find (in the database) the value of the optional configuration
+    /// parameter called 'format' corresponding to that datatype and return it, or an empty string
+    /// if no format parameter has been configured for that datatype or if the format parameter is
+    /// not defined. The format parameter indicates how values of the given column are to be
+    /// formatted when saving a table to an external file.
+    pub async fn get_datatype_format(&self, datatype: &str) -> Result<String> {
+        if !self
+            .config
+            .table
+            .get("datatype")
+            .and_then(|t| Some(&t.column))
+            .and_then(|c| Some(c.keys().collect::<Vec<_>>()))
+            .and_then(|v| Some(v.contains(&&"format".to_string())))
+            .expect("Could not find column configrations for the datatype table")
+        {
+            Ok("".to_string())
+        } else {
+            let sql = format!(
+                r#"SELECT "format" FROM "datatype" WHERE "datatype" = '{}'"#,
+                datatype,
+            );
+            let rows = sqlx_query(&sql).fetch_all(&self.pool).await?;
+            if rows.len() > 0 {
+                let format_string = rows[0]
+                    .try_get::<&str, &str>("format")
+                    .ok()
+                    .expect("No column 'format' in row.");
+                Ok(format_string.to_string())
+            } else {
+                Ok("".to_string())
+            }
+        }
+    }
+
+    /// Given a table name and the name of a column in that table, find (in the database) the value
+    /// of the optional configuration parameter called 'format' and return it, or an empty string
+    /// if no format parameter has been configured or if none has been defined for that column.
+    /// The format parameter indicates how values of the given column are to be formatted when
+    /// saving a table to an external file.
+    pub async fn get_column_format(&self, table: &str, column: &str) -> Result<String> {
+        if !self
+            .config
+            .table
+            .get("datatype")
+            .and_then(|t| Some(t.column.clone()))
+            .and_then(|c| Some(c.keys().cloned().collect::<Vec<_>>()))
+            .and_then(|v| Some(v.contains(&"format".to_string())))
+            .expect("Could not find column configrations for the datatype table")
+        {
+            Ok("".to_string())
+        } else {
+            let sql = format!(
+                r#"SELECT d."format"
+                     FROM "column" c, "datatype" d
+                    WHERE c."table" = '{}'
+                      AND c."column" = '{}'
+                      AND c."datatype" = d."datatype""#,
+                table, column
+            );
+            let rows = sqlx_query(&sql).fetch_all(&self.pool).await?;
+            if rows.len() > 1 {
+                panic!(
+                    "Multiple entries corresponding to '{}' in datatype table",
+                    column
+                );
+            }
+            let format_string = rows[0]
+                .try_get::<&str, &str>("format")
+                .ok()
+                .unwrap_or_default();
+            Ok(format_string.to_string())
+        }
     }
 
     /// Given a table name, a row number, and a transaction through which to access the database,
@@ -2563,9 +2735,25 @@ impl Valve {
             )))?
             .datatype;
 
-        let dt_condition = datatype_conditions
+        // If the condition is a list, then use the condition of the datatype indicated by
+        // its first argument. Otherwise use the condition as is.
+        let dt_condition = match datatype_conditions
             .get(dt_name)
-            .and_then(|d| Some(d.parsed.clone()));
+            .and_then(|d| Some(&d.parsed))
+        {
+            Some(Expression::Function(name, args)) if name == "list" => match &*args[0] {
+                Expression::Label(arg) => {
+                    let label = unquote(arg).unwrap_or_else(|_| arg.to_string());
+                    match datatype_conditions.get(&label) {
+                        Some(c) => Some(c.parsed.clone()),
+                        None => None,
+                    }
+                }
+                _ => None,
+            },
+            Some(dt_condition) => Some(dt_condition.clone()),
+            None => None,
+        };
 
         let mut values = vec![];
         match dt_condition {
