@@ -209,7 +209,7 @@ $(guess_test_db): valve guess_test_data $(guess_test_dir)/*.tsv | build $(guess_
 # (Ubuntu 22.04.4 LTS, runner version 2.317.0) in just over 20s. GitHub
 # sometimes changes the runner version, however, thus if we set the threshold
 # too low we might get a failure. The threshold below is about 10s more than the time
-# it takes using postgresql on my laptop (unplugged), and about 15s more than it takes
+# it takes using postgresql on my laptop (while plugged), and about 15s more than it takes
 # using sqlite.
 perf_test_threshold = 45
 perf_test_dir = test/perf_test_data
