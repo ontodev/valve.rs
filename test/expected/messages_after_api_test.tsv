@@ -24,6 +24,10 @@ table12	3	foo	error	key:foreign	Value '_schmeagol_' of column foo is not in tabl
 table14	2	foo	error	datatype:integer_list	Value 'a' of column foo should be one of a list of positive or negative integers separated by spaces	-1 a 5
 table14	2	foo	error	key:foreign	Value 'a' of column foo is not in table15.foo	-1 a 5
 table14	3	foo	error	key:foreign	Value '9' of column foo is not in table15.foo	3 4 9
+table16	2	alago	error	datatype:search_pipe	alago should be a string containing a sequence either of digits or of lowercase letters	' _ '
+table16	2	bar	error	datatype:exclude_pipe	bar should be neither a sequence of digits nor a sequence of lowercase letters	987
+table16	3	alago	error	datatype:search_pipe	alago should be a string containing a sequence either of digits or of lowercase letters	*?+$/
+table16	3	bar	error	datatype:exclude_pipe	bar should be neither a sequence of digits nor a sequence of lowercase letters	zxy
 table16	3	foo	error	datatype:match_pipe	foo should be a sequence either of digits or of lowercase letters	abc123
 table2	1	child	error	key:unique	Values of child must be unique	b
 table2	2	foo	error	rule:foo-1	bar must be null whenever foo is null	
