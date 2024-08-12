@@ -8,7 +8,7 @@
 A lightweight validation engine written in rust.
 
 ### API
-See the [Valve documentation](target/doc/ontodev_valve/valve/index.html)
+See [valve]
 
 ### Command line usage
 Run:
