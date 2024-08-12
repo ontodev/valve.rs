@@ -10,3 +10,4 @@ COB	COB:0000013	molecular entity	owl:Class	material entity
 COB	VO:0000001	vaccine	owl:Class	material entity	
 BOB	VO:0000001	vaccine	owl:Class	material entity	
 BFOBBER	BFO:0000027	bazaar	owl:Class	barrie	
+COB	BFO:0000099	jafar	owl:Class	mar	

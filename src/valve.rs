@@ -409,19 +409,6 @@ pub struct ValveTreeConstraint {
     pub parent: String,
 }
 
-/// Configuration information for a particular 'under' constraint
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub struct ValveUnderConstraint {
-    /// The column whose values should be 'under' the given value in the given tree
-    pub column: String,
-    /// The table to which the reference tree belongs
-    pub ttable: String,
-    /// The column (i.e., the 'child') on which the reference tree is based
-    pub tcolumn: String,
-    /// The value that the values of `column` should be under with respect to the given tree
-    pub value: SerdeValue,
-}
-
 /// Configuration information for a particular foreign key constraint
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct ValveForeignConstraint {
@@ -449,8 +436,6 @@ pub struct ValveConstraintConfig {
     pub foreign: HashMap<String, Vec<ValveForeignConstraint>>,
     /// A map from table names to each given table's tree constraints
     pub tree: HashMap<String, Vec<ValveTreeConstraint>>,
-    /// A map from table names to each given table's under constraints
-    pub under: HashMap<String, Vec<ValveUnderConstraint>>,
 }
 
 /// Configuration information for a particular Valve instance
@@ -468,7 +453,7 @@ pub struct ValveConfig {
     /// conditional 'when-then' rules associated with that column. Note that 'associated with'
     /// means that the given column is the when-column of some rule defined on the table.
     pub rule: HashMap<String, HashMap<String, Vec<ValveRuleConfig>>>,
-    /// Configuration specific to Valve's database and tree/under constraints
+    /// Configuration specific to Valve's database and tree constraints
     pub constraint: ValveConstraintConfig,
 }
 
@@ -1295,18 +1280,17 @@ impl Valve {
                 .collect::<Vec<_>>()
         };
 
-        let (primaries, uniques, foreigns, _trees, _unders) = {
+        let (primaries, uniques, foreigns, _trees) = {
             // Conflict tables have no database constraints:
             if table_name.ends_with("_conflict") {
-                (vec![], vec![], vec![], vec![], vec![])
+                (vec![], vec![], vec![], vec![])
             } else {
                 let cons = &self.config.constraint;
                 let primaries = cons.primary.get(table_name).cloned().unwrap_or(vec![]);
                 let uniques = cons.unique.get(table_name).cloned().unwrap_or(vec![]);
                 let foreigns = cons.foreign.get(table_name).cloned().unwrap_or(vec![]);
                 let trees = cons.tree.get(table_name).cloned().unwrap_or(vec![]);
-                let unders = cons.under.get(table_name).cloned().unwrap_or(vec![]);
-                (primaries, uniques, foreigns, trees, unders)
+                (primaries, uniques, foreigns, trees)
             }
         };
 
@@ -1791,9 +1775,7 @@ impl Valve {
                 // We need to wait until all of the rows for a table have been loaded before
                 // validating the "foreign" constraints on a table's trees, since this checks if
                 // the values of one column (the tree's parent) are all contained in another column
-                // (the tree's child). We also need to wait before validating a table's "under"
-                // constraints, because lthough the tree associated with such a constraint need not
-                // be defined on the same table, it can be.
+                // (the tree's child).
                 let recs_to_update = block_on(validate_tree_foreign_keys(
                     &self.config,
                     &self.pool,
@@ -2243,6 +2225,7 @@ impl Valve {
             table_name,
             &row,
             true,
+            false,
         )
         .await?;
 
@@ -2522,6 +2505,7 @@ impl Valve {
                     table,
                     &from,
                     false,
+                    false,
                 )
                 .await?;
 
@@ -2636,6 +2620,7 @@ impl Valve {
                     &mut tx,
                     table,
                     &to,
+                    false,
                     false,
                 )
                 .await?;
@@ -2827,24 +2812,11 @@ impl Valve {
                                     }
                                 }
                             }
-                            Expression::Function(name, args)
-                                if name == "under" || name == "tree" =>
-                            {
+                            Expression::Function(name, args) if name == "tree" => {
                                 let mut tree_col = "not set";
-                                let mut under_val = Some("not set".to_string());
-                                if name == "under" {
-                                    if let Expression::Field(_, column) = &**&args[0] {
-                                        tree_col = column;
-                                    }
-                                    if let Expression::Label(label) = &**&args[1] {
-                                        under_val = Some(label.to_string());
-                                    }
-                                } else {
-                                    let tree_key = &args[0];
-                                    if let Expression::Label(label) = &**tree_key {
-                                        tree_col = label;
-                                        under_val = None;
-                                    }
+                                let tree_key = &args[0];
+                                if let Expression::Label(label) = &**tree_key {
+                                    tree_col = label;
                                 }
 
                                 let tree = config
@@ -2863,15 +2835,8 @@ impl Valve {
                                     )))?;
                                 let child_column = &tree.child;
 
-                                let (tree_sql, mut params) = with_tree_sql(
-                                    &self.config,
-                                    &tree,
-                                    &table_name.to_string(),
-                                    &table_name.to_string(),
-                                    under_val.as_ref(),
-                                    None,
-                                    &pool,
-                                );
+                                let mut params = vec![];
+                                let tree_sql = with_tree_sql(&tree, &table_name.to_string(), None);
                                 let child_column_text =
                                     cast_column_sql_to_text(&child_column, &sql_type);
                                 let sql = local_sql_syntax(

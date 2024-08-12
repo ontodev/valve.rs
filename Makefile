@@ -99,7 +99,7 @@ sqlite_api_test: valve test/src/table.tsv build/valve.db test/insert_update.sh |
 	$(word 4,$^) $(word 3,$^) $(word 2,$^)
 	scripts/export_messages.py $(word 3,$^) $| $(tables_to_test)
 	diff --strip-trailing-cr -q test/expected/messages_after_api_test.tsv test/output/messages.tsv
-	echo "select \"history_id\", \"table\", \"row\", \"from\", \"to\", \"summary\", \"user\", \"undone_by\" from history where history_id < 15 order by history_id" | sqlite3 -header -tabs build/valve.db > test/output/history.tsv
+	echo "select \"history_id\", \"table\", \"row\", \"from\", \"to\", \"summary\", \"user\", \"undone_by\" from history where history_id < 16 order by history_id" | sqlite3 -header -tabs build/valve.db > test/output/history.tsv
 	diff --strip-trailing-cr -q test/expected/history.tsv test/output/history.tsv
 	# We drop all of the db tables because the schema for the next test (random test) is different
 	# from the schema used for this test.
@@ -114,7 +114,7 @@ pg_api_test: valve test/src/table.tsv test/insert_update.sh | test/output
 	$(word 3,$^) $(pg_connect_string) $(word 2,$^)
 	scripts/export_messages.py $(pg_connect_string) $| $(tables_to_test)
 	diff --strip-trailing-cr -q test/expected/messages_after_api_test.tsv test/output/messages.tsv
-	psql $(pg_connect_string) -c "COPY (select \"history_id\", \"table\", \"row\", \"from\", \"to\", \"summary\", \"user\", \"undone_by\" from history where history_id < 15 order by history_id) TO STDOUT WITH NULL AS ''" > test/output/history.tsv
+	psql $(pg_connect_string) -c "COPY (select \"history_id\", \"table\", \"row\", \"from\", \"to\", \"summary\", \"user\", \"undone_by\" from history where history_id < 16 order by history_id) TO STDOUT WITH NULL AS ''" > test/output/history.tsv
 	tail -n +2 test/expected/history.tsv | diff --strip-trailing-cr -q test/output/history.tsv -
 	# We drop all of the db tables because the schema for the next test (random test) is different
 	# from the schema used for this test.

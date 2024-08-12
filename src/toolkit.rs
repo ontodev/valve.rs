@@ -8,7 +8,7 @@ use crate::{
         ValveCell, ValveCellMessage, ValveChange, ValveColumnConfig, ValveConfig,
         ValveConstraintConfig, ValveDatatypeConfig, ValveError, ValveForeignConstraint,
         ValveMessage, ValveRow, ValveRowChange, ValveRuleConfig, ValveSpecialConfig,
-        ValveTableConfig, ValveTreeConstraint, ValveUnderConstraint,
+        ValveTableConfig, ValveTreeConstraint,
     },
     valve_grammar::StartParser,
     CHUNK_SIZE, MAX_DB_CONNECTIONS, MOVE_INTERVAL, MULTI_THREADED, SQL_PARAM,
@@ -1209,7 +1209,7 @@ pub fn read_config_files(
             .and_then(|t| Some(t.column_order = column_order));
 
         // Populate the table constraints for this table:
-        let (primaries, uniques, foreigns, trees, unders) = get_table_constraints(
+        let (primaries, uniques, foreigns, trees) = get_table_constraints(
             &tables_config,
             &datatypes_config,
             parser,
@@ -1229,9 +1229,6 @@ pub fn read_config_files(
         constraints_config
             .tree
             .insert(table_name.to_string(), trees);
-        constraints_config
-            .under
-            .insert(table_name.to_string(), unders);
     }
 
     // 6. Add implicit unique constraints for trees and foreign keys:
@@ -1947,6 +1944,7 @@ pub async fn get_rows_to_update(
     IndexMap<String, Vec<ValveRow>>,
     IndexMap<String, Vec<ValveRow>>,
     IndexMap<String, Vec<ValveRow>>,
+    IndexMap<String, Vec<ValveRow>>,
 )> {
     fn get_cell_value(row: &ValveRow, column: &str) -> Result<String> {
         row.contents
@@ -1977,6 +1975,8 @@ pub async fn get_rows_to_update(
 
     let mut rows_to_update_before = IndexMap::new();
     let mut rows_to_update_after = IndexMap::new();
+    let mut rows_to_update_unique = IndexMap::new();
+    let mut rows_to_update_tree = IndexMap::new();
     for fdep in &foreign_dependencies {
         let dependent_table = &fdep.table;
         let dependent_column = &fdep.column;
@@ -2052,8 +2052,6 @@ pub async fn get_rows_to_update(
         rows_to_update_after.insert(dependent_table.to_string(), updates_after);
     }
 
-    // Collect the intra-table dependencies:
-    // TODO: Consider also the tree intra-table dependencies.
     let primaries = config
         .constraint
         .primary
@@ -2073,7 +2071,6 @@ pub async fn get_rows_to_update(
         .map(|k| k.to_string())
         .collect::<Vec<_>>();
 
-    let mut rows_to_update_intra = IndexMap::new();
     for column in &columns {
         if !uniques.contains(column) && !primaries.contains(column) {
             continue;
@@ -2112,16 +2109,57 @@ pub async fn get_rows_to_update(
                 .await?
             }
         };
-        rows_to_update_intra.insert(table.to_string(), updates);
+        rows_to_update_unique.insert(table.to_string(), updates);
     }
 
-    // TODO: Collect the dependencies for under constraints similarly to the way we
-    // collect foreign constraints (see just above).
+    // Collect tree-foreign dependencies:
+    let trees = config
+        .constraint
+        .tree
+        .get(table)
+        .expect(&format!("Undefined table '{}'", table));
+
+    for tree in trees {
+        let dependent_column = &tree.parent;
+        let target_column = &tree.child;
+        // Query the database using `row_number` to get the current value of the column for
+        // the row.
+        let updates_tree = match &query_as_if.row {
+            None => {
+                if query_as_if.kind != QueryAsIfKind::Remove {
+                    log::warn!(
+                        "No row in query_as_if: {:?} for {:?}",
+                        query_as_if,
+                        query_as_if.kind
+                    );
+                }
+                vec![]
+            }
+            Some(row) => {
+                // Fetch the cell corresponding to `column` from `row`, and the value of that cell,
+                // which is the new value for the row.
+                let new_value = get_cell_value(&row, target_column)?;
+                let rows = get_affected_rows(
+                    table,
+                    dependent_column,
+                    &new_value,
+                    Some(&query_as_if.row_number),
+                    config,
+                    pool,
+                    tx,
+                )
+                .await?;
+                rows
+            }
+        };
+        rows_to_update_tree.insert(table.to_string(), updates_tree);
+    }
 
     Ok((
         rows_to_update_before,
+        rows_to_update_tree,
+        rows_to_update_unique,
         rows_to_update_after,
-        rows_to_update_intra,
     ))
 }
 
@@ -2937,6 +2975,7 @@ pub async fn insert_new_row_tx(
     table: &str,
     row: &ValveRow,
     skip_validation: bool,
+    do_not_recurse: bool,
 ) -> Result<u32> {
     // Send the row through the row validator to determine if any fields are problematic and
     // to mark them with appropriate messages:
@@ -3035,7 +3074,18 @@ pub async fn insert_new_row_tx(
 
     // Look through the valve config to see which tables are dependent on this table
     // and find the rows that need to be updated:
-    let (_, updates_after, _) = get_rows_to_update(config, pool, tx, table, &query_as_if).await?;
+    let (_, updates_tree, _, updates_after) = {
+        if do_not_recurse {
+            (
+                IndexMap::new(),
+                IndexMap::new(),
+                IndexMap::new(),
+                IndexMap::new(),
+            )
+        } else {
+            get_rows_to_update(config, pool, tx, table, &query_as_if).await?
+        }
+    };
 
     // Check it to see if the row should be redirected to the conflict table:
     let table_to_write = {
@@ -3087,6 +3137,20 @@ pub async fn insert_new_row_tx(
         query.execute(tx.acquire().await?).await?;
     }
 
+    // Now process the updates that need to be performed because of an insertion to a tree
+    // column:
+    process_updates(
+        config,
+        datatype_conditions,
+        rule_conditions,
+        pool,
+        tx,
+        &updates_tree,
+        &query_as_if,
+        true,
+    )
+    .await?;
+
     // Now process the updates that need to be performed after the update of the target row:
     process_updates(
         config,
@@ -3128,7 +3192,7 @@ pub async fn delete_row_tx(
     // Look through the valve config to see which tables are dependent on this table and find the
     // rows that need to be updated. Since this is a delete there will only be rows to update
     // before and none after the delete:
-    let (updates_before, _, updates_intra) =
+    let (updates_before, updates_tree, updates_unique, _) =
         get_rows_to_update(config, pool, tx, table, &query_as_if).await?;
 
     // Process the updates that need to be performed before the update of the target row:
@@ -3165,6 +3229,20 @@ pub async fn delete_row_tx(
     let query = sqlx_query(&sql);
     query.execute(tx.acquire().await?).await?;
 
+    // Now process the updates that need to be performed because of an insertion to a tree
+    // column:
+    process_updates(
+        config,
+        datatype_conditions,
+        rule_conditions,
+        pool,
+        tx,
+        &updates_tree,
+        &query_as_if,
+        true,
+    )
+    .await?;
+
     // Finally process the rows from the same table as the target table that need to be re-validated
     // because of unique or primary constraints:
     process_updates(
@@ -3173,7 +3251,7 @@ pub async fn delete_row_tx(
         rule_conditions,
         pool,
         tx,
-        &updates_intra,
+        &updates_unique,
         &query_as_if,
         true,
     )
@@ -3213,9 +3291,14 @@ pub async fn update_row_tx(
         row_number: row_number,
         row: Some(row.clone()),
     };
-    let (updates_before, updates_after, updates_intra) = {
+    let (updates_before, updates_tree, updates_unique, updates_after) = {
         if do_not_recurse {
-            (IndexMap::new(), IndexMap::new(), IndexMap::new())
+            (
+                IndexMap::new(),
+                IndexMap::new(),
+                IndexMap::new(),
+                IndexMap::new(),
+            )
         } else {
             get_rows_to_update(config, pool, tx, table, &query_as_if).await?
         }
@@ -3277,11 +3360,26 @@ pub async fn update_row_tx(
         table,
         &row,
         false,
+        do_not_recurse,
     )
     .await?;
 
     // Move the row back to the position it was in before it was deleted:
     move_row_tx(tx, table, &row_number, &old_previous_rn).await?;
+
+    // Now process the updates that need to be performed because of an insertion to a tree
+    // column:
+    process_updates(
+        config,
+        datatype_conditions,
+        rule_conditions,
+        pool,
+        tx,
+        &updates_tree,
+        &query_as_if,
+        true,
+    )
+    .await?;
 
     // Now process the rows from the same table as the target table that need to be re-validated
     // because of unique or primary constraints:
@@ -3291,7 +3389,7 @@ pub async fn update_row_tx(
         rule_conditions,
         pool,
         tx,
-        &updates_intra,
+        &updates_unique,
         &query_as_if,
         true,
     )
@@ -3744,8 +3842,8 @@ pub fn local_sql_syntax(pool: &AnyPool, sql: &String) -> String {
 }
 
 /// Takes as arguments a list of tables and a configuration struct describing all of the constraints
-/// between tables. After validating that there are no cycles amongst the foreign, tree, and
-/// under dependencies, returns (i) the list of tables sorted according to their foreign key
+/// between tables. After validating that there are no cycles amongst the foreign, and tree
+/// dependencies, returns (i) the list of tables sorted according to their foreign key
 /// dependencies, such that if table_a depends on table_b, then table_b comes before table_a in the
 /// list; (ii) A map from table names to the lists of tables that depend on a given table; (iii) a
 /// map from table names to the lists of tables that a given table depends on.
@@ -3833,7 +3931,6 @@ pub fn verify_table_deps_and_sort(
 
     // Check for inter-table cycles:
     let foreign_keys = &constraints.foreign;
-    let under_keys = &constraints.under;
     let mut dependency_graph = DiGraphMap::<&str, ()>::new();
     for table_name in table_list {
         let t_index = dependency_graph.add_node(table_name);
@@ -3844,31 +3941,6 @@ pub fn verify_table_deps_and_sort(
             let ftable = &fkey.ftable;
             let f_index = dependency_graph.add_node(&ftable);
             dependency_graph.add_edge(t_index, f_index, ());
-        }
-
-        let ukeys = under_keys
-            .get(table_name)
-            .expect(&format!("Undefined table '{}'", table_name));
-        for ukey in ukeys {
-            let ttable = &ukey.ttable;
-            let tcolumn = &ukey.tcolumn;
-            let value = &ukey.value;
-            if ttable != table_name {
-                let ttable_trees = trees.get(ttable).unwrap();
-                if ttable_trees
-                    .iter()
-                    .filter(|d| d.child == *tcolumn)
-                    .collect::<Vec<_>>()
-                    .is_empty()
-                {
-                    panic!(
-                        "under({}.{}, {}) refers to a non-existent tree",
-                        ttable, tcolumn, value
-                    );
-                }
-                let tt_index = dependency_graph.add_node(&ttable);
-                dependency_graph.add_edge(t_index, tt_index, ());
-            }
         }
     }
 
@@ -3913,7 +3985,6 @@ pub fn verify_table_deps_and_sort(
                     if i < end_index {
                         let dep_name = cycle.get(i + 1).unwrap().as_str();
                         let fkeys = foreign_keys.get(table).unwrap();
-                        let ukeys = under_keys.get(table).unwrap();
                         let column;
                         let ref_table;
                         let ref_column;
@@ -3921,10 +3992,6 @@ pub fn verify_table_deps_and_sort(
                             column = &dep.column;
                             ref_table = &dep.ftable;
                             ref_column = &dep.fcolumn;
-                        } else if let Some(dep) = ukeys.iter().find(|d| d.ttable == *dep_name) {
-                            column = &dep.column;
-                            ref_table = &dep.ttable;
-                            ref_column = &dep.tcolumn;
                         } else {
                             panic!("{}. Unable to retrieve the details.", message);
                         }
@@ -3962,7 +4029,7 @@ pub fn get_table_options(config: &ValveConfig, table: &str) -> Result<HashSet<St
 
 /// Given a table configuration map and a datatype configuration map, a parser, a table name, and a
 /// database connection pool, return lists of: primary keys, unique constraints, foreign keys,
-/// trees, and under keys.
+/// and trees.
 pub fn get_table_constraints(
     tables_config: &HashMap<String, ValveTableConfig>,
     datatypes_config: &HashMap<String, ValveDatatypeConfig>,
@@ -3974,13 +4041,11 @@ pub fn get_table_constraints(
     Vec<String>,
     Vec<ValveForeignConstraint>,
     Vec<ValveTreeConstraint>,
-    Vec<ValveUnderConstraint>,
 ) {
     let mut primaries = vec![];
     let mut uniques = vec![];
     let mut foreigns = vec![];
     let mut trees = vec![];
-    let mut unders = vec![];
 
     let columns = tables_config
         .get(table_name)
@@ -4071,26 +4136,6 @@ pub fn get_table_constraints(
                             }
                         };
                     }
-                    Expression::Function(name, args) if name == "under" => {
-                        let generic_error = format!(
-                            "Invalid 'under' constraint: {} for: {}",
-                            structure, table_name
-                        );
-                        if args.len() != 2 {
-                            panic!("{}", generic_error);
-                        }
-                        match (&*args[0], &*args[1]) {
-                            (Expression::Field(ttable, tcolumn), Expression::Label(value)) => {
-                                unders.push(ValveUnderConstraint {
-                                    column: column_name.to_string(),
-                                    ttable: ttable.to_string(),
-                                    tcolumn: tcolumn.to_string(),
-                                    value: json!(value),
-                                });
-                            }
-                            (_, _) => panic!("{}", generic_error),
-                        };
-                    }
                     _ => panic!(
                         "Unrecognized structure: {} for {}.{}",
                         structure, table_name, column_name
@@ -4100,7 +4145,7 @@ pub fn get_table_constraints(
         }
     }
 
-    return (primaries, uniques, foreigns, trees, unders);
+    return (primaries, uniques, foreigns, trees);
 }
 
 /// Given a list of messages and a HashMap, messages_stats, with which to collect counts of
