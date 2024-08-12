@@ -3564,7 +3564,7 @@ pub fn compile_condition(
                         })
                     }
                     "match" => {
-                        pattern = format!("^{}{}$", flags, pattern);
+                        pattern = format!("^({}{})$", flags, pattern);
                         let re = Regex::new(pattern.as_str())?;
                         Ok(CompiledCondition {
                             value_type: ValueType::Single,

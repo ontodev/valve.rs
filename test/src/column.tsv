@@ -78,6 +78,9 @@ table13	foo				text
 table13	bar				text		
 table14	foo				integer_list	from(table15.foo)	
 table15	foo				integer	primary	
+table16	foo				match_pipe		
+table16	bar				exclude_pipe		
+table16	alago				search_pipe		
 view1	foo		empty		trimmed_line		
 view1	bar		empty		trimmed_line		
 view2	foo		empty		trimmed_line		

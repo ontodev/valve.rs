@@ -18,6 +18,7 @@ table12	test/src/ontology/table12.tsv	The twelvth data table
 table13	test/src/ontology/table13.tsv	The thirteenth data table		
 table14	test/src/ontology/table14.tsv	The fourteenth data table		
 table15	test/src/ontology/table15.tsv	The fifteenth data table		
+table16	test/src/ontology/table16.tsv	The sixteenth data table		
 view1	test/output/view1.sql			db_table db_view internal
 view2	test/output/view2.sh			save db_view
 view3				db_view
