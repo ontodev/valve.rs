@@ -34,7 +34,7 @@ Valve's configuration is specified in a number of user-editable tables represent
 | zebra stripes | are neat      |    $1 |
 
 table                | path                                 | description | type     | options
------------------------------------------------------------------------------------------------
+-------------------- | ------------------------------------ | ----------- | -------- | ------------
 table                | schema/table.tsv                     |             | table    |
 column               | schema/column.tsv                    |             | column   |
 datatype             | schema/datatype.tsv                  |             | datatype |
