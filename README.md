@@ -27,6 +27,12 @@ To be written
 
 Valve's configuration is specified in a number of user-editable tables represented as `.tsv` files. The most important of these is the table called 'table' (normally stored in a file called `table.tsv`, although any filename could be used). The 'table' table contains the following columns: `table`, `path`, `description`, `type`, `options`. Below is an example 'table' table:
 
+| Tables        | Are           | Cool  |
+| ------------- |:-------------:| -----:|
+| col 3 is      | right-aligned | $1600 |
+| col 2 is      | centered      |   $12 |
+| zebra stripes | are neat      |    $1 |
+
 table                | path                                 | description | type     | options
 -----------------------------------------------------------------------------------------------
 table                | schema/table.tsv                     |             | table    |
