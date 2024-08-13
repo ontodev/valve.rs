@@ -33,18 +33,18 @@ Valve's configuration is specified in a number of user-editable tables represent
 | col 2 is      | centered      |   $12 |
 | zebra stripes | are neat      |    $1 |
 
-table                    | path                                        | description | type     | options
---------------------     | ------------------------------------------- | ----------- | -------- | ------------
-`table`                  | `schema/table.tsv`                        |             | `table`    |
-`column`                 | `schema/column.tsv`                       |             | `column`   |
-`datatype`              | `schema/datatype.tsv`                     |             | `datatype` |
-`rule`                   | `schema/rule.tsv`                          |             | `rule`     |
-`user_table1`           | `schema/user/user_table1.ts  `           |             |          |
-`user_readonly_table2` | `schema/user/user_readonly_table1.tsv`  |             |          | `no-edit no-save no-conflict`
-`user_view1`            | `schema/user/user_view1.sql`             |             |          | `db_view`
-`user_view2`            | `schema/user/user_view2.sh`              |             |          | `db_view`
-`user_view2`            | `schema/user/user_view2.sh`              |             |          | `db_view`
-`user_view3`            |                                              |             |          | `db_view`
+table                | path                                        | description | type     | options
+-------------------- | ------------------------------------------- | ----------- | -------- | ------------
+table                | `schema/table.tsv`                        |             | table    |
+column               | `schema/column.tsv`                       |             | column   |
+datatype             | `schema/datatype.tsv`                     |             | datatype |
+rule                 | `schema/rule.tsv`                          |             | rule     |
+user_table1          | `schema/user/user_table1.ts  `           |             |          |
+user_readonly_table2 | `schema/user/user_readonly_table1.tsv`  |             |          | no-edit no-save no-conflict
+user_view1           | `schema/user/user_view1.sql`             |             |          | db_view
+user_view2           | `schema/user/user_view2.sh`              |             |          | db_view
+user_view2           | `schema/user/user_view2.sh`              |             |          | db_view
+user_view3           |                                              |             |          | db_view
 
 The column, `table`, indicates the name of the table, and the column, `path`, indicates where in the filesystem that the
 table is located. The column, `description`, is optional and is used to describe the table's contents.
