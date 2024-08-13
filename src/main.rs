@@ -22,7 +22,7 @@ static SAVE_DIR_HELP: &str = "Save tables to DIR instead of to their configured 
           long_about = None)]
 struct Cli {
     /// Use this option with caution. When set, Valve will not not ask the user for confirmation
-    /// before executing potentially destructive operations.
+    /// before executing potentially destructive operations on the database and/or table files.
     #[arg(long, action = ArgAction::SetTrue)]
     assume_yes: bool,
 
