@@ -21,7 +21,7 @@ To be written.
 
 To be written
 
-### Configuration tables
+### Configuration
 
 #### The table table
 
@@ -66,15 +66,15 @@ If no options are specified, the options *db_table*, *truncate*, *load*, *save*,
 
 TO BE CONTINUED ...
 
-### The column table
+#### The column table
 
 TODO
 
-### The datatype table
+#### The datatype table
 
 TODO
 
-### The rule table
+#### The rule table
 
 TODO
 
