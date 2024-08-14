@@ -69,7 +69,7 @@ If no options are specified, the options *db_table*, *truncate*, *load*, *save*,
 In addition to a table table, Valve also requires a column table. The column table configuration is normally stored in a file called 'column.tsv' though in principle any filename may be used. The column table contains one row for every column of every configured table. This includes the special configuration tables (such as the column table itself) as well as user-defined tables. Below is an example column table, with the special configuration tables omitted:
 
 table  | column  | label    | nulltype | default | datatype     | structure            | description
----    | ---     | ---      | ---      | ---     | ---          | ---                  | ---
+--     | --      | ---      | --       | --      | ---          | ---                  | -
 table1 | column1 | Column 1 |          | value1  |              |                      |
 table1 | column2 | Column 2 | empty    |         | integer      | from(table2.column2) |
 table2 | column1 | Column 1 |          |         | trimmed_line | primary              |
