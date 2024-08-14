@@ -1476,13 +1476,13 @@ impl Valve {
         for table in &sorted_table_list {
             let table_config = self.get_table_config(table)?;
             if table_config.options.contains("db_view") {
-                // If the path points to a .sql file, execute the statements that are contained in
-                // it against the database, trusting that the user has written the script correctly.
-                // Note that the SQL script, not Valve, is responsible for deciding whether the
-                // view actually needs to be recreated. In any case, once any specified scripts have
-                // been run (if the path is empty then Valve assumes that the view has already been
-                // set up in the database), Valve checks to make sure that the view now exists and
-                // returns an error if it does not.
+                // If the path points to a .sql file or an executable file, execute the statements
+                // that are contained in it against the database, trusting that they are correct.
+                // Note that the SQL script (or executable file), not Valve, is responsible for
+                // deciding whether the view actually needs to be recreated. In any case, once any
+                // specified scripts have been run (if the path is empty then Valve assumes that the
+                // view has already been set up in the database), Valve checks to make sure that the
+                // view now exists and returns an error if it does not.
                 if table_config.path.to_lowercase().ends_with(".sql") {
                     self.execute_sql_file(&table_config.path).await?;
                 } else if table_config.path != "" {

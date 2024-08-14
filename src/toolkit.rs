@@ -662,8 +662,6 @@ pub fn read_config_files(
         // - A table is allowed to have an empty path unless it is editable. If the path is
         //   non-empty then it can be a file ending (case insensitively) with '.tsv', a file ending
         //   (case insensitively) with '.sql', or an executable file.
-        // - All other tables (other than internal tables) must have a path and it must end
-        //   (case insensitively) in '.tsv'.
         let is_view = row_options.contains("db_view");
         let is_readonly = !row_options.contains("edit");
         let is_internal = row_options.contains("internal");
