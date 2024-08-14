@@ -1,5 +1,4 @@
 table	cell	level	rule	message	value
-table	D3	error	datatype:table_type	type should be a table type	rule
 table	E12	error	option:unrecognized	unrecognized option	foo
 table	E21	warning	option:overrides	overrides db_table	db_view
 table	E21	error	option:reserved	reserved for internal use	internal

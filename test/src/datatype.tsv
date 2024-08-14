@@ -17,7 +17,7 @@ prefix	word	exclude(/\W/)	a prefix for a CURIE
 real	nonspace	match(/-?\d+(\.\d+)?/)	a positive or negative real number	REAL		%.4f
 suffix	word	exclude(/\W/)	a suffix for a CURIE			
 table_name	word	exclude(/\W/)	a table name			
-table_type	word	in('table', 'column', 'datatype')	a table type			
+table_type	word	in(table, column, datatype, rule)	a table type			
 options	trimmed_line	match(/[\w_-]+(\s+[\w_-]+)*/)	a space-separated list of words (which may contain underscores and dashes)			
 text			any text	TEXT	textarea	
 trimmed_line	line	match(/\S([^\n]*\S)*/)	a line of text that does not begin or end with whitespace			

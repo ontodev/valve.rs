@@ -25,26 +25,26 @@ To be written
 
 #### The table table
 
-Valve's configuration is specified in a number of user-editable tables represented as `.tsv` files. The most important of these is the table called 'table' (normally stored in a file called `table.tsv`, although any filename could be used). The table table (see below for an example) contains the following columns: **table**, **path**, **description**, **type**, **options**.
+Valve is configured using a number of special, required, configuration tables that can be represented as '.tsv' files. The most important of these is the table called 'table', also known as the table table. One normally configures the table table using a '.tsv' file called 'table.tsv', although any filename could be used in principle, and in fact it is also possible to read the table table directly from the database, as long as the database already contains a table called 'table' with the right setup. Below is an example of a table table:
 
-table                | path                                    | description | type     | options
--------------------- | ----------------------------------------| ----------- | -------- | ------------
-table                | schema/table.tsv                        |             | table    |
-column               | schema/column.tsv                       |             | column   |
-datatype             | schema/datatype.tsv                     |             | datatype |
-rule                 | schema/rule.tsv                         |             | rule     |
-user_table1          | schema/user/user_table1.tsv             |             |          |
-user_readonly_table2 | schema/user/user_readonly_table1.tsv    |             |          | no-edit no-save no-conflict
-user_view1           | schema/user/user_view1.sql              |             |          | db_view
-user_view2           | schema/user/user_view2.sh               |             |          | db_view
-user_view2           | schema/user/user_view2.sh               |             |          | db_view
-user_view3           |                                         |             |          | db_view
+table                | path                                 | description | type     | options
+-------------------- | ------------------------------------ | ----------- | -------- | ------------
+table                | schema/table.tsv                     |             | table    |
+column               | schema/column.tsv                    |             | column   |
+datatype             | schema/datatype.tsv                  |             | datatype |
+rule                 | schema/rule.tsv                      |             | rule     |
+user_table1          | schema/user/user_table1.tsv          |             |          |
+user_readonly_table2 | schema/user/user_readonly_table1.tsv |             |          | no-edit no-save no-conflict
+user_view1           | schema/user/user_view1.sql           |             |          | db_view
+user_view2           | schema/user/user_view2.sh            |             |          | db_view
+user_view2           | schema/user/user_view2.sh            |             |          | db_view
+user_view3           |                                      |             |          | db_view
 
-These columns have the following significance:
+Note that in the first row above the table being described is the table table itself. The table called 'column', or the column table, is described in the second row, and so on. In general the columns of the table table have the following significance:
 - **table**: the name of the table.
-- **path**: where to find information about the contents of the table. This can be a `.tsv` file, a `.sql` file, some other executable file, or it can be empty. The kind of path (if any) that needs to be specified is determined by the contents of the **options** column (see below) for the given table.
+- **path**: where to find information about the contents of the table. This can be a '.tsv' file, a '.sql' file, some other executable file, or it can be empty. The kind of path (if any) that needs to be specified is determined by the contents of the **options** column (see below) for the given table.
 - **description**: An optional description of the contents and/or the purpose of the table.
-- **type**: Valve recognizes four special configuration table types that can be specified using the **type** column of the table table. These are the `table`, `column`, `datatype`, and `rule` table types. Valve requires that a single table corresponding to each of the first three types be configured. However specifying a table of type `rule` (i.e., specifying a rule table) is optional. This section is about the table table. For the other special table types, see the sections on [the column table](#the-column-table), [the datatype table](#the-column-table), and the [the rule table](#the-column-table) below. Data tables (e.g., the `user_*` tables in the above figure) should not explicitly specify a type, and if one is specified it will be ignored unless it is one of the recognised types just mentioned.
+- **type**: Valve recognizes four special configuration table types that can be specified using the **type** column of the table table. These are the `table`, `column`, `datatype`, and `rule` table types. Valve requires that a single table corresponding to each of the first three types be configured. However specifying a table of type `rule` (i.e., specifying a rule table) is optional. This section is about the table table. For the other special table types, see the sections on [the column table](#the-column-table), [the datatype table](#the-datatype-table), and the [the rule table](#the-rule-table) below. Data tables (e.g., the 'user_*' tables in the above figure) should not explicitly specify a type, and if one is specified it will be ignored unless it is one of the recognised types just mentioned.
 - **options**: allows the user to specify a number of further options for the table (see below).
 
 ##### Further information on options
@@ -66,15 +66,59 @@ If no options are specified, the options *db_table*, *truncate*, *load*, *save*,
 
 #### The column table
 
-TODO
+In addition to a table table, Valve also requires a column table. The column table configuration is normally stored in a file called 'column.tsv' though in principle any filename may be used. The column table contains one row for every column of every configured table. This includes the special configuration tables (such as the column table itself) as well as user-defined tables. Below is an example column table, with the special configuration tables omitted:
+
+table  | column  | label    | nulltype | default | datatype     | structure            | description
+---    | ---     | ---      | ---      | ---     | ---          | ---                  | ---
+table1 | column1 | Column 1 |          | value1  |              |                      |
+table1 | column2 | Column 2 | empty    |         | integer      | from(table2.column2) |
+table2 | column1 | Column 1 |          |         | trimmed_line | primary              |
+table2 | column2 | Column 2 |          |         | integer      | unique               |
+table3 | column1 | Column 1 |          |         | word         | primary              |
+table3 | column2 | Column 2 | empty    |         | word         | tree(column1)        |
+
+
+The columns of the column table have the following significance:
+
+**TODO.**
 
 #### The datatype table
 
-TODO
+In addition to the table table and the column table, Valve also requires a datatype table. The datatype table configuration is normally stored in a file called 'datatype.tsv' although in principle any filename could be used. The datatype table stores the definitions of the datatypes referred to in the **datatype** column of the column table. Below is a subset of the rows of an example datatype table:
+
+datatype  | parent   | condition             | description                                       | sql_type | HTML type | format
+---       | ---      | ---                   | ---                                               | ---      | ---       | ---
+text      |          |                       | any text                                          | TEXT     | textarea  |
+integer   | text     | match(/-?\d+/)        | a positive or negative decimal digit, or 0        | INTEGER  |           | %i
+word      | text     | exclude(/\W/)         | a single word: letters, numbers, underscore       |          |           | %s
+empty     | text     | equals('')            | the empty string                                  | NULL     |           |
+custom1   | text     | match(/\S+:\S+/)      | two nonspace character sequences separated by ':' |          |           |
+custom2   | text     | in(alice, bob, cindy) | either 'alice', 'bob', or 'cindy'                 |          |           |
+custom3   | text     | list(word, ' ')       | a list of words separated by spaces               |          |           |
+custom4   | text     | search(/\d+/)         | a string containing a sequence of digits          |          |           |
+
+The columns of the datatype table have the following significance:
+
+**TODO.**
 
 #### The rule table
 
-TODO
+In addition to the table table, the column table, and the datatype table, it is also possible (but optional) to configure a table of type 'rule', or a rule table. When it is configured, the rule table configuration is normally stored in a file called 'rule.tsv' though in principle any filename may be used. The rule table defines a number of rules of the following form:
+
+&nbsp; &nbsp; *when `CONDITION_ON_COLUMN_1` is satisfied then `CONDITION_ON_COLUMN_2` must also be satisfied*
+
+where `CONDITION_ON_COLUMN_1` and `CONDITION_ON_COLUMN_2` are defined with respect to the same table.
+
+Below is an example rule table:
+
+table  | when column | when condition | then column | then condition | level | description
+---    | ---         | ---            | ---         | ---            | ---   | ---
+table1 | foo         | null           | bar         | not null       | error |
+table2 | foo         | negative_int   | bar         | positive_int   | error |
+
+The columns of the rule table have the following significance:
+
+**TODO.**
 
 ## Command line usage
 

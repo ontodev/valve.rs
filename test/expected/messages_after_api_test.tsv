@@ -1,5 +1,4 @@
 table	row	column	level	rule	message	value
-table	3	type	error	datatype:table_type	type should be a table type	rule
 table	12	options	error	option:unrecognized	unrecognized option	foo
 table	21	options	warning	option:overrides	overrides db_table	db_view
 table	21	options	error	option:reserved	reserved for internal use	internal
