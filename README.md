@@ -1,6 +1,6 @@
 # ontodev_valve/valve.rs
 
-A lightweight validation engine written in rust.
+Valve - A lightweight validation engine written in rust.
 
 ## Table of contents
 
@@ -42,10 +42,12 @@ user_view3           |                                         |             |  
 
 These columns have the following significance:
 - **table**: the name of the table.
-- **path**: where to find information about the contents of the table. This can be a .tsv file, a .sql file, some other executable file, or it can be empty. The kind of path that needs to be specified is determined by the contents of the **options** column (see below) for the table.
-- **description**: An optional description of the contents and/or purpose of the table.
-- **type**: Valve recognizes four special table types that can be specified using the **type** column. These are the `table`, `column`, `datatype`, and `rule` table types. Valve requires that tables corresponding to each of the first three types be configured. However specifying a table of type `rule` is optional. For more on the first three types, see the sections entitled [The column table](#the-column-table), [The datatype table](#the-column-table), and [The rule table](#the-column-table) below. Note that user-defined tables should not specify a type. Note also that if an unrecognised type is specified Valve will ignore it.
+- **path**: where to find information about the contents of the table. This can be a .tsv file, a .sql file, some other executable file, or it can be empty. The kind of path that needs to be specified is determined by the contents of the **options** column (see below) for the given table.
+- **description**: An optional description of the contents and/or the purpose of the table.
+- **type**: Valve recognizes four special table types that can be specified using the **type** column. These are the `table`, `column`, `datatype`, and `rule` table types. Valve requires that tables corresponding to each of the first three types be configured. However specifying a table of type `rule` is optional. For more on the first three types, see the sections on [the column table](#the-column-table), [the datatype table](#the-column-table), and [the rule table](#the-column-table) below. Note that user-defined tables should not explicitly specify a type, and if one is specified it will be ignored unless it is one of the recognised types just mentioned.
 - **options**: allows the user to specify a number of further options for the table (see below).
+
+##### Further information on options
 
 If no options are specified, the options *db_table*, *truncate*, *load*, *save*, *edit*, *validate_on_load*, and *conflict* will all be set by default. The complete list of allowable options, and their meanings, are:
   - *db_table*: The table is represented in the database by a regular table. Note that this option is not compatible with *db_view*.
