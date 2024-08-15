@@ -109,7 +109,7 @@ The columns of the column table have the following significance:
 - **structure**: Valve recognises the following four structural constraints on columns:
   - `primary`: The column is the primary key for the table to which it belongs; values must therefore be unique. Note that in the database this implies that a `PRIMARY KEY` constraint will be declared for the column
   - `unique`: The column's values must be unique. Note that in the database this implies that a `UNIQUE` constraint will be declared for the column.
-  - `from(table_name.column_name)`: All non-null values of the column must exist in the column `column_name` of the table `table_name`. Note that in the database this implies that a `FOREIGN KEY` constraint will be declared for the column, unless the column's datatype is a [list datatype](#list-datatypes).
+  - `from(foreign_table.foreign_column)`: All non-null values of the column must exist in the column `foreign_column` of the table `foreign_table`. Note that in the database this implies that a `FOREIGN KEY` constraint will be declared for the column, unless the column's datatype is a [list datatype](#list-datatypes), and that a `UNIQUE` constraint will be declared for `foreign_table.foreign_column`, unless a `unique` structure has already been declared for that column in the column table.
   - `tree(column_name)`: All non-null values of the column must exist in the column `column_name` of the same table
 - **description**: An optional description of the contents and/or the purpose of the column.
 
