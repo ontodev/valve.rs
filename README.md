@@ -102,21 +102,20 @@ table3 | column2 | Column 2 | empty    |         | word         | tree(column1) 
 The columns of the column table have the following significance:
 - **table**: The name of the table to which the column belongs
 - **column**: The name of the column
-- **label**: If not empty, this will be used, instead of **column**, as the header for the column when saving the table
-- **nulltype**: The datatype used to represent a null value in the column. For instance the datatype 'empty' in the example above is defined to match the empty string (see also [the datatype table](#the-datatype-table)). If a column has no **nulltype**, this means that empty values for the column are to be considered invalid.
-- **default**: The default value to use for the column when inserting a row of data to the database. Note that in the database this implies that a `DEFAULT` constraint will be declared for the column
+- **label**: If not empty, this will be used, instead of **column**, as the header for the column when saving the table.
+- **nulltype**: The datatype used to represent a null value in the column. For instance the datatype 'empty' in the example above is defined to match the empty string (see also [the datatype table](#the-datatype-table)). If a column has no **nulltype**, this means that null values for the column are to be considered invalid.
+- **default**: The default value to use for the column when inserting a row of data to the database. Note that in the database this implies that a `DEFAULT` constraint will be declared for the column.
 - **datatype**: The column's datatype, which must be one of the valid datatypes defined in the [the datatype table](#the-datatype-table)
 - **structure**: Valve recognises the following four structural constraints on columns:
-  - `primary`: The column is the primary key for the table to which it belongs; values must therefore be unique. Note that in the database this implies that a `PRIMARY KEY` constraint will be declared for the column
+  - `primary`: The column is the primary key for the table to which it belongs; values must therefore be unique. Note that in the database this implies that a `PRIMARY KEY` constraint will be declared for the column.
   - `unique`: The column's values must be unique. Note that in the database this implies that a `UNIQUE` constraint will be declared for the column.
-  - `from(foreign_table.foreign_column)`: All non-null values of the column must exist in the column `foreign_column` of the table `foreign_table`. Note that in the database this implies that a `FOREIGN KEY` constraint will be declared for the column, unless the column's datatype is a [list datatype](#list-datatypes), and that a `UNIQUE` constraint will be declared for `foreign_table.foreign_column`, unless a `unique` structure has already been declared for that column in the column table.
+  - `from(foreign_table.foreign_column)`: All non-null values of the column must exist in the column `foreign_column` of the table `foreign_table`. Note that in the database this implies that a `FOREIGN KEY` constraint will be declared for the column, unless the column's datatype is a list datatype (see [the datatype table](#the-datatype-table)), and that a `UNIQUE` constraint will be declared for `foreign_table.foreign_column`, unless a `unique` structure has already been declared for that column in the column table.
   - `tree(column_name)`: All non-null values of the column must exist in the column `column_name` of the same table
 - **description**: An optional description of the contents and/or the purpose of the column.
 
-
 #### The datatype table
 
-In addition to the table table and the column table, Valve also requires a datatype table. The datatype table configuration is normally stored in a file called 'datatype.tsv' although in principle any filename could be used. The datatype table stores the definitions of the datatypes referred to in the **datatype** column of the column table. Below is a subset of the rows of an example datatype table:
+In addition to the table table and the column table, Valve also requires a datatype table. The datatype table configuration is normally stored in a file called 'datatype.tsv', though in principle any filename may be used as long as the **type** field corresponding to the filename is set to 'datatype in [the table table](#the-table-table). The datatype table stores the definitions of the datatypes referred to in the **datatype** column of the column table. Below is a subset of the rows of an example datatype table:
 
 datatype  | parent   | condition             | description                                       | sql_type | HTML type | format
 ---       | ---      | ---                   | ---                                               | ---      | ---       | ---
@@ -130,16 +129,26 @@ custom3   | text     | list(word, ' ')       | a list of words separated by spac
 custom4   | text     | search(/\d+/)         | a string containing a sequence of digits          |          |           |
 
 The columns of the datatype table have the following significance:
+- **datatype**: The name of the datatype
+- **parent**: TODO. Talk about how the hierarchy works when it comes to validation and sql types.
+- **condition**: The logical condition used to validate whether a given data value conforms to the datatype (see [datatype-conditions](#datatype-conditions) below)
+- **description**: TODO.
+- **sql_type**: TODO.
+- **HTML type** (optional): TODO.
+- **format** (optional): TODO.
 
-TODO.
+##### Datatype conditions
 
-##### List datatypes
-
-TODO.
+- *match(/REGEX/)*: TODO
+- *exclude(/REGEX/)*: TODO
+- *search(/REGEX/)*: TODO
+- *equals(VAL)*: TODO
+- *in(VAL1, ...)*: TODO
+- *list(DATATYPE, SEPARATOR)*: TODO
 
 #### The rule table
 
-In addition to the table table, the column table, and the datatype table, it is also possible (but optional) to configure a table of type 'rule', or a rule table. When it is configured, the rule table configuration is normally stored in a file called 'rule.tsv' though in principle any filename may be used. The rule table defines a number of rules of the following form:
+In addition to the table table, the column table, and the datatype table, it is also possible (but optional) to configure a table of type 'rule', or a rule table. When it is configured, the rule table configuration is normally stored in a file called 'rule.tsv', though in principle any filename may be used as long as the **type** field corresponding to the filename is set to 'rule in [the table table](#the-table-table). The rule table defines a number of rules of the following form:
 
 &nbsp; &nbsp; *when `CONDITION_ON_COLUMN_1` is satisfied then `CONDITION_ON_COLUMN_2` must also be satisfied*
 
