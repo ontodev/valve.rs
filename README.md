@@ -153,12 +153,12 @@ The columns of the datatype table have the following significance:
 
 ##### Datatype conditions
 
-- **match(/REGEX/)**: Violated if a given value does not match `REGEX`.
-- **exclude(/REGEX/)**: Violated if a given value matches `REGEX`.
-- **search(/REGEX/)**: Violated if a given value does not contain an instance of `REGEX`.
-- **equals(VAL)**: Violated if a given value is not equal to `VAL`.
-- **in(VAL1, ...)**: Violated if a given value is not one of the values in the list: `VAL1, ...`
-- **list(ITEM_DATATYPE, SEPARATOR)**: Values of the given column are in the form of a sequence of items, each of datatype `ITEM_DATATYPE`, separated by the string `SEPARATOR`. This condition is violated if any of the items fail to conform to `ITEM_DATATYPE`.
+- *match(/REGEX/)*: Violated if a given value does not match `REGEX`.
+- *exclude(/REGEX/)*: Violated if a given value matches `REGEX`.
+- *search(/REGEX/)*: Violated if a given value does not contain an instance of `REGEX`.
+- *equals(VAL)*: Violated if a given value is not equal to `VAL`.
+- *in(VAL1, ...)*: Violated if a given value is not one of the values in the list: `VAL1, ...`
+- *list(ITEM_DATATYPE, SEPARATOR)*: Values of the given column are in the form of a sequence of items, each of datatype `ITEM_DATATYPE`, separated by the string `SEPARATOR`. This condition is violated if any of the items fail to conform to `ITEM_DATATYPE`.
 
 #### Required datatypes
 
