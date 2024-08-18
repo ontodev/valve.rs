@@ -888,7 +888,7 @@ pub fn read_config_files(
     }
 
     // Check that all the essential datatypes have been configured:
-    for dt in vec!["text", "empty", "line", "word"] {
+    for dt in vec!["text", "empty", "line", "trimmed_line", "nonspace", "word"] {
         if !datatypes_config.contains_key(dt) {
             return Err(
                 ValveError::ConfigError(format!("Missing required datatype: '{}'", dt)).into(),
