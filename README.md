@@ -13,7 +13,7 @@ Valve - A lightweight validation engine written in rust.
 
 ## Design and concepts
 
-To be written.
+TODO.
 
 ## Installation and configuration
 
@@ -21,15 +21,15 @@ To be written.
 
 #### Binary installation
 
-Option 1: Build and install the binary for the latest release using [crates.io](https://crates.io/crates/ontodev_valve) by running:
+_Option 1_: Build and install the binary for the latest release using [crates.io](https://crates.io/crates/ontodev_valve) by running:
 
     cargo install ontodev_valve
 
-Option 2: Download the appropriate binary for your system from the [release page](https://github.com/ontodev/valve.rs/releases) and copy it to your system's executable path.
+_Option 2_: Download the appropriate binary for your system from the [release page](https://github.com/ontodev/valve.rs/releases) and copy it to your system's executable path.
 
 #### Source installation
 
-If you would like to work with a newer version of Valve, you can build the binary from source instead. Begin by using `git clone` to clone the source code repository into a local folder:
+It is also possible to build the binary yourself from the source code. This is required if you would like to work with a version of Valve that is newer than the latest release. Begin by using `git clone` to clone the source code repository into a local folder:
 
     git clone git@github.com:ontodev/valve.rs.git
 
@@ -41,11 +41,21 @@ After the build has completed successfully, the `ontodev_valve` binary may be fo
 
     cp target/release/ontodev_valve ~/bin/
 
+Finally, run
+
+    ontodev_valve --help
+
+to verify that Valve was installed correctly.
+
 ### Configuration
+
+Valve is configured primarily using a number of special configuration tables that can be represented as '.tsv' files. The most important of these is the table called 'table', also known as the table table. A [table table](#the-table-table) configuration is required to use Valve. A [column table](#the-column-table) and [datatype table](#the-datatype-table) configuration are required as well. Optionally, the user may also specify a rule table configuration.
+
+The table table is alone among the configuration tables in that it cannot be given an arbitrary name but must always be given the name 'table'. This is not the case for the column, datatype and rules tables. Although it is recommended to use the names 'column, 'datatype', and 'rule', respectively, alternate names may be chosen for these tables as explained below.
 
 #### The table table
 
-Valve is configured using a number of special, required, configuration tables that can be represented as '.tsv' files. The most important of these is the table called 'table', also known as the table table. One normally configures the table table using a '.tsv' file called 'table.tsv', although any filename could be used in principle, and in fact it is also possible to read the table table directly from the database, as long as the database already contains a table called 'table' with the right setup. 
+One normally configures the table table using a '.tsv' file called 'table.tsv', although any filename could be used in principle, and in fact it is also possible to read the table table directly from the database, as long as the database already contains a table called 'table' with the right setup. 
 
 Below is an example of a table table:
 
@@ -64,16 +74,16 @@ user_view3           |                                      |             |     
 
 Note that in the first row above the table being described is the table table itself. In general the columns of the table table have the following significance:
 - **table**: the name of the table.
-- **path**: where to find information about the contents of the table. This can be a '.tsv' file, a '.sql' file, some other executable file, or it can be empty. The kind of path (if any) that needs to be specified is determined by the contents of the **options** column (see below) for the given table.
+- **path**: where to find information about the contents of the table. This can be a '.tsv' file, a '.sql' file, some other executable file, or it can be empty. The path for one of the special configuration tables must be a '.tsv' file. Otherwise the kind of path (if any) that needs to be specified is determined by the contents of the **options** column (see below) for the given table.
 - **description**: An optional description of the contents and/or the purpose of the table.
-- **type**: Valve recognizes four special configuration table types that can be specified using the **type** column of the table table. These are the `table`, `column`, `datatype`, and `rule` table types. Configuring a table, column, and datatype table is required to operate Valve, while configuring a rule table is optional. This section is about the table table, i.e., the (single) configured table of type 'table'. For the other special table types, see the sections on [the column table](#the-column-table), [the datatype table](#the-datatype-table), and the [the rule table](#the-rule-table) below. Data tables (e.g., the 'user_*' tables in the above example) should not explicitly specify a type, and in general if a type other than the ones just mentioned is specified it will be ignored.
-- **options**: allows the user to specify a number of further options for the table (see below).
+- **type**: Valve recognizes four special configuration table types that can be specified using the **type** column of the table table. These are the `table`, `column`, `datatype`, and `rule` table types. Data tables (e.g., the 'user_*' tables in the above example) should not explicitly specify a type, and in general if a type other than the ones just mentioned is specified it will be ignored.
+- **options** (optional column): Allows the user to specify a number of further options for the table (see below).
 
 ##### Further information on options
 
-If no options are specified, the options *db_table*, *truncate*, *load*, *save*, *edit*, *validate_on_load*, and *conflict* will all be set by default. The complete list of allowable options, and their meanings, are given below:
-  - *db_table*: The table will be represented in the database by a regular table. Note that if the *edit* option has also been set, then **path** must be non-empty and it can be (a) a file ending (case insensitively) with '.tsv' explicitly specifying the contents of the table, (b) a file ending (case insensitively) with '.sql', or (c) an executable file. In the case of (a), Valve will take care of validating and loading the data from the '.tsv' file. In cases (b) and (c), Valve uses the '.sql' file or the executable to load the data, and performs no validation other than to verify that it has been done without error. If **path** is empty, then Valve expects that the table has already been created and loaded by the user and will fail otherwise. Note that the *db_table* option is not compatible with *db_view*.
-  - *db_view*: The table is represented in the database by a view. A view is allowed to have an empty **path**, in which case valve simply verifies that the view exists but does not create it. When **path** is non-empty then it must either end (case-insensitively) in '.sql' or be an executable file. Note that the **path** for a *db_view* must never end (case-insensitively) in '.tsv'. When **path** is not-empty, valve relies on the '.sql' file or the executable to create the view, otherwise it expects the view to have already been created by the user. Regardless of the value of **path**, Valve performs no validation of the data other than to verify that the view exists. Note that the *db_view* option is not compatible with any of *db_table*, *truncate*, *load*, *conflict*, *save*, *edit*, or *validate_on_load*.
+If no options are specified, the options *db_table*, *truncate*, *load*, *save*, *edit*, *validate_on_load*, and *conflict* will all be set to true by default. The complete list of allowable options, and their meanings, are given below:
+  - *db_table*: The table will be represented in the database by a regular table. Note that if the *edit* option has also been set, then **path** must be non-empty and it can be one of (a) a file ending (case insensitively) with '.tsv' explicitly specifying the contents of the table, (b) a file ending (case insensitively) with '.sql', or (c) an executable file. In the case of (a), Valve will take care of validating and loading the data from the '.tsv' file. In cases (b) and (c), Valve uses the '.sql' file or the executable to load the data, and performs no validation other than to verify that this has been done without error. If **path** is empty, then Valve expects that the table has already been created and loaded by the user and will fail otherwise. Note that the *db_table* option is not compatible with the *db_view* option.
+  - *db_view*: The table will be represented in the database by a view. A view is allowed to have an empty **path**, in which case valve simply verifies that the view exists but does not create it. When **path** is non-empty then it must either end (case-insensitively) in '.sql' or be an executable file. Note that the **path** for a view must never end (case-insensitively) in '.tsv'. When **path** is not-empty, valve relies on the '.sql' file or the executable to create the view, otherwise it expects the view to have already been created by the user. Regardless of the value of **path**, Valve performs no validation of the data other than to verify that the view exists in the database. Note that the *db_view* option is not compatible with any of *db_table*, *truncate*, *load*, *conflict*, *save*, *edit*, or *validate_on_load*.
   - *load*: The table may be loaded with data. Note that this option is not compatible with *db_view*.
   - *truncate*: The table should be truncated before it is loaded. Note that this option is not compatible with *db_view*.
   - *conflict*: When reading the configuration for a table called 'T', then if 'T' has the *conflict* option set, Valve should create, in addition to 'T', a database table called 'T_conflict'. The purpose of this table is to store invalid data that, due to the violation of a database constraint, cannot be stored in 'T' (see [Design and concepts](#design-and-concepts)). Note that the *conflict* option is not compatible with *db_view*.
@@ -88,7 +98,9 @@ If no options are specified, the options *db_table*, *truncate*, *load*, *save*,
 
 #### The column table
 
-In addition to a table table, Valve also requires a column table. The column table configuration is normally stored in a file called 'column.tsv', though in principle any filename may be used as long as the **type** field corresponding to the filename is set to 'column' in [the table table](#the-table-table). The column table contains one row for every column of every configured table. This includes both special configuration tables (such as the column table itself) and user-defined tables. Below is an example column table, with the special configuration tables omitted:
+In addition to a table table, Valve also requires a column table. The column table configuration is normally stored in a file called 'column.tsv', though in principle any filename may be used as long as the **type** field corresponding to the filename is set to 'column' in [the table table](#the-table-table). The column table contains one row for every column of every configured table. This includes both special configuration tables (such as the column table itself) and user-defined tables.
+
+Below is an example column table, with the special configuration tables omitted:
 
 table  | column  | label    | nulltype | default | datatype     | structure            | description
 ---    | ---     | ---      | ---      | ---     | ---          | ---                  | ---
@@ -102,20 +114,22 @@ table3 | column2 | Column 2 | empty    |         | word         | tree(column1) 
 The columns of the column table have the following significance:
 - **table**: The name of the table to which the column belongs
 - **column**: The name of the column
-- **label**: If not empty, this will be used, instead of **column**, as the header for the column when saving the table.
-- **nulltype**: The datatype used to represent a null value in the column. For instance the datatype 'empty' in the example above is defined to match the empty string (see also [the datatype table](#the-datatype-table)). If a column has no **nulltype**, this means that null values for the column are to be considered invalid.
-- **default**: The default value to use for the column when inserting a row of data to the database. Note that in the database this implies that a `DEFAULT` constraint will be declared for the column.
+- **label**: If not empty, then instead of **column**, use **label** as the header for the column when saving the table.
+- **nulltype**: The datatype, defined in [the datatype table](#the-datatype-table), used to represent a null value in the column. For instance the datatype 'empty' in the example above is defined to match the string '' (see the example from the section on [the datatype table](#the-datatype-table)). If a column has a **nulltype**, then values of the column that match the **nulltype**'s associated datatype are considered to be valid values for the column. If a column has no **nulltype**, this means that a null value (by default, an empty string) for the column is considered to be an invalid value.
+- **default** (optional column): The default value to use for the column when inserting a row of data to the database. Note that in the database this implies that a `DEFAULT` constraint will be declared for the column.
 - **datatype**: The column's datatype, which must be one of the valid datatypes defined in the [the datatype table](#the-datatype-table)
 - **structure**: Valve recognises the following four structural constraints on columns:
   - `primary`: The column is the primary key for the table to which it belongs; values must therefore be unique. Note that in the database this implies that a `PRIMARY KEY` constraint will be declared for the column.
   - `unique`: The column's values must be unique. Note that in the database this implies that a `UNIQUE` constraint will be declared for the column.
-  - `from(foreign_table.foreign_column)`: All non-null values of the column must exist in the column `foreign_column` of the table `foreign_table`. Note that in the database this implies that a `FOREIGN KEY` constraint will be declared for the column, unless the column's datatype is a list datatype (see [the datatype table](#the-datatype-table)), and that a `UNIQUE` constraint will be declared for `foreign_table.foreign_column`, unless a `unique` structure has already been declared for that column in the column table.
+  - `from(foreign_table.foreign_column)`: All non-null values of the column must exist in the column `foreign_column` of the table `foreign_table`. Note that in the database this implies that a `FOREIGN KEY` constraint will be declared for the column, unless the column's datatype is a list datatype (see [the datatype table](#the-datatype-table)), and it also implies that a `UNIQUE` constraint will be declared for `foreign_table.foreign_column`, unless a `unique` structure has already been declared for that column in the column table.
   - `tree(column_name)`: All non-null values of the column must exist in the column `column_name` of the same table
-- **description**: An optional description of the contents and/or the purpose of the column.
+- **description**: A description of the contents and/or the purpose of the column.
 
 #### The datatype table
 
-In addition to the table table and the column table, Valve also requires a datatype table. The datatype table configuration is normally stored in a file called 'datatype.tsv', though in principle any filename may be used as long as the **type** field corresponding to the filename is set to 'datatype in [the table table](#the-table-table). The datatype table stores the definitions of the datatypes referred to in the **datatype** column of the column table. Below is a subset of the rows of an example datatype table:
+In addition to the table table and the column table, Valve also requires the user to configure a datatype table. The datatype table configuration is normally stored in a file called 'datatype.tsv', though in principle any filename may be used as long as the **type** field corresponding to the filename is set to 'datatype in [the table table](#the-table-table). The datatype table stores the definitions of the datatypes referred to in the **datatype** column of the column table.
+
+Below is a subset of the rows of an example datatype table:
 
 datatype  | parent   | condition             | description                                       | sql_type | HTML type | format
 ---       | ---      | ---                   | ---                                               | ---      | ---       | ---
@@ -130,27 +144,36 @@ custom4   | text     | search(/\d+/)         | a string containing a sequence of
 
 The columns of the datatype table have the following significance:
 - **datatype**: The name of the datatype
-- **parent**: TODO. Talk about how the hierarchy works when it comes to validation and sql types.
+- **parent**: The more generic datatype, if any, that this datatype is a special case of. When the value of a given column violates its datatype **condition**, Valve will move up the datatype hierarchy to determine whether its ancestors' datatype conditions have also been violated, and if so, Valve will add validation error messages corresponding to these further violations to the error messages it assigns to that value in that column.
 - **condition**: The logical condition used to validate whether a given data value conforms to the datatype (see [datatype-conditions](#datatype-conditions) below)
-- **description**: TODO.
-- **sql_type**: TODO.
-- **HTML type** (optional): TODO.
-- **format** (optional): TODO.
+- **description**: A description of the datatype and/or its purpose.
+- **sql_type**: The SQL type to use for columns that have the given datatype in the database. If empty, the SQL type of the nearest ancestor for which a SQL type has been defined will be used.
+- **HTML type** (optional column): The HTML type corresponding to the datatype.
+- **format** (optional column): The sprintf-style format string to apply to values of the datatype when saving them.
 
 ##### Datatype conditions
 
-- *match(/REGEX/)*: TODO
-- *exclude(/REGEX/)*: TODO
-- *search(/REGEX/)*: TODO
-- *equals(VAL)*: TODO
-- *in(VAL1, ...)*: TODO
-- *list(DATATYPE, SEPARATOR)*: TODO
+- *match(/`REGEX`/)*: Violated if a given value does not match `REGEX`.
+- *exclude(/`REGEX`/)*: Violated if a given value matches `REGEX`.
+- *search(/`REGEX`/)*: Violated if a given value does not contain an instance of `REGEX`.
+- *equals(`VAL`)*: Violated if a given value is not equal to `VAL`.
+- *in(`VAL1, ...`)*: Violated if a given value is not one of the values in the list: `VAL1, ...`
+- *list(`ITEM_DATATYPE`, `SEPARATOR`)*: Values of the given column are in the form of a sequence of items, each of datatype `ITEM_DATATYPE`, separated by the string `SEPARATOR`. This condition is violated if any of the items fail to conform to `ITEM_DATATYPE`.
+
+#### Required datatypes
+
+Valve requires that the following datatypes be defined:
+- `text`, `empty`, `line`, `word`
+
+Note that the `text` type should be defined so that it accepts any string of text, i.e., its associated datatype **condition** should be left undefined.
 
 #### The rule table
 
-In addition to the table table, the column table, and the datatype table, it is also possible (but optional) to configure a table of type 'rule', or a rule table. When it is configured, the rule table configuration is normally stored in a file called 'rule.tsv', though in principle any filename may be used as long as the **type** field corresponding to the filename is set to 'rule in [the table table](#the-table-table). The rule table defines a number of rules of the following form:
+In addition to the table table, the column table, and the datatype table, it is also possible (but optional) to configure a table of type 'rule', or a rule table. When it is configured, the rule table configuration is normally stored in a file called 'rule.tsv', though in principle any filename may be used as long as the **type** field corresponding to the filename is set to 'rule in [the table table](#the-table-table).
 
-&nbsp; &nbsp; *when `CONDITION_ON_COLUMN_1` is satisfied then `CONDITION_ON_COLUMN_2` must also be satisfied*
+The rule table is used to define a number of rules of the following form:
+
+&nbsp; &nbsp; &nbsp; &nbsp; *when `CONDITION_ON_COLUMN_1` is satisfied then `CONDITION_ON_COLUMN_2` must also be satisfied* &nbsp; &nbsp; &nbsp; &nbsp; (1)
 
 where `CONDITION_ON_COLUMN_1` and `CONDITION_ON_COLUMN_2` are defined with respect to the same table.
 
@@ -163,7 +186,13 @@ table2 | foo         | negative_int   | bar         | positive_int   | error |
 
 The columns of the rule table have the following significance:
 
-**TODO.**
+- **table**: The name of the table to which the rule is applicable.
+- **when column**: The column that the **when condition** will be checked against.
+- **when condition**: The condition to apply to values of **when column**
+- **then column**: The column that the **then condition** will be checked against.
+- **then condition**: The condition to apply to values of **then column** whenever the **when condition** has been satisfied for **when column**.
+- **level**: The severity of the violation
+- **description**: A description of the rule and/or its purpose.
 
 #### Using the `--guess` option
 

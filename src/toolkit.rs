@@ -695,6 +695,13 @@ pub fn read_config_files(
         // Check that the table table path is the same as the path that was input as an argument to
         // this function:
         if row_type == "table" {
+            if row_table != "table" {
+                return Err(ValveError::ConfigError(format!(
+                    "Invalid table table name: '{}'. The table table must be named 'table'",
+                    row_table,
+                ))
+                .into());
+            }
             if path.to_lowercase().ends_with(".tsv") && row_path != path {
                 return Err(ValveError::ConfigError(format!(
                     "The \"table\" table path '{}' is not the expected '{}'",
