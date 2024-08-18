@@ -154,7 +154,7 @@ The columns of the datatype table have the following significance:
 ##### Datatype conditions
 
 - `match(/REGEX/)`: Violated if a given value does not match `REGEX`.
-- `exclude(/REGEX/)`: Violated if a given value matches `REGEX`.
+- `exclude(/REGEX/)`: Violated if a given value contains an instance of `REGEX`.
 - `search(/REGEX/)`: Violated if a given value does not contain an instance of `REGEX`.
 - `equals(VAL)`: Violated if a given value is not equal to `VAL`.
 - `in(VAL1, ...)`: Violated if a given value is not one of the values in the list: `VAL1, ...`
@@ -163,9 +163,18 @@ The columns of the datatype table have the following significance:
 #### Required datatypes
 
 Valve requires that the following datatypes be defined:
-- `text`, `empty`, `line`, `word`
+- `text`, `empty`, `line`, `trimmed_line`, `nonspace`, `word`
 
-Note that the `text` type should be defined so that it accepts any string of text, i.e., its associated datatype **condition** should be left undefined.
+The recommended datatype configurations for these four datatypes are the following:
+
+datatype     | parent       | condition              | description | sql_type | HTML type | format
+---          | ---          | ---                    | ---         | ---      | ---       | ---
+text         |              |                        |             | TEXT     | textarea  |
+empty        | text         | equals('')             |             | NULL     |           |
+line         | text         | exclude(/\n/)          |             |          | input     |
+trimmed_line | line         | match(/\S([^\n]*\S)*/) |             |          |           |
+nonspace     | trimmed_line | exclude(/\s/)          |             |          |           |
+word         | nonspace     | exclude(/\W/)          |             |          |           | %s
 
 #### The rule table
 
