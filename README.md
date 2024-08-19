@@ -50,7 +50,7 @@ to verify that Valve was installed correctly.
 
 ### Configuration
 
-Valve is configured primarily using a number of special configuration tables that can be represented as '.tsv' files. The most important of these is the table called 'table', also known as the table table. A [table table](#the-table-table) configuration is required to use Valve. A [column table](#the-column-table) and [datatype table](#the-datatype-table) configuration are required as well. Optionally, the user may also specify a rule table configuration.
+Valve is configured primarily using a number of special configuration tables that can be represented as '.tsv' files. The most important of these is the table called 'table', also known as the table table. A [table table](#the-table-table) configuration is required to use Valve. A [column table](#the-column-table) and [datatype table](#the-datatype-table) configuration are required as well. Optionally, the user may also specify a [rule table](#the-rule-table) configuration.
 
 The table table is alone among the configuration tables in that it cannot be given an arbitrary name but must always be given the name 'table'. This is not the case for the column, datatype and rules tables. Although it is recommended to use the names 'column, 'datatype', and 'rule', respectively, alternate names may be chosen for these tables as explained below.
 
