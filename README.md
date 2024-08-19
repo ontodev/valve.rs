@@ -203,9 +203,35 @@ The columns of the rule table have the following significance:
 - **level**: The severity of the violation
 - **description**: A description of the rule and/or its purpose.
 
-#### Using the `--guess` option
+#### Using **guess**
 
-**TODO**
+In some cases it is useful to be able to try and infer what the table table and column table configuration should be, given the current state of the Valve instance, for a given data table not currently managed by Valve. To do this one may use Valve's command line interface to run the **guess** subcommand as follows:
+
+    ontodev_valve guess [OPTIONS] SOURCE DESTINATION TABLE_TSV
+
+where:
+- `SOURCE` is the location of the '.tsv' representing the table table.
+- `DESTINATION` is the path to a PostgreSQL or SQLite database.
+- `TABLE_TSV` is the '.tsv' file representing the data table whose column configuration is to be guessed.
+
+For the list of possible options, and for general information on Valve's command line interface, see [command line usage](#command-line-usage). Below is an example of using **guess**:
+
+    $ ./valve guess test/guess_test_data/table.tsv build/valve_guess.db test/guess_test_data/ontology/table2.tsv 
+
+    The following row will be inserted to "table":
+    table                                     path                                      type                                      description                               
+    table2                                    test/guess_test_data/ontology/table2.tsv                                                                                      
+
+    The following row will be inserted to "column":
+    table               column              label               nulltype            datatype            structure           description         
+    table2              zork                                                        integer             primary                                 
+    table2              zindy                                                       IRI                 unique                                  
+    table2              xyzzy                                                       suffix              unique                                  
+    table2              foo                                                         prefix                                                      
+    table2              bar                                                         IRI                 unique                                  
+
+    Do you want to write this updated configuration to the database? [y/N] y
+
 
 ## Command line usage
 
