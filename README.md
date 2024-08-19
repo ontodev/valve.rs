@@ -9,6 +9,7 @@ Valve - A lightweight validation engine written in rust.
 - [Command line usage](#command-line-usage)
 - [Logging](#logging)
 - [Application Programmer Interface (API)](#api)
+- [Troubleshooting](#troubleshooting)
 - [Python bindings](#python-bindings)
 
 ## Design and concepts
@@ -276,6 +277,10 @@ in the the root folder of your local copy of the valve.rs source code repository
 in your favourite browser. For a more general discussion of how
 
 For a higher level See also the [Design and concepts](#design-and-concepts) section below.
+
+## Troubleshooting
+
+TODO.
 
 ## Python bindings
 See [valve.py](https://github.com/ontodev/valve.py)
