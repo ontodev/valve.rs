@@ -67,9 +67,8 @@ column               | schema/column.tsv                    |             | colu
 datatype             | schema/datatype.tsv                  |             | datatype |
 rule                 | schema/rule.tsv                      |             | rule     |
 user_table1          | schema/user/user_table1.tsv          |             |          |
-user_readonly_table2 | schema/user/user_readonly_table1.tsv |             |          | no-edit no-save no-conflict
+user_readonly_table1 | schema/user/user_readonly_table1.tsv |             |          | no-edit no-save no-conflict
 user_view1           | schema/user/user_view1.sql           |             |          | db_view
-user_view2           | schema/user/user_view2.sh            |             |          | db_view
 user_view2           | schema/user/user_view2.sh            |             |          | db_view
 user_view3           |                                      |             |          | db_view
 
@@ -128,7 +127,7 @@ The columns of the column table have the following significance:
 
 #### The datatype table
 
-In addition to the table table and the column table, Valve also requires the user to configure a datatype table. The datatype table configuration is normally stored in a file called 'datatype.tsv', though in principle any filename may be used as long as the **type** field corresponding to the filename is set to 'datatype in [the table table](#the-table-table). The datatype table stores the definitions of the datatypes referred to in the **datatype** column of the column table.
+In addition to the table table and the column table, Valve also requires the user to configure a datatype table. The datatype table configuration is normally stored in a file called 'datatype.tsv', though in principle any filename may be used as long as the **type** field corresponding to the filename is set to 'datatype' in [the table table](#the-table-table). The datatype table stores the definitions of the datatypes referred to in the **datatype** column of the column table.
 
 Below is a subset of the rows of an example datatype table:
 
@@ -146,27 +145,27 @@ custom4   | text     | search(/\d+/)         | a string containing a sequence of
 The columns of the datatype table have the following significance:
 - **datatype**: The name of the datatype
 - **parent**: The more generic datatype, if any, that this datatype is a special case of. When the value of a given column violates its datatype **condition**, Valve will move up the datatype hierarchy to determine whether its ancestors' datatype conditions have also been violated, and if so, Valve will add validation error messages corresponding to these further violations to the error messages it assigns to that value in that column.
-- **condition**: The logical condition used to validate whether a given data value conforms to the datatype (see [datatype-conditions](#datatype-conditions) below)
+- **condition**: The logical condition used to validate whether a given data value conforms to the datatype (see [condition types](#condition-types) below)
 - **description**: A description of the datatype and/or its purpose.
 - **sql_type**: The SQL type to use for columns that have the given datatype in the database. If empty, the SQL type of the nearest ancestor for which a SQL type has been defined will be used.
 - **HTML type** (optional column): The HTML type corresponding to the datatype.
 - **format** (optional column): The sprintf-style format string to apply to values of the datatype when saving them.
 
-##### Datatype conditions
+##### Condition types
 
 - `match(/REGEX/)`: Violated if a given value does not match `REGEX`.
 - `exclude(/REGEX/)`: Violated if a given value contains an instance of `REGEX`.
 - `search(/REGEX/)`: Violated if a given value does not contain an instance of `REGEX`.
 - `equals(VAL)`: Violated if a given value is not equal to `VAL`.
 - `in(VAL1, ...)`: Violated if a given value is not one of the values in the list: `VAL1, ...`
-- `list(ITEM_DATATYPE, SEPARATOR)`: Values of the given column are in the form of a sequence of items, each of datatype `ITEM_DATATYPE`, separated by the string `SEPARATOR`. This condition is violated whenever a value of the column is not in this form, otherwise it is violated if any of the items in the given list fail to conform to `ITEM_DATATYPE`.
+- `list(ITEM_DATATYPE, SEPARATOR)`: Violated if a given value is not in the form of a sequence of items, each of datatype `ITEM_DATATYPE`, separated by the string `SEPARATOR`. Otherwise the condition is violated if any of the items in the given list fail to conform to `ITEM_DATATYPE`.
 
 #### Required datatypes
 
 Valve requires that the following datatypes be defined:
 - `text`, `empty`, `line`, `trimmed_line`, `nonspace`, `word`
 
-The recommended datatype configurations for these four datatypes are the following:
+The recommended datatype configurations for these four datatypes are the following (note that the `HTML type` and `format` columns are optional):
 
 datatype     | parent       | condition              | description | sql_type | HTML type | format
 ---          | ---          | ---                    | ---         | ---      | ---       | ---
@@ -179,7 +178,7 @@ word         | nonspace     | exclude(/\W/)          |             |          | 
 
 #### The rule table
 
-In addition to the table table, the column table, and the datatype table, it is also possible (but optional) to configure a table of type 'rule', or a rule table. When it is configured, the rule table configuration is normally stored in a file called 'rule.tsv', though in principle any filename may be used as long as the **type** field corresponding to the filename is set to 'rule in [the table table](#the-table-table).
+In addition to the table table, the column table, and the datatype table, it is also possible (but optional) to configure a table of type 'rule', or a rule table. When it is configured, the rule table configuration is normally stored in a file called 'rule.tsv', though in principle any filename may be used as long as the **type** field corresponding to the filename is set to 'rule' in [the table table](#the-table-table).
 
 The rule table is used to define a number of rules of the following form:
 
@@ -198,15 +197,15 @@ The columns of the rule table have the following significance:
 
 - **table**: The name of the table to which the rule is applicable.
 - **when column**: The column that the **when condition** will be checked against.
-- **when condition**: The condition to apply to values of **when column**
+- **when condition**: The condition to apply to values of **when column**. This can either be one of the recognized [condition types](#condition-types), or it can be the name of a datatype in which case the condition corresponding to the datatype will be used.
 - **then column**: The column that the **then condition** will be checked against.
-- **then condition**: The condition to apply to values of **then column** whenever the **when condition** has been satisfied for **when column**.
+- **then condition**: The condition to apply to values of **then column** whenever the **when condition** has been satisfied for **when column**. This can either be one of the recognized [condition types](#condition-types), or it can be the name of a datatype in which case the condition corresponding to the datatype will be used.
 - **level**: The severity of the violation
 - **description**: A description of the rule and/or its purpose.
 
 #### Using **guess**
 
-In some cases it is useful to be able to try and infer what the table table and column table configuration should be, given the current state of the Valve instance, for a given data table not currently managed by Valve. To do this one may use Valve's command line interface to run the **guess** subcommand as follows:
+In some cases it is useful to be able to try and guess what the table table and column table configuration should be, using information about the current state of the Valve instance, for a given data table not currently managed by Valve. To do this one may use Valve's command line interface to run the **guess** subcommand as follows:
 
     ontodev_valve guess [OPTIONS] SOURCE DESTINATION TABLE_TSV
 
@@ -215,7 +214,9 @@ where:
 - `DESTINATION` is the path to a PostgreSQL or SQLite database.
 - `TABLE_TSV` is the '.tsv' file representing the data table whose column configuration is to be guessed.
 
-For the list of possible options, and for general information on Valve's command line interface, see [command line usage](#command-line-usage). Below is an example of using **guess**:
+For the list of possible options, and for general information on Valve's command line interface, see [command line usage](#command-line-usage).
+
+Below is an example of using **guess**:
 
     $ ./valve guess test/guess_test_data/table.tsv build/valve_guess.db test/guess_test_data/ontology/table2.tsv 
 
