@@ -218,7 +218,7 @@ For the list of possible options, and for general information on Valve's command
 
 Below is an example of using **guess**:
 
-    $ ./valve guess test/guess_test_data/table.tsv build/valve_guess.db test/guess_test_data/ontology/table2.tsv 
+    $ ontodev_valve guess test/guess_test_data/table.tsv build/valve_guess.db test/guess_test_data/ontology/table2.tsv 
 
     The following row will be inserted to "table":
     table                                     path                                      type                                      description                               
