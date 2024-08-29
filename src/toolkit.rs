@@ -668,7 +668,7 @@ pub fn read_config_files(
         if is_view || is_readonly {
             if is_view && row_path.ends_with(".tsv") {
                 return Err(ValveError::ConfigError(format!(
-                    "Invalid path '{}' for view '{}'. TSV files are not supported for views.",
+                    "Invalid path '{}' for view '{}'. '.tsv' files are not supported for views.",
                     row_path, row_table,
                 ))
                 .into());
