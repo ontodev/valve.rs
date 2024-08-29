@@ -381,11 +381,11 @@ The **path** column indicates where the data for a given table may be found. It 
    - The *db_view* option is not allowed. If set to true, Valve will fail with a "'.tsv' files are not supported for views" error.
 
 2. If **path** does not end in '.tsv':
-   - Its associated **type** must be empty. Note that this implies that Valve's [configuration tables](#configuration) must be specified using '.tsv' files. User tables are allowed to use any of the possible path types (a) through (d).
+   - Its associated **type** must be empty. Note that this implies that Valve's [configuration tables](#configuration) _must_ be specified using '.tsv' files.
    - The *edit* option is not allowed. If set to true, Valve will fail with an "Editable tables require a path that ends in '.tsv'" error.
 
 3. If **path** either ends in '.sql', or represents a generic executable:
-   - If the *db_view* option is set, Valve assumes that the '.sql' file or generic executable indicated contains the instructions necessary to create the and load the database table.
+   - If the *db_view* option is set, Valve assumes that the '.sql' file or generic executable indicated contains the instructions necessary to create the view and that the view displays the appropriate data.
    - If the *db_view* option is not set, Valve will take care of creating the table but it will expect that the '.sql' file or generic executable contains the statements necessary to load the data.
    - If **path** ends in '.sql', Valve reads in the statements contained in the '.sql' file and then executes them against the database.
    - If **path** represents a generic executable, then it is executed as a shell process. Note that the executable script or binary must accept two arguments indicating the location of the database and the name of the table that the path corresponds to.
