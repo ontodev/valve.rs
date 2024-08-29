@@ -369,17 +369,38 @@ Note that in the first row above the table being described is the table table it
 - **table**: the name of the table.
 - **path**: where to find information about the contents of the table (see below). Note that the path for one of the special configuration tables must be a '.tsv' file.
 - **description**: An optional description of the contents and/or the purpose of the table.
-- **type**: Valve recognizes four special configuration table types that can be specified using the **type** column of the table table. These are the `table`, `column`, `datatype`, and `rule` table types. Data tables (e.g., the 'user_*' tables in the above example) should not explicitly specify a type, and in general if a type other than the ones just mentioned is specified it will be ignored.
+- **type**: Valve recognizes four special configuration table types that can be specified using the **type** column of the table table. These are the `table`, `column`, `datatype`, and `rule` table types. Data tables (e.g., the 'user_*' tables in the above example) should not explicitly specify a type, and in general if a type other than the ones just mentioned is specified, Valve will exit with an "Unrecognized table type" error.
 - **options** (optional column): Allows the user to specify a number of further options for the table (see below).
 
 ##### Further information on **path**
 
-The **path** column indicates where the data for a given table may be found. It can be a '.tsv' file, a '.sql' file, some other executable file, or it can be empty. In each case it will have consequences for the possible values of **type** and **options**.
+The **path** column indicates where the data for a given table may be found. It can be (a) a '.tsv' file, (b) a '.sql' file, (c) some other executable file, or (d) the **path** may be empty. In each case it will have the following consequences for the possible values of **type** and and for the possible **options** that may be used with the table.
 
-1. If **path** is not a '.tsv' file, then **type** should be empty. It must not be any of `table`, `column`, `datatype`, or `rule`.
-2. If **path** is a '.tsv' file, then the *db_view* option (see below) cannot be set.
-3. If **path** is a '.sql' file, then either the *db_view* or *db_table* option may be used. In either case, Valve will execute the statements contained in the '.sql' file against the database and verify that the table or view has been created successfully, but will not directly manipulate the data.
+1. If **path** ends in '.tsv':
+   - Its associated **type** may be any one of `table`, `column`, `datatype`, `rule`, or it may be empty.
+   - The *db_view* option is not allowed. If set to true, Valve will fail with a "'.tsv' files are not supported for views" error.
 
+2. If **path** does not end in '.tsv':
+   - Its associated **type** must be empty. Note that this implies that Valve's [configuration tables](#configuration) must be specified using '.tsv' files. User tables are allowed to use any of the possible path types (a) through (d).
+   - The *edit* option is not allowed. If set to true, Valve will fail with an "Editable tables require a path that ends in '.tsv'" error.
+
+3. If **path** either ends in '.sql', or represents a generic executable:
+   - If the *db_view* option is set, Valve assumes that the '.sql' file or generic executable indicated contains the instructions necessary to create the and load the database table. Otherwise, Valve will take care of creating the table but it will expect that the '.sql' file or generic executable contains the statements necessary to load the data.
+   - If **path** ends in '.sql', Valve reads in the statements contained in the '.sql' file and then executes them against the database.
+   - If **path** represents a generic executable, then it is executed as a shell process. Note that the executable script or binary must accept two arguments indicating the location of the database and the name of the table that the path corresponds to.
+
+5. If **path** is empty:
+   - If the *db_view* option is set, Valve assumes that the view already exists in the database.
+   - If the *db_view* option is not set, Valve will take care of creating the table but it will not attempt to load it.
+
+This is summarized in the following table:
+
+path               | possible types           | possible options      | created by                                    | loaded by
+-------------------|--------------------------|-----------------------|-----------------------------------------------|----------
+Ends in '.tsv'     | any valid type, or empty | *db_view* not allowed | Valve                                         | Valve
+Ends in '.sql'     | must be empty            | *edit* not allowed    | *db_view*: the '.sql' file, *db_table*: Valve | Valve
+Generic executable | must be empty            | *edit* not allowed    | *db_view*: the executable, *db_table*: Valve  | Valve
+empty              | must be empty            | *edit* not allowed    | No one (assumed to already exist)             | No one (assumed to be already loaded)
 
 ##### Further information on **options**
 
