@@ -396,12 +396,14 @@ The **path** column indicates where the data for a given table may be found. It 
 
 This is summarized in the following table:
 
-path               | possible types           | possible options      | created by                                    | loaded by
+path               | possible types           | possible options      | created by                                    | loaded by*
 -------------------|--------------------------|-----------------------|-----------------------------------------------|----------
 Ends in '.tsv'     | any valid type, or empty | *db_view* not allowed | Valve                                         | Valve
-Ends in '.sql'     | must be empty            | *edit* not allowed    | *db_view*: the '.sql' file, *db_table*: Valve | Valve (unless *db_view* is set)
-Generic executable | must be empty            | *edit* not allowed    | *db_view*: the executable, *db_table*: Valve  | Valve (unless *db_view* is set)
+Ends in '.sql'     | must be empty            | *edit* not allowed    | *db_view*: the '.sql' file, *db_table*: Valve | Valve
+Generic executable | must be empty            | *edit* not allowed    | *db_view*: the executable, *db_table*: Valve  | Valve
 empty              | must be empty            | *edit* not allowed    | No one (assumed to already exist)             | No one (assumed to be already loaded)
+
+*: Note that loading is only applicable when the *db_view* option has not been set.
 
 ##### Further information on **options**
 
