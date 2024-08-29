@@ -385,7 +385,8 @@ The **path** column indicates where the data for a given table may be found. It 
    - The *edit* option is not allowed. If set to true, Valve will fail with an "Editable tables require a path that ends in '.tsv'" error.
 
 3. If **path** either ends in '.sql', or represents a generic executable:
-   - If the *db_view* option is set, Valve assumes that the '.sql' file or generic executable indicated contains the instructions necessary to create the and load the database table. Otherwise, Valve will take care of creating the table but it will expect that the '.sql' file or generic executable contains the statements necessary to load the data.
+   - If the *db_view* option is set, Valve assumes that the '.sql' file or generic executable indicated contains the instructions necessary to create the and load the database table.
+   - If the *db_view* option is not set, Valve will take care of creating the table but it will expect that the '.sql' file or generic executable contains the statements necessary to load the data.
    - If **path** ends in '.sql', Valve reads in the statements contained in the '.sql' file and then executes them against the database.
    - If **path** represents a generic executable, then it is executed as a shell process. Note that the executable script or binary must accept two arguments indicating the location of the database and the name of the table that the path corresponds to.
 
@@ -419,7 +420,7 @@ If no options are specified, the options *db_table*, *truncate*, *load*, *save*,
   - *no-edit*: Sets the *edit* option (which is set to true by default unless *db_view* is true) to false.
   - *no-save*: Sets the *save* option (which is set to true by default unless *db_view* is true) to false.
 
-###### Commonly used options
+###### Commonly used option combinations
 
 TODO.
 
