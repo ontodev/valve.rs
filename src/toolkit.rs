@@ -1619,6 +1619,7 @@ pub fn get_sql_for_text_view(
     let inner_columns = {
         let mut v = vec![
             "row_number".to_string(),
+            "row_order".to_string(),
             "message".to_string(),
             "history".to_string(),
         ];
@@ -1629,6 +1630,7 @@ pub fn get_sql_for_text_view(
     let outer_columns = {
         let mut v = vec![
             "t.row_number".to_string(),
+            "t.row_order".to_string(),
             "t.message".to_string(),
             "t.history".to_string(),
         ];

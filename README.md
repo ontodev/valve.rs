@@ -14,9 +14,302 @@ Valve - A lightweight validation engine written in rust.
 
 ## Design and concepts
 
+Valve reads in the contents of user-defined data tables and represents them using a spreadsheet-like structure incorporating "rich" or annotated cells that may subsequently be edited and saved. The annotations are of two kinds:
+
+1. **Data validation messages** indicating that the value of a particular cell violates one or more of a number of user-defined data validation rules.
+2. **Data update messages** indicating that the value of a particular cell has changed as well as the details of the change.
+
+After reading and optionally validating the initial data, the validated information is loaded into a database that can then be queried directly using your favourite SQL client (e.g., [sqlite3](https://sqlite.org/cli.html) or [psql](https://www.postgresql.org/docs/current/app-psql.html)) as in the examples below. The currently supported databases are [SQLite](https://sqlite.org) and [PostgreSQL](https://www.postgresql.org). Valve further provides an [Application-programmer interface (API)](#api) that can be used to incorporate Valve's data validation and manipulation functionality and to visualize the validated data within your own [rust project](https://www.rust-lang.org/). For an example of a rust project that uses Valve, see [ontodev/nanobot.rs](https://github.com/ontodev/nanobot.rs). Finally, Valve also provides a [Command line interface (CLI)](#command-line-usage) for some of its more important functions like `load`, `save`, and `guess`.
+
+### The Valve database
+
+#### Data tables and views
+
+Below is an example of one of the views Valve provides into a data table in which three of the five rows contain invalid data, and one row has been edited since it was initially loaded. The output is from a [psql](https://www.postgresql.org/docs/current/app-psql.html) session connected to a PostgreSQL database called 'valve_postgres'.
+
+    valve_postgres=> select * from table11_text_view
+
+ row_number | row_order |                                                                     message                                                    | history | child | xyzzy | foo | bar | parent 
+------------|-----------|--------------------------------------------------------------------------------------------------------------------------------|---------|-------|-------|-----|-----|--------
+ 1 | 1000      |                                                                                                                                |         | a     | c     | d   | e   | b
+ 2 | 2000      |                                                                                                                                |         | b     | d     | e   | f   | c
+ 3 | 3000      | `[{"column":"foo","value":"d","level":"error","rule":"key:primary","message":"Values of foo must be unique"}]` | `[[{"column":"child","level":"update","message":"Value changed from 'z' to 'g'","old_value":"z","value":"g"}]]`        | g     | e     | d   | c   | f
+ 4 | 4000      | `[{"column":"foo","value":"e","level":"error","rule":"key:primary","message":"Values of foo must be unique"}]` |         | f     | x     | e   | z   | g
+ 5 | 5000      | `[{"column":"foo","value":"e","level":"error","rule":"key:primary","message":"Values of foo must be unique"}]` |         | d     | y     | e   | w   | h
+
+    (5 rows)
+
+Here, **row_number** is a fixed identifier assigned to each row at the time of creation, while **row_order**, which in principle might change multiple times throughout the lifetime of a given row, is used to manipulate the logical order of rows in the table. The **message** column, in this example, conveys that the value 'd' of the column "foo" in row 3, and the value 'e' of the same column in rows 4 and 5, are duplicates of already existing values of that column, which happens to be a primary key, and are therefore invalid. We can also see, from the **history** column, that there has been one change, in which one of values in row 3, namely the value of the column "child", has been changed from 'z' to 'g'. Finally, the names of the columns to the right of the **history** column correspond to the column names of the source table and will therefore vary from table to table. Normally these column names are specified in the header of a '.tsv' file from which the source data is read, though see **BELOW** for alternate input data formats and table options. In any case the data contained in the columns to the right of the **history** column will exactly match the contents of the source table unless the data has been edited since it was initially loaded.
+
+For the example below we will assume that a file named `table6.tsv` exists on your hard disk in your current working directory with the following contents:
+
+child | parent | xyzzy | foo | bar
+------|--------|-------|-----|----
+1     | 2      | 4     | e   |
+2     | 3      | 5     |     | 25
+3     | 4      | 6     | e   | 25
+4     | 5      | 7     | e   | 23
+5     | 6      | 8     |     |
+6     | 7      | 1     |     |
+7     | 8      | 26    |     |
+8     |        |       |     |
+9     |        |       |     |
+
+In order for Valve to read this table it must first be configured to do so. This is done using a number of special data tables called [configuration tables](#configuration), usually represented using further '.tsv' files, that contain information about:
+
+1. Where to find the data tables and other general properties of each managed data table.
+2. The datatypes represented in the various data tables.
+3. Information about the columns of each data table: their associated datatypes, data dependencies between the values in one table column and some other one, and any other constraints or restrictions on individual columns.
+4. Rules constraining the joint values of two different cells in a single given row of data.
+
+For our example we will assume that Valve's configuration tables contain the following entries:
+
+*table table*
+
+table  | path       | description | type | options
+-------|------------|-------------|------|---------
+table6 | table6.tsv |             |      |
+
+*column table*
+
+table  | column | label | nulltype | default | datatype | structure          | description
+-------|--------|-------|----------|---------|----------|--------------------|------------
+table6 | child  |       |          |         | integer  | from(table4.child) |
+table6 | parent |       | empty    |         | integer  | tree(child)        |
+table6 | xyzzy  |       | empty    |         | integer  |                    |
+table6 | foo    |       | empty    |         | text     |                    |
+table6 | bar    |       | empty    |         | integer  |                    |
+
+*datatype table*
+
+datatype     | parent       | condition              | description | sql_type
+-------------|--------------|------------------------|-------------|---------
+integer      | nonspace     | match(/-?\d+/)         |             | INTEGER
+nonspace     | trimmed_line | exclude(/\s/)          |             |
+trimmed_line | line         | match(/\S([^\n]*\S)*/) |             |
+line         | text         | exclude(/\n/)          |             |
+word         | nonspace     | exclude(/\W/)          |             |
+empty        | text         | equals('')             |             |
+text         |              |                        |             | TEXT
+
+*rule table*
+
+table  | when_column | when_condition | then_column | then_condition | level | description
+------ |-------------|----------------|-------------|----------------|-------|------------
+table6 | foo         | null           | bar         | null           | error | bar must be null whenever foo is null
+table6 | foo         | not null       | bar         | not null       | error | bar cannot be null if foo is not null
+table6 | foo         | nonspace       | bar         | word           | error | bar must be a word if foo is nonspace
+table6 | foo         | equals(e)      | bar         | in(25, 26)     | error | bar must be 25 or 26 if foo = 'e'
+
+For the meanings of all of the columns in the configuration tables above, see the section on [configuration](#configuration). In the rest of this section we'll refrain from explaining the meaning of a particular configuration table column unless and until it becomes relevant to our example. What is relevant at this point is only that each configuration table is _also_ a data table whose contents are themselves subject to validation by Valve. In other words Valve will not necessarily fail to run if there are errors in its configuration (as long as those errors aren't critical) and it can moreover help to identify what those errors are. The upshot is that almost everything I mention below regarding `table6` also applies to the special configuration tables `table`, `column`, `datatype` and `rule` unless otherwise noted.
+
+Once it has been read in by Valve from its source file, a given logical table will be represented, in the database, by between one and two database tables and by as many as two database views. In our example, the source data, contained in the file 'table6.tsv', represents (according to the table table configuration) a normal data table with the default options set, which means that all four database tables and views will be created. These are:
+
+1. `table6`: The database table, having the same name as the logical table, that normally contains the bulk of the table's data.
+2. `table6_conflict` (only when the [_conflict_ option](#the-table-table) is set): Valve aims to represent user data whether or not that data is valid. When it is not valid, however, this presents an obstacle when it comes to representing it in a relational database like SQLite or PostgreSQL. For instance, if a table contains a primary key column, then data rows containing values for the column that already exist in the table should be marked as invalid, but still somehow represented by Valve. However the implied database constraint on the database table will prevent us from inserting duplicate values to a primary key column. A similar issue arises for unique and foreign key constraints. To get around the database limitations that are due to database constraints such as primary, unique, or foreign keys, Valve constructs a `_conflict` table that is identical to the normal version of the table, but that does not include those keys. In our example, any rows containing duplicate values of the primary key column will be inserted to the database table called `table6_conflict`, while the other rows will be inserted to `table6`.
+3. `table6_view` (only when the [_conflict_ option](#the-table-table) is set): When Valve validates a row from the logical table, `table6`, the validation messages it generates are not stored in the database table called `table6` but instead in a [special internal database table](#the-message-and-history-tables) called `message`. Similarly, when Valve adds, updates, or deletes a row from `table6`, a record of the change is not stored in `table6`, but in a [special internal database table](#the-message-and-history-tables) called `history`. Because it can be convenient for information about the validity of a particular cell to be presented side by side with the value of the cell itself, Valve constructs a table called `table6_view` which combines information from `table6` and `table6_conflict` with the `message` and `history` tables.
+4. `table6_text_view` (only when the [_conflict_ option](#the-table-table) is set): In addition to the restrictions associated with primary, unique, and foreign key constraints, the database will also not allow us to represent values that are invalid due to an incorrect SQL type, in particular when one attempts to insert a non-numeric string value to a numeric column of a database table. To get around this limitation, Valve constructs a database view called `table6_text_view`. Unlike `table6_view`, which is defined such that the datatype of each column in `table6_view` exactly matches the datatype of the corresponding datatype in `table6`, in `table6_text_view` all of the columns are cast to TEXT so that no SQL datatype errors can occur when representing the data.
+
+After loading the data from `table6.tsv` into the database, these four tables and views will be found to have the following contents:
+
+    valve_postgres=> select * from table6;
+
+row_number | row_order | child | parent | xyzzy | foo | bar 
+-----------|-----------|-------|--------|-------|-----|-----
+1          | 1000      | 1     | 2      | 4     | e   |
+2          | 2000      | 2     | 3      | 5     |     | 25
+3          | 3000      | 3     | 4      | 6     | e   | 25
+4          | 4000      | 4     | 5      | 7     | e   | 23
+5          | 5000      | 5     | 6      | 8     |     |
+6          | 6000      | 6     | 7      | 1     |     |
+7          | 7000      | 7     | 8      | 26    |     |
+8          | 8000      | 8     |        |       |     |
+
+    (8 rows)
+
+    valve_postgres=> select * from table6_conflict;
+
+row_number | row_order | child | parent | xyzzy | foo | bar 
+-----------|-----------|-------|--------|-------|-----|-----
+9          | 9000      | 9     |        |       |     |
+(1 row)
+
+    valve_postgres=> select * from table6_view order by row_order;
+
+ row_number | row_order | child | parent | xyzzy | foo | bar | message | history 
+------------|-----------|-------|--------|-------|-----|-----|---------|---------
+ 1          | 1000      | 1     | 2      | 4     | e   |     | [{"column":"foo","value":"e","level":"error","rule":"rule:foo-2","message":"bar cannot be null if foo is not null"}, {"column":"foo","value":"e","level":"error","rule":"rule:foo-4","message":"bar must be 25 or 26 if foo = 'e'"}] |
+ 2 |      2000 |     2 |      3 |     5 |     |  25 | [{"column":"foo","value":"","level":"error","rule":"rule:foo-1","message":"bar must be null whenever foo is null"}] |
+ 3 |      3000 |     3 |      4 |     6 | e   |  25 | |
+ 4 |      4000 |     4 |      5 |     7 | e   |  23 | [{"column":"foo","value":"e","level":"error","rule":"rule:foo-4","message":"bar must be 25 or 26 if foo = 'e'"}] |
+ 5 |      5000 |     5 |      6 |     8 |     |     | |
+ 6 |      6000 |     6 |      7 |     1 |     |     | |
+ 7 |      7000 |     7 |      8 |    26 |     |     | |
+ 8 |      8000 |     8 |        |       |     |     | |
+ 9 |      9000 |     9 |        |       |     |     | [{"column":"child","value":"9","level":"error","rule":"key:foreign","message":"Value '9' of column child exists only in table4_conflict.numeric_foreign_column"}] |
+
+    (9 rows)
+
+    valve_postgres=> select * from table6_text_view order by row_order;
+
+ row_number | row_order | child | parent | xyzzy | foo | bar | message | history 
+------------|-----------|-------|--------|-------|-----|-----|---------|---------
+ 1          | 1000      | 1     | 2      | 4     | e   |     | [{"column":"foo","value":"e","level":"error","rule":"rule:foo-2","message":"bar cannot be null if foo is not null"}, {"column":"foo","value":"e","level":"error","rule":"rule:foo-4","message":"bar must be 25 or 26 if foo = 'e'"}] |
+ 2 |      2000 |     2 |      3 |     5 |     |  25 | [{"column":"foo","value":"","level":"error","rule":"rule:foo-1","message":"bar must be null whenever foo is null"}] |
+ 3 |      3000 |     3 |      4 |     6 | e   |  25 | |
+ 4 |      4000 |     4 |      5 |     7 | e   |  23 | [{"column":"foo","value":"e","level":"error","rule":"rule:foo-4","message":"bar must be 25 or 26 if foo = 'e'"}] |
+ 5 |      5000 |     5 |      6 |     8 |     |     | |
+ 6 |      6000 |     6 |      7 |     1 |     |     | |
+ 7 |      7000 |     7 |      8 |    26 |     |     | |
+ 8 |      8000 |     8 |        |       |     |     | |
+ 9 |      9000 |     9 |        |       |     |     | [{"column":"child","value":"9","level":"error","rule":"key:foreign","message":"Value '9' of column child exists only in table4_conflict.numeric_foreign_column"}] |
+
+    (9 rows)
+
+#### The **message** and **history** tables
+
+In the previous section we mentioned that `table6_view` and `table6_text_view` are defined in terms of a query that draws on data from `table6` and `table6_conflict` as well as from the special internal tables called `message` and `history`. The information in these tables can also be queried directly. After loading the data from `table6.tsv` into the database, one will find that the `message` table contains the following contents:
+
+    valve_postgres=> select * from message where "table" = 'table6';
+
+message_id | table  | row | column | value | level | rule     | message
+-----------|--------|-----|--------|-------|-------|----------|---------
+36 | table6 | 1 | foo    | e     | error | rule:foo-2  | bar cannot be null if foo is not null
+37 | table6 | 1 | foo    | e     | error | rule:foo-4  | bar must be 25 or 26 if foo = 'e'
+38 | table6 | 2 | foo    |       | error | rule:foo-1  | bar must be null whenever foo is null
+39 | table6 | 4 | foo    | e     | error | rule:foo-4  | bar must be 25 or 26 if foo = 'e'
+40 | table6 | 9 | child  | 9     | error | key:foreign | Value '9' of column child exists only in table4_conflict.numeric_foreign_column
+
+    (5 rows)
+
+Here,
+- **message_id** is a unique identifier for this message assigned when it is created.
+- **table** is the table that this message is associated with.
+- **row** is the row_number of the table that this message is associated with.
+- **column** is the column in the row of the table that this message is associated with.
+- **value** is what the message is about.
+- **level** is the severity of the message.
+- **rule** identifies the rule that, when applied to the given value, resulted in the message.
+- **message** is the text of the message.
+
+The **history** table will be empty immediately after the initial loading of the database.
+
+    valve_postgres=> select * from history where "table" = 'table6';
+
+history_id | table | row | from | to | summary | user | undone_by | timestamp 
+-----------|-------|-----|------|----|---------|------|-----------|-----------
+ |     |     |     |    |       |     |          |
+
+    (0 rows)
+
+Here,
+- **history_id** is a unique identifier for this history record that is assigned when it is created.
+- **table** is the table that this record is associated with.
+- **row** is the row number of the table that this record is associated with.
+- **from** is a JSON representation of the row as it was before the change (see the section on [data validation](#data-validation)).
+- **to** is a JSON representation of the row after the change (see the section on [data validation](#data-validation)).
+- **user** is the name of the user that initiated the change, or who undid or redid the change (if applicable).
+- **undone_by** is the name of the user that undid the change (if applicable).
+- **timestamp** records the time of the change, or the time that it was undone or redone (if applicable).
+- **summary** is a JSON representation of a summary of the change in the form of an array of records corresponding to each column that has changed. e.g.,
+```json
+        [
+            {
+                "column":"bar",
+                "level":"update",
+                "message":"Value changed from '' to 2",
+                "old_value":"",
+                "value":"2"
+            },
+            {
+                "column":"child",
+                "level":"update",
+                "message":"Value changed from 1 to 2",
+                "old_value":"1",
+                "value":"2"
+            },
+            {
+                "column":"foo",
+                "level":"update",
+                "message":"Value changed from 'e' to 'a'",
+                "old_value":"e",
+                "value":"a"
+            },
+            {
+                "column":"xyzzy",
+                "level":"update",
+                "message":"Value changed from 4 to 23",
+                "old_value":"4",
+                "value":"23"
+            }
+        ]
+```
+
+Note that the **summary** column of the **history** table is where the information in the view columns `table6_view.history` and `table6_text_view.history` is taken from, which is why these view columns are always in the form of an array of arrays, i.e., an array of summary records for the given row.
+
+### Data validation and editing
+
+TODO.
+
+#### Load-time validation
+
+TODO.
+
+##### Overview
+
+TODO.
+
+##### Intra-table validation
+
+TODO.
+
+##### Inter-table validation
+
+TODO.
+
+#### Using the Valve API
+
+TODO.
+
+##### ValveRow
+
+TODO.
+
+##### ValveCell
+
+TODO.
+
+##### ValveMessage
+
+TODO.
+
+##### Inserting a new row
+
+TODO.
+
+##### Updating a row
+
+TODO.
+
+##### Deleting a row
+
+TODO.
+
+##### Moving a row
+
 TODO.
 
 ## Installation and configuration
+
+TODO.
+
+### Prerequisites
+
+TODO.
+
+#### Differences between PostgreSQL and SQLite
+
+TODO.
 
 ### Installation
 
@@ -74,12 +367,21 @@ user_view3           |                                      |             |     
 
 Note that in the first row above the table being described is the table table itself. In general the columns of the table table have the following significance:
 - **table**: the name of the table.
-- **path**: where to find information about the contents of the table. This can be a '.tsv' file, a '.sql' file, some other executable file, or it can be empty. The path for one of the special configuration tables must be a '.tsv' file. Otherwise the kind of path (if any) that needs to be specified is determined by the contents of the **options** column (see below) for the given table.
+- **path**: where to find information about the contents of the table (see below). Note that the path for one of the special configuration tables must be a '.tsv' file.
 - **description**: An optional description of the contents and/or the purpose of the table.
 - **type**: Valve recognizes four special configuration table types that can be specified using the **type** column of the table table. These are the `table`, `column`, `datatype`, and `rule` table types. Data tables (e.g., the 'user_*' tables in the above example) should not explicitly specify a type, and in general if a type other than the ones just mentioned is specified it will be ignored.
 - **options** (optional column): Allows the user to specify a number of further options for the table (see below).
 
-##### Further information on options
+##### Further information on **path**
+
+The **path** column indicates where the data for a given table may be found. It can be a '.tsv' file, a '.sql' file, some other executable file, or it can be empty. In each case it will have consequences for the possible values of **type** and **options**.
+
+1. If **path** is not a '.tsv' file, then **type** should be empty. It must not be any of `table`, `column`, `datatype`, or `rule`.
+2. If **path** is a '.tsv' file, then the *db_view* option (see below) cannot be set.
+3. If **path** is a '.sql' file, then either the *db_view* or *db_table* option may be used. In either case, Valve will execute the statements contained in the '.sql' file against the database and verify that the table or view has been created successfully, but will not directly manipulate the data.
+
+
+##### Further information on **options**
 
 If no options are specified, the options *db_table*, *truncate*, *load*, *save*, *edit*, *validate_on_load*, and *conflict* will all be set to true by default. The complete list of allowable options, and their meanings, are given below:
   - *db_table*: The table will be represented in the database by a regular table. Note that if the *edit* option has also been set, then **path** must be non-empty and it can be one of (a) a file ending (case insensitively) with '.tsv' explicitly specifying the contents of the table, (b) a file ending (case insensitively) with '.sql', or (c) an executable file. In the case of (a), Valve will take care of validating and loading the data from the '.tsv' file. In cases (b) and (c), Valve uses the '.sql' file or the executable to load the data, and performs no validation other than to verify that this has been done without error. If **path** is empty, then Valve expects that the table has already been created and loaded by the user and will fail otherwise. Note that the *db_table* option is not compatible with the *db_view* option.
@@ -95,6 +397,10 @@ If no options are specified, the options *db_table*, *truncate*, *load*, *save*,
   - *no-validate_on_load*: Sets the *validate_on_load* option (which is set to true by default unless *db_view* is true) to false.
   - *no-edit*: Sets the *edit* option (which is set to true by default unless *db_view* is true) to false.
   - *no-save*: Sets the *save* option (which is set to true by default unless *db_view* is true) to false.
+
+###### Commonly used options
+
+TODO.
 
 #### The column table
 
