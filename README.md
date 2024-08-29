@@ -398,8 +398,8 @@ This is summarized in the following table:
 path               | possible types           | possible options      | created by                                    | loaded by
 -------------------|--------------------------|-----------------------|-----------------------------------------------|----------
 Ends in '.tsv'     | any valid type, or empty | *db_view* not allowed | Valve                                         | Valve
-Ends in '.sql'     | must be empty            | *edit* not allowed    | *db_view*: the '.sql' file, *db_table*: Valve | Valve
-Generic executable | must be empty            | *edit* not allowed    | *db_view*: the executable, *db_table*: Valve  | Valve
+Ends in '.sql'     | must be empty            | *edit* not allowed    | *db_view*: the '.sql' file, *db_table*: Valve | Valve (unless *db_view* is set)
+Generic executable | must be empty            | *edit* not allowed    | *db_view*: the executable, *db_table*: Valve  | Valve (unless *db_view* is set)
 empty              | must be empty            | *edit* not allowed    | No one (assumed to already exist)             | No one (assumed to be already loaded)
 
 ##### Further information on **options**
