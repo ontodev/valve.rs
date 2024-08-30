@@ -8,11 +8,11 @@ use crate::{
         add_message_counts, cast_column_sql_to_text, convert_undo_or_redo_record_to_change,
         delete_row_tx, generate_datatype_conditions, generate_rule_conditions,
         get_column_for_label, get_column_value_as_string, get_json_array_from_row,
-        get_json_object_from_row, get_label_for_column, get_parsed_structure_conditions,
-        get_pool_from_connection_string, get_previous_row_tx, get_record_to_redo,
-        get_record_to_undo, get_row_from_db, get_sql_for_standard_view, get_sql_for_text_view,
-        get_sql_type, get_sql_type_from_global_config, insert_chunks, insert_new_row_tx,
-        local_sql_syntax, move_row_tx, read_config_files, record_row_change, record_row_move,
+        get_json_object_from_row, get_parsed_structure_conditions, get_pool_from_connection_string,
+        get_previous_row_tx, get_record_to_redo, get_record_to_undo, get_row_from_db,
+        get_sql_for_standard_view, get_sql_for_text_view, get_sql_type,
+        get_sql_type_from_global_config, insert_chunks, insert_new_row_tx, local_sql_syntax,
+        move_row_tx, normalize_options, read_config_files, record_row_change, record_row_move,
         switch_undone_state, undo_or_redo_move, update_row_tx, verify_table_deps_and_sort,
         ColumnRule, CompiledCondition, ParsedStructure, ValueType,
     },
@@ -1878,7 +1878,25 @@ impl Valve {
     /// Save all configured editable tables to their configured paths, unless save_dir is specified,
     /// in which case save them there instead.
     pub fn save_all_tables(&self, save_dir: &Option<String>) -> Result<&Self> {
-        let tables = self.get_sorted_table_list_with_option("save", false);
+        // Collect tables from the 'table' table.
+        let mut tables: Vec<String> = vec![];
+        let sql = format!("SELECT \"table\", \"options\" FROM \"table\"");
+        let mut stream = sqlx_query(&sql).fetch(&self.pool);
+        while let Some(row) = block_on(stream.try_next())? {
+            let table = row.try_get::<&str, &str>("table").ok().unwrap_or_default();
+            let options = row
+                .try_get::<&str, &str>("options")
+                .ok()
+                .unwrap_or_default();
+            let row_options = options.split(" ").collect::<Vec<_>>();
+            if let Ok((row_options, _)) = normalize_options(&row_options, 0) {
+                if row_options.contains("save") {
+                    tables.push(table.to_string());
+                }
+            };
+        }
+
+        let tables = tables.iter().map(|s| s.as_str()).collect_vec();
         self.save_tables(&tables, save_dir)?;
         Ok(self)
     }
@@ -1886,62 +1904,46 @@ impl Valve {
     /// Given a vector of table names, save those tables to their configured path's, unless
     /// save_dir is specified, in which case save them there instead.
     pub fn save_tables(&self, tables: &Vec<&str>, save_dir: &Option<String>) -> Result<&Self> {
-        let table_paths: HashMap<String, String> = self
-            .config
-            .table
-            .iter()
-            .filter(|(k, v)| {
-                !INTERNAL_TABLES.contains(&k.as_str())
-                    && tables.contains(&k.as_str())
-                    && v.path != ""
-            })
-            .map(|(k, v)| (k.to_string(), v.path.to_string()))
-            .collect();
-
         if self.verbose {
-            println!(
-                "Saving tables: {} ...",
-                table_paths
-                    .keys()
-                    .map(|k| k.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
+            println!("Saving tables: {} ...", tables.join(", "));
         }
 
-        for (table, path) in table_paths.iter() {
-            let options = self.get_table_options(table)?;
-            let path = match save_dir {
-                Some(save_dir) => {
-                    if !options.contains("save") {
-                        let path_dir = Path::new(path)
-                            .parent()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("");
-                        if path_dir == save_dir {
-                            return Err(ValveError::InputError(format!(
-                                "Option 'save' is not set for table '{}'. Cannot overwrite '{}'",
-                                table, path
-                            ))
-                            .into());
-                        }
-                    }
-                    format!(
-                        "{}/{}",
-                        save_dir,
-                        Path::new(path).file_name().and_then(|n| n.to_str()).ok_or(
-                            ValveError::InputError(format!("Unable to save to '{}'", path))
-                        )?
-                    )
+        let sql = format!(
+            r#"SELECT "table", "path", "options" FROM "table" WHERE "table" IN ('{}')"#,
+            tables.join("', '")
+        );
+        let mut stream = sqlx_query(&sql).fetch(&self.pool);
+        while let Some(row) = block_on(stream.try_next())? {
+            let table = row.try_get::<&str, &str>("table").ok().unwrap_or_default();
+            let options = row
+                .try_get::<&str, &str>("options")
+                .ok()
+                .unwrap_or_default();
+            let row_options = options.split(" ").collect::<Vec<_>>();
+            match normalize_options(&row_options, 0) {
+                Err(_) => {
+                    log::warn!("Invalid table options: {options}");
+                    continue;
                 }
+                Ok((row_options, _)) => {
+                    if !row_options.contains("save") {
+                        log::warn!("Saving '{}' is not supported", table,);
+                        continue;
+                    }
+                }
+            };
+
+            let path = row.try_get::<&str, &str>("path").ok().unwrap_or_default();
+            let path = match save_dir {
+                Some(s) => format!(
+                    "{}/{}",
+                    s,
+                    Path::new(path).file_name().and_then(|n| n.to_str()).ok_or(
+                        ValveError::InputError(format!("Unable to save to '{}'", path))
+                    )?,
+                ),
                 None => {
-                    if !options.contains("save") {
-                        return Err(ValveError::InputError(format!(
-                            "Saving '{}' is not supported",
-                            table
-                        ))
-                        .into());
-                    } else if !path.ends_with(".tsv") {
+                    if !path.ends_with(".tsv") {
                         return Err(ValveError::InputError(format!(
                             "Refusing to save to non-tsv file '{}'",
                             path
@@ -1951,35 +1953,14 @@ impl Valve {
                     path.to_string()
                 }
             };
-
-            let table_config = self.get_table_config(table)?;
-            let column_config = &table_config.column;
-            let mut labels = vec![];
-            let columns: Vec<&str> = table_config
-                .column_order
-                .iter()
-                .map(|i| i.as_str())
-                .collect();
-            for column in &columns {
-                let label = get_label_for_column(&column_config, column, table)?;
-                labels.push(label);
-            }
-            let labels = labels.iter().map(|i| i.as_str()).collect();
-
-            self.save_table(table, &columns, &labels, &path)?;
+            let _ = self.save_table(table, path.as_str());
         }
 
         Ok(self)
     }
 
     /// Save the given table with the given columns at the given path as a TSV file.
-    pub fn save_table(
-        &self,
-        table: &str,
-        columns: &Vec<&str>,
-        labels: &Vec<&str>,
-        path: &str,
-    ) -> Result<&Self> {
+    pub fn save_table(&self, table: &str, path: &str) -> Result<&Self> {
         // Uses the given (unverified) printf-style format string and the given compiled regular
         // expression (which is used to verify the given format) to format the given cell.
         fn format_cell(colformat: &str, format_regex: &Regex, cell: &str) -> String {
@@ -2037,6 +2018,62 @@ impl Valve {
             }
         }
 
+        // Check that the table options allow save.
+        // TODO: handle "Save as..." case
+        let sql = format!("SELECT \"options\" FROM \"table\" WHERE \"table\" = '{table}'");
+        match block_on(sqlx_query(&sql).fetch_one(&self.pool)) {
+            Err(_) => {
+                return Err(
+                    ValveError::DataError(format!("No such table in database: '{table}'")).into(),
+                )
+            }
+            Ok(row) => {
+                let options = row
+                    .try_get::<&str, &str>("options")
+                    .ok()
+                    .unwrap_or_default();
+                let row_options = options.split(" ").collect::<Vec<_>>();
+                match normalize_options(&row_options, 0) {
+                    Err(_) => {
+                        return Err(ValveError::ConfigError(format!(
+                            "Invalid table options: {options}"
+                        ))
+                        .into())
+                    }
+
+                    Ok((row_options, _)) => {
+                        if !row_options.contains("save") {
+                            return Err(ValveError::ConfigError(format!(
+                                "Saving '{table}' is not supported by table options: {options}"
+                            ))
+                            .into());
+                        }
+                    }
+                };
+            }
+        }
+
+        let mut columns: Vec<String> = vec![];
+        let mut labels: Vec<String> = vec![];
+        let mut formats: Vec<String> = vec![];
+
+        let sql = format!(
+            r#"SELECT "column", "label", "format" FROM "column" LEFT JOIN "datatype" ON "column"."datatype" = "datatype"."datatype" WHERE "table" = '{table}'"#
+        );
+        let mut stream = sqlx_query(&sql).fetch(&self.pool);
+        while let Some(row) = block_on(stream.try_next())? {
+            let column = row.try_get::<&str, &str>("column").ok().unwrap_or_default();
+            let label = row.try_get::<&str, &str>("label").ok().unwrap_or_default();
+            let format = row.try_get::<&str, &str>("format").ok().unwrap_or_default();
+            columns.push(column.into());
+            if label == "" {
+                labels.push(column.into());
+            } else {
+                labels.push(label.into());
+            }
+            formats.push(format.into());
+        }
+
         if columns.len() != labels.len() {
             return Err(ValveError::InputError(format!(
                 "The column list: {:?} and label list: {:?} differ in length.",
@@ -2044,18 +2081,16 @@ impl Valve {
             ))
             .into());
         }
-
-        let table_options = self.get_table_options(table)?;
-        if !table_options.contains("save") {
+        if columns.len() != formats.len() {
             return Err(ValveError::InputError(format!(
-                "Unable to save '{}': Not supported",
-                table
+                "The column list: {:?} and format list: {:?} differ in length.",
+                columns, formats,
             ))
             .into());
         }
 
         let mut formatted_columns = vec!["\"row_number\"".to_string()];
-        for column in columns {
+        for column in columns.clone() {
             formatted_columns.push(format!(r#""{}""#, column));
         }
         let query_table = format!("\"{}_text_view\"", table);
@@ -2074,9 +2109,9 @@ impl Valve {
         let mut stream = sqlx_query(&sql).fetch(&self.pool);
         while let Some(row) = block_on(stream.try_next())? {
             let mut record: Vec<String> = vec![];
-            for column in columns.iter() {
-                let colformat = block_on(self.get_column_format(table, column))?;
+            for (i, column) in columns.iter().enumerate() {
                 let cell = row.try_get::<&str, &str>(column).ok().unwrap_or_default();
+                let colformat = formats.get(i).unwrap();
                 if colformat != "" {
                     let formatted_cell = format_cell(&colformat, &format_regex, &cell);
                     record.push(formatted_cell.to_string());
@@ -2127,46 +2162,6 @@ impl Valve {
             } else {
                 Ok("".to_string())
             }
-        }
-    }
-
-    /// Given a table name and the name of a column in that table, find (in the database) the value
-    /// of the optional configuration parameter called 'format' and return it, or an empty string
-    /// if no format parameter has been configured or if none has been defined for that column.
-    /// The format parameter indicates how values of the given column are to be formatted when
-    /// saving a table to an external file.
-    pub async fn get_column_format(&self, table: &str, column: &str) -> Result<String> {
-        if !self
-            .config
-            .table
-            .get("datatype")
-            .and_then(|t| Some(t.column.clone()))
-            .and_then(|c| Some(c.keys().cloned().collect::<Vec<_>>()))
-            .and_then(|v| Some(v.contains(&"format".to_string())))
-            .expect("Could not find column configrations for the datatype table")
-        {
-            Ok("".to_string())
-        } else {
-            let sql = format!(
-                r#"SELECT d."format"
-                     FROM "column" c, "datatype" d
-                    WHERE c."table" = '{}'
-                      AND c."column" = '{}'
-                      AND c."datatype" = d."datatype""#,
-                table, column
-            );
-            let rows = sqlx_query(&sql).fetch_all(&self.pool).await?;
-            if rows.len() > 1 {
-                panic!(
-                    "Multiple entries corresponding to '{}' in datatype table",
-                    column
-                );
-            }
-            let format_string = rows[0]
-                .try_get::<&str, &str>("format")
-                .ok()
-                .unwrap_or_default();
-            Ok(format_string.to_string())
         }
     }
 
