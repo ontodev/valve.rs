@@ -340,9 +340,20 @@ graph TD;
     C-->D;
 ```
 
+```mermaid
+flowchart TD
+    node1[validate_cell_nulltype() for all cells]
+    modal1{if nulltype is None}
+    node2[validate_cell_rules()]
+    node3[validate_cell_datatype()]
+    modal2{sql type error?}
+    node4[validate_cell_foreign_constraints()]
+    node5[validate_cell_unique_constraints()]
+    node6[validate_tree_foreign_keys()]
+    node1 -- then, for each cell: --> node2
+    node5 -- then, over the table as a whole: --> node6
+```
 
-where thevalues
-- The different cell validation functions
 
 ##### Batch vs. one-off validation
 
