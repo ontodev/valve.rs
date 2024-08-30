@@ -251,17 +251,17 @@ Note that the **summary** column of the **history** table is where the informati
 
 #### Representing validated data
 
-Once a given row of data has been inserted into the database and (optionally) validated, Valve represents it using a `ValveRow` struct (see the [API reference](#api)) which contains the following information:
+For the purposes of this documentation, we are to understand a *row* (of data) to mean an array of cells, where each cell is associated a particular value of one of the columns in the given table. Once a given row of data has been inserted into the database and (optionally) validated, Valve represents it using a `ValveRow` struct (see the [API reference](#api)) which contains the following information:
 
 1. The row's fixed, unique, identifier, or `row_number`.
-1. A map from the names of the columns contained in the row, to the `ValveCell` struct associated with each, where the latter represents the results of running Valve's validation engine (see [the validation process](#the-validation-process)) on the value of that column.
+1. A map from the names of the columns contained in the row, to the `ValveCell` struct associated with each, where the latter represents the results of running Valve's validation engine (see [the validation process](#the-validation-process)) on the cell associated with that column.
 
 In particular, each `ValveCell` contains the following information:
 
 1. The value of the cell.
 1. Whether the value should be interpreted as a null value of the given column, and if so, the column's nulltype.
 1. Whether or not the value is valid given the column's [column configuration](#the-column-table).
-1. A list of `ValveCellMessage` structs representing the validation messages associated with this cell value.
+1. A list of `ValveCellMessage` structs representing the validation messages associated with this cell.
 
 Each `ValveCellMessage`, in turn, contains the following information:
 
@@ -328,17 +328,23 @@ Valve is designed to identify and report on the following rule violations:
 
 #### The validation process
 
-TODO.
+##### Cell validation
 
-##### Overview
+For a given row of data, validation proceeds cell by cell. The validation consists in a series of checks schematically represented in the flowchart below and subsequently explained in more detail.
 
-TODO.
+```mermaid
+graph TD;
+    A-->B;
+    A-->C;
+    B-->D;
+    C-->D;
+```
 
-##### Intra-table validation
 
-TODO.
+where thevalues
+- The different cell validation functions
 
-##### Inter-table validation
+##### Batch vs. one-off validation
 
 TODO.
 
@@ -666,7 +672,7 @@ For further information see the [Rust Cookbook](https://rust-lang-nursery.github
 
 ## API
 
-The API (application-programmer interface) reference documentation can normally be found on [crates.io](https://crates.io/crates/ontodev_valve), however this documentation is currently out of date. To generate the latest API documentation, run
+The API (application-programmer interface) reference documentation for the latest release of Valve can normally be found on [docs.rs](https://docs.rs/ontodev_valve/latest/ontodev_valve/). In case you would like to generate the API documentation for a newer version of Valve, run:
 
 ```rust
 cargo doc
@@ -676,9 +682,7 @@ in the the root folder of your local copy of the valve.rs source code repository
 
     <valve.rs root folder>/target/doc/ontodev_valve/index.html
 
-in your favourite browser. For a more general discussion of how
-
-For a higher level See also the [Design and concepts](#design-and-concepts) section below.
+in your favourite browser. For a higher level See also the [Design and concepts](#design-and-concepts) section.
 
 ## Troubleshooting
 
