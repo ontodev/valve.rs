@@ -64,13 +64,13 @@ In order for Valve to read this table it must first be configured to do so. This
 
 For our example we will assume that Valve's configuration tables contain the following entries:
 
-*table table*
+The table table
 
 table  | path       | description | type | options
 -------|------------|-------------|------|---------
 table6 | table6.tsv |             |      |
 
-*column table*
+The column table
 
 table  | column | label | nulltype | default | datatype | structure          | description
 -------|--------|-------|----------|---------|----------|--------------------|------------
@@ -80,7 +80,7 @@ table6 | xyzzy  |       | empty    |         | integer  |                    |
 table6 | foo    |       | empty    |         | text     |                    |
 table6 | bar    |       | empty    |         | integer  |                    |
 
-*datatype table*
+The datatype table
 
 datatype     | parent       | condition              | description | sql_type
 -------------|--------------|------------------------|-------------|---------
@@ -92,7 +92,7 @@ word         | nonspace     | exclude(/\W/)          |             |
 empty        | text         | equals('')             |             |
 text         |              |                        |             | TEXT
 
-*rule table*
+The rule table
 
 table  | when_column | when_condition | then_column | then_condition | level | description
 ------ |-------------|----------------|-------------|----------------|-------|------------
@@ -374,7 +374,7 @@ Note that in the first row above the table being described is the table table it
 
 ##### Further information on **path**
 
-The **path** column indicates where the data for a given table may be found. It can be (a) a '.tsv' file, (b) a '.sql' file, (c) some other executable file, or (d) the **path** may be empty. In each case it will have the following consequences for the possible values of **type** and and for the possible **options** that may be used with the table.
+The **path** column indicates where the data for a given table may be found. It can be (a) a '.tsv' file, (b) a '.sql' file, (c) some other executable file, or (d) it may be empty. In each case it will have the following consequences for the possible values of **type** and and for the possible **options** that may be used with the table.
 
 1. If **path** ends in '.tsv':
    - Its associated **type** may be any one of `table`, `column`, `datatype`, `rule`, or it may be empty.
@@ -394,7 +394,7 @@ The **path** column indicates where the data for a given table may be found. It 
    - If the *db_view* option is set, Valve assumes that the view already exists in the database.
    - If the *db_view* option is not set, Valve will take care of creating the table but it will not attempt to load it.
 
-This is summarized in the following table:
+The above is conveniently summarized in the following table:
 
 path               | possible types           | possible options      | created by                                    | loaded by*
 -------------------|--------------------------|-----------------------|-----------------------------------------------|----------
@@ -403,7 +403,7 @@ Ends in '.sql'     | must be empty            | *edit* not allowed    | *db_view
 Generic executable | must be empty            | *edit* not allowed    | *db_view*: the executable, *db_table*: Valve  | Valve
 empty              | must be empty            | *edit* not allowed    | No one (assumed to already exist)             | No one (assumed to be already loaded)
 
-*: Note that loading is only applicable when the *db_view* option has not been set.
+* Note that loading is only applicable when the *db_view* option has not been set.
 
 ##### Further information on **options**
 
@@ -422,9 +422,21 @@ If no options are specified, the options *db_table*, *truncate*, *load*, *save*,
   - *no-edit*: Sets the *edit* option (which is set to true by default unless *db_view* is true) to false.
   - *no-save*: Sets the *save* option (which is set to true by default unless *db_view* is true) to false.
 
-###### Commonly used option combinations
+###### Commonly used path and option combinations
 
-TODO.
+Here are some commonly used table table configurations:
+
+table                | path                                 | description                                                                              | type     | options
+---------------------| -------------------------------------| -----------------------------------------------------------------------------------------| ---------| ------------
+plain                | src/data/plain.tsv                   | A database table with default options set, backed by a '.tsv' file                       |          |
+appendonly           | src/data/appendonly.tsv              | A database table which is appended to but never truncated                                |          | no-truncate
+readonly1            | src/data/readonly1.tsv               | A read-only table that is backed by a '.tsv' file                                        |          | no-edit no-save
+readonly2            | src/data/readonly2.sh                | A read-only table whose contents are assumed to be valid, backed by a generic executable |          | no-edit no-conflict no-validate-on-load
+view1                | src/data/view1.sql                   | A view backed by a '.sql' file                                                           |          | db_view
+table                | src/table.tsv                        | the table table                                                                          | table    |
+column               | src/column.tsv                       | the column table                                                                         | column   |
+datatype             | src/datatype.tsv                     | the datatype table                                                                       | datatype |
+rule                 | src/rule.tsv                         | the rule table                                                                           | rule     |
 
 #### The column table
 

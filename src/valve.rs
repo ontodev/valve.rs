@@ -1938,7 +1938,16 @@ impl Valve {
                         ValveError::InputError(format!("Unable to save to '{}'", path))
                     )?,
                 ),
-                None => path.to_string(),
+                None => {
+                    if !path.ends_with(".tsv") {
+                        return Err(ValveError::InputError(format!(
+                            "Refusing to save to non-tsv file '{}'",
+                            path
+                        ))
+                        .into());
+                    }
+                    path.to_string()
+                }
             };
             self.save_table(table, &columns, &labels, &path)?;
         }
