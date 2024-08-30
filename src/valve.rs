@@ -1911,10 +1911,46 @@ impl Valve {
 
         for (table, path) in table_paths.iter() {
             let options = self.get_table_options(table)?;
-            if !options.contains("save") {
-                log::warn!("Saving '{}' is not supported", table,);
-                continue;
-            }
+            let path = match save_dir {
+                Some(save_dir) => {
+                    if !options.contains("save") {
+                        let path_dir = Path::new(path)
+                            .parent()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("");
+                        if path_dir == save_dir {
+                            return Err(ValveError::InputError(format!(
+                                "Option 'save' is not set for table '{}'. Cannot overwrite '{}'",
+                                table, path
+                            ))
+                            .into());
+                        }
+                    }
+                    format!(
+                        "{}/{}",
+                        save_dir,
+                        Path::new(path).file_name().and_then(|n| n.to_str()).ok_or(
+                            ValveError::InputError(format!("Unable to save to '{}'", path))
+                        )?
+                    )
+                }
+                None => {
+                    if !options.contains("save") {
+                        return Err(ValveError::InputError(format!(
+                            "Saving '{}' is not supported",
+                            table
+                        ))
+                        .into());
+                    } else if !path.ends_with(".tsv") {
+                        return Err(ValveError::InputError(format!(
+                            "Refusing to save to non-tsv file '{}'",
+                            path
+                        ))
+                        .into());
+                    }
+                    path.to_string()
+                }
+            };
 
             let table_config = self.get_table_config(table)?;
             let column_config = &table_config.column;
@@ -1930,25 +1966,6 @@ impl Valve {
             }
             let labels = labels.iter().map(|i| i.as_str()).collect();
 
-            let path = match save_dir {
-                Some(s) => format!(
-                    "{}/{}",
-                    s,
-                    Path::new(path).file_name().and_then(|n| n.to_str()).ok_or(
-                        ValveError::InputError(format!("Unable to save to '{}'", path))
-                    )?,
-                ),
-                None => {
-                    if !path.ends_with(".tsv") {
-                        return Err(ValveError::InputError(format!(
-                            "Refusing to save to non-tsv file '{}'",
-                            path
-                        ))
-                        .into());
-                    }
-                    path.to_string()
-                }
-            };
             self.save_table(table, &columns, &labels, &path)?;
         }
 
