@@ -334,23 +334,26 @@ For a given row of data, validation proceeds cell by cell. The validation consis
 
 ```mermaid
 flowchart TD
-    node1["Call validate_cell_nulltype() for all cells"]
-    modal1{"Does it have a nulltype?"}
+    node1["Call validate_cell_nulltype() for all cells."]
+    node1 -- "Then, for each cell:" --> node2
     node2["validate_cell_rules()"]
+    node2 --> modal1
+    modal1{"Does the cell have a nulltype?"}
+    modal1 -- No. --> node3
+    modal1 -- Yes. Skip further validation for this cell. --> modal3
     node3["validate_cell_datatype()"]
-    modal2{"Does the cell value contain a SQL type error?"}
-    node4["validate_cell_foreign_constraints()"]
-    node5["validate_cell_unique_constraints()"]
-    node6["validate_tree_foreign_keys()"]
-    node1 -- "Then, for each cell:" --> modal1
-    modal1 -- No --> node2
-    modal1 -- Yes. Then over the table as a whole: --> node6
-    node2 --> node3
     node3 --> modal2
+    modal2{"Does the cell value contain a SQL type error?"}
     modal2 -- No --> node4
-    modal2 -- Yes. Then over the table as a whole: --> node6
+    modal2 -- Yes --> modal3
+    node4["validate_cell_foreign_constraints()"]
     node4 --> node5
+    node5["validate_cell_unique_constraints()"]
     node5 -- "Then, over the table as a whole:" --> node6
+    modal3{"Have we iterated over all of the cells in the row?"}
+    modal3 -- Yes. Then over the table as a whole: --> node6
+    modal3 -- No. Go on to the next cell. --> node2
+    node6["validate_tree_foreign_keys()"]
 ```
 
 ###### validate_cell_nulltype()
