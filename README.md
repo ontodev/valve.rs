@@ -349,7 +349,7 @@ flowchart TD
     node4["validate_cell_foreign_constraints()"]
     node4 --> node5
     node5["validate_cell_unique_constraints()"]
-    node5 -- "Then, over the table as a whole:" --> node6
+    node5 --> modal3
     modal3{"Have we iterated over all of the cells in the row?"}
     modal3 -- Yes, then over the table as a whole: --> node6
     modal3 -- No, go on to the next cell. --> node2
