@@ -249,9 +249,84 @@ Note that the **summary** column of the **history** table is where the informati
 
 ### Data validation and editing
 
-TODO.
+#### Representing validated data
 
-#### Load-time validation
+Once a given row of data has been inserted into the database and (optionally) validated, Valve represents it using a `ValveRow` struct (see the [API reference](#api)) which contains the following information:
+
+1. The row's fixed, unique, identifier, or `row_number`.
+1. A map from the names of the columns contained in the row, to the `ValveCell` struct associated with each, where the latter represents the results of running Valve's validation engine (see [the validation process](#the-validation-process)) on the value of that column.
+
+In particular, each `ValveCell` contains the following information:
+
+1. The value of the cell.
+1. Whether the value should be interpreted as a null value of the given column, and if so, the column's nulltype.
+1. Whether or not the value is valid given the column's [column configuration](#the-column-table).
+1. A list of `ValveCellMessage` structs representing the validation messages associated with this cell value.
+
+Each `ValveCellMessage`, in turn, contains the following information:
+
+1. The level or severity of the message (e.g., "error", "warn", "info").
+1. An alphanumeric identifier for the rule violation described by the message.
+1. The text of the message.
+
+The following is an example of a textual representation of the contents of a `ValveRow`:
+
+```rust
+ValveRow {
+    row_number: Some(
+        11,
+    ),
+    contents: {
+        "id": ValveCell {
+            nulltype: None,
+            value: String("BFO:0000027"),
+            valid: true,
+            messages: [],
+        },
+        "name": ValveCell {
+            nulltype: None,
+            value: String("Mike"),
+            valid: true,
+            messages: [],
+        },
+        "location": ValveCell {
+            nulltype: None,
+            value: String("baree"),
+            valid: false,
+            messages: [
+                ValveCellMessage {
+                    level: "error",
+                    rule: "key:foreign",
+                    message: "Value 'baree' of column location is not in cities.city_name",
+                },
+            ],
+        },
+        "preferred_seafood": ValveCell {
+            nulltype: Some("empty"),
+            value: String(""),
+            valid: true,
+            messages: [],
+        },
+    },
+}
+```
+
+#### Types of validation errors
+
+Valve is designed to identify and report on the following rule violations:
+
+- **key:foreign**: The column that the given value belongs to has a `from()` structure (see [the column table](#the-column-table) that references some column, F, in another table, but the given value is not in F.
+- **key:primary**: The column that the given value belongs to has a `primary` structure, and the given value already exists in the column.
+- **key:unique**: The column that the given value belongs to has a `unique` structure, and the given value already exists in the column.
+- **option:unrecognized** (table table only): The list of options specified in the **options** column of the [table table](#the-table-table) contains an unrecognized option.
+- **option:redundant**: (table table only): The list of options specified in the **options** column of the table table contains an option that is already implied by one of the other options.
+- **option:reserved**: (table table only): The list of options specified in the **options** column of the table table contains an option keyword that is reserved for internal use.
+- **option:overrides**: (table table only): The list of options specified in the **options** column of the table table contains an option that overrides one of the other options.
+- **tree:foreign**: The column that the given value belongs to has a `tree()` structure that references some other column, T, of the same table; but the given value is not in T.
+- **datatype:_DATATYPE_**: The column that the given value belongs to has the datatype, _DATATYPE_, but applying _DATATYPE_'s associated condition to the given value results in a failure.
+- **rule:_COLUMN_-_N_**: The given value of _COLUMN_ causes the _Nth_ rule in the [rule table](#the-rule-table) that has been defined with respect to the `when_column`, _COLUMN_, to be violated.
+
+#### The validation process
 
 TODO.
 
@@ -267,35 +342,19 @@ TODO.
 
 TODO.
 
-#### Using the Valve API
+#### Inserting a new row
 
 TODO.
 
-##### ValveRow
+#### Updating a row
 
 TODO.
 
-##### ValveCell
+#### Deleting a row
 
 TODO.
 
-##### ValveMessage
-
-TODO.
-
-##### Inserting a new row
-
-TODO.
-
-##### Updating a row
-
-TODO.
-
-##### Deleting a row
-
-TODO.
-
-##### Moving a row
+#### Moving a row
 
 TODO.
 
@@ -422,9 +481,9 @@ If no options are specified, the options *db_table*, *truncate*, *load*, *save*,
   - *no-edit*: Sets the *edit* option (which is set to true by default unless *db_view* is true) to false.
   - *no-save*: Sets the *save* option (which is set to true by default unless *db_view* is true) to false.
 
-###### Commonly used path and option combinations
+##### Commonly used path and option combinations
 
-Here are some commonly used table table configurations:
+Here are some examples of commonly used table table configurations:
 
 table                | path                                 | description                                                                              | type     | options
 ---------------------| -------------------------------------| -----------------------------------------------------------------------------------------| ---------| ------------
