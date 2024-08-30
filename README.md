@@ -333,26 +333,31 @@ Valve is designed to identify and report on the following rule violations:
 For a given row of data, validation proceeds cell by cell. The validation consists in a series of checks schematically represented in the flowchart below and subsequently explained in more detail.
 
 ```mermaid
-graph TD;
-    A-->B;
-    A-->C;
-    B-->D;
-    C-->D;
+flowchart TD
+    node1["Call validate_cell_nulltype() for all cells"]
+    modal1{"Does it have a nulltype?"}
+    node2["validate_cell_rules()"]
+    node3["validate_cell_datatype()"]
+    modal2{"Does the cell value contain a SQL type error?"}
+    node4["validate_cell_foreign_constraints()"]
+    node5["validate_cell_unique_constraints()"]
+    node6["validate_tree_foreign_keys()"]
+    node1 -- "Then, for each cell:" --> modal1
+    modal1 -- No --> node2
+    modal1 -- Yes. Then over the table as a whole: --> node6
+    node2 --> node3
+    node3 --> modal2
+    modal2 -- No --> node4
+    modal2 -- Yes. Then over the table as a whole: --> node6
+    node4 --> node5
+    node5 -- "Then, over the table as a whole:" --> node6
 ```
 
-```mermaid
-flowchart TD
-    node1[validate_cell_nulltype() for all cells]
-    modal1{if nulltype is None}
-    node2[validate_cell_rules()]
-    node3[validate_cell_datatype()]
-    modal2{sql type error?}
-    node4[validate_cell_foreign_constraints()]
-    node5[validate_cell_unique_constraints()]
-    node6[validate_tree_foreign_keys()]
-    node1 -- then, for each cell: --> node2
-    node5 -- then, over the table as a whole: --> node6
-```
+###### validate_cell_nulltype()
+
+###### validate_cell_rules()**
+
+###### etc.
 
 
 ##### Batch vs. one-off validation
