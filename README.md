@@ -334,7 +334,7 @@ For a given row of data, validation proceeds cell by cell. The validation consis
 
 ```mermaid
 flowchart TD
-    node1["validate_cell_nulltype() (for all cells)"]
+    node1["validate_cell_nulltype() (for all cells in the row)"]
     node1 -- "Then, for each cell:" --> node2
     node2["validate_cell_rules()"]
     node2 --> modal1
@@ -358,27 +358,27 @@ flowchart TD
 
 ###### validate_cell_nulltype()
 
-TODO.
+The `validate_cell_nulltype()` function determines whether the value of the given cell matches the nulltype (if any) of its associated column, as defined in the [column table](#the-column-table). If the value matches the nulltype of the column, then the `nulltype` field of the `ValveCell` struct is set to the name of that nulltype. Otherwise the `nulltype` field remains `None`.
 
 ###### validate_cell_rules()
 
-TODO.
+The `validate_cell_rules()` function determines whether any rules in the [rule table](#the-rule-table) that are applicable to the cell have been violated. A rule is applicable to a cell when the rule's **when_column** matches the column name of the cell.
 
 ###### validate_cell_datatype()
 
-TODO.
+The `validate_cell_datatype()` function determines whether the value of the cell violates the datatype condition, as defined in the [datatype table](#the-datatype-table), for the datatype associated with the cell's column in the [column table](#the-column-table).
 
 ###### validate_cell_foreign_constraints()
 
-TODO.
+The `validate_cell_foreign_constraints()` function verifies, for a given cell, that if the column that the cell belongs to has been configured with a `from()` constraint (see the [column-table](#the-column-table)), then the cell's value (or values if the column has a [list datatype](#the-datatype-table)) is (are) among the values of the foreign column referred to by the constraint. Note that if the foreign table has a `_conflict` version (see [the table table](#the-table-table)), then this function will distinguish between (a) the case in which the value or values associated with the cell are not found in either the foreign table or its associated conflict table, and (b) the case in which the value or values are found only in the conflict table.
 
 ###### validate_cell_unique_constraints()
 
-TODO.
+The `validate_cell_unique_constraints()` function verifies, for a given cell, that if the colum that the cell belongs to has been configured with either a `primary` or a `unique` constraint (see the [column-table](#the-column-table)), then the cell's value is not among the values that have been already inserted to that column, neither in the normal version of the table nor in the conflict version of the table (in the case where the *conflict* option has been set).
 
 ###### validate_tree_foreign_keys()
 
-TODO.
+When a column, `column2` has a structure `tree(column1)` defined on it in the [column table](#the-column-table), then all non-null values of `column2` must exist in `column1`. The `validate_tree_foreign_keys()` function verifies, for a given table, whether any of the values of any of the cells in any of the rows violate any of the table's `tree()` conditions, if any.
 
 ##### Batch vs. one-off validation
 
