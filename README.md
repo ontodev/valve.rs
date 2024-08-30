@@ -334,13 +334,13 @@ For a given row of data, validation proceeds cell by cell. The validation consis
 
 ```mermaid
 flowchart TD
-    node1["Call validate_cell_nulltype() for all cells."]
+    node1["validate_cell_nulltype() (for all cells)"]
     node1 -- "Then, for each cell:" --> node2
     node2["validate_cell_rules()"]
     node2 --> modal1
     modal1{"Does the cell have a nulltype?"}
-    modal1 -- No. --> node3
-    modal1 -- Yes. Skip further validation for this cell. --> modal3
+    modal1 -- No --> node3
+    modal1 -- Yes, skip further validation for this cell. --> modal3
     node3["validate_cell_datatype()"]
     node3 --> modal2
     modal2{"Does the cell value contain a SQL type error?"}
@@ -351,8 +351,8 @@ flowchart TD
     node5["validate_cell_unique_constraints()"]
     node5 -- "Then, over the table as a whole:" --> node6
     modal3{"Have we iterated over all of the cells in the row?"}
-    modal3 -- Yes. Then over the table as a whole: --> node6
-    modal3 -- No. Go on to the next cell. --> node2
+    modal3 -- Yes, then over the table as a whole: --> node6
+    modal3 -- No, go on to the next cell. --> node2
     node6["validate_tree_foreign_keys()"]
 ```
 
