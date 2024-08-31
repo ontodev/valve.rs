@@ -14,7 +14,7 @@ Valve - A lightweight validation engine written in rust.
 
 ## Design and concepts
 
-Valve reads in the contents of user-defined data tables and represents them using a spreadsheet-like structure incorporating "rich" or annotated cells that may subsequently be edited and saved. The annotations are of two kinds:
+Valve reads in the contents of user-defined data tables and represents them using a spreadsheet-like structure incorporating annotated cells that may subsequently be edited and saved. The annotations are of two kinds:
 
 1. **Data validation messages** indicating that the value of a particular cell violates one or more of a number of user-defined data validation rules.
 2. **Data update messages** indicating that the value of a particular cell has changed as well as the details of the change.
@@ -206,8 +206,8 @@ Here,
 - **history_id** is a unique identifier for this history record that is assigned when it is created.
 - **table** is the table that this record is associated with.
 - **row** is the row number of the table that this record is associated with.
-- **from** is a JSON representation of the row as it was before the change (see the section on [data validation](#data-validation)).
-- **to** is a JSON representation of the row after the change (see the section on [data validation](#data-validation)).
+- **from** is a rich JSON representation of the row as it was before the change (see the section on [data validation](#data-validation)).
+- **to** is a rich JSON representation of the row after the change (see the section on [data validation](#data-validation)).
 - **user** is the name of the user that initiated the change, or who undid or redid the change (if applicable).
 - **undone_by** is the name of the user that undid the change (if applicable).
 - **timestamp** records the time of the change, or the time that it was undone or redone (if applicable).
@@ -384,21 +384,39 @@ When a column, `column2` has a structure `tree(column1)` defined on it in the [c
 
 The algorithm described in [the previous section](#validating-a-row-of-data) is applicable to a single row of data. When initially loading the many rows of a data table from its source into the database, however, a number of optimizations may be used to speed up the validation process. In particular, some of the steps for validating a row's cells from the previous section do not need to refer to any data external to a given row, and may therefore be performed in parallel. These are steps 1&ndash;3, i.e., the nulltype, rules, and datatype validation steps. Only the remaining steps: foreign and unique/primary constraint validation, need be performed row by row.
 
-#### Inserting a new row
+#### Editing the data
 
-TODO.
+Once a data table has been loaded into the database and validated, it may be desirable to further edit the data, for instance to resolve any outstanding validation messages, or for some other reason. The possible operations that can be performed on the data are `insert_row()`, `update_row()`, `delete_row()`, and `move_row()`. In addition the function `validate_row()` is used to validate the row during the editing process.
 
-#### Updating a row
+Note that `insert_row()`, `update_row()`, and `validate_row()` require that a row be specified in the following "simple" form:
 
-TODO.
+    {
+        "column_1": value1,
+        "column_2": value2,
+        ...
+    },
 
-#### Deleting a row
+The output of these three functions is a `ValveRow` (see [representing validated data](#representing-validated-data)).
 
-TODO.
+After editing the data, a record of the change will be inserted to the [history table](#the-message-and-history-tables). The `ValveRow` representing the row as it was before the change (in the case of an update, delete, or move operation), and the `ValveRow` representing it as it is after the change (in the case of an update, move, or insert), will be used as the values of the **from** and **to** columns, respectively. Note that to represent a `ValveRow` in the database, "rich" JSON format is used:
 
-#### Moving a row
+    {
+        "column_1": {
+            "valid": <true|false>,
+            "messages": [{"level": level, "rule": rule, "message": message}, ...],
+            "value": value1
+        },
+        "column_2": {
+            "valid": <true|false>,
+            "messages": [{"level": level, "rule": rule, "message": message}, ...],
+            "value": value2
+        },
+        ...
+    },
 
-TODO.
+
+For more information on the data manipulation and browsing operations provided by Valve see the section on the [Valve API](#api).
+
 
 ## Installation and configuration
 
