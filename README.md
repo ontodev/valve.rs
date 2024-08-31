@@ -348,12 +348,12 @@ flowchart TD
     modal2 -- Yes --> modal3
     node4["4. Validate foreign constraints"]
     node4 --> node5
-    node5[5. "Validate primary and unique Constraints"]
+    node5["5. Validate primary and unique Constraints"]
     node5 --> modal3
     modal3{"Have we iterated over all of the cells in the row?"}
     modal3 -- Yes, then over the table as a whole: --> node6
     modal3 -- No, go on to the next cell --> node2
-    node6[6. "Validate tree-foreign keys"]
+    node6["6. Validate tree-foreign keys"]
 ```
 
 ###### Determining the nulltype of a cell
