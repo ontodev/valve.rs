@@ -39,7 +39,7 @@ Below is an example of one of the views Valve provides into a data table in whic
 
     (5 rows)
 
-Here, **row_number** is a fixed identifier assigned to each row at the time of creation, while **row_order**, which in principle might change multiple times throughout the lifetime of a given row, is used to manipulate the logical order of rows in the table. The **message** column, in this example, conveys that the value 'd' of the column "foo" in row 3, and the value 'e' of the same column in rows 4 and 5, are duplicates of already existing values of that column, which happens to be a primary key, and are therefore invalid. We can also see, from the **history** column, that there has been one change, in which one of values in row 3, namely the value of the column "child", has been changed from 'z' to 'g'. Finally, the names of the columns to the right of the **history** column correspond to the column names of the source table and will therefore vary from table to table. Normally these column names are specified in the header of a '.tsv' file from which the source data is read, though see **BELOW** for alternate input data formats and table options. In any case the data contained in the columns to the right of the **history** column will exactly match the contents of the source table unless the data has been edited since it was initially loaded.
+Here, **row_number** is a fixed identifier assigned to each row at the time of creation, while **row_order**, which in principle might change multiple times throughout the lifetime of a given row, is used to manipulate the logical order of rows in the table. The **message** column, in this example, conveys that the value 'd' of the column "foo" in row 3, and the value 'e' of the same column in rows 4 and 5, are duplicates of already existing values of that column, which happens to be a primary key, and are therefore invalid. We can also see, from the **history** column, that there has been one change, in which one of values in row 3, namely the value of the column "child", has been changed from 'z' to 'g'. Finally, the names of the columns to the right of the **history** column correspond to the column names of the source table and will therefore vary from table to table. Normally these column names are specified in the header of a '.tsv' file from which the source data is read, though see [below](#further-information-on-path) for alternate input data formats and associated table options. In any case the data contained in the columns to the right of the **history** column will exactly match the contents of the source table unless the data has been edited since it was initially loaded.
 
 For the example below we will assume that a file named `table6.tsv` exists on your hard disk in your current working directory with the following contents:
 
@@ -57,20 +57,20 @@ child | parent | xyzzy | foo | bar
 
 In order for Valve to read this table it must first be configured to do so. This is done using a number of special data tables called [configuration tables](#configuration), usually represented using further '.tsv' files, that contain information about:
 
-1. Where to find the data tables and other general properties of each managed data table.
-2. The datatypes represented in the various data tables.
-3. Information about the columns of each data table: their associated datatypes, data dependencies between the values in one table column and some other one, and any other constraints or restrictions on individual columns.
-4. Rules constraining the joint values of two different cells in a single given row of data.
+1. Where to find the data tables and other general properties of each managed data table (i.e., the [table table](#the-table-table)).
+2. The datatypes represented in the various data tables (i.e., the [datatype table](#the-datatype-table)).
+3. Information about the columns of each data table: their associated datatypes, data dependencies between the values in one table column and some other one, and any other constraints or restrictions on individual columns (i.e., the [column table](#the-column-table)).
+4. Rules constraining the joint values of two different cells in a single given row of data (i.e., the [rule table](#the-rule-table)).
 
 For our example we will assume that Valve's configuration tables contain the following entries:
 
-The table table
+* **Table table**
 
 table  | path       | description | type | options
 -------|------------|-------------|------|---------
 table6 | table6.tsv |             |      |
 
-The column table
+* **Column table**
 
 table  | column | label | nulltype | default | datatype | structure          | description
 -------|--------|-------|----------|---------|----------|--------------------|------------
@@ -80,7 +80,7 @@ table6 | xyzzy  |       | empty    |         | integer  |                    |
 table6 | foo    |       | empty    |         | text     |                    |
 table6 | bar    |       | empty    |         | integer  |                    |
 
-The datatype table
+* **Datatype table**
 
 datatype     | parent       | condition              | description | sql_type
 -------------|--------------|------------------------|-------------|---------
@@ -92,7 +92,7 @@ word         | nonspace     | exclude(/\W/)          |             |
 empty        | text         | equals('')             |             |
 text         |              |                        |             | TEXT
 
-The rule table
+* **Rule table**
 
 table  | when_column | when_condition | then_column | then_condition | level | description
 ------ |-------------|----------------|-------------|----------------|-------|------------
@@ -251,7 +251,7 @@ Note that the **summary** column of the **history** table is where the informati
 
 #### Representing validated data
 
-For the purposes of this documentation, we are to understand a *row* (of data) to mean an array of cells, where each cell is associated a particular value of one of the columns in the given table. Once a given row of data has been inserted into the database and (optionally) validated, Valve represents it using a `ValveRow` struct (see the [API reference](#api)) which contains the following information:
+For the purposes of this section we will define a *cell* as a single value, that can either be valid or invalid, of one of the columns of a given data table. We will further define a *row* of data, from a given data table, to be an array of correlated cells, such that for every column in the table there is one and only one cell in the row corresponding to it. Once a given row of data has been inserted into the database and (optionally) validated, Valve represents it using a `ValveRow` struct (see the [API reference](#api)) containing the following information:
 
 1. The row's fixed, unique, identifier, or `row_number`.
 1. A map from the names of the columns contained in the row, to the `ValveCell` struct associated with each, where the latter represents the results of running Valve's validation engine (see [the validation process](#the-validation-process)) on the cell associated with that column.
@@ -265,11 +265,11 @@ In particular, each `ValveCell` contains the following information:
 
 Each `ValveCellMessage`, in turn, contains the following information:
 
-1. The level or severity of the message (e.g., "error", "warn", "info").
-1. An alphanumeric identifier for the rule violation described by the message.
+1. The level, or severity, of the message (e.g., "error", "warn", "info").
+1. An alphanumeric identifier for the rule violation described by the message (see the section on [rule violation identifiers](#rule-violation-identifiers)).
 1. The text of the message.
 
-The following is an example of a textual representation of the contents of a `ValveRow`:
+The following is a textual representation of an example of a `ValveRow`:
 
 ```rust
 ValveRow {
@@ -311,9 +311,9 @@ ValveRow {
 }
 ```
 
-#### Types of validation errors
+##### Rule violation identifiers
 
-Valve is designed to identify and report on the following rule violations:
+Valve uses the following to identify the rule that has been violated by a given cell value in the `ValveCellMessage` associated with the violation:
 
 - **key:foreign**: The column that the given value belongs to has a `from()` structure (see [the column table](#the-column-table) that references some column, F, in another table, but the given value is not in F.
 - **key:primary**: The column that the given value belongs to has a `primary` structure, and the given value already exists in the column.
@@ -324,65 +324,65 @@ Valve is designed to identify and report on the following rule violations:
 - **option:overrides**: (table table only): The list of options specified in the **options** column of the table table contains an option that overrides one of the other options.
 - **tree:foreign**: The column that the given value belongs to has a `tree()` structure that references some other column, T, of the same table; but the given value is not in T.
 - **datatype:_DATATYPE_**: The column that the given value belongs to has the datatype, _DATATYPE_, but applying _DATATYPE_'s associated condition to the given value results in a failure.
-- **rule:_COLUMN_-_N_**: The given value of _COLUMN_ causes the _Nth_ rule in the [rule table](#the-rule-table) that has been defined with respect to the `when_column`, _COLUMN_, to be violated.
+- **rule:_COLUMN_-_N_**: The given value of _COLUMN_ causes the _Nth_ rule in the [rule table](#the-rule-table) whose `when_column` is _COLUMN_ to be violated.
 
 #### The validation process
 
-##### Cell validation
+##### Validating a row of data
 
-For a given row of data, validation proceeds cell by cell. The validation consists in a series of checks schematically represented in the flowchart below and subsequently explained in more detail.
+For a given row of data in a given data table, Valve's validation process consists in a series of checks that are schematically represented in the flowchart below and subsequently explained in more detail.
 
 ```mermaid
 flowchart TD
-    node1["validate_cell_nulltype() (for all cells in the row)"]
+    node1["1. Determine the nulltype (if any) of each cell in the row"]
     node1 -- "Then, for each cell:" --> node2
-    node2["validate_cell_rules()"]
+    node2["2. Validate rules"]
     node2 --> modal1
     modal1{"Does the cell have a nulltype?"}
     modal1 -- No --> node3
     modal1 -- Yes, skip further validation for this cell --> modal3
-    node3["validate_cell_datatype()"]
+    node3["3. Validate datatype"]
     node3 --> modal2
     modal2{"Does the cell value contain a SQL type error?"}
     modal2 -- No --> node4
     modal2 -- Yes --> modal3
-    node4["validate_cell_foreign_constraints()"]
+    node4["4. Validate foreign constraints"]
     node4 --> node5
-    node5["validate_cell_unique_constraints()"]
+    node5[5. "Validate primary and unique Constraints"]
     node5 --> modal3
     modal3{"Have we iterated over all of the cells in the row?"}
     modal3 -- Yes, then over the table as a whole: --> node6
     modal3 -- No, go on to the next cell --> node2
-    node6["validate_tree_foreign_keys()"]
+    node6[6. "Validate tree-foreign keys"]
 ```
 
-###### validate_cell_nulltype()
+###### Determining the nulltype of a cell
 
-The `validate_cell_nulltype()` function determines whether the value of the given cell matches the nulltype (if any) of its associated column, as defined in the [column table](#the-column-table). If the value matches the nulltype of the column, then the `nulltype` field of the `ValveCell` struct is set to the name of that nulltype. Otherwise the `nulltype` field remains `None`.
+The validation process begins by determining, for each cell in the row, whether the value of that cell matches the nulltype (if any) of its associated column, as defined in the [column table](#the-column-table). In particular, if the value of the cell matches the nulltype of its associated column, then the `nulltype` field of the `ValveCell` struct used to represent the cell will be set to indicate that the value is a null value of that type. Otherwise the `nulltype` field will remain unset, indicating that the value is not a null value. For instance, suppose that the cell value is '' (i.e., the empty string), and that the nulltype for its associated column, as defined in the [column table](#the-column-table), is `empty`. Since `empty`'s associated condition, as defined in the [datatype table](#the-datatype-table) is `equals('')`, applying it to the cell value will result in a match, and Valve will set the `nulltype` field for the `ValveCell` representing this particular cell to `empty`. In the case where the value of the cell does *not* match the condition associated with the datatype, `empty`, (i.e., when the cell value is something other than an empty string), the validation process will leave the `nulltype` field of the `ValveCell` unset.
 
-###### validate_cell_rules()
+###### Validating rules
 
-The `validate_cell_rules()` function determines whether any rules in the [rule table](#the-rule-table) that are applicable to the cell have been violated. A rule is applicable to a cell when the rule's **when_column** matches the column name of the cell.
+This step of the validation process determines whether any of the rules in the [rule table](#the-rule-table) that are applicable to a cell have been violated. A rule in the rule table is applicable to a cell when the cell's associated column is the same as the **when_column** associated with the rule. Note that since the rules in the rule table correspond to **if-then** conditionals, such that the antecedent and consequent of a given conditional refer (in general) to two distinct columns, a rule violation may indicate that there is a problem with the value of either or both. Whenever a rule violation occurs, a `ValveCellMessage` struct is added to the list of messages associated with the cell, identifying the particular violation that occurred (see the section on [rule violation IDs](#rule-violation-identifiers)) and its associated `level` and `description` as found in the [rule table](#the-rule-table).
 
-###### validate_cell_datatype()
+###### Validating datatypes
 
-The `validate_cell_datatype()` function determines whether the value of the cell violates the datatype condition, as defined in the [datatype table](#the-datatype-table), for the datatype associated with the cell's column in the [column table](#the-column-table).
+This step of the validation process determines whether a cell's value violates the datatype condition, as defined in the [datatype table](#the-datatype-table), for the datatype associated with the cell's column in the [column table](#the-column-table). When a datatype violation occurs, a `ValveCellMessage` struct is added to the list of messages associated with the cell, identifying the particular datatype violation that occurred (see the section on [rule violation IDs](#rule-violation-identifiers)). The text of the message is taken from the description of the datatype that has been violated (see the [datatype table](#the-datatype-table)).
 
-###### validate_cell_foreign_constraints()
+###### Validating foreign constraints
 
-The `validate_cell_foreign_constraints()` function verifies, for a given cell, that if the column that the cell belongs to has been configured with a `from()` constraint (see the [column-table](#the-column-table)), then the cell's value (or values if the column has a [list datatype](#the-datatype-table)) is (are) among the values of the foreign column referred to by the constraint. Note that if the foreign table has a `_conflict` version (see [the table table](#the-table-table)), then this function will distinguish between (a) the case in which the value or values associated with the cell are not found in either the foreign table or its associated conflict table, and (b) the case in which the value or values are found only in the conflict table.
+This step in the validation process verifies, for a given cell, that if the cell's associated, `C`, column has been configured with a structure of the form `from(T, F)` (see the [column-table](#the-column-table)), where `T` is a foreign table and `F` is a column in `T`, then the cell's value (or values if `C`'s datatype is a [list datatype](#the-datatype-table)) is (are) among the values of `F`. Note that if the foreign table has a `_conflict` version (see [the table table](#the-table-table)), then this function will distinguish between (a) the case in which a given value is not found in either the foreign table or its associated conflict table, and (b) the case in which a given value is found only in the conflict table. When a foreign constraint violation occurs, a `ValveCellMessage` struct is added to the list of messages associated with the cell with the identifier `key:foreign` (see also the section on [rule violation IDs](#rule-violation-identifiers)). The text of the message will be of the form: `Value 'V' of column C is not in T.F`, whenever `V` is neither found in the normal version of the table nor (if applicable) its conflict version, and it will be of the form `Value 'V' of column C exists only in T_conflict.F` whenever `V` exists in `T_conflict` but not in `T`.
 
-###### validate_cell_unique_constraints()
+###### Validating primary and unique constraints
 
-The `validate_cell_unique_constraints()` function verifies, for a given cell, that if the colum that the cell belongs to has been configured with either a `primary` or a `unique` constraint (see the [column-table](#the-column-table)), then the cell's value is not among the values that have been already inserted to that column, neither in the normal version of the table nor in the conflict version of the table (in the case where the *conflict* option has been set).
+This step in the validation process verifies, for a given cell, that if the cell's associated column has been configured with either a `primary` or a `unique` constraint (see the [column-table](#the-column-table)), then the cell's value is not among the values of the column that have already been inserted into the table, neither in the normal version of the table nor in the conflict version (in the case where the *conflict* option has been set). When a primary or unique constraint violation occurs, a `ValveCellMessage` struct is added to the list of messages associated with the cell with the appropriate [rule violation ID](#rule-violation-identifiers). The text of the message is of the form `Values of COLUMN must be unique`.
 
-###### validate_tree_foreign_keys()
+###### Validating tree-foreign keys
 
-When a column, `column2` has a structure `tree(column1)` defined on it in the [column table](#the-column-table), then all non-null values of `column2` must exist in `column1`. The `validate_tree_foreign_keys()` function verifies, for a given table, whether any of the values of any of the cells in any of the rows violate any of the table's `tree()` conditions, if any.
+When a column, `column2` has a structure `tree(column1)` defined on it in the [column table](#the-column-table), then all non-null values of `column2` must exist in `column1`. This step in the validation process function verifies, for a given table, whether any of the values of any of the cells in any of the rows violate any of the table's `tree()` conditions. When a primary or unique constraint violation occurs, a `ValveCellMessage` struct is added to the list of messages associated with the cell with the appropriate [rule violation ID](#rule-violation-identifiers). The text of the message is of the form `Value 'VAL' of column COLUMN2 is not in COLUMN1`.
 
-##### Batch vs. one-off validation
+##### Batch validation
 
-TODO.
+The algorithm described in [the previous section](#validating-a-row-of-data) is applicable to a single row of data. When initially loading the many rows of a data table from its source into the database, however, a number of optimizations may be used to speed up the validation process. In particular, some of the steps for validating a row's cells from the previous section do not need to refer to any data external to a given row, and may therefore be performed in parallel. These are steps 1&ndash;3, i.e., the nulltype, rules, and datatype validation steps. Only the remaining steps: foreign and unique/primary constraint validation, need be performed row by row.
 
 #### Inserting a new row
 
