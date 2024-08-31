@@ -206,8 +206,8 @@ Here,
 - **history_id** is a unique identifier for this history record that is assigned when it is created.
 - **table** is the table that this record is associated with.
 - **row** is the row number of the table that this record is associated with.
-- **from** is a rich JSON representation of the row as it was before the change (see the section on [data validation](#data-validation)).
-- **to** is a rich JSON representation of the row after the change (see the section on [data validation](#data-validation)).
+- **from** is a rich JSON representation of the row as it was before the change (see the section on [data validation](#representing-validated-data)).
+- **to** is a rich JSON representation of the row after the change (see the section on [data validation](#representing-validated-data)).
 - **user** is the name of the user that initiated the change, or who undid or redid the change (if applicable).
 - **undone_by** is the name of the user that undid the change (if applicable).
 - **timestamp** records the time of the change, or the time that it was undone or redone (if applicable).
