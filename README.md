@@ -4,7 +4,7 @@ Valve - A lightweight validation engine written in rust.
 
 ## Table of contents
 
-_Generated using [markdown-toc](#https://github.com/jonschlinkert/markdown-toc)_
+_Generated using [markdown-toc](https://github.com/jonschlinkert/markdown-toc)_
 
 * [Design and concepts](#design-and-concepts)
   + [The Valve database](#the-valve-database)
@@ -85,11 +85,19 @@ Jennifer Lopez              | solo |                   | Medi-Assist            
 Janice Joplin               | solo |                   | Pittsfield Medical        | FFFHYZDFJ432        |
 Chrissie Hynde              | solo |                   | Blue Cross                | 4422393877          |
 Van Halen                   | band | 5                 | Blue Cross                | 9476587117          | BBDC
-Van Morrison                | solo | 1                 | Medi-Assist               | MA67920004571       |
+Van Morrison                | solo |                   | Medi-Assist               | MA67920004571       |
 Paul McCartney              | solo |                   | Medi-Assisr               | MA60768763987       |
 The Band                    | band | five              | Blue Cross                | 0831133887          |
 Bob Dylan                   | solo |                   | Pittsfield Medical        | FFF GYU ZKJ 954     |
 Van Halen                   | band |                   | Blue Cr.                  | 9476587117          |
+
+We will also assume that a file named `providers.tsv` exists on your hard disk in your current working directory with the following contents:
+
+name               | address
+-------------------|----------
+Blue Cross         | 123 Fake Street, Fake Town, USA, 55123
+Medi-Assist        | 933 Phoney Boulevard, Accra, Ghana, GA008
+Pittsfield Medical | 510 North Street, Pittsfield, MA, 01201
 
 In order for Valve to read this table it must first be configured to do so. This is done using a number of special data tables called [configuration tables](#configuration), usually represented using further '.tsv' files, that contain information about:
 
@@ -102,9 +110,10 @@ For our example we will assume that Valve's configuration tables contain the fol
 
 * **Table table**
 
-table   | path        | description | type | options
---------|-------------|-------------|------|---------
-artists | artists.tsv |             |      |
+table     | path          | description | type | options
+----------|---------------|-------------|------|---------
+artists   | artists.tsv   |             |      |
+providers | providers.tsv |             |      |
 
 * **Column table**
 
@@ -115,7 +124,7 @@ artists   | type                       |       |          |         | trimmed_li
 artists   | number_of_members          |       | empty    |         | integer      |                      |
 artists   | health_insurance_provider  |       |          |         | trimmed_line | from(providers.name) |
 artists   | health_insurance_id        |       |          |         | nonspace     |                      |
-artists   | health_insurance_id_suffix |       |          |         | word         |                      |
+artists   | health_insurance_id_suffix |       | empty    |         | word         |                      |
 providers | name                       |       |          |         | trimmed_line | primary              |
 providers | address                    |       |          |         | text         |                      |
 
@@ -140,14 +149,6 @@ artists | health_insurance_provider | equals('Blue Cross')         | health_insu
 artists | health_insurance_provider | equals('Pittsfield Medical') | health_insurance_id        | word           | error | a Pittsfield Medical ID must consist in a single word
 
 For the meanings of all of the columns in the configuration tables above, see the section on [configuration](#configuration). In the rest of this section we'll refrain from explaining the meaning of a particular configuration table column unless and until it becomes relevant to our example. What is relevant at this point is only that each configuration table is _also_ a data table whose contents are themselves subject to validation by Valve. In other words Valve will not necessarily fail to run if there are errors in its configuration (as long as those errors aren't critical) and it can moreover help to identify what those errors are. The upshot is that almost everything I mention below regarding `artists` also applies to the special configuration tables `table`, `column`, `datatype` and `rule` unless otherwise noted.
-
-For our example we will also assume that the user data table, `providers`, that is referred to in the structure for the column `artists.health_insurance_provider` has the following contents:
-
-name               | address
--------------------|----------
-Blue Cross         | 123 Fake Street, Fake Town, USA, 55123
-Medi-Assist        | 933 Phoney Boulevard, Accra, Ghana, GA008
-Pittsfield Medical | 510 North Street, Pittsfield, MA, 01201
 
 Once it has been read in by Valve from its source file, a given logical table will be represented, in the database, by between one and two database tables and by as many as two database views. In our example, the source data, contained in the file 'artists.tsv', represents (according to the table table configuration) a normal data table with the default options set, which means that all four database tables and views will be created. These are:
 
@@ -195,8 +196,8 @@ row_number|row_order|name          |type|number_of_members|health_insurance_prov
  6            | 6000        | Van Halen                   | band | 5                   | Blue Cross                | 9476587117            | BBDC                       |                                                                                                                                                                                                            | 
  7            | 7000        | Van Morrison                | solo |                   | Medi-Assist               | MA67920004571       |                            |                                                                                                                                                                                                            | 
  8            | 8000        | Paul McCartney              | solo |                   | Medi-Assisr               | MA60768763987       |                            | [{"column":"health_insurance_provider","value":"Medi-Assisr","level":"error","rule":"key:foreign","message":"Value 'Medi-Assisr' of column health_insurance_provider is not in providers.name"}]           | 
- 9            | 9000        | The Band                    | band |                   | Blue Cross                | 0831133887            |                            | [{"column":"health_insurance_provider","value":"Blue Cross","level":"error","rule":"rule:health_insurance_provider-1","message":"a health insurance id suffix must be specified for Blue Cross members"}, |            |           |                             |      |                   |                           |                     |                            |  {"column":"number_of_members","value":"five","level":"error","rule":"datatype:integer","message":"number_of_members should be a positive or negative integer"}]                                           | 
- 10           | 10000       | Bob Dylan                   | solo |                   | Pittsfield Medical        | FFF GYU ZKJ 954       |                            | [{"column":"health_insurance_id","value":"FFF GYU ZKJ 954  ","level":"error","rule":"datatype:nonspace","message":"health_insurance_id should be text without whitespace"},                                 |             |           |                             |      |                   |                           |                     |                            |  {"column":"health_insurance_provider","value":"Pittsfield Medical","level":"error","rule":"rule:health_insurance_provider-2","message":"a Pittsfield Medical health insurance id must be a single word"}] | 
+ 9            | 9000        | The Band                    | band |                   | Blue Cross                | 0831133887            |                            | [{"column":"health_insurance_provider","value":"Blue Cross","level":"error","rule":"rule:health_insurance_provider-1","message":"a health insurance id suffix must be specified for Blue Cross members"}, {"column":"number_of_members","value":"five","level":"error","rule":"datatype:integer","message":"number_of_members should be a positive or negative integer"}]                                           | 
+ 10           | 10000       | Bob Dylan                   | solo |                   | Pittsfield Medical        | FFF GYU ZKJ 954       |                            | [{"column":"health_insurance_id","value":"FFF GYU ZKJ 954  ","level":"error","rule":"datatype:nonspace","message":"health_insurance_id should be text without whitespace"}, {"column":"health_insurance_provider","value":"Pittsfield Medical","level":"error","rule":"rule:health_insurance_provider-2","message":"a Pittsfield Medical health insurance id must be a single word"}] | 
  11           | 11000       | Van Halen                   | band | 5                   | Pittsfield Med.           | 9476587117            |                            | [{"column":"health_insurance_provider","value":"Pittsfield Med.","level":"error","rule":"key:foreign","message":"Value 'Pittsfield Med.' of column health_insurance_provider is not in providers.name"},  |             |           |                             |      |                   |                           |                     |                            |  {"column":"name","value":"Van Halen","level":"error","rule":"key:primary","message":"Values of name must be unique"}]
 
     (11 rows)
@@ -213,9 +214,9 @@ row_number|row_order|name          |type|number_of_members|health_insurance_prov
  6            | 6000        | Van Halen                   | band | 5                   | Blue Cross                | 9476587117            | BBDC                       |                                                                                                                                                                                                            | 
  7            | 7000        | Van Morrison                | solo |                   | Medi-Assist               | MA67920004571       |                            |                                                                                                                                                                                                            | 
  8            | 8000        | Paul McCartney              | solo |                   | Medi-Assisr               | MA60768763987       |                            | [{"column":"health_insurance_provider","value":"Medi-Assisr","level":"error","rule":"key:foreign","message":"Value 'Medi-Assisr' of column health_insurance_provider is not in providers.name"}]           | 
- 9            | 9000        | The Band                    | band | five              | Blue Cross                | 0831133887            |                            | [{"column":"health_insurance_provider","value":"Blue Cross","level":"error","rule":"rule:health_insurance_provider-1","message":"a health insurance id suffix must be specified for Blue Cross members"}, |             |           |                             |      |                   |                           |                     |                            |  {"column":"number_of_members","value":"five","level":"error","rule":"datatype:integer","message":"number_of_members should be a positive or negative integer"}]                                           | 
- 10           | 10000       | Bob Dylan                   | solo |                   | Pittsfield Medical        | FFF GYU ZKJ 954       |                            | [{"column":"health_insurance_id","value":"FFF GYU ZKJ 954  ","level":"error","rule":"datatype:nonspace","message":"health_insurance_id should be text without whitespace"},                                 |            |           |                             |      |                   |                           |                     |                            |  {"column":"health_insurance_provider","value":"Pittsfield Medical","level":"error","rule":"rule:health_insurance_provider-2","message":"a Pittsfield Medical health insurance id must be a single word"}] | 
- 11           | 11000       | Van Halen                   | band | 5                   | Pittsfield Med.           | 9476587117            |                            | [{"column":"health_insurance_provider","value":"Pittsfield Med.","level":"error","rule":"key:foreign","message":"Value 'Pittsfield Med.' of column health_insurance_provider is not in providers.name"},  |            |           |                             |      |                   |                           |                     |                            |  {"column":"name","value":"Van Halen","level":"error","rule":"key:primary","message":"Values of name must be unique"}]
+ 9            | 9000        | The Band                    | band | five              | Blue Cross                | 0831133887            |                            | [{"column":"health_insurance_provider","value":"Blue Cross","level":"error","rule":"rule:health_insurance_provider-1","message":"a health insurance id suffix must be specified for Blue Cross members"},{"column":"number_of_members","value":"five","level":"error","rule":"datatype:integer","message":"number_of_members should be a positive or negative integer"}]                                           | 
+ 10           | 10000       | Bob Dylan                   | solo |                   | Pittsfield Medical        | FFF GYU ZKJ 954       |                            | [{"column":"health_insurance_id","value":"FFF GYU ZKJ 954  ","level":"error","rule":"datatype:nonspace","message":"health_insurance_id should be text without whitespace"},{"column":"health_insurance_provider","value":"Pittsfield Medical","level":"error","rule":"rule:health_insurance_provider-2","message":"a Pittsfield Medical health insurance id must be a single word"}] | 
+ 11           | 11000       | Van Halen                   | band | 5                   | Pittsfield Med.           | 9476587117            |                            | [{"column":"health_insurance_provider","value":"Pittsfield Med.","level":"error","rule":"key:foreign","message":"Value 'Pittsfield Med.' of column health_insurance_provider is not in providers.name"}, {"column":"name","value":"Van Halen","level":"error","rule":"key:primary","message":"Values of name must be unique"}]
 
     (11 rows)
 
@@ -371,7 +372,7 @@ ValveRow {
 
 Valve uses the following to identify the rule that has been violated by a given cell value in the `ValveCellMessage` associated with the violation:
 
-- **key:foreign**: The column that the given value belongs to has a `from()` structure (see [the column table](#the-column-table) that references some column, F, in another table, but the given value is not in F.
+- **key:foreign**: The column that the given value belongs to has a `from()` structure (see [the column table](#the-column-table)) that references some column, F, in another table, but the given value is not in F.
 - **key:primary**: The column that the given value belongs to has a `primary` structure, and the given value already exists in the column.
 - **key:unique**: The column that the given value belongs to has a `unique` structure, and the given value already exists in the column.
 - **option:unrecognized** (table table only): The list of options specified in the **options** column of the [table table](#the-table-table) contains an unrecognized option.
@@ -426,7 +427,7 @@ This step of the validation process determines whether a cell's value violates t
 
 ###### Validating foreign constraints
 
-This step in the validation process verifies, for a given cell, that if the cell's associated, `C`, column has been configured with a structure of the form `from(T, F)` (see the [column-table](#the-column-table)), where `T` is a foreign table and `F` is a column in `T`, then the cell's value (or values if `C`'s datatype is a [list datatype](#the-datatype-table)) is (are) among the values of `F`. Note that if the foreign table has a `_conflict` version (see [the table table](#the-table-table)), then this function will distinguish between (a) the case in which a given value is not found in either the foreign table or its associated conflict table, and (b) the case in which a given value is found only in the conflict table. When a foreign constraint violation occurs, a `ValveCellMessage` struct is added to the list of messages associated with the cell with the identifier `key:foreign` (see also the section on [rule violation IDs](#rule-violation-identifiers)). The text of the message will be of the form: `Value 'V' of column C is not in T.F`, whenever `V` is neither found in the normal version of the table nor (if applicable) its conflict version, and it will be of the form `Value 'V' of column C exists only in T_conflict.F` whenever `V` exists in `T_conflict` but not in `T`.
+This step in the validation process verifies, for a given cell, that if the cell's associated column, `C`, has been configured with a structure of the form `from(T, F)` (see the [column-table](#the-column-table)), where `T` is a foreign table and `F` is a column in `T`, then the cell's value (or values if `C`'s datatype is a [list datatype](#the-datatype-table)) is (are) among the values of `F`. Note that if the foreign table has a `_conflict` version (see [the table table](#the-table-table)), then this function will distinguish between (a) the case in which a given value is not found in either the foreign table or its associated conflict table, and (b) the case in which a given value is found only in the conflict table. When a foreign constraint violation occurs, a `ValveCellMessage` struct is added to the list of messages associated with the cell with the identifier `key:foreign` (see also the section on [rule violation IDs](#rule-violation-identifiers)). The text of the message will be of the form: `Value 'V' of column C is not in T.F`, whenever `V` is neither found in the normal version of the table nor (if applicable) its conflict version, and it will be of the form `Value 'V' of column C exists only in T_conflict.F` whenever `V` exists in `T_conflict` but not in `T`.
 
 ###### Validating primary and unique constraints
 
@@ -442,7 +443,7 @@ The algorithm described in [the previous section](#validating-a-row-of-data) is 
 
 #### Editing the data
 
-Once a data table has been loaded into the database and validated, it may be desirable to further edit the data, for instance to resolve any outstanding validation messages, or for some other reason. The possible operations that can be performed on the data are `insert_row()`, `update_row()`, `delete_row()`, and `move_row()`. In addition the function `validate_row()` is used to validate the row during the editing process.
+Once a data table has been loaded into the database and validated, it may be desirable to further edit the data, for instance to resolve any outstanding validation messages, or for some other reason. The possible operations that can be performed on the data are `insert_row()`, `update_row()`, `delete_row()`, and `move_row()`. In addition the function `validate_row()` is used to generate validation information about the row during the editing process.
 
 Note that `insert_row()`, `update_row()`, and `validate_row()` require that a row be specified in the following "simple" form:
 
