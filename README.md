@@ -23,9 +23,9 @@ _Generated using [markdown-toc](https://github.com/jonschlinkert/markdown-toc)_
         + [Validating tree-foreign keys](#validating-tree-foreign-keys)
       * [Batch validation](#batch-validation)
     - [Editing the data](#editing-the-data)
+    - [Saving data tables](#saving-data-tables)
 * [Installation and configuration](#installation-and-configuration)
   + [Prerequisites](#prerequisites)
-    - [Differences between PostgreSQL and SQLite](#differences-between-postgresql-and-sqlite)
   + [Installation](#installation)
     - [Binary installation](#binary-installation)
     - [Source installation](#source-installation)
@@ -53,7 +53,7 @@ Valve reads in the contents of user-defined data tables and represents them usin
 1. **Data validation messages** indicating that the value of a particular cell violates one or more of a number of user-defined data validation rules.
 2. **Data update messages** indicating that the value of a particular cell has changed as well as the details of the change.
 
-After reading and optionally validating the initial data, the validated information is loaded into a database that can then be queried directly using your favourite SQL client (e.g., [sqlite3](https://sqlite.org/cli.html) or [psql](https://www.postgresql.org/docs/current/app-psql.html)) as in the examples below. The currently supported databases are [SQLite](https://sqlite.org) and [PostgreSQL](https://www.postgresql.org) (see [Differences between PostgreSQL and SQLite](#differences-between-postgresql-and-sqlite)). Valve further provides an [Application-programmer interface (API)](#api) that can be used to incorporate Valve's data validation and manipulation functionality and to visualize the validated data within your own [rust project](https://www.rust-lang.org/). For an example of a rust project that uses Valve, see [ontodev/nanobot.rs](https://github.com/ontodev/nanobot.rs). Finally, Valve also provides a [Command line interface (CLI)](#command-line-usage) for some of its more important functions like `load`, `save`, and `guess`.
+After reading and optionally validating the initial data, the validated information is loaded into a database that can then be queried directly using your favourite SQL client (e.g., [sqlite3](https://sqlite.org/cli.html) or [psql](https://www.postgresql.org/docs/current/app-psql.html)) as in the examples below. The currently supported databases are [SQLite](https://sqlite.org) and [PostgreSQL](https://www.postgresql.org). Valve further provides an [Application-programmer interface (API)](#api) that can be used to incorporate Valve's data validation and manipulation functionality and to visualize the validated data within your own [rust project](https://www.rust-lang.org/). For an example of a rust project that uses Valve, see [ontodev/nanobot.rs](https://github.com/ontodev/nanobot.rs). Finally, Valve also provides a [Command line interface (CLI)](#command-line-usage) for some of its more important functions like `load`, `save`, and `guess`.
 
 ### The Valve database
 
@@ -472,18 +472,18 @@ After editing the data, a record of the change will be inserted to the [history 
     },
 
 
-For more information on the data manipulation and browsing operations provided by Valve see the section on the [Valve API](#api).
+Valve also provides the `undo()` and `redo()` functions, to undo the last insert, update, or delete operation, and to redo the last undo, respectively. For more information on the data manipulation and browsing operations provided by Valve see the section on the [Valve API](#api).
 
+#### Saving data tables
+
+To save a data table or tables to a '.tsv' file, one uses the API functions, `save_all_tables()`, `save_tables()`, or `save_table()`. Note that unless the [save option](#further-information-on-options) has been set, it is not possible to overwrite the source file from which the table was originally loaded. One must save the table to an alternate location. For more information on saving data tables Valve see the section on the [Valve API](#api).
 
 ## Installation and configuration
 
 ### Prerequisites
 
-TODO.
-
-#### Differences between PostgreSQL and SQLite
-
-TODO.
+- Building Valve from source requires installing a [rust development environment](https://www.rust-lang.org/learn/get-started). 
+- Valve also requires database management software to be installed. The currently supported databases are [SQLite](https://sqlite.org) and [PostgreSQL](https://www.postgresql.org). In the latter case the database server must be up and running and ready to accept connections. Note that although the database may be queried directly by using your favourite SQL client (e.g., [sqlite3](https://sqlite.org/cli.html) or [psql](https://www.postgresql.org/docs/current/app-psql.html)), one advantage to viewing and manipulating the data through Valve is that syntax and other [differences](https://www.digitalocean.com/community/tutorials/sqlite-vs-mysql-vs-postgresql-a-comparison-of-relational-database-management-systems) between the two database management systems become transparent to the user.
 
 ### Installation
 
