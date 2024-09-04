@@ -8,10 +8,10 @@ use crate::{
         ValveCell, ValveCellMessage, ValveChange, ValveColumnConfig, ValveConfig,
         ValveConstraintConfig, ValveDatatypeConfig, ValveError, ValveForeignConstraint,
         ValveMessage, ValveRow, ValveRowChange, ValveRuleConfig, ValveSpecialConfig,
-        ValveTableConfig, ValveTreeConstraint, ValveUnderConstraint,
+        ValveTableConfig, ValveTreeConstraint,
     },
     valve_grammar::StartParser,
-    CHUNK_SIZE, MAX_DB_CONNECTIONS, MOVE_INTERVAL, MULTI_THREADED, SQL_PARAM, SQL_TYPES,
+    CHUNK_SIZE, MAX_DB_CONNECTIONS, MOVE_INTERVAL, MULTI_THREADED, SQL_PARAM,
 };
 use anyhow::Result;
 use async_recursion::async_recursion;
@@ -86,7 +86,7 @@ impl std::fmt::Debug for ParsedStructure {
 }
 
 /// The type of value the condition should be applied to.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum ValueType {
     Single,
     List(String),
@@ -662,15 +662,13 @@ pub fn read_config_files(
         // - A table is allowed to have an empty path unless it is editable. If the path is
         //   non-empty then it can be a file ending (case insensitively) with '.tsv', a file ending
         //   (case insensitively) with '.sql', or an executable file.
-        // - All other tables (other than internal tables) must have a path and it must end
-        //   (case insensitively) in '.tsv'.
         let is_view = row_options.contains("db_view");
         let is_readonly = !row_options.contains("edit");
         let is_internal = row_options.contains("internal");
         if is_view || is_readonly {
             if is_view && row_path.ends_with(".tsv") {
                 return Err(ValveError::ConfigError(format!(
-                    "Invalid path '{}' for view '{}'. TSV files are not supported for views.",
+                    "Invalid path '{}' for view '{}'. '.tsv' files are not supported for views.",
                     row_path, row_table,
                 ))
                 .into());
@@ -697,6 +695,13 @@ pub fn read_config_files(
         // Check that the table table path is the same as the path that was input as an argument to
         // this function:
         if row_type == "table" {
+            if row_table != "table" {
+                return Err(ValveError::ConfigError(format!(
+                    "Invalid table table name: '{}'. The table table must be named 'table'",
+                    row_table,
+                ))
+                .into());
+            }
             if path.to_lowercase().ends_with(".tsv") && row_path != path {
                 return Err(ValveError::ConfigError(format!(
                     "The \"table\" table path '{}' is not the expected '{}'",
@@ -883,7 +888,7 @@ pub fn read_config_files(
     }
 
     // Check that all the essential datatypes have been configured:
-    for dt in vec!["text", "empty", "line", "word"] {
+    for dt in vec!["text", "empty", "line", "trimmed_line", "nonspace", "word"] {
         if !datatypes_config.contains_key(dt) {
             return Err(
                 ValveError::ConfigError(format!("Missing required datatype: '{}'", dt)).into(),
@@ -1209,7 +1214,7 @@ pub fn read_config_files(
             .and_then(|t| Some(t.column_order = column_order));
 
         // Populate the table constraints for this table:
-        let (primaries, uniques, foreigns, trees, unders) = get_table_constraints(
+        let (primaries, uniques, foreigns, trees) = get_table_constraints(
             &tables_config,
             &datatypes_config,
             parser,
@@ -1229,9 +1234,6 @@ pub fn read_config_files(
         constraints_config
             .tree
             .insert(table_name.to_string(), trees);
-        constraints_config
-            .under
-            .insert(table_name.to_string(), unders);
     }
 
     // 6. Add implicit unique constraints for trees and foreign keys:
@@ -1325,14 +1327,14 @@ pub fn read_config_files(
 /// Given the global configuration struct and a parser, compile all of the datatype conditions,
 /// add them to a hash map whose keys are the text versions of the conditions and whose values
 /// are the compiled conditions, and then finally return the hash map.
-pub fn generate_compiled_datatype_conditions(
+pub fn generate_datatype_conditions(
     config: &ValveConfig,
     parser: &StartParser,
 ) -> Result<HashMap<String, CompiledCondition>> {
     // We go through the datatypes one by one, compiling any non-list types first and saving the
     // list types, which are higher level types that refer to non-list types, for later.
     let mut saved_for_last = HashMap::new();
-    let mut compiled_datatype_conditions = HashMap::new();
+    let mut datatype_conditions = HashMap::new();
     for (dt_name, dt_config) in config.datatype.iter() {
         let condition = &dt_config.condition;
         if condition != "" {
@@ -1340,18 +1342,17 @@ pub fn generate_compiled_datatype_conditions(
                 saved_for_last.insert(dt_name, dt_config);
             } else {
                 let compiled_condition =
-                    compile_condition(condition, parser, &compiled_datatype_conditions)?;
-                compiled_datatype_conditions.insert(dt_name.to_string(), compiled_condition);
+                    compile_condition(condition, parser, &datatype_conditions)?;
+                datatype_conditions.insert(dt_name.to_string(), compiled_condition);
             }
         }
     }
     for (dt_name, dt_config) in saved_for_last.iter() {
         let condition = &dt_config.condition;
-        let compiled_condition =
-            compile_condition(&condition, parser, &compiled_datatype_conditions)?;
-        compiled_datatype_conditions.insert(dt_name.to_string(), compiled_condition);
+        let compiled_condition = compile_condition(&condition, parser, &datatype_conditions)?;
+        datatype_conditions.insert(dt_name.to_string(), compiled_condition);
     }
-    Ok(compiled_datatype_conditions)
+    Ok(datatype_conditions)
 }
 
 /// Given the global config struct, a hash map of compiled datatype conditions (indexed by the text
@@ -1366,12 +1367,12 @@ pub fn generate_compiled_datatype_conditions(
 ///      ...
 /// }
 /// ```
-pub fn generate_compiled_rule_conditions(
+pub fn generate_rule_conditions(
     config: &ValveConfig,
-    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
+    datatype_conditions: &HashMap<String, CompiledCondition>,
     parser: &StartParser,
 ) -> Result<HashMap<String, HashMap<String, Vec<ColumnRule>>>> {
-    let mut compiled_rule_conditions = HashMap::new();
+    let mut rule_conditions = HashMap::new();
     let tables_config = &config.table;
     let rules_config = &config.rule;
     for (rules_table, table_rules) in rules_config.iter() {
@@ -1393,15 +1394,15 @@ pub fn generate_compiled_rule_conditions(
                     }
                 }
                 let when_compiled =
-                    compile_condition(&rule.when_condition, parser, &compiled_datatype_conditions)?;
+                    compile_condition(&rule.when_condition, parser, &datatype_conditions)?;
                 let then_compiled =
-                    compile_condition(&rule.then_condition, parser, &compiled_datatype_conditions)?;
+                    compile_condition(&rule.then_condition, parser, &datatype_conditions)?;
 
-                if !compiled_rule_conditions.contains_key(rules_table) {
+                if !rule_conditions.contains_key(rules_table) {
                     let table_rules = HashMap::new();
-                    compiled_rule_conditions.insert(rules_table.to_string(), table_rules);
+                    rule_conditions.insert(rules_table.to_string(), table_rules);
                 }
-                let table_rules = compiled_rule_conditions.get_mut(rules_table).unwrap();
+                let table_rules = rule_conditions.get_mut(rules_table).unwrap();
                 if !table_rules.contains_key(column_rule_key) {
                     table_rules.insert(column_rule_key.to_string(), vec![]);
                 }
@@ -1413,7 +1414,7 @@ pub fn generate_compiled_rule_conditions(
             }
         }
     }
-    Ok(compiled_rule_conditions)
+    Ok(rule_conditions)
 }
 
 /// Given the global config struct and a parser, parse all of the structure conditions, add them to
@@ -1618,6 +1619,7 @@ pub fn get_sql_for_text_view(
     let inner_columns = {
         let mut v = vec![
             "row_number".to_string(),
+            "row_order".to_string(),
             "message".to_string(),
             "history".to_string(),
         ];
@@ -1628,6 +1630,7 @@ pub fn get_sql_for_text_view(
     let outer_columns = {
         let mut v = vec![
             "t.row_number".to_string(),
+            "t.row_order".to_string(),
             "t.message".to_string(),
             "t.history".to_string(),
         ];
@@ -1948,6 +1951,7 @@ pub async fn get_rows_to_update(
     IndexMap<String, Vec<ValveRow>>,
     IndexMap<String, Vec<ValveRow>>,
     IndexMap<String, Vec<ValveRow>>,
+    IndexMap<String, Vec<ValveRow>>,
 )> {
     fn get_cell_value(row: &ValveRow, column: &str) -> Result<String> {
         row.contents
@@ -1978,6 +1982,8 @@ pub async fn get_rows_to_update(
 
     let mut rows_to_update_before = IndexMap::new();
     let mut rows_to_update_after = IndexMap::new();
+    let mut rows_to_update_unique = IndexMap::new();
+    let mut rows_to_update_tree = IndexMap::new();
     for fdep in &foreign_dependencies {
         let dependent_table = &fdep.table;
         let dependent_column = &fdep.column;
@@ -2053,8 +2059,6 @@ pub async fn get_rows_to_update(
         rows_to_update_after.insert(dependent_table.to_string(), updates_after);
     }
 
-    // Collect the intra-table dependencies:
-    // TODO: Consider also the tree intra-table dependencies.
     let primaries = config
         .constraint
         .primary
@@ -2074,7 +2078,6 @@ pub async fn get_rows_to_update(
         .map(|k| k.to_string())
         .collect::<Vec<_>>();
 
-    let mut rows_to_update_intra = IndexMap::new();
     for column in &columns {
         if !uniques.contains(column) && !primaries.contains(column) {
             continue;
@@ -2113,16 +2116,57 @@ pub async fn get_rows_to_update(
                 .await?
             }
         };
-        rows_to_update_intra.insert(table.to_string(), updates);
+        rows_to_update_unique.insert(table.to_string(), updates);
     }
 
-    // TODO: Collect the dependencies for under constraints similarly to the way we
-    // collect foreign constraints (see just above).
+    // Collect tree-foreign dependencies:
+    let trees = config
+        .constraint
+        .tree
+        .get(table)
+        .expect(&format!("Undefined table '{}'", table));
+
+    for tree in trees {
+        let dependent_column = &tree.parent;
+        let target_column = &tree.child;
+        // Query the database using `row_number` to get the current value of the column for
+        // the row.
+        let updates_tree = match &query_as_if.row {
+            None => {
+                if query_as_if.kind != QueryAsIfKind::Remove {
+                    log::warn!(
+                        "No row in query_as_if: {:?} for {:?}",
+                        query_as_if,
+                        query_as_if.kind
+                    );
+                }
+                vec![]
+            }
+            Some(row) => {
+                // Fetch the cell corresponding to `column` from `row`, and the value of that cell,
+                // which is the new value for the row.
+                let new_value = get_cell_value(&row, target_column)?;
+                let rows = get_affected_rows(
+                    table,
+                    dependent_column,
+                    &new_value,
+                    Some(&query_as_if.row_number),
+                    config,
+                    pool,
+                    tx,
+                )
+                .await?;
+                rows
+            }
+        };
+        rows_to_update_tree.insert(table.to_string(), updates_tree);
+    }
 
     Ok((
         rows_to_update_before,
+        rows_to_update_tree,
+        rows_to_update_unique,
         rows_to_update_after,
-        rows_to_update_intra,
     ))
 }
 
@@ -2133,8 +2177,8 @@ pub async fn get_rows_to_update(
 /// `updates`.
 pub async fn process_updates(
     config: &ValveConfig,
-    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
-    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    datatype_conditions: &HashMap<String, CompiledCondition>,
+    rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     pool: &AnyPool,
     tx: &mut Transaction<'_, sqlx::Any>,
     updates: &IndexMap<String, Vec<ValveRow>>,
@@ -2146,8 +2190,8 @@ pub async fn process_updates(
             // Validate each row 'counterfactually':
             let vrow = validate_row_tx(
                 config,
-                compiled_datatype_conditions,
-                compiled_rule_conditions,
+                datatype_conditions,
+                rule_conditions,
                 pool,
                 Some(tx),
                 update_table,
@@ -2159,8 +2203,8 @@ pub async fn process_updates(
             // Update the row in the database:
             update_row_tx(
                 config,
-                compiled_datatype_conditions,
-                compiled_rule_conditions,
+                datatype_conditions,
+                rule_conditions,
                 pool,
                 tx,
                 update_table,
@@ -2931,21 +2975,22 @@ pub async fn move_row_tx(
 #[async_recursion]
 pub async fn insert_new_row_tx(
     config: &ValveConfig,
-    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
-    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    datatype_conditions: &HashMap<String, CompiledCondition>,
+    rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     pool: &AnyPool,
     tx: &mut Transaction<sqlx::Any>,
     table: &str,
     row: &ValveRow,
     skip_validation: bool,
+    do_not_recurse: bool,
 ) -> Result<u32> {
     // Send the row through the row validator to determine if any fields are problematic and
     // to mark them with appropriate messages:
     let row = if !skip_validation {
         validate_row_tx(
             config,
-            compiled_datatype_conditions,
-            compiled_rule_conditions,
+            datatype_conditions,
+            rule_conditions,
             pool,
             Some(tx),
             table,
@@ -3036,7 +3081,18 @@ pub async fn insert_new_row_tx(
 
     // Look through the valve config to see which tables are dependent on this table
     // and find the rows that need to be updated:
-    let (_, updates_after, _) = get_rows_to_update(config, pool, tx, table, &query_as_if).await?;
+    let (_, updates_tree, _, updates_after) = {
+        if do_not_recurse {
+            (
+                IndexMap::new(),
+                IndexMap::new(),
+                IndexMap::new(),
+                IndexMap::new(),
+            )
+        } else {
+            get_rows_to_update(config, pool, tx, table, &query_as_if).await?
+        }
+    };
 
     // Check it to see if the row should be redirected to the conflict table:
     let table_to_write = {
@@ -3088,11 +3144,25 @@ pub async fn insert_new_row_tx(
         query.execute(tx.acquire().await?).await?;
     }
 
+    // Now process the updates that need to be performed because of an insertion to a tree
+    // column:
+    process_updates(
+        config,
+        datatype_conditions,
+        rule_conditions,
+        pool,
+        tx,
+        &updates_tree,
+        &query_as_if,
+        true,
+    )
+    .await?;
+
     // Now process the updates that need to be performed after the update of the target row:
     process_updates(
         config,
-        compiled_datatype_conditions,
-        compiled_rule_conditions,
+        datatype_conditions,
+        rule_conditions,
         pool,
         tx,
         &updates_after,
@@ -3109,8 +3179,8 @@ pub async fn insert_new_row_tx(
 #[async_recursion]
 pub async fn delete_row_tx(
     config: &ValveConfig,
-    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
-    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    datatype_conditions: &HashMap<String, CompiledCondition>,
+    rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     pool: &AnyPool,
     tx: &mut Transaction<sqlx::Any>,
     table: &str,
@@ -3129,14 +3199,14 @@ pub async fn delete_row_tx(
     // Look through the valve config to see which tables are dependent on this table and find the
     // rows that need to be updated. Since this is a delete there will only be rows to update
     // before and none after the delete:
-    let (updates_before, _, updates_intra) =
+    let (updates_before, updates_tree, updates_unique, _) =
         get_rows_to_update(config, pool, tx, table, &query_as_if).await?;
 
     // Process the updates that need to be performed before the update of the target row:
     process_updates(
         config,
-        compiled_datatype_conditions,
-        compiled_rule_conditions,
+        datatype_conditions,
+        rule_conditions,
         pool,
         tx,
         &updates_before,
@@ -3166,15 +3236,29 @@ pub async fn delete_row_tx(
     let query = sqlx_query(&sql);
     query.execute(tx.acquire().await?).await?;
 
+    // Now process the updates that need to be performed because of an insertion to a tree
+    // column:
+    process_updates(
+        config,
+        datatype_conditions,
+        rule_conditions,
+        pool,
+        tx,
+        &updates_tree,
+        &query_as_if,
+        true,
+    )
+    .await?;
+
     // Finally process the rows from the same table as the target table that need to be re-validated
     // because of unique or primary constraints:
     process_updates(
         config,
-        compiled_datatype_conditions,
-        compiled_rule_conditions,
+        datatype_conditions,
+        rule_conditions,
         pool,
         tx,
-        &updates_intra,
+        &updates_unique,
         &query_as_if,
         true,
     )
@@ -3191,8 +3275,8 @@ pub async fn delete_row_tx(
 #[async_recursion]
 pub async fn update_row_tx(
     config: &ValveConfig,
-    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
-    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    datatype_conditions: &HashMap<String, CompiledCondition>,
+    rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     pool: &AnyPool,
     tx: &mut Transaction<sqlx::Any>,
     table: &str,
@@ -3214,9 +3298,14 @@ pub async fn update_row_tx(
         row_number: row_number,
         row: Some(row.clone()),
     };
-    let (updates_before, updates_after, updates_intra) = {
+    let (updates_before, updates_tree, updates_unique, updates_after) = {
         if do_not_recurse {
-            (IndexMap::new(), IndexMap::new(), IndexMap::new())
+            (
+                IndexMap::new(),
+                IndexMap::new(),
+                IndexMap::new(),
+                IndexMap::new(),
+            )
         } else {
             get_rows_to_update(config, pool, tx, table, &query_as_if).await?
         }
@@ -3225,8 +3314,8 @@ pub async fn update_row_tx(
     // Process the updates that need to be performed before the update of the target row:
     process_updates(
         config,
-        compiled_datatype_conditions,
-        compiled_rule_conditions,
+        datatype_conditions,
+        rule_conditions,
         pool,
         tx,
         &updates_before,
@@ -3242,8 +3331,8 @@ pub async fn update_row_tx(
         row.row_number = Some(row_number);
         validate_row_tx(
             config,
-            compiled_datatype_conditions,
-            compiled_rule_conditions,
+            datatype_conditions,
+            rule_conditions,
             pool,
             Some(tx),
             table,
@@ -3261,8 +3350,8 @@ pub async fn update_row_tx(
     // Perform the update in two steps:
     delete_row_tx(
         config,
-        compiled_datatype_conditions,
-        compiled_rule_conditions,
+        datatype_conditions,
+        rule_conditions,
         pool,
         tx,
         table,
@@ -3271,28 +3360,43 @@ pub async fn update_row_tx(
     .await?;
     insert_new_row_tx(
         config,
-        compiled_datatype_conditions,
-        compiled_rule_conditions,
+        datatype_conditions,
+        rule_conditions,
         pool,
         tx,
         table,
         &row,
         false,
+        do_not_recurse,
     )
     .await?;
 
     // Move the row back to the position it was in before it was deleted:
     move_row_tx(tx, table, &row_number, &old_previous_rn).await?;
 
+    // Now process the updates that need to be performed because of an insertion to a tree
+    // column:
+    process_updates(
+        config,
+        datatype_conditions,
+        rule_conditions,
+        pool,
+        tx,
+        &updates_tree,
+        &query_as_if,
+        true,
+    )
+    .await?;
+
     // Now process the rows from the same table as the target table that need to be re-validated
     // because of unique or primary constraints:
     process_updates(
         config,
-        compiled_datatype_conditions,
-        compiled_rule_conditions,
+        datatype_conditions,
+        rule_conditions,
         pool,
         tx,
-        &updates_intra,
+        &updates_unique,
         &query_as_if,
         true,
     )
@@ -3302,8 +3406,8 @@ pub async fn update_row_tx(
     // the target row:
     process_updates(
         config,
-        compiled_datatype_conditions,
-        compiled_rule_conditions,
+        datatype_conditions,
+        rule_conditions,
         pool,
         tx,
         &updates_after,
@@ -3394,12 +3498,12 @@ pub fn read_db_table_into_vector(pool: &AnyPool, config_table: &str) -> Result<V
 
 /// Given a condition on a datatype, if the condition is a Function, then parse it using
 /// StartParser, create a corresponding CompiledCondition, and return it. If the condition is a
-/// Label, then look for the CompiledCondition corresponding to it in compiled_datatype_conditions
+/// Label, then look for the CompiledCondition corresponding to it in datatype_conditions
 /// and return it.
 pub fn compile_condition(
     condition: &str,
     parser: &StartParser,
-    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
+    datatype_conditions: &HashMap<String, CompiledCondition>,
 ) -> Result<CompiledCondition> {
     if condition == "null" || condition == "not null" {
         // The case of a "null" or "not null" condition will be treated specially later during the
@@ -3467,7 +3571,7 @@ pub fn compile_condition(
                         })
                     }
                     "match" => {
-                        pattern = format!("^{}{}$", flags, pattern);
+                        pattern = format!("^({}{})$", flags, pattern);
                         let re = Regex::new(pattern.as_str())?;
                         Ok(CompiledCondition {
                             value_type: ValueType::Single,
@@ -3531,7 +3635,7 @@ pub fn compile_condition(
                             "Datatype not found: '{}' in arguments for 'list': {:?}",
                             datatype, args
                         ));
-                        let compiled = match compiled_datatype_conditions.get(datatype) {
+                        let compiled = match datatype_conditions.get(datatype) {
                             Some(condition) => condition.compiled.clone(),
                             _ => return Err(datatype_not_found_error.into()),
                         };
@@ -3548,12 +3652,8 @@ pub fn compile_condition(
                 _ => Err(syntax_error.into()),
             }
         }
-        Expression::Label(value)
-            if compiled_datatype_conditions.contains_key(&value.to_string()) =>
-        {
-            let condition = compiled_datatype_conditions
-                .get(&value.to_string())
-                .unwrap();
+        Expression::Label(value) if datatype_conditions.contains_key(&value.to_string()) => {
+            let condition = datatype_conditions.get(&value.to_string()).unwrap();
             Ok(CompiledCondition {
                 value_type: ValueType::Single,
                 original: value.to_string(),
@@ -3689,6 +3789,31 @@ pub fn get_column_value(row: &AnyRow, column: &str, sql_type: &str) -> SerdeValu
     }
 }
 
+/// Given a global config map, a map of compiled datatype conditions, a table name and a column
+/// name, get the value type of the column.
+pub fn get_value_type(
+    config: &ValveConfig,
+    datatype_conditions: &HashMap<String, CompiledCondition>,
+    table_name: &str,
+    column_name: &str,
+) -> ValueType {
+    let datatype = &config
+        .table
+        .get(table_name)
+        .expect(&format!("No config found for table '{}'", table_name))
+        .column
+        .get(column_name)
+        .expect(&format!(
+            "No config found for column '{}' of table '{}'",
+            column_name, table_name
+        ))
+        .datatype;
+    match datatype_conditions.get(datatype) {
+        None => ValueType::Single,
+        Some(condition) => condition.value_type.clone(),
+    }
+}
+
 /// Given a SQL string, possibly with unbound parameters represented by the placeholder string
 /// SQL_PARAM, and given a database pool, if the pool is of type Sqlite, then change the syntax used
 /// for unbound parameters to Sqlite syntax, which uses "?", otherwise use Postgres syntax, which
@@ -3724,8 +3849,8 @@ pub fn local_sql_syntax(pool: &AnyPool, sql: &String) -> String {
 }
 
 /// Takes as arguments a list of tables and a configuration struct describing all of the constraints
-/// between tables. After validating that there are no cycles amongst the foreign, tree, and
-/// under dependencies, returns (i) the list of tables sorted according to their foreign key
+/// between tables. After validating that there are no cycles amongst the foreign, and tree
+/// dependencies, returns (i) the list of tables sorted according to their foreign key
 /// dependencies, such that if table_a depends on table_b, then table_b comes before table_a in the
 /// list; (ii) A map from table names to the lists of tables that depend on a given table; (iii) a
 /// map from table names to the lists of tables that a given table depends on.
@@ -3813,7 +3938,6 @@ pub fn verify_table_deps_and_sort(
 
     // Check for inter-table cycles:
     let foreign_keys = &constraints.foreign;
-    let under_keys = &constraints.under;
     let mut dependency_graph = DiGraphMap::<&str, ()>::new();
     for table_name in table_list {
         let t_index = dependency_graph.add_node(table_name);
@@ -3824,31 +3948,6 @@ pub fn verify_table_deps_and_sort(
             let ftable = &fkey.ftable;
             let f_index = dependency_graph.add_node(&ftable);
             dependency_graph.add_edge(t_index, f_index, ());
-        }
-
-        let ukeys = under_keys
-            .get(table_name)
-            .expect(&format!("Undefined table '{}'", table_name));
-        for ukey in ukeys {
-            let ttable = &ukey.ttable;
-            let tcolumn = &ukey.tcolumn;
-            let value = &ukey.value;
-            if ttable != table_name {
-                let ttable_trees = trees.get(ttable).unwrap();
-                if ttable_trees
-                    .iter()
-                    .filter(|d| d.child == *tcolumn)
-                    .collect::<Vec<_>>()
-                    .is_empty()
-                {
-                    panic!(
-                        "under({}.{}, {}) refers to a non-existent tree",
-                        ttable, tcolumn, value
-                    );
-                }
-                let tt_index = dependency_graph.add_node(&ttable);
-                dependency_graph.add_edge(t_index, tt_index, ());
-            }
         }
     }
 
@@ -3893,7 +3992,6 @@ pub fn verify_table_deps_and_sort(
                     if i < end_index {
                         let dep_name = cycle.get(i + 1).unwrap().as_str();
                         let fkeys = foreign_keys.get(table).unwrap();
-                        let ukeys = under_keys.get(table).unwrap();
                         let column;
                         let ref_table;
                         let ref_column;
@@ -3901,10 +3999,6 @@ pub fn verify_table_deps_and_sort(
                             column = &dep.column;
                             ref_table = &dep.ftable;
                             ref_column = &dep.fcolumn;
-                        } else if let Some(dep) = ukeys.iter().find(|d| d.ttable == *dep_name) {
-                            column = &dep.column;
-                            ref_table = &dep.ttable;
-                            ref_column = &dep.tcolumn;
                         } else {
                             panic!("{}. Unable to retrieve the details.", message);
                         }
@@ -3942,7 +4036,7 @@ pub fn get_table_options(config: &ValveConfig, table: &str) -> Result<HashSet<St
 
 /// Given a table configuration map and a datatype configuration map, a parser, a table name, and a
 /// database connection pool, return lists of: primary keys, unique constraints, foreign keys,
-/// trees, and under keys.
+/// and trees.
 pub fn get_table_constraints(
     tables_config: &HashMap<String, ValveTableConfig>,
     datatypes_config: &HashMap<String, ValveDatatypeConfig>,
@@ -3954,13 +4048,11 @@ pub fn get_table_constraints(
     Vec<String>,
     Vec<ValveForeignConstraint>,
     Vec<ValveTreeConstraint>,
-    Vec<ValveUnderConstraint>,
 ) {
     let mut primaries = vec![];
     let mut uniques = vec![];
     let mut foreigns = vec![];
     let mut trees = vec![];
-    let mut unders = vec![];
 
     let columns = tables_config
         .get(table_name)
@@ -4051,26 +4143,6 @@ pub fn get_table_constraints(
                             }
                         };
                     }
-                    Expression::Function(name, args) if name == "under" => {
-                        let generic_error = format!(
-                            "Invalid 'under' constraint: {} for: {}",
-                            structure, table_name
-                        );
-                        if args.len() != 2 {
-                            panic!("{}", generic_error);
-                        }
-                        match (&*args[0], &*args[1]) {
-                            (Expression::Field(ttable, tcolumn), Expression::Label(value)) => {
-                                unders.push(ValveUnderConstraint {
-                                    column: column_name.to_string(),
-                                    ttable: ttable.to_string(),
-                                    tcolumn: tcolumn.to_string(),
-                                    value: json!(value),
-                                });
-                            }
-                            (_, _) => panic!("{}", generic_error),
-                        };
-                    }
                     _ => panic!(
                         "Unrecognized structure: {} for {}.{}",
                         structure, table_name, column_name
@@ -4080,169 +4152,7 @@ pub fn get_table_constraints(
         }
     }
 
-    return (primaries, uniques, foreigns, trees, unders);
-}
-
-/// Given a table configuration struct, a datatype configuration struct, a parser, a table name,
-/// and a database connection pool, return a list of DDL statements that can be used to create the
-/// database tables.
-pub fn get_table_ddl(
-    config: &ValveConfig,
-    table_name: &String,
-    pool: &AnyPool,
-) -> Result<Vec<String>> {
-    let tables_config = &config.table;
-    let datatypes_config = &config.datatype;
-
-    let mut statements = vec![];
-    let mut create_lines = vec![
-        format!(r#"CREATE TABLE "{}" ("#, table_name),
-        String::from(r#"  "row_number" BIGINT,"#),
-        String::from(r#"  "row_order" BIGINT,"#),
-    ];
-
-    let normal_table_name;
-    if let Some(s) = table_name.strip_suffix("_conflict") {
-        normal_table_name = String::from(s);
-    } else {
-        normal_table_name = table_name.to_string();
-    }
-
-    let column_configs = {
-        let column_order = &tables_config
-            .get(&normal_table_name)
-            .expect(&format!("Undefined table '{}'", normal_table_name))
-            .column_order;
-        let columns = &tables_config
-            .get(&normal_table_name)
-            .expect(&format!("Undefined table '{}'", normal_table_name))
-            .column;
-
-        column_order
-            .iter()
-            .map(|column_name| columns.get(column_name).unwrap())
-            .collect::<Vec<_>>()
-    };
-
-    let (primaries, uniques, foreigns, _trees, _unders) = {
-        // Conflict tables have no database constraints:
-        if table_name.ends_with("_conflict") {
-            (vec![], vec![], vec![], vec![], vec![])
-        } else {
-            let cons = &config.constraint;
-            let primaries = cons.primary.get(table_name).cloned().unwrap_or(vec![]);
-            let uniques = cons.unique.get(table_name).cloned().unwrap_or(vec![]);
-            let foreigns = cons.foreign.get(table_name).cloned().unwrap_or(vec![]);
-            let trees = cons.tree.get(table_name).cloned().unwrap_or(vec![]);
-            let unders = cons.under.get(table_name).cloned().unwrap_or(vec![]);
-            (primaries, uniques, foreigns, trees, unders)
-        }
-    };
-
-    let c = column_configs.len();
-    let mut r = 0;
-    for column_config in column_configs {
-        r += 1;
-        let sql_type = get_sql_type(&datatypes_config, &column_config.datatype, pool);
-
-        let short_sql_type = {
-            if sql_type.to_lowercase().as_str().starts_with("varchar(") {
-                "VARCHAR"
-            } else {
-                &sql_type
-            }
-        };
-
-        if !SQL_TYPES.contains(&short_sql_type.to_lowercase().as_str()) {
-            panic!(
-                "Unrecognized SQL type '{}' for datatype: '{}'. Accepted SQL types are: {}",
-                sql_type,
-                column_config.datatype,
-                SQL_TYPES.join(", ")
-            );
-        }
-
-        let column_name = &column_config.column;
-        let mut line = format!(r#"  "{}" {}"#, column_name, sql_type);
-
-        // Check if the column is a primary key and indicate this in the DDL if so:
-        if primaries.contains(&column_name) {
-            line.push_str(" PRIMARY KEY");
-        }
-
-        // Check if the column has a unique constraint and indicate this in the DDL if so:
-        if uniques.contains(&column_name) {
-            line.push_str(" UNIQUE");
-        }
-
-        // Check if the column has a default value and indicate this in the DDL if it does:
-        let default_value = match &column_config.default {
-            SerdeValue::String(s) if s == "" => "".to_string(),
-            SerdeValue::String(s) => format!("'{}'", s),
-            SerdeValue::Number(n) => n.to_string(),
-            SerdeValue::Null => "".to_string(),
-            _ => panic!(
-                "Configured default value, {:?}, of column '{}' is neither \
-                         a number nor a string.",
-                column_config.default, column_name
-            ),
-        };
-        if default_value != "" {
-            line.push_str(&format!(" DEFAULT {}", default_value));
-        }
-
-        // If there are foreign constraints add a column to the end of the statement which we will
-        // finish after this for loop is done (but don't do this for views):
-        let applicable_foreigns = foreigns
-            .iter()
-            .filter(|fkey| {
-                let table_config = &tables_config
-                    .get(&fkey.ftable)
-                    .expect(&format!("Undefined table '{}'", fkey.ftable));
-                !table_config.options.contains("db_view")
-            })
-            .collect::<Vec<_>>();
-        if !(r >= c && applicable_foreigns.is_empty()) {
-            line.push_str(",");
-        }
-        create_lines.push(line);
-    }
-
-    // Add the SQL to indicate any foreign constraints:
-    let num_fkeys = foreigns.len();
-    for (i, fkey) in foreigns.iter().enumerate() {
-        let ftable_options = {
-            let table_config = &tables_config
-                .get(&fkey.ftable)
-                .expect(&format!("Undefined table '{}'", fkey.ftable));
-            table_config.options.clone()
-        };
-        if !ftable_options.contains("db_view") {
-            create_lines.push(format!(
-                r#"  FOREIGN KEY ("{}") REFERENCES "{}"("{}"){}"#,
-                fkey.column,
-                fkey.ftable,
-                fkey.fcolumn,
-                if i < (num_fkeys - 1) { "," } else { "" }
-            ));
-        }
-    }
-    create_lines.push(String::from(");"));
-    // We are done generating the lines for the 'create table' statement. Join them and add the
-    // result to the statements to return:
-    statements.push(String::from(create_lines.join("\n")));
-
-    // Finally, create further unique indexes on row_number and row_order:
-    statements.push(format!(
-        r#"CREATE UNIQUE INDEX "{}_row_number_idx" ON "{}"("row_number");"#,
-        table_name, table_name
-    ));
-    statements.push(format!(
-        r#"CREATE UNIQUE INDEX "{}_row_order_idx" ON "{}"("row_order");"#,
-        table_name, table_name
-    ));
-
-    Ok(statements)
+    return (primaries, uniques, foreigns, trees);
 }
 
 /// Given a list of messages and a HashMap, messages_stats, with which to collect counts of
@@ -4275,13 +4185,13 @@ pub fn add_message_counts(
 /// the datatype name is not defined in the given config.
 pub fn get_datatype_ancestors(
     config: &ValveConfig,
-    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
+    datatype_conditions: &HashMap<String, CompiledCondition>,
     dt_name: &str,
     only_conditioned: bool,
 ) -> Vec<ValveDatatypeConfig> {
     fn build_hierarchy(
         config: &ValveConfig,
-        compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
+        datatype_conditions: &HashMap<String, CompiledCondition>,
         start_dt_name: &str,
         dt_name: &str,
         only_conditioned: bool,
@@ -4293,7 +4203,7 @@ pub fn get_datatype_ancestors(
                 .get(dt_name)
                 .expect(&format!("Undefined datatype '{}'", dt_name));
             let dt_name = datatype.datatype.as_str();
-            let dt_condition = compiled_datatype_conditions.get(dt_name);
+            let dt_condition = datatype_conditions.get(dt_name);
             let dt_parent = datatype.parent.as_str();
             if dt_name != start_dt_name {
                 if !only_conditioned {
@@ -4306,7 +4216,7 @@ pub fn get_datatype_ancestors(
             }
             let mut more_datatypes = build_hierarchy(
                 config,
-                compiled_datatype_conditions,
+                datatype_conditions,
                 start_dt_name,
                 dt_parent,
                 only_conditioned,
@@ -4317,7 +4227,7 @@ pub fn get_datatype_ancestors(
     }
     build_hierarchy(
         config,
-        compiled_datatype_conditions,
+        datatype_conditions,
         dt_name,
         dt_name,
         only_conditioned,
@@ -4614,6 +4524,7 @@ pub async fn make_inserts(
 pub async fn insert_chunk(
     config: &ValveConfig,
     pool: &AnyPool,
+    datatype_conditions: &HashMap<String, CompiledCondition>,
     table_name: &String,
     rows: &mut Vec<ValveRow>,
     chunk_number: usize,
@@ -4621,100 +4532,145 @@ pub async fn insert_chunk(
     verbose: bool,
     validate: bool,
 ) -> Result<()> {
-    // Insertion with optional inter-table validation:
-    // Try to insert the rows to the db first without validating unique and foreign constraints.
-    // If there are constraint violations this will cause a database error, in which case we then
-    // explicitly do the constraint validation and insert the resulting rows.
-    // Note that instead of passing messages_stats here, we are going to initialize an empty map
-    // and pass that instead. The reason is that if a database error gets thrown, and then we
-    // redo the validation later, some of the messages will be double-counted. So to avoid that
-    // we send an empty map here, and in the case of no database error, we will just add the
-    // contents of the temporary map to messages_stats (in the Ok branch of the match statement
-    // below).
-    let mut tmp_messages_stats = HashMap::new();
-    tmp_messages_stats.insert("error".to_string(), 0);
-    tmp_messages_stats.insert("warning".to_string(), 0);
-    tmp_messages_stats.insert("info".to_string(), 0);
-    let (main_sql, main_params, conflict_sql, conflict_params, message_sql, message_params) =
-        make_inserts(
+    async fn validate_and_insert(
+        // This function implements the full validation process without any shortcuts. It will be
+        // called only in the last resort. Otherwise we try to use the database to tell us whether
+        // validation needs to be done and only do it in that case.
+        config: &ValveConfig,
+        pool: &AnyPool,
+        datatype_conditions: &HashMap<String, CompiledCondition>,
+        table_name: &String,
+        rows: &mut Vec<ValveRow>,
+        chunk_number: usize,
+        messages_stats: &mut HashMap<String, usize>,
+        verbose: bool,
+    ) -> Result<()> {
+        // Validate all remaining constraints:
+        validate_rows_constraints(config, pool, datatype_conditions, table_name, rows).await?;
+        // Construct the SQL statements and corresponding parameters for the database update:
+        let (main_sql, main_params, conflict_sql, conflict_params, message_sql, message_params) =
+            make_inserts(
+                config,
+                table_name,
+                rows,
+                chunk_number,
+                messages_stats,
+                verbose,
+                pool,
+            )
+            .await?;
+
+        // Add data to the main table:
+        let main_sql = local_sql_syntax(&pool, &main_sql);
+        let mut main_query = sqlx_query(&main_sql);
+        for param in &main_params {
+            main_query = main_query.bind(param);
+        }
+        main_query.execute(pool).await?;
+
+        // Add data to the conflict table:
+        let conflict_sql = local_sql_syntax(&pool, &conflict_sql);
+        let mut conflict_query = sqlx_query(&conflict_sql);
+        for param in &conflict_params {
+            conflict_query = conflict_query.bind(param);
+        }
+        conflict_query.execute(pool).await?;
+
+        // Add data to the message table:
+        let message_sql = local_sql_syntax(&pool, &message_sql);
+        let mut message_query = sqlx_query(&message_sql);
+        for param in &message_params {
+            message_query = message_query.bind(param);
+        }
+        message_query.execute(pool).await?;
+        Ok(())
+    }
+
+    // Determine whether any of the columns of this table are list types constrained by from()
+    // structures, or are the basis for a tree() constraint. Such columns are not tied to foreign
+    // keys in the database and therefore we cannot rely on the database to complain when they are
+    // violated:
+    let has_list_with_from = {
+        let table_config = config
+            .table
+            .get(table_name)
+            .expect(&format!("Cannot find config for table '{}'", table_name));
+        // Check, for each column, whether it is a list type, and if it is, check if the table
+        // has a foreign constraint on that column:
+        table_config.column.keys().any(|column_name| {
+            match get_value_type(config, datatype_conditions, table_name, column_name) {
+                ValueType::List(_) => {
+                    let foreigns = config.constraint.foreign.get(table_name).expect(&format!(
+                        "Cannot find foreign constraints for table '{}'",
+                        table_name
+                    ));
+                    foreigns
+                        .iter()
+                        .any(|foreign| foreign.column == *column_name)
+                }
+                ValueType::Single => false,
+            }
+        })
+    };
+    let has_trees = {
+        let trees = config
+            .constraint
+            .tree
+            .get(table_name)
+            .expect(&format!("Cannot find trees for table '{}'", table_name));
+        !trees.is_empty()
+    };
+
+    // If the validation flag is set, then if the table has a list column with a from() structure,
+    // or if the table has a tree, we always perform validation. Otherwise we rely on the database
+    // to complain when we try to insert the data, and only do the full validation when it does.
+    if validate && (has_list_with_from || has_trees) {
+        validate_and_insert(
             config,
+            pool,
+            datatype_conditions,
             table_name,
             rows,
             chunk_number,
-            &mut tmp_messages_stats,
+            messages_stats,
             verbose,
-            pool,
         )
-        .await?;
+        .await
+    } else {
+        // Insertion with optional inter-table validation:
+        // Try to insert the rows to the db first without validating unique and foreign constraints.
+        // If there are constraint violations this will cause a database error, in which case we
+        // then explicitly do the constraint validation and insert the resulting rows. Note that
+        // instead of passing messages_stats here, we are going to initialize an empty map and pass
+        // that instead. The reason is that if a database error gets thrown, and then we
+        // redo the validation later, some of the messages will be double-counted. So to avoid
+        // that we send an empty map here, and in the case of no database error, we will just add
+        // the contents of the temporary map to messages_stats (in the Ok branch of the match
+        // statement below).
+        let mut tmp_messages_stats = HashMap::new();
+        tmp_messages_stats.insert("error".to_string(), 0);
+        tmp_messages_stats.insert("warning".to_string(), 0);
+        tmp_messages_stats.insert("info".to_string(), 0);
+        let (main_sql, main_params, conflict_sql, conflict_params, message_sql, message_params) =
+            make_inserts(
+                config,
+                table_name,
+                rows,
+                chunk_number,
+                &mut tmp_messages_stats,
+                verbose,
+                pool,
+            )
+            .await?;
 
-    let main_sql = local_sql_syntax(&pool, &main_sql);
-    let mut main_query = sqlx_query(&main_sql);
-    for param in &main_params {
-        main_query = main_query.bind(param);
-    }
-    let main_result = main_query.execute(pool).await;
-    match main_result {
-        Ok(_) => {
-            let conflict_sql = local_sql_syntax(&pool, &conflict_sql);
-            let mut conflict_query = sqlx_query(&conflict_sql);
-            for param in &conflict_params {
-                conflict_query = conflict_query.bind(param);
-            }
-            conflict_query.execute(pool).await?;
-
-            let message_sql = local_sql_syntax(&pool, &message_sql);
-            let mut message_query = sqlx_query(&message_sql);
-            for param in &message_params {
-                message_query = message_query.bind(param);
-            }
-            message_query.execute(pool).await?;
-
-            if verbose {
-                let curr_errors = messages_stats.get("error").unwrap();
-                messages_stats.insert(
-                    "error".to_string(),
-                    curr_errors + tmp_messages_stats.get("error").unwrap(),
-                );
-                let curr_warnings = messages_stats.get("warning").unwrap();
-                messages_stats.insert(
-                    "warning".to_string(),
-                    curr_warnings + tmp_messages_stats.get("warning").unwrap(),
-                );
-                let curr_infos = messages_stats.get("info").unwrap();
-                messages_stats.insert(
-                    "info".to_string(),
-                    curr_infos + tmp_messages_stats.get("info").unwrap(),
-                );
-            }
+        let main_sql = local_sql_syntax(&pool, &main_sql);
+        let mut main_query = sqlx_query(&main_sql);
+        for param in &main_params {
+            main_query = main_query.bind(param);
         }
-        Err(e) => {
-            if validate {
-                validate_rows_constraints(config, pool, table_name, rows).await?;
-                let (
-                    main_sql,
-                    main_params,
-                    conflict_sql,
-                    conflict_params,
-                    message_sql,
-                    message_params,
-                ) = make_inserts(
-                    config,
-                    table_name,
-                    rows,
-                    chunk_number,
-                    messages_stats,
-                    verbose,
-                    pool,
-                )
-                .await?;
-
-                let main_sql = local_sql_syntax(&pool, &main_sql);
-                let mut main_query = sqlx_query(&main_sql);
-                for param in &main_params {
-                    main_query = main_query.bind(param);
-                }
-                main_query.execute(pool).await?;
-
+        let main_result = main_query.execute(pool).await;
+        match main_result {
+            Ok(_) => {
                 let conflict_sql = local_sql_syntax(&pool, &conflict_sql);
                 let mut conflict_query = sqlx_query(&conflict_sql);
                 for param in &conflict_params {
@@ -4728,13 +4684,45 @@ pub async fn insert_chunk(
                     message_query = message_query.bind(param);
                 }
                 message_query.execute(pool).await?;
-            } else {
-                return Err(ValveError::DatabaseError(e).into());
+
+                if verbose {
+                    let curr_errors = messages_stats.get("error").unwrap();
+                    messages_stats.insert(
+                        "error".to_string(),
+                        curr_errors + tmp_messages_stats.get("error").unwrap(),
+                    );
+                    let curr_warnings = messages_stats.get("warning").unwrap();
+                    messages_stats.insert(
+                        "warning".to_string(),
+                        curr_warnings + tmp_messages_stats.get("warning").unwrap(),
+                    );
+                    let curr_infos = messages_stats.get("info").unwrap();
+                    messages_stats.insert(
+                        "info".to_string(),
+                        curr_infos + tmp_messages_stats.get("info").unwrap(),
+                    );
+                }
+                Ok(())
+            }
+            Err(e) => {
+                if validate {
+                    validate_and_insert(
+                        config,
+                        pool,
+                        datatype_conditions,
+                        table_name,
+                        rows,
+                        chunk_number,
+                        messages_stats,
+                        verbose,
+                    )
+                    .await
+                } else {
+                    Err(ValveError::DatabaseError(e).into())
+                }
             }
         }
-    };
-
-    Ok(())
+    }
 }
 
 /// Given a configuration map, a database connection pool, maps for compiled datatype and rule
@@ -4746,8 +4734,8 @@ pub async fn insert_chunk(
 pub async fn insert_chunks(
     config: &ValveConfig,
     pool: &AnyPool,
-    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
-    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    datatype_conditions: &HashMap<String, CompiledCondition>,
+    rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     table_name: &String,
     chunks: &IntoChunks<StringRecordsIter<'_, std::fs::File>>,
     headers: &Vec<String>,
@@ -4763,8 +4751,8 @@ pub async fn insert_chunks(
                 let only_nulltype = !validate;
                 validate_rows_intra(
                     config,
-                    compiled_datatype_conditions,
-                    compiled_rule_conditions,
+                    datatype_conditions,
+                    rule_conditions,
                     table_name,
                     headers,
                     &mut rows,
@@ -4775,6 +4763,7 @@ pub async fn insert_chunks(
             insert_chunk(
                 config,
                 pool,
+                datatype_conditions,
                 table_name,
                 &mut intra_validated_rows,
                 chunk_number,
@@ -4808,8 +4797,8 @@ pub async fn insert_chunks(
                         let only_nulltype = !validate;
                         validate_rows_intra(
                             config,
-                            compiled_datatype_conditions,
-                            compiled_rule_conditions,
+                            datatype_conditions,
+                            rule_conditions,
                             table_name,
                             headers,
                             &mut rows,
@@ -4830,6 +4819,7 @@ pub async fn insert_chunks(
                 insert_chunk(
                     config,
                     pool,
+                    datatype_conditions,
                     table_name,
                     &mut intra_validated_rows,
                     chunk_number,

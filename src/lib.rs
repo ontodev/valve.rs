@@ -1,32 +1,8 @@
-//! <!-- Please do not edit README.md directly. To generate a new readme from the crate documentation
-//!      in src/lib.rs, install cargo-readme using `cargo install cargo-readme` and then run:
-//!      `cargo readme > README.md` -->
-//!
-//! # valve.rs
+//! # ontodev/valve.rs
 //! A lightweight validation engine written in rust.
 //!
 //! ## API
 //! See [valve]
-//!
-//! ## Command line usage
-//! Run:
-//! ```
-//! valve --help
-//! ```
-//! to see command line options.
-//!
-//! ## Logging
-//! By default Valve only logs error messages. To also enable warning and information messages,
-//! set the environment variable `RUST_LOG` to the minimum logging level desired for ontodev_valve:
-//! `debug`, `info`, `warn`, or `error`.
-//! For instance:
-//! ```
-//! export RUST_LOG="ontodev_valve=info"
-//! ```
-//! For further information see the [Rust Cookbook](https://rust-lang-nursery.github.io/rust-cookbook/development_tools/debugging/config_log.html).
-//!
-//! ## Python bindings
-//! See [valve.py](https://github.com/ontodev/valve.py)
 
 #[macro_use]
 extern crate lalrpop_util;
@@ -62,10 +38,7 @@ pub static MOVE_INTERVAL: u32 = 1000;
 pub static PRINTF_RE: &str = r#"^%.*([\w%])$"#;
 
 /// The size of the datatype validation cache.
-static DT_CACHE_SIZE: usize = 10000;
-
-/// The size of the foreign key validation cache.
-static FKEY_CACHE_SIZE: usize = 10000;
+pub static DT_CACHE_SIZE: usize = 10000;
 
 // Note that SQL_PARAM must be a 'word' (from the point of view of regular expressions) since in the
 // local_sql_syntax() function below we are matchng against it using '\b' which represents a word

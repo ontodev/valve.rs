@@ -1,11 +1,10 @@
 table	cell	level	rule	message	value
-table	D3	error	datatype:table_type	type should be a table type	rule
 table	E12	error	option:unrecognized	unrecognized option	foo
-table	E17	warning	option:overrides	overrides db_table	db_view
-table	E17	error	option:reserved	reserved for internal use	internal
-table	E18	warning	option:overrides	overrides save	db_view
-table	E21	warning	option:overrides	overrides edit	no-edit
-table	E21	warning	option:overrides	overrides save	no-save
+table	E21	warning	option:overrides	overrides db_table	db_view
+table	E21	error	option:reserved	reserved for internal use	internal
+table	E22	warning	option:overrides	overrides save	db_view
+table	E25	warning	option:overrides	overrides edit	no-edit
+table	E25	warning	option:overrides	overrides save	no-save
 table1	B5	error	key:unique	Values of base must be unique	http://purl.obolibrary.org/obo/VO_
 table1	A5	error	key:primary	Values of prefix must be unique	VO
 table1	B10	error	key:unique	Values of base must be unique	http://www.w3.org/1999/02/22-rdf-syntax-ns#
@@ -13,8 +12,21 @@ table1	A10	error	key:primary	Values of prefix must be unique	rdf
 table11	D3	error	key:primary	Values of foo must be unique	d
 table11	D4	error	key:primary	Values of foo must be unique	e
 table11	D5	error	key:primary	Values of foo must be unique	e
+table12	A1	error	key:foreign	Value '_treacle_' of column foo is not in table13.foo	_schmeichel_ _darrigol_ _treacle_
 table12	A2	error	datatype:custom_b	Value 'beta' of column foo should be one of a list of custom_a tokens separated by spaces	_alpha_ beta _delta_ _gamma_ phi
 table12	A2	error	datatype:custom_b	Value 'phi' of column foo should be one of a list of custom_a tokens separated by spaces	_alpha_ beta _delta_ _gamma_ phi
+table12	A2	error	key:foreign	Value 'beta' of column foo is not in table13.foo	_alpha_ beta _delta_ _gamma_ phi
+table12	A2	error	key:foreign	Value 'phi' of column foo is not in table13.foo	_alpha_ beta _delta_ _gamma_ phi
+table12	B3	error	key:foreign	Value 'plorgo' of column bar is not in table13.bar	plorgo
+table12	A3	error	key:foreign	Value '_schmeagol_' of column foo is not in table13.foo	_schmeagol_
+table14	A2	error	datatype:integer_list	Value 'a' of column foo should be one of a list of positive or negative integers separated by spaces	-1 a 5
+table14	A2	error	key:foreign	Value 'a' of column foo is not in table15.foo	-1 a 5
+table14	A3	error	key:foreign	Value '9' of column foo is not in table15.foo	3 4 9
+table16	C2	error	datatype:search_pipe	alago should be a string containing a sequence either of digits or of lowercase letters	' _ '
+table16	B2	error	datatype:exclude_pipe	bar should be neither a sequence of digits nor a sequence of lowercase letters	987
+table16	C3	error	datatype:search_pipe	alago should be a string containing a sequence either of digits or of lowercase letters	*?+$/
+table16	B3	error	datatype:exclude_pipe	bar should be neither a sequence of digits nor a sequence of lowercase letters	zxy
+table16	A3	error	datatype:match_pipe	foo should be a sequence either of digits or of lowercase letters	abc123
 table2	D1	error	rule:foo-2	bar cannot be null if foo is not null	5
 table2	D1	error	rule:foo-4	bar must be 'y' or 'z' if foo = 5	5
 table2	D2	error	rule:foo-1	bar must be null whenever foo is null	
@@ -36,7 +48,6 @@ table3	A7	error	key:foreign	Value 'CO B' of column source is not in table1.prefi
 table3	B8	error	key:unique	Values of id must be unique	COB:0000013
 table3	B10	error	key:unique	Values of id must be unique	VO:0000001
 table3	C10	error	key:primary	Values of label must be unique	vaccine
-table3	C10	error	tree:child-unique	Values of label must be unique	vaccine
 table3	A10	error	key:foreign	Value 'BOB' of column source is not in table1.prefix	BOB
 table4	A9	error	key:unique	Values of foreign_column must be unique	a
 table4	A10	error	key:unique	Values of foreign_column must be unique	b

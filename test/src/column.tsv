@@ -32,7 +32,7 @@ table1	ontology IRI		empty		IRI
 table1	version IRI		empty		IRI		
 table2	child				trimmed_line	from(table4.other_foreign_column)	
 table2	parent		empty		trimmed_line	tree(child)	
-table2	xyzzy		empty		trimmed_line	under(table2.child, d)	
+table2	xyzzy		empty		trimmed_line		
 table2	foo		empty		integer	from(table4.numeric_foreign_column)	
 table2	bar		empty		text		
 table3	source				prefix	from(table1.prefix)	
@@ -50,7 +50,7 @@ table5	real				real
 table5	num				numeric		
 table6	child				integer	from(table4.numeric_foreign_column)	
 table6	parent		empty		integer	tree(child)	
-table6	xyzzy		empty		integer	under(table6.child, 4)	
+table6	xyzzy		empty		integer		
 table6	foo		empty		text		
 table6	bar		empty		integer		
 table7	zork				text	primary	
@@ -72,7 +72,15 @@ table11	parent				text
 table11	xyzzy				text		
 table11	foo				text	primary	
 table11	bar	barmatic			text	from(view1.bar)	
-table12	foo				custom_b		
+table12	foo				custom_b	from(table13.foo)	
+table12	bar				word	from(table13.bar)	
+table13	foo				text		
+table13	bar				text		
+table14	foo				integer_list	from(table15.foo)	
+table15	foo				integer	primary	
+table16	foo				match_pipe		
+table16	bar				exclude_pipe		
+table16	alago				search_pipe		
 view1	foo		empty		trimmed_line		
 view1	bar		empty		trimmed_line		
 view2	foo		empty		trimmed_line		

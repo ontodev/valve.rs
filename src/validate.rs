@@ -3,14 +3,15 @@
 use crate::{
     ast::Expression,
     toolkit::{
-        cast_sql_param_from_text, get_column_value_as_string, get_datatype_ancestors,
-        get_sql_type_from_global_config, get_table_options, is_sql_type_error, local_sql_syntax,
-        ColumnRule, CompiledCondition, QueryAsIf, QueryAsIfKind, ValueType,
+        cast_sql_param_from_text, get_column_value, get_column_value_as_string,
+        get_datatype_ancestors, get_sql_type_from_global_config, get_table_options, get_value_type,
+        is_sql_type_error, local_sql_syntax, ColumnRule, CompiledCondition, QueryAsIf,
+        QueryAsIfKind, ValueType,
     },
     valve::{
         ValveCell, ValveCellMessage, ValveConfig, ValveRow, ValveRuleConfig, ValveTreeConstraint,
     },
-    DT_CACHE_SIZE, FKEY_CACHE_SIZE,
+    DT_CACHE_SIZE,
 };
 use anyhow::Result;
 use indexmap::IndexMap;
@@ -27,8 +28,8 @@ use std::collections::HashMap;
 /// parameter. Note that this function is idempotent.
 pub async fn validate_row_tx(
     config: &ValveConfig,
-    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
-    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    datatype_conditions: &HashMap<String, CompiledCondition>,
+    rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     pool: &AnyPool,
     tx: Option<&mut Transaction<'_, sqlx::Any>>,
     table_name: &str,
@@ -55,7 +56,7 @@ pub async fn validate_row_tx(
     for (column_name, cell) in valve_row.contents.iter_mut() {
         validate_cell_nulltype(
             config,
-            compiled_datatype_conditions,
+            datatype_conditions,
             &table_name.to_string(),
             column_name,
             cell,
@@ -66,7 +67,7 @@ pub async fn validate_row_tx(
     for (column_name, cell) in valve_row.contents.iter_mut() {
         validate_cell_rules(
             config,
-            compiled_rule_conditions,
+            rule_conditions,
             &table_name.to_string(),
             column_name,
             &context,
@@ -76,7 +77,7 @@ pub async fn validate_row_tx(
         if cell.nulltype == None {
             validate_cell_datatype(
                 config,
-                compiled_datatype_conditions,
+                datatype_conditions,
                 &table_name.to_string(),
                 column_name,
                 cell,
@@ -91,11 +92,12 @@ pub async fn validate_row_tx(
                     config,
                     pool,
                     Some(tx),
+                    datatype_conditions,
                     &table_name.to_string(),
                     column_name,
                     cell,
                     query_as_if,
-                    None,
+                    &None,
                 )
                 .await?;
                 validate_cell_unique_constraints(
@@ -107,6 +109,7 @@ pub async fn validate_row_tx(
                     cell,
                     &vec![],
                     row_number,
+                    &None,
                 )
                 .await?;
             }
@@ -143,190 +146,6 @@ pub async fn validate_row_tx(
 
     remove_duplicate_messages(&mut valve_row)?;
     Ok(valve_row)
-}
-
-/// Given a config map, a db connection pool, a table name, and an optional extra row, validate
-/// any associated under constraints for the current column. Optionally, if a transaction is
-/// given, use that instead of the pool for database access.
-pub async fn validate_under(
-    config: &ValveConfig,
-    pool: &AnyPool,
-    mut tx: Option<&mut Transaction<'_, sqlx::Any>>,
-    table_name: &String,
-    extra_row: Option<&ValveRow>,
-) -> Result<Vec<SerdeValue>> {
-    let mut results = vec![];
-    let ukeys = config
-        .constraint
-        .under
-        .get(table_name)
-        .expect(&format!("Undefined table '{}'", table_name));
-
-    let table_options = get_table_options(config, table_name)?;
-    let query_table = {
-        if !table_options.contains("conflict") {
-            table_name.to_string()
-        } else {
-            format!("{}_view", table_name)
-        }
-    };
-    for ukey in ukeys {
-        let tree_table = &ukey.ttable;
-        let tree_child = &ukey.tcolumn;
-        let column = &ukey.column;
-        let sql_type = get_sql_type_from_global_config(&config, &table_name, &column, pool);
-        let tree = config
-            .constraint
-            .tree
-            .get(tree_table)
-            .unwrap()
-            .iter()
-            .find(|tkey| tkey.child == *tree_child)
-            .unwrap();
-        let tree_parent = &tree.parent;
-        let mut extra_clause;
-        let mut params;
-        if let Some(ref extra_row) = extra_row {
-            (extra_clause, params) =
-                select_with_extra_row(config, extra_row, table_name, &query_table, pool);
-        } else {
-            extra_clause = String::new();
-            params = vec![];
-        }
-
-        // For each value of the column to be checked:
-        // (1) Determine whether it is in the tree's child column.
-        // (2) Create a sub-tree of the given tree whose root is the given "under value"
-        //     (i.e., ukey["value"]). Now on the one hand, if the value to be checked is in the
-        //     parent column of that sub-tree, then it follows that that value is _not_ under the
-        //     under value, but above it. On the other hand, if the value to be checked is not in
-        //     the parent column of the sub-tree, then if condition (1) is also satisfied it follows
-        //     that it _is_ under the under_value.
-        //     Note that "under" is interpreted in the inclusive sense; i.e., values are trivially
-        //     understood to be under themselves.
-        let effective_table;
-        if !extra_clause.is_empty() {
-            effective_table = format!("{}_ext", query_table);
-        } else {
-            effective_table = query_table.clone();
-        }
-
-        let effective_tree;
-        if tree_table == table_name {
-            effective_tree = effective_table.to_string();
-        } else {
-            effective_tree = tree_table.to_string();
-        }
-
-        let uval = ukey
-            .value
-            .as_str()
-            .and_then(|v| Some(v.to_string()))
-            .unwrap();
-        let (tree_sql, mut tree_params) = with_tree_sql(
-            config,
-            &tree,
-            &table_name,
-            &effective_tree,
-            Some(&uval),
-            None,
-            pool,
-        );
-        // Add the tree params to the beginning of the parameter list:
-        tree_params.append(&mut params);
-        params = tree_params;
-
-        // Remove the 'WITH' part of the extra clause since it is redundant given the tree sql and
-        // will therefore result in a syntax error:
-        if !extra_clause.is_empty() {
-            extra_clause = format!(", {}", &extra_clause[5..]);
-        }
-        let sql = local_sql_syntax(
-            &pool,
-            &format!(
-                r#"{tree_sql} {extra_clause}
-                   SELECT
-                    "row_number",
-                    "{effective_table}"."{column}",
-                    CASE
-                      WHEN "{effective_table}"."{column}" IN (
-                        SELECT "{tree_child}" FROM "{effective_tree}"
-                      )
-                      THEN 1 ELSE 0
-                    END AS "is_in_tree",
-                    CASE
-                      WHEN "{effective_table}"."{column}" IN (
-                        SELECT "{tree_parent}" FROM "tree"
-                      )
-                      THEN 0 ELSE 1
-                    END AS "is_under"
-                  FROM "{effective_table}""#,
-                tree_sql = tree_sql,
-                extra_clause = extra_clause,
-                effective_table = effective_table,
-                column = column,
-                tree_child = tree_child,
-                effective_tree = effective_tree,
-                tree_parent = tree_parent,
-            ),
-        );
-
-        let mut query = sqlx_query(&sql);
-        for param in &params {
-            query = query.bind(param);
-        }
-        let rows = {
-            if let None = tx {
-                query.fetch_all(pool).await?
-            } else {
-                query
-                    .fetch_all(tx.as_mut().unwrap().acquire().await?)
-                    .await?
-            }
-        };
-
-        for row in rows {
-            let raw_row_number = row.try_get_raw("row_number").unwrap();
-            let row_number: i64;
-            if raw_row_number.is_null() {
-                row_number = 0;
-            } else {
-                row_number = row.get("row_number");
-            }
-
-            let raw_column_val = row.try_get_raw(format!(r#"{}"#, column).as_str()).unwrap();
-            if !raw_column_val.is_null() {
-                let column_val = get_column_value_as_string(&row, &column, &sql_type);
-                // We use i32 instead of i64 (which we use for row_number) here because, unlike
-                // row_number, which is a BIGINT, 0 and 1 are being interpreted as normal sized ints.
-                let is_in_tree: i32 = row.get("is_in_tree");
-                let is_under: i32 = row.get("is_under");
-                if is_in_tree == 0 {
-                    results.push(json!({
-                        "row_number": row_number as u32,
-                        "column": column,
-                        "value": column_val,
-                        "level": "error",
-                        "rule": "under:not-in-tree",
-                        "message": format!("Value '{}' of column {} is not in {}.{}",
-                                           column_val, column, tree_table, tree_child).as_str(),
-                    }));
-                } else if is_under == 0 {
-                    results.push(json!({
-                        "row_number": row_number as u32,
-                        "column": column,
-                        "value": column_val,
-                        "level": "error",
-                        "rule": "under:not-under",
-                        "message": format!("Value '{}' of column {} is not under '{}'",
-                                           column_val, column, uval.clone()).as_str(),
-                    }));
-                }
-            }
-        }
-    }
-
-    Ok(results)
 }
 
 /// Given a config map, a db connection pool, and a table name, validate whether there is a
@@ -439,30 +258,263 @@ pub async fn validate_tree_foreign_keys(
     Ok(results)
 }
 
-/// Given a config map, a database connection pool, a table name, and a number of rows to validate,
-/// validate foreign and unique constraints, where the latter include primary and "tree child" keys
-/// (which imply unique constraints) and return the validated results.
+/// Given a config map, a database connection pool, a hashmap describing datatype conditions, a
+/// table name, and a number of rows to validate, validate foreign and unique constraints, where
+/// the latter include unique and primary constraints and modify the given rows with the validation
+/// results.
 pub async fn validate_rows_constraints(
     config: &ValveConfig,
     pool: &AnyPool,
-    table_name: &String,
+    datatype_conditions: &HashMap<String, CompiledCondition>,
+    table: &String,
     rows: &mut Vec<ValveRow>,
 ) -> Result<()> {
-    let column_names = &config
-        .table
-        .get(table_name)
-        .expect(&format!("Undefined table '{}'", table_name))
-        .column_order;
-
-    let mut fkey_caches = match FKEY_CACHE_SIZE {
-        0 => None,
-        _ => {
-            let mut cache = HashMap::new();
-            for column in column_names {
-                cache.insert(column.to_string(), LfuCache::with_capacity(FKEY_CACHE_SIZE));
+    // Given a config map, a pool, and a table and column name, then if the column is not
+    // constrained by a foreign constraint, return None. Otherwise if there is a constraint on,
+    // say, the column "fcolumn" of the table "ftable", then return two vectors of SerdeValues,
+    // where the first contains the contents of ftable.fcolumn, and the second contains the contents
+    // of ftable_conflict.fcolumn, or is empty if no conflict table exists.
+    async fn get_allowed_values(
+        config: &ValveConfig,
+        pool: &AnyPool,
+        table: &str,
+        column: &str,
+        received_values: &HashMap<&str, Vec<SerdeValue>>,
+    ) -> Result<Option<(Vec<SerdeValue>, Vec<SerdeValue>)>> {
+        let fconstraint = {
+            let mut fconstraints = config
+                .constraint
+                .foreign
+                .get(table)
+                .expect(&format!(
+                    "Could not retrieve foreign constraints for table '{}'",
+                    table
+                ))
+                .iter()
+                .filter(|fkey| fkey.column == column)
+                .collect::<Vec<_>>();
+            if fconstraints.len() > 1 {
+                log::warn!(
+                    "There is more than one foreign constraint defined for '{}.{}'.",
+                    table,
+                    column
+                );
             }
-            Some(cache)
+            // Take the last one:
+            fconstraints.pop()
+        };
+        match fconstraint {
+            None => Ok(None),
+            Some(fkey) => {
+                let sql_type =
+                    get_sql_type_from_global_config(config, &fkey.ftable, &fkey.fcolumn, pool)
+                        .to_lowercase();
+
+                let values_str = received_values
+                    .get(&*fkey.column)
+                    .unwrap()
+                    .iter()
+                    .map(|value| {
+                        let value = value
+                            .as_str()
+                            .expect(&format!("'{}' is not a string", value));
+                        if vec!["integer", "numeric", "real"].contains(&sql_type.as_str()) {
+                            format!("{}", value)
+                        } else {
+                            format!("'{}'", value)
+                        }
+                    })
+                    .filter(|value| !is_sql_type_error(&sql_type, value))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+
+                // Foreign keys always correspond to columns with unique constraints so we do not
+                // need to use the keyword 'DISTINCT' when querying the normal version of the table:
+                let sql = format!(
+                    r#"SELECT "{}" FROM "{}" WHERE "{}" IN ({})"#,
+                    fkey.fcolumn, fkey.ftable, fkey.fcolumn, values_str
+                );
+
+                let allowed_values = sqlx_query(&sql)
+                    .fetch_all(pool)
+                    .await?
+                    .iter()
+                    .map(|row| get_column_value(row, &fkey.fcolumn, &sql_type))
+                    .collect::<Vec<_>>();
+
+                let allowed_values_conflict = {
+                    let foptions = &config
+                        .table
+                        .get(&fkey.ftable)
+                        .expect(&format!("No config for table: '{}'", fkey.ftable))
+                        .options;
+                    if foptions.contains("conflict") {
+                        // The conflict table has no keys other than on row_number so in principle
+                        // it could have duplicate values of the foreign constraint, therefore we
+                        // add the DISTINCT keyword here:
+                        let sql = format!(
+                            r#"SELECT DISTINCT "{}" FROM "{}_conflict" WHERE "{}" IN ({})"#,
+                            fkey.fcolumn, fkey.ftable, fkey.fcolumn, values_str
+                        );
+                        sqlx_query(&sql)
+                            .fetch_all(pool)
+                            .await?
+                            .iter()
+                            .map(|row| get_column_value(row, &fkey.fcolumn, &sql_type))
+                            .collect::<Vec<_>>()
+                    } else {
+                        // If there is no conflict table just return an empty vector.
+                        vec![]
+                    }
+                };
+
+                Ok(Some((allowed_values, allowed_values_conflict)))
+            }
         }
+    }
+
+    // Given a config map, a pool, and a table and column name, then if the column is not
+    // constrained by a unique or primary constraint, return None. Otherwise
+    // return a vector of SerdeValues containing the (distinct) values of the column in question,
+    // regardless of their validity (except when the invalidity would result in a SQL error).
+    async fn get_forbidden_values(
+        config: &ValveConfig,
+        pool: &AnyPool,
+        table: &str,
+        column: &str,
+        received_values: &HashMap<&str, Vec<SerdeValue>>,
+    ) -> Result<Option<Vec<SerdeValue>>> {
+        let primaries = &config
+            .constraint
+            .primary
+            .get(table)
+            .expect(&format!("Undefined table '{}'", table));
+        let uniques = &config
+            .constraint
+            .unique
+            .get(table)
+            .expect(&format!("Undefined table '{}'", table));
+
+        if primaries.iter().any(|c| c == column) || uniques.iter().any(|c| c == column) {
+            let options = &config
+                .table
+                .get(table)
+                .expect(&format!("No config for table: '{}'", table))
+                .options;
+
+            let (query_table, query_modifier) = {
+                if !options.contains("conflict") {
+                    (table.to_string(), String::new())
+                } else {
+                    (format!("{}_view", table), "DISTINCT".to_string())
+                }
+            };
+
+            let sql_type =
+                get_sql_type_from_global_config(config, &table, &column, pool).to_lowercase();
+            let values_str = received_values
+                .get(&*column)
+                .unwrap()
+                .iter()
+                .map(|value| {
+                    let value = value
+                        .as_str()
+                        .expect(&format!("'{}' is not a string", value));
+                    if vec!["integer", "numeric", "real"].contains(&sql_type.as_str()) {
+                        format!("{}", value)
+                    } else {
+                        format!("'{}'", value)
+                    }
+                })
+                .filter(|value| !is_sql_type_error(&sql_type, value))
+                .collect::<Vec<_>>()
+                .join(", ");
+
+            let sql = format!(
+                r#"SELECT {} "{}" FROM "{}" WHERE "{}" IN ({})"#,
+                query_modifier, column, query_table, column, values_str
+            );
+
+            let forbidden_values = sqlx_query(&sql)
+                .fetch_all(pool)
+                .await?
+                .iter()
+                .map(|row| get_column_value(row, &column, &sql_type))
+                .collect::<Vec<_>>();
+            Ok(Some(forbidden_values))
+        } else {
+            Ok(None)
+        }
+    }
+
+    // Begin by getting the table config for this table:
+    let table_config = &config
+        .table
+        .get(table)
+        .expect(&format!("Undefined table '{}'", table));
+
+    // Declare a closure for constructing a HashMap from column names (looked up in table_config) to
+    // vectors of the values of those columns in the row. The closure accepts an argument, split,
+    // which, if set, indicates that the value of a column which has the special list() datatype
+    // is to be interpreted, not as itself a value, but as a list of individual values.
+    let mut get_values_by_column_from_rows = |split: bool| -> HashMap<&str, Vec<SerdeValue>> {
+        let mut received_values = table_config
+            .column_order
+            .iter()
+            .map(|column| (column.as_str(), vec![]))
+            .collect::<HashMap<_, _>>();
+        for row in rows.iter_mut() {
+            for (column, values) in &mut received_values {
+                let cell = row
+                    .contents
+                    .get(&column.to_string())
+                    .expect(&format!("No column '{}' in row", column));
+                if !split {
+                    values.push(cell.value.clone());
+                } else {
+                    let value_list = {
+                        let value_type = get_value_type(config, datatype_conditions, table, column);
+                        match &value_type {
+                            ValueType::Single => vec![cell.value.clone()],
+                            ValueType::List(separator) => cell
+                                .strvalue()
+                                .split(separator)
+                                .map(|s| json!(s))
+                                .collect::<Vec<_>>(),
+                        }
+                    };
+                    for value in &value_list {
+                        values.push(value.clone());
+                    }
+                }
+            }
+        }
+        received_values
+    };
+
+    let received_values_split = get_values_by_column_from_rows(true);
+    let received_values_unsplit = get_values_by_column_from_rows(false);
+    // Prefetch the values that are allowed and/or forbidden for this particular
+    // column given the current state of the given table:
+    let allowed_values = {
+        let mut allowed_values = HashMap::new();
+        for column in &table_config.column_order {
+            allowed_values.insert(
+                column.to_string(),
+                get_allowed_values(config, pool, table, column, &received_values_split).await?,
+            );
+        }
+        allowed_values
+    };
+    let forbidden_values = {
+        let mut forbidden_values = HashMap::new();
+        for column in &table_config.column_order {
+            forbidden_values.insert(
+                column.to_string(),
+                get_forbidden_values(config, pool, table, column, &received_values_unsplit).await?,
+            );
+        }
+        forbidden_values
     };
 
     let mut valve_rows = vec![];
@@ -471,43 +523,53 @@ pub async fn validate_rows_constraints(
             row_number: None,
             contents: IndexMap::new(),
         };
-        for column_name in column_names {
-            let cell = row.contents.get_mut(column_name).unwrap();
+        for column in &table_config.column_order {
+            let cell = row.contents.get_mut(column).unwrap();
             // We don't do any further validation on cells that are legitimately empty, or on cells
             // that have SQL type violations. We exclude the latter because they can result in
             // database errors when, for instance, we compare a numeric with a non-numeric type.
-            let sql_type = get_sql_type_from_global_config(config, table_name, &column_name, pool);
+            let sql_type = get_sql_type_from_global_config(config, table, &column, pool);
             if cell.nulltype == None && !is_sql_type_error(&sql_type, &cell.strvalue()) {
-                let fkey_cache = match &mut fkey_caches {
-                    None => None,
-                    Some(fkey_caches) => fkey_caches.get_mut(column_name),
+                let (allowed_values, forbidden_values) = {
+                    let error_msg = format!("Could not retrieve values for column '{}'", column);
+                    let allowed_values = allowed_values.get(column).expect(&error_msg);
+                    let forbidden_values = forbidden_values.get(column).expect(&error_msg);
+                    (allowed_values, forbidden_values)
                 };
                 validate_cell_foreign_constraints(
                     config,
                     pool,
                     None,
-                    table_name,
-                    &column_name,
+                    datatype_conditions,
+                    table,
+                    &column,
                     cell,
                     None,
-                    fkey_cache,
+                    &allowed_values,
                 )
-                .await?;
+                .await
+                .expect(&format!(
+                    "Unable to validate foreign constraints for row number: {:?}, column '{}.{}'",
+                    row.row_number, table, column
+                ));
                 validate_cell_unique_constraints(
                     config,
                     pool,
                     None,
-                    table_name,
-                    &column_name,
+                    table,
+                    &column,
                     cell,
                     &valve_rows,
                     None,
+                    &forbidden_values,
                 )
-                .await?;
+                .await
+                .expect(&format!(
+                    "Unable to validate unique constraints for row number: {:?}, column '{}.{}'",
+                    row.row_number, table, column
+                ));
             }
-            valve_row
-                .contents
-                .insert(column_name.to_string(), cell.clone());
+            valve_row.contents.insert(column.to_string(), cell.clone());
         }
         // Note that in this implementation, the result rows are never actually returned, but we
         // still need them because the validate_cell_unique_constraints() function needs a list of
@@ -524,8 +586,8 @@ pub async fn validate_rows_constraints(
 /// return the validated versions.
 pub fn validate_rows_intra(
     config: &ValveConfig,
-    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
-    compiled_rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    datatype_conditions: &HashMap<String, CompiledCondition>,
+    rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     table_name: &String,
     headers: &Vec<String>,
     rows: &Vec<Result<csv::StringRecord, csv::Error>>,
@@ -571,7 +633,7 @@ pub fn validate_rows_intra(
                     let cell = valve_row.contents.get_mut(column_name).unwrap();
                     validate_cell_nulltype(
                         config,
-                        compiled_datatype_conditions,
+                        datatype_conditions,
                         table_name,
                         &column_name,
                         cell,
@@ -584,7 +646,7 @@ pub fn validate_rows_intra(
                         let cell = valve_row.contents.get_mut(column_name).unwrap();
                         validate_cell_rules(
                             config,
-                            compiled_rule_conditions,
+                            rule_conditions,
                             table_name,
                             &column_name,
                             &context,
@@ -619,7 +681,7 @@ pub fn validate_rows_intra(
                                     None => {
                                         validate_cell_datatype(
                                             config,
-                                            compiled_datatype_conditions,
+                                            datatype_conditions,
                                             table_name,
                                             &column_name,
                                             cell,
@@ -636,7 +698,7 @@ pub fn validate_rows_intra(
                             } else {
                                 validate_cell_datatype(
                                     config,
-                                    compiled_datatype_conditions,
+                                    datatype_conditions,
                                     table_name,
                                     &column_name,
                                     cell,
@@ -645,7 +707,7 @@ pub fn validate_rows_intra(
                         } else {
                             validate_cell_datatype(
                                 config,
-                                compiled_datatype_conditions,
+                                datatype_conditions,
                                 table_name,
                                 &column_name,
                                 cell,
@@ -725,43 +787,22 @@ pub fn select_with_extra_row(
     )
 }
 
-/// Given a map representing a tree constraint, a table name, a root from which to generate a
-/// sub-tree of the tree, and an extra SQL clause, generate the SQL for a WITH clause representing
-/// the sub-tree.
+/// Given a map representing a tree constraint, a table name, and an extra SQL clause, generate the
+/// SQL for a WITH clause representing tree.
 pub fn with_tree_sql(
-    config: &ValveConfig,
     tree: &ValveTreeConstraint,
-    table_name: &str,
     effective_table_name: &str,
-    root: Option<&String>,
     extra_clause: Option<&String>,
-    pool: &AnyPool,
-) -> (String, Vec<String>) {
+) -> String {
     let empty_string = String::new();
     let extra_clause = extra_clause.unwrap_or_else(|| &empty_string);
     let child_col = &tree.child;
     let parent_col = &tree.parent;
-
-    let mut params = vec![];
-    let under_sql;
-    if let Some(root) = root {
-        let sql_type = get_sql_type_from_global_config(config, table_name, &child_col, pool);
-        under_sql = format!(
-            r#"WHERE "{}" = {}"#,
-            child_col,
-            cast_sql_param_from_text(&sql_type)
-        );
-        params.push(root.clone());
-    } else {
-        under_sql = String::new();
-    }
-
-    let sql = format!(
+    format!(
         r#"WITH RECURSIVE "tree" AS (
            {extra_clause}
                SELECT "{child_col}", "{parent_col}" 
                    FROM "{effective_table_name}" 
-                   {under_sql} 
                    UNION ALL 
                SELECT "t1"."{child_col}", "t1"."{parent_col}" 
                    FROM "{effective_table_name}" AS "t1" 
@@ -771,10 +812,7 @@ pub fn with_tree_sql(
         child_col = child_col,
         parent_col = parent_col,
         effective_table_name = effective_table_name,
-        under_sql = under_sql,
-    );
-
-    (sql, params)
+    )
 }
 
 /// Given a config map, compiled datatype conditions, a table name, a column name, and a cell to
@@ -783,7 +821,7 @@ pub fn with_tree_sql(
 /// cell.
 pub fn validate_cell_nulltype(
     config: &ValveConfig,
-    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
+    datatype_conditions: &HashMap<String, CompiledCondition>,
     table_name: &String,
     column_name: &String,
     cell: &mut ValveCell,
@@ -799,7 +837,7 @@ pub fn validate_cell_nulltype(
 
     if column.nulltype != "" {
         let nt_name = &column.nulltype;
-        let nt_condition = &compiled_datatype_conditions.get(nt_name).unwrap().compiled;
+        let nt_condition = &datatype_conditions.get(nt_name).unwrap().compiled;
         let value = &cell.strvalue();
         if nt_condition(&value) {
             cell.nulltype = Some(nt_name.to_string());
@@ -811,7 +849,7 @@ pub fn validate_cell_nulltype(
 /// validate, validate the cell's datatype and return the validated cell.
 pub fn validate_cell_datatype(
     config: &ValveConfig,
-    compiled_datatype_conditions: &HashMap<String, CompiledCondition>,
+    datatype_conditions: &HashMap<String, CompiledCondition>,
     table_name: &String,
     column_name: &String,
     cell: &mut ValveCell,
@@ -868,7 +906,7 @@ pub fn validate_cell_datatype(
         .get(primary_dt_name)
         .expect(&format!("Undefined datatype '{}'", primary_dt_name));
     let primary_dt_desc = &primary_dt.description;
-    if let Some(primary_dt_cond) = compiled_datatype_conditions.get(primary_dt_name) {
+    if let Some(primary_dt_cond) = datatype_conditions.get(primary_dt_name) {
         let strvalue = cell.strvalue();
         let values = match &primary_dt_cond.value_type {
             ValueType::Single => vec![strvalue.as_str()],
@@ -880,7 +918,7 @@ pub fn validate_cell_datatype(
             }
             cell.valid = false;
             let mut datatypes_to_check =
-                get_datatype_ancestors(config, compiled_datatype_conditions, primary_dt_name, true);
+                get_datatype_ancestors(config, datatype_conditions, primary_dt_name, true);
             // If this datatype has any parents, check them beginning from the most general to
             // the most specific. We use while and pop instead of a for loop so as to check the
             // conditions in LIFO order.
@@ -888,7 +926,7 @@ pub fn validate_cell_datatype(
                 let datatype = datatypes_to_check.pop().unwrap();
                 let dt_name = &datatype.datatype;
                 let dt_description = &datatype.description;
-                let dt_condition = &compiled_datatype_conditions.get(dt_name).unwrap().compiled;
+                let dt_condition = &datatype_conditions.get(dt_name).unwrap().compiled;
                 if !dt_condition(&value) {
                     let message = construct_message(
                         &value,
@@ -928,7 +966,7 @@ pub fn validate_cell_datatype(
 /// to any applicable rules.
 pub fn validate_cell_rules(
     config: &ValveConfig,
-    compiled_rules: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+    rules: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     table_name: &String,
     column_name: &String,
     context: &ValveRow,
@@ -940,7 +978,7 @@ pub fn validate_cell_rules(
         rule: &ValveRuleConfig,
         table_name: &String,
         column_name: &String,
-        compiled_rules: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
+        rules: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     ) -> bool {
         let condition = {
             if condition_type == "when" {
@@ -956,7 +994,7 @@ pub fn validate_cell_rules(
             return (condition == "null" && cell.nulltype != None)
                 || (condition == "not null" && cell.nulltype == None);
         } else {
-            let compiled_condition = compiled_rules
+            let compiled_condition = rules
                 .get(table_name)
                 .and_then(|t| t.get(column_name))
                 .and_then(|v| {
@@ -989,16 +1027,9 @@ pub fn validate_cell_rules(
         // enumerate() begins at 0 by default but we need to begin with 1:
         let rule_number = rule_number + 1;
         // Check the then condition only if the when condition is satisfied:
-        if check_condition("when", cell, rule, table_name, column_name, compiled_rules) {
+        if check_condition("when", cell, rule, table_name, column_name, rules) {
             let then_cell = context.contents.get(&rule.then_column).unwrap();
-            if !check_condition(
-                "then",
-                then_cell,
-                rule,
-                table_name,
-                column_name,
-                compiled_rules,
-            ) {
+            if !check_condition("then", then_cell, rule, table_name, column_name, rules) {
                 cell.valid = false;
                 cell.messages.push(ValveCellMessage {
                     rule: format!("rule:{}-{}", column_name, rule_number),
@@ -1119,16 +1150,20 @@ pub fn as_if_to_sql(
 /// Given a config map, a db connection pool, a table name, a column name, and a cell to validate,
 /// check the cell value against any foreign keys that have been defined for the column. If there is
 /// a violation, indicate it with an error message attached to the cell. Optionally, if a
-/// transaction is given, use that instead of the pool for database access.
+/// transaction is given, use that instead of the pool for database access. Optionally, if
+/// query_as_if is given, use it to query the table counterfactually. Optionally, if a cache is
+/// given, use the cache to determine foreign key violations instead of querying the database. Note
+/// that caching is normally used only in the context of batch processing.
 pub async fn validate_cell_foreign_constraints(
     config: &ValveConfig,
     pool: &AnyPool,
     mut tx: Option<&mut Transaction<'_, sqlx::Any>>,
+    datatype_conditions: &HashMap<String, CompiledCondition>,
     table_name: &String,
     column_name: &String,
     cell: &mut ValveCell,
     query_as_if: Option<&QueryAsIf>,
-    mut fkey_cache: Option<&mut LfuCache<String, bool>>,
+    cache: &Option<(Vec<SerdeValue>, Vec<SerdeValue>)>,
 ) -> Result<()> {
     let fkeys = config
         .constraint
@@ -1138,6 +1173,11 @@ pub async fn validate_cell_foreign_constraints(
         .iter()
         .filter(|t| t.column == *column_name)
         .collect::<Vec<_>>();
+
+    // If there are no foreign keys, then just return:
+    if fkeys.is_empty() {
+        return Ok(());
+    }
 
     let as_if_clause = match query_as_if {
         Some(query_as_if) => {
@@ -1152,133 +1192,147 @@ pub async fn validate_cell_foreign_constraints(
         None => "".to_string(),
     };
 
-    /// Use the given SQL statement to determine whether the value associated with the given cell
-    /// is in the database. Use the given transaction if it is set, otherwise use the pool.
+    // Given a db pool, optionally a transaction, and an as_if clause, checks whether the given
+    // value is in the given column, which has the given sql_type, of the given table. If the
+    // optional cache is provided, use it to look up the values of the column instead of accessing
+    // the database. This cache has the form of a tuple of vectors of SerdeValues, such that the
+    // vector in the first position is used if the table name does not end in '_conflict', and the
+    // vector in the second position is used if it does.
     async fn fkey_in_db(
         pool: &AnyPool,
         tx: &mut Option<&mut Transaction<'_, sqlx::Any>>,
-        cell: &mut ValveCell,
-        fsql: &str,
+        as_if_clause: &str,
+        table: &str,
+        column: &str,
+        sql_type: &str,
+        value: &str,
+        cache: &Option<(Vec<SerdeValue>, Vec<SerdeValue>)>,
     ) -> Result<bool> {
-        let frows = {
-            if let None = tx {
-                sqlx_query(&fsql)
-                    .bind(&cell.strvalue())
-                    .fetch_all(pool)
-                    .await?
-            } else {
-                sqlx_query(&fsql)
-                    .bind(&cell.strvalue())
-                    .fetch_all(tx.as_mut().unwrap().acquire().await?)
-                    .await?
-            }
-        };
-        Ok(!frows.is_empty())
-    }
-
-    for fkey in fkeys {
-        let ftable = &fkey.ftable;
-        let (as_if_clause, ftable_alias) = match query_as_if {
-            Some(query_as_if) if *ftable == query_as_if.table => {
-                (as_if_clause.to_string(), query_as_if.alias.to_string())
-            }
-            _ => ("".to_string(), ftable.to_string()),
-        };
-        let fcolumn = &fkey.fcolumn;
-        let sql_type =
-            get_sql_type_from_global_config(&config, ftable, fcolumn, pool).to_lowercase();
-        let sql_param = cast_sql_param_from_text(&sql_type);
-        let fsql = local_sql_syntax(
-            &pool,
-            &format!(
-                r#"{}SELECT 1 FROM "{}" WHERE "{}" = {} LIMIT 1"#,
-                as_if_clause,
-                ftable_alias,
-                fcolumn,
-                {
-                    if sql_type == "text" || sql_type.starts_with("varchar(") {
-                        format!("'{}'", cell.strvalue())
+        match cache {
+            Some((values, conflict_values)) => {
+                let values = {
+                    if table.ends_with("_conflict") {
+                        conflict_values
                     } else {
-                        format!("{}", cell.strvalue())
+                        values
                     }
-                }
-            ),
-        );
-
-        let fkey_satisfied = match fkey_cache {
-            Some(ref mut fkey_cache) => match fkey_cache.get(&cell.strvalue()) {
-                Some(in_db) => *in_db,
-                None => {
-                    let in_db = fkey_in_db(pool, &mut tx, cell, &fsql).await?;
-                    let key = cell.strvalue();
-                    fkey_cache.insert(key.clone(), in_db);
-                    in_db
-                }
-            },
-            None => fkey_in_db(pool, &mut tx, cell, &fsql).await?,
-        };
-
-        if !fkey_satisfied {
-            cell.valid = false;
-            let mut message = ValveCellMessage {
-                rule: "key:foreign".to_string(),
-                level: "error".to_string(),
-                message: format!(
-                    "Value '{}' of column {} is not in {}.{}",
-                    cell.strvalue(),
-                    column_name,
-                    ftable,
-                    fcolumn
-                ),
-            };
-            let foptions = &config
-                .table
-                .get(ftable)
-                .expect(&format!(
-                    "Foreign table: '{}' is not in table config",
-                    ftable
-                ))
-                .options;
-
-            if foptions.contains("conflict") {
-                let (as_if_clause_for_conflict, ftable_alias) = match query_as_if {
-                    Some(query_as_if) if *ftable == query_as_if.table => (
-                        as_if_clause_for_conflict.to_string(),
-                        query_as_if.alias.to_string(),
-                    ),
-                    _ => ("".to_string(), ftable.to_string()),
                 };
+                Ok(values.iter().any(|cached_value| match cached_value {
+                    SerdeValue::String(s) => s == value,
+                    _ => cached_value.to_string() == value,
+                }))
+            }
+            None => {
                 let fsql = local_sql_syntax(
-                    &pool,
+                    pool,
                     &format!(
-                        r#"{}SELECT 1 FROM "{}_conflict" WHERE "{}" = {} LIMIT 1"#,
-                        as_if_clause_for_conflict, ftable_alias, fcolumn, sql_param
+                        r#"{}SELECT 1 FROM "{}" WHERE "{}" = {} LIMIT 1"#,
+                        as_if_clause,
+                        table,
+                        column,
+                        {
+                            if sql_type == "text" || sql_type.starts_with("varchar(") {
+                                format!("'{}'", value)
+                            } else {
+                                format!("{}", value)
+                            }
+                        }
                     ),
                 );
                 let frows = {
                     if let None = tx {
-                        sqlx_query(&fsql)
-                            .bind(cell.strvalue())
-                            .fetch_all(pool)
-                            .await?
+                        sqlx_query(&fsql).fetch_all(pool).await?
                     } else {
                         sqlx_query(&fsql)
-                            .bind(cell.strvalue())
                             .fetch_all(tx.as_mut().unwrap().acquire().await?)
                             .await?
                     }
                 };
-                if !frows.is_empty() {
-                    message.message = format!(
-                        "Value '{}' of column {} exists only in {}_conflict.{}",
-                        cell.strvalue(),
-                        column_name,
-                        ftable,
-                        fcolumn
-                    );
-                }
+                Ok(!frows.is_empty())
             }
-            cell.messages.push(message);
+        }
+    }
+
+    // Check if the column has the list() datatype. If so parse the values in the list and
+    // iterate over them.
+    let strvalue = cell.strvalue();
+    let values = {
+        let value_type = get_value_type(config, datatype_conditions, table_name, column_name);
+        match &value_type {
+            ValueType::Single => vec![strvalue.as_str()],
+            ValueType::List(separator) => strvalue.split(separator).collect::<Vec<_>>(),
+        }
+    };
+    for value in &values {
+        for fkey in &fkeys {
+            let ftable = &fkey.ftable;
+            let (as_if_clause, ftable_alias) = match query_as_if {
+                Some(query_as_if) if *ftable == query_as_if.table => {
+                    (as_if_clause.to_string(), query_as_if.alias.to_string())
+                }
+                _ => ("".to_string(), ftable.to_string()),
+            };
+            let fcolumn = &fkey.fcolumn;
+            let sql_type =
+                get_sql_type_from_global_config(&config, ftable, fcolumn, pool).to_lowercase();
+            if !fkey_in_db(
+                pool,
+                &mut tx,
+                &as_if_clause,
+                &ftable_alias,
+                fcolumn,
+                &sql_type,
+                value,
+                cache,
+            )
+            .await?
+            {
+                cell.valid = false;
+                let mut message = ValveCellMessage {
+                    rule: "key:foreign".to_string(),
+                    level: "error".to_string(),
+                    message: format!(
+                        "Value '{}' of column {} is not in {}.{}",
+                        value, column_name, ftable, fcolumn
+                    ),
+                };
+                let foptions = &config
+                    .table
+                    .get(ftable)
+                    .expect(&format!(
+                        "Foreign table: '{}' is not in table config",
+                        ftable
+                    ))
+                    .options;
+
+                if foptions.contains("conflict") {
+                    let (as_if_clause_for_conflict, ftable_alias) = match query_as_if {
+                        Some(query_as_if) if *ftable == query_as_if.table => (
+                            as_if_clause_for_conflict.to_string(),
+                            query_as_if.alias.to_string(),
+                        ),
+                        _ => ("".to_string(), ftable.to_string()),
+                    };
+                    if fkey_in_db(
+                        pool,
+                        &mut tx,
+                        &as_if_clause_for_conflict,
+                        &format!("{}_conflict", ftable_alias),
+                        fcolumn,
+                        &sql_type,
+                        value,
+                        cache,
+                    )
+                    .await?
+                    {
+                        message.message = format!(
+                            "Value '{}' of column {} exists only in {}_conflict.{}",
+                            value, column_name, ftable, fcolumn
+                        );
+                    }
+                }
+                cell.messages.push(message);
+            }
         }
     }
 
@@ -1286,21 +1340,22 @@ pub async fn validate_cell_foreign_constraints(
 }
 
 /// Given a config map, a db connection pool, a table name, a column name, a cell to validate,
-/// the row, `context`, to which the cell belongs, and a list of previously validated rows,
-/// check the cell value against any unique-type keys that have been defined for the column.
-/// If there is a violation, indicate it with an error message attached to the cell. If
-/// `row_number` is set to None, then no row corresponding to the given cell is assumed to exist
-/// in the table. Optionally, if a transaction is given, use that instead of the pool for database
-/// access.
+/// and a list of previously validated rows, check the cell value against any unique-type keys that
+/// have been defined for the column. If there is a violation, indicate it with an error message
+/// attached to the cell. If `row_number` is set to None, then no row corresponding to the given
+/// cell is assumed to exist in the table. Optionally, if a transaction is given, use that
+/// instead of the pool for database access. Optionally, if a cache is given, use that to determine
+/// the validity of the cell rather than accessing the database.
 pub async fn validate_cell_unique_constraints(
     config: &ValveConfig,
     pool: &AnyPool,
-    mut tx: Option<&mut Transaction<'_, sqlx::Any>>,
+    tx: Option<&mut Transaction<'_, sqlx::Any>>,
     table_name: &String,
     column_name: &String,
     cell: &mut ValveCell,
     prev_results: &Vec<ValveRow>,
     row_number: Option<u32>,
+    cache: &Option<Vec<SerdeValue>>,
 ) -> Result<()> {
     // If the column has a primary or unique key constraint, or if it is the child associated with
     // a tree, then if the value of the cell is a duplicate either of one of the previously
@@ -1316,18 +1371,9 @@ pub async fn validate_cell_unique_constraints(
         .unique
         .get(table_name)
         .expect(&format!("Undefined table '{}'", table_name));
-    let trees = config
-        .constraint
-        .tree
-        .get(table_name)
-        .expect(&format!("Undefined table '{}'", table_name))
-        .iter()
-        .map(|t| &t.child)
-        .collect::<Vec<_>>();
 
     let is_primary = primaries.contains(column_name);
     let is_unique = !is_primary && uniques.contains(column_name);
-    let is_tree_child = trees.contains(&column_name);
 
     fn make_error(rule: &str, column_name: &String) -> ValveCellMessage {
         ValveCellMessage {
@@ -1337,44 +1383,75 @@ pub async fn validate_cell_unique_constraints(
         }
     }
 
-    if is_primary || is_unique || is_tree_child {
-        let table_options = get_table_options(config, table_name)?;
-        let mut query_table = {
-            if !table_options.contains("conflict") {
-                table_name.to_string()
-            } else {
-                format!("{}_view", table_name)
+    async fn in_db(
+        config: &ValveConfig,
+        pool: &AnyPool,
+        mut tx: Option<&mut Transaction<'_, sqlx::Any>>,
+        table_name: &String,
+        column_name: &String,
+        cell: &mut ValveCell,
+        row_number: Option<u32>,
+        cache: &Option<Vec<SerdeValue>>,
+    ) -> Result<bool> {
+        // If a cache is given, just check it, otherwise access the database.
+        match cache {
+            Some(values) => Ok(values.iter().any(|cached_value| match cached_value {
+                SerdeValue::String(s) => *s == cell.value,
+                _ => cached_value.to_string() == cell.value,
+            })),
+            None => {
+                let table_options = get_table_options(config, table_name)?;
+                // If the table does not have a conflict table then there is no view to check, so
+                // we check the table itself.
+                let mut query_table = {
+                    if !table_options.contains("conflict") {
+                        table_name.to_string()
+                    } else {
+                        format!("{}_view", table_name)
+                    }
+                };
+                let mut with_sql = String::new();
+                let except_table = format!("{}_exc", query_table);
+                if let Some(row_number) = row_number {
+                    with_sql = format!(
+                        r#"WITH "{}" AS (
+                               SELECT * FROM "{}"
+                               WHERE "row_number" != {}
+                           ) "#,
+                        except_table, query_table, row_number
+                    );
+                }
+
+                if !with_sql.is_empty() {
+                    query_table = except_table;
+                }
+
+                let sql_type =
+                    get_sql_type_from_global_config(&config, &table_name, &column_name, pool);
+                let sql_param = cast_sql_param_from_text(&sql_type);
+                let sql = local_sql_syntax(
+                    &pool,
+                    &format!(
+                        r#"{} SELECT 1 FROM "{}" WHERE "{}" = {} LIMIT 1"#,
+                        with_sql, query_table, column_name, sql_param
+                    ),
+                );
+                let strvalue = cell.strvalue();
+                let query = sqlx_query(&sql).bind(&strvalue);
+                if let None = tx {
+                    Ok(!query.fetch_all(pool).await?.is_empty())
+                } else {
+                    Ok(!query
+                        .fetch_all(tx.as_mut().unwrap().acquire().await?)
+                        .await?
+                        .is_empty())
+                }
             }
-        };
-        let mut with_sql = String::new();
-        let except_table = format!("{}_exc", query_table);
-        if let Some(row_number) = row_number {
-            with_sql = format!(
-                r#"WITH "{}" AS (
-                       SELECT * FROM "{}"
-                       WHERE "row_number" != {}
-                   ) "#,
-                except_table, query_table, row_number
-            );
         }
+    }
 
-        if !with_sql.is_empty() {
-            query_table = except_table;
-        }
-
-        let sql_type = get_sql_type_from_global_config(&config, &table_name, &column_name, pool);
-        let sql_param = cast_sql_param_from_text(&sql_type);
-        let sql = local_sql_syntax(
-            &pool,
-            &format!(
-                r#"{} SELECT 1 FROM "{}" WHERE "{}" = {} LIMIT 1"#,
-                with_sql, query_table, column_name, sql_param
-            ),
-        );
-        let strvalue = cell.strvalue();
-        let query = sqlx_query(&sql).bind(&strvalue);
-
-        let contained_in_prev_results = !prev_results
+    if is_primary || is_unique {
+        let in_prev_results = !prev_results
             .iter()
             .filter(|p| {
                 p.contents.get(column_name).unwrap().value == cell.value
@@ -1383,17 +1460,18 @@ pub async fn validate_cell_unique_constraints(
             .collect::<Vec<_>>()
             .is_empty();
 
-        if contained_in_prev_results
-            || !{
-                if let None = tx {
-                    query.fetch_all(pool).await?.is_empty()
-                } else {
-                    query
-                        .fetch_all(tx.as_mut().unwrap().acquire().await?)
-                        .await?
-                        .is_empty()
-                }
-            }
+        if in_prev_results
+            || in_db(
+                config,
+                pool,
+                tx,
+                table_name,
+                column_name,
+                cell,
+                row_number,
+                cache,
+            )
+            .await?
         {
             cell.valid = false;
             if is_primary || is_unique {
@@ -1403,10 +1481,6 @@ pub async fn validate_cell_unique_constraints(
                 } else {
                     error_message = make_error("key:unique", column_name);
                 }
-                cell.messages.push(error_message);
-            }
-            if is_tree_child {
-                let error_message = make_error("tree:child-unique", column_name);
                 cell.messages.push(error_message);
             }
         }

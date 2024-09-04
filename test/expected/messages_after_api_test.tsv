@@ -1,11 +1,10 @@
 table	row	column	level	rule	message	value
-table	3	type	error	datatype:table_type	type should be a table type	rule
 table	12	options	error	option:unrecognized	unrecognized option	foo
-table	17	options	warning	option:overrides	overrides db_table	db_view
-table	17	options	error	option:reserved	reserved for internal use	internal
-table	18	options	warning	option:overrides	overrides save	db_view
-table	21	options	warning	option:overrides	overrides edit	no-edit
-table	21	options	warning	option:overrides	overrides save	no-save
+table	21	options	warning	option:overrides	overrides db_table	db_view
+table	21	options	error	option:reserved	reserved for internal use	internal
+table	22	options	warning	option:overrides	overrides save	db_view
+table	25	options	warning	option:overrides	overrides edit	no-edit
+table	25	options	warning	option:overrides	overrides save	no-save
 table1	5	base	error	key:unique	Values of base must be unique	http://purl.obolibrary.org/obo/VO_
 table1	5	prefix	error	key:primary	Values of prefix must be unique	VO
 table1	10	base	error	key:unique	Values of base must be unique	http://www.w3.org/1999/02/22-rdf-syntax-ns#
@@ -14,10 +13,22 @@ table10	1	numeric_foreign_column	error	datatype:integer	numeric_foreign_column s
 table10	1	numeric_foreign_column	error	datatype:trimmed_line	numeric_foreign_column should be a line of text that does not begin or end with whitespace	
 table11	2	foo	error	key:primary	Values of foo must be unique	d
 table11	3	foo	error	key:primary	Values of foo must be unique	d
+table12	1	foo	error	key:foreign	Value '_treacle_' of column foo is not in table13.foo	_schmeichel_ _darrigol_ _treacle_
 table12	2	foo	error	datatype:custom_b	Value 'beta' of column foo should be one of a list of custom_a tokens separated by spaces	_alpha_ beta _delta_ _gamma_ phi
 table12	2	foo	error	datatype:custom_b	Value 'phi' of column foo should be one of a list of custom_a tokens separated by spaces	_alpha_ beta _delta_ _gamma_ phi
+table12	2	foo	error	key:foreign	Value 'beta' of column foo is not in table13.foo	_alpha_ beta _delta_ _gamma_ phi
+table12	2	foo	error	key:foreign	Value 'phi' of column foo is not in table13.foo	_alpha_ beta _delta_ _gamma_ phi
+table12	3	bar	error	key:foreign	Value 'plorgo' of column bar is not in table13.bar	plorgo
+table12	3	foo	error	key:foreign	Value '_schmeagol_' of column foo is not in table13.foo	_schmeagol_
+table14	2	foo	error	datatype:integer_list	Value 'a' of column foo should be one of a list of positive or negative integers separated by spaces	-1 a 5
+table14	2	foo	error	key:foreign	Value 'a' of column foo is not in table15.foo	-1 a 5
+table14	3	foo	error	key:foreign	Value '9' of column foo is not in table15.foo	3 4 9
+table16	2	alago	error	datatype:search_pipe	alago should be a string containing a sequence either of digits or of lowercase letters	' _ '
+table16	2	bar	error	datatype:exclude_pipe	bar should be neither a sequence of digits nor a sequence of lowercase letters	987
+table16	3	alago	error	datatype:search_pipe	alago should be a string containing a sequence either of digits or of lowercase letters	*?+$/
+table16	3	bar	error	datatype:exclude_pipe	bar should be neither a sequence of digits nor a sequence of lowercase letters	zxy
+table16	3	foo	error	datatype:match_pipe	foo should be a sequence either of digits or of lowercase letters	abc123
 table2	1	child	error	key:unique	Values of child must be unique	b
-table2	1	child	error	tree:child-unique	Values of child must be unique	b
 table2	2	foo	error	rule:foo-1	bar must be null whenever foo is null	
 table2	4	foo	error	rule:foo-4	bar must be 'y' or 'z' if foo = 5	5
 table2	9	child	error	key:foreign	Value 'i' of column child exists only in table4_conflict.other_foreign_column	i
@@ -27,7 +38,6 @@ table3	1	source	error	key:foreign	Value 'MOB' of column source is not in table1.
 table3	2	source	error	key:foreign	Value 'ZOB' of column source is not in table1.prefix	ZOB
 table3	3	source	error	key:foreign	Value 'JOB' of column source is not in table1.prefix	JOB
 table3	4	source	error	key:foreign	Value 'SOB' of column source is not in table1.prefix	SOB
-table3	5	parent	error	tree:foreign	Value 'jafar' of column parent is not in column label	jafar
 table3	5	source	error	key:foreign	Value 'YOB' of column source is not in table1.prefix	YOB
 table3	6	parent	error	tree:foreign	Value 'owl:Thing' of column parent is not in column label	owl:Thing
 table3	7	source	error	datatype:nonspace	source should be text without whitespace	CO B
@@ -37,7 +47,6 @@ table3	7	source	error	key:foreign	Value 'CO B' of column source is not in table1
 table3	8	id	error	key:unique	Values of id must be unique	COB:0000013
 table3	10	id	error	key:unique	Values of id must be unique	VO:0000001
 table3	10	label	error	key:primary	Values of label must be unique	vaccine
-table3	10	label	error	tree:child-unique	Values of label must be unique	vaccine
 table3	10	source	error	key:foreign	Value 'BOB' of column source is not in table1.prefix	BOB
 table3	11	parent	error	tree:foreign	Value 'barrie' of column parent is not in column label	barrie
 table3	11	source	error	key:foreign	Value 'BFOBBER' of column source is not in table1.prefix	BFOBBER
@@ -45,12 +54,10 @@ table4	9	foreign_column	error	key:unique	Values of foreign_column must be unique
 table4	10	foreign_column	error	key:unique	Values of foreign_column must be unique	b
 table4	10	numeric_foreign_column	error	key:primary	Values of numeric_foreign_column must be unique	9
 table6	1	child	error	key:unique	Values of child must be unique	2
-table6	1	child	error	tree:child-unique	Values of child must be unique	2
 table6	2	foo	error	rule:foo-1	bar must be null whenever foo is null	
 table6	4	foo	error	rule:foo-4	bar must be 25 or 26 if foo = 'e'	e
 table6	9	child	error	key:foreign	Value '9' of column child exists only in table4_conflict.numeric_foreign_column	9
 table6	10	child	error	key:unique	Values of child must be unique	2
-table6	10	child	error	tree:child-unique	Values of child must be unique	2
 table7	3	planetfall	error	datatype:integer	planetfall should be a positive or negative integer	e
 table8	1	prefix	error	key:foreign	Value 'a' of column prefix is not in table10.foreign_column	a
 table8	2	prefix	error	key:foreign	Value 'w' of column prefix exists only in table10_conflict.foreign_column	w

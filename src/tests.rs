@@ -130,6 +130,25 @@ async fn test_insert_2(valve: &Valve) -> Result<()> {
     Ok(())
 }
 
+async fn test_insert_3(valve: &Valve) -> Result<()> {
+    eprint!("Running test_insert_3() ... ");
+
+    let row = json!({
+        "id": "BFO:0000099",
+        "label": "jafar",
+        "parent": "mar",
+        "source": "COB",
+        "type": "owl:Class",
+    });
+    let (_new_row_num, _new_row) = valve.insert_row("table3", row.as_object().unwrap()).await?;
+
+    // The result of this insertion is that the tree:foreign error message will be resolved
+    // for table3 row 5 column parent: "Value 'jafar' of column parent is not in column label"
+
+    eprintln!("done.");
+    Ok(())
+}
+
 async fn test_dependencies(valve: &Valve) -> Result<()> {
     eprint!("Running test_dependencies() ... ");
 
@@ -648,55 +667,43 @@ async fn test_modes(valve: &Valve) -> Result<()> {
 
     let result = valve.insert_row("readonly1", &readonly_row).await;
     match result {
-        Err(e) => assert_eq!(
-            format!("{:?}", e),
-            r#"InputError("Inserting to table 'readonly1' is not allowed")"#,
-        ),
+        Err(e) => assert!(format!("{:?}", e)
+            .starts_with(r#"InputError("Inserting to table 'readonly1' is not allowed")"#)),
         _ => assert!(false, "Expected an error result but got an OK result"),
     };
 
     let result = valve.insert_row("view1", &view_row).await;
     match result {
-        Err(e) => assert_eq!(
-            format!("{:?}", e),
-            r#"InputError("Inserting to table 'view1' is not allowed")"#,
-        ),
+        Err(e) => assert!(format!("{:?}", e)
+            .starts_with(r#"InputError("Inserting to table 'view1' is not allowed")"#)),
         _ => assert!(false, "Expected an error result but got an OK result"),
     };
 
     let result = valve.update_row("readonly1", &1, &readonly_row).await;
     match result {
-        Err(e) => assert_eq!(
-            format!("{:?}", e),
-            r#"InputError("Updating table 'readonly1' is not allowed")"#,
-        ),
+        Err(e) => assert!(format!("{:?}", e)
+            .starts_with(r#"InputError("Updating table 'readonly1' is not allowed")"#)),
         _ => assert!(false, "Expected an error result but got an OK result"),
     };
 
     let result = valve.update_row("view1", &1, &view_row).await;
     match result {
-        Err(e) => assert_eq!(
-            format!("{:?}", e),
-            r#"InputError("Updating table 'view1' is not allowed")"#,
-        ),
+        Err(e) => assert!(format!("{:?}", e)
+            .starts_with(r#"InputError("Updating table 'view1' is not allowed")"#)),
         _ => assert!(false, "Expected an error result but got an OK result"),
     };
 
     let result = valve.delete_row("readonly1", &1).await;
     match result {
-        Err(e) => assert_eq!(
-            format!("{:?}", e),
-            r#"InputError("Deleting from table 'readonly1' is not allowed")"#,
-        ),
+        Err(e) => assert!(format!("{:?}", e)
+            .starts_with(r#"InputError("Deleting from table 'readonly1' is not allowed")"#)),
         _ => assert!(false, "Expected an error result but got an OK result"),
     };
 
     let result = valve.delete_row("view1", &1).await;
     match result {
-        Err(e) => assert_eq!(
-            format!("{:?}", e),
-            r#"InputError("Deleting from table 'view1' is not allowed")"#,
-        ),
+        Err(e) => assert!(format!("{:?}", e)
+            .starts_with(r#"InputError("Deleting from table 'view1' is not allowed")"#)),
         _ => assert!(false, "Expected an error result but got an OK result"),
     };
 
@@ -977,6 +984,7 @@ pub async fn run_api_tests(valve: &Valve) -> Result<()> {
     test_insert_1(&valve).await?;
     test_update_2(&valve).await?;
     test_insert_2(&valve).await?;
+    test_insert_3(&valve).await?;
     test_dependencies(&valve).await?;
     test_undo_redo(&valve).await?;
     test_randomized_api_test_with_undo_redo(&valve).await?;
