@@ -1878,22 +1878,60 @@ impl Valve {
     /// Save all configured editable tables to their configured paths, unless save_dir is specified,
     /// in which case save them there instead.
     pub fn save_all_tables(&self, save_dir: &Option<String>) -> Result<&Self> {
+        fn has_options(table: &str, pool: &AnyPool) -> Result<bool> {
+            if pool.any_kind() == AnyKind::Postgres {
+                let sql = local_sql_syntax(
+                    &pool,
+                    &format!(
+                        r#"SELECT 1
+                           FROM "information_schema"."columns"
+                           WHERE "table_name" = {} AND "column_name" = 'options' LIMIT 1"#,
+                        SQL_PARAM,
+                    ),
+                );
+                Ok(block_on(sqlx_query(&sql).bind(table).fetch_all(pool))?.is_empty())
+            } else {
+                let sql = local_sql_syntax(&pool, &format!(r#"PRAGMA TABLE_INFO("{}")"#, table));
+                Ok(block_on(sqlx_query(&sql).bind(table).fetch_all(pool))?
+                    .iter()
+                    .filter(|r| r.get::<&str, &str>("name") == "options")
+                    .collect::<Vec<_>>()
+                    .is_empty())
+            }
+        }
+
+        fn get_options(table: &str, pool: &AnyPool) -> Result<Vec<String>> {
+            let sql = local_sql_syntax(
+                &pool,
+                &format!(
+                    r#"SELECT "options" FROM "table" WHERE "table" = {}"#,
+                    SQL_PARAM
+                ),
+            );
+            let options = block_on(sqlx_query(&sql).bind(table).fetch_one(pool))?
+                .try_get::<&str, &str>("options")?
+                .split(" ")
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>();
+            Ok(options)
+        }
+
         // Collect tables from the 'table' table.
         let mut tables: Vec<String> = vec![];
-        let sql = format!("SELECT \"table\", \"options\" FROM \"table\"");
+        let sql = format!("SELECT \"table\" FROM \"table\"");
         let mut stream = sqlx_query(&sql).fetch(&self.pool);
         while let Some(row) = block_on(stream.try_next())? {
             let table = row.try_get::<&str, &str>("table").ok().unwrap_or_default();
-            let options = row
-                .try_get::<&str, &str>("options")
-                .ok()
-                .unwrap_or_default();
-            let row_options = options.split(" ").collect::<Vec<_>>();
-            if let Ok((row_options, _)) = normalize_options(&row_options, 0) {
-                if row_options.contains("save") {
+            if has_options(table, &self.pool)? {
+                let options = get_options(table, &self.pool)?;
+                let options = options.iter().map(|s| s.as_str()).collect::<Vec<_>>();
+                let (options, _) = normalize_options(&options, 0)?;
+                if options.contains("save") {
                     tables.push(table.to_string());
                 }
-            };
+            } else {
+                tables.push(table.to_string());
+            }
         }
 
         let tables = tables.iter().map(|s| s.as_str()).collect_vec();
@@ -1904,6 +1942,7 @@ impl Valve {
     /// Given a vector of table names, save those tables to their configured path's, unless
     /// save_dir is specified, in which case save them there instead.
     pub fn save_tables(&self, tables: &Vec<&str>, save_dir: &Option<String>) -> Result<&Self> {
+        // TODO: Be more careful about the options column
         if self.verbose {
             println!("Saving tables: {} ...", tables.join(", "));
         }
@@ -1961,6 +2000,7 @@ impl Valve {
 
     /// Save the given table with the given columns at the given path as a TSV file.
     pub fn save_table(&self, table: &str, path: &str) -> Result<&Self> {
+        // TODO: Be more careful about the options and format columns.
         // Uses the given (unverified) printf-style format string and the given compiled regular
         // expression (which is used to verify the given format) to format the given cell.
         fn format_cell(colformat: &str, format_regex: &Regex, cell: &str) -> String {
