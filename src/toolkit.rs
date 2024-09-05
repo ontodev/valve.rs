@@ -4023,7 +4023,7 @@ pub fn verify_table_deps_and_sort(
 }
 
 /// Given a global configuration struct and a table name, returns the options for the table.
-pub fn get_table_options(config: &ValveConfig, table: &str) -> Result<HashSet<String>> {
+pub fn get_table_options_from_config(config: &ValveConfig, table: &str) -> Result<HashSet<String>> {
     Ok(config
         .table
         .get(table)

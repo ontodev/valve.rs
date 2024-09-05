@@ -295,7 +295,7 @@ async fn main() -> Result<()> {
         } => {
             exit_unless_tsv(source);
             let valve = build_valve(source, destination).unwrap();
-            valve.save_all_tables(&save_dir).unwrap();
+            valve.save_all_tables(&save_dir).await.unwrap();
         }
         Commands::Save {
             save_dir,
@@ -310,7 +310,7 @@ async fn main() -> Result<()> {
                 .filter(|s| *s != "")
                 .map(|s| s.as_str())
                 .collect::<Vec<_>>();
-            valve.save_tables(&tables, &save_dir).unwrap();
+            valve.save_tables(&tables, &save_dir).await.unwrap();
         }
         Commands::Guess {
             sample_size,

@@ -4,9 +4,9 @@ use crate::{
     ast::Expression,
     toolkit::{
         cast_sql_param_from_text, get_column_value, get_column_value_as_string,
-        get_datatype_ancestors, get_sql_type_from_global_config, get_table_options, get_value_type,
-        is_sql_type_error, local_sql_syntax, ColumnRule, CompiledCondition, QueryAsIf,
-        QueryAsIfKind, ValueType,
+        get_datatype_ancestors, get_sql_type_from_global_config, get_table_options_from_config,
+        get_value_type, is_sql_type_error, local_sql_syntax, ColumnRule, CompiledCondition,
+        QueryAsIf, QueryAsIfKind, ValueType,
     },
     valve::{
         ValveCell, ValveCellMessage, ValveConfig, ValveRow, ValveRuleConfig, ValveTreeConstraint,
@@ -165,7 +165,7 @@ pub async fn validate_tree_foreign_keys(
         .get(table_name)
         .expect(&format!("Undefined table '{}'", table_name));
 
-    let table_options = get_table_options(config, table_name)?;
+    let table_options = get_table_options_from_config(config, table_name)?;
     let query_table = {
         if !table_options.contains("conflict") {
             table_name.to_string()
@@ -1400,7 +1400,7 @@ pub async fn validate_cell_unique_constraints(
                 _ => cached_value.to_string() == cell.value,
             })),
             None => {
-                let table_options = get_table_options(config, table_name)?;
+                let table_options = get_table_options_from_config(config, table_name)?;
                 // If the table does not have a conflict table then there is no view to check, so
                 // we check the table itself.
                 let mut query_table = {
