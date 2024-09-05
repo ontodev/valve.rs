@@ -1875,22 +1875,6 @@ impl Valve {
         Ok(self)
     }
 
-    /// Returns true if the Valve instance has options enabled, according to the currently loaded
-    /// configuration.
-    pub async fn options_enabled_in_config(&self) -> Result<bool> {
-        // Calling is_empty() is good enough to determine if the options column is enabled, since
-        // if the options are blank in the .tsv file for the table table, then it will be given
-        // the default option set implicitly when normalized_options() is called while reading
-        // the file.
-        Ok(!self
-            .config
-            .table
-            .get("table")
-            .expect("Could not retrieve table table configuration")
-            .options
-            .is_empty())
-    }
-
     /// Returns true if the Valve instance has options enabled, according to the database.
     pub async fn options_enabled_in_db(&self) -> Result<bool> {
         if self.pool.any_kind() == AnyKind::Postgres {
@@ -2047,7 +2031,6 @@ impl Valve {
 
     /// Save the given table with the given columns at the given path as a TSV file.
     pub async fn save_table(&self, table: &str, path: &str) -> Result<&Self> {
-        // TODO: Be more careful about the options and format columns.
         // Uses the given (unverified) printf-style format string and the given compiled regular
         // expression (which is used to verify the given format) to format the given cell.
         fn format_cell(colformat: &str, format_regex: &Regex, cell: &str) -> String {
@@ -2105,47 +2088,44 @@ impl Valve {
             }
         }
 
-        // Check that the table options allow save.
-        // TODO: handle "Save as..." case
-        let sql = format!("SELECT \"options\" FROM \"table\" WHERE \"table\" = '{table}'");
-        match sqlx_query(&sql).fetch_one(&self.pool).await {
-            Err(_) => {
-                return Err(
-                    ValveError::DataError(format!("No such table in database: '{table}'")).into(),
-                )
-            }
-            Ok(row) => {
-                let options = row
-                    .try_get::<&str, &str>("options")
-                    .ok()
-                    .unwrap_or_default();
-                let row_options = options.split(" ").collect::<Vec<_>>();
-                match normalize_options(&row_options, 0) {
-                    Err(_) => {
-                        return Err(ValveError::ConfigError(format!(
-                            "Invalid table options: {options}"
-                        ))
-                        .into())
-                    }
-
-                    Ok((row_options, _)) => {
-                        if !row_options.contains("save") {
-                            return Err(ValveError::ConfigError(format!(
-                                "Saving '{table}' is not supported by table options: {options}"
-                            ))
-                            .into());
-                        }
-                    }
-                };
-            }
+        if self.options_enabled_in_db().await? {
+            let sql = local_sql_syntax(
+                &self.pool,
+                &format!(
+                    r#"SELECT "path", "options" FROM "table" WHERE "table" = {}"#,
+                    SQL_PARAM
+                ),
+            );
+            let row = sqlx_query(&sql).bind(table).fetch_one(&self.pool).await?;
+            let configured_path = row.try_get::<&str, &str>("path")?;
+            let options = row
+                .try_get::<&str, &str>("options")?
+                .split(" ")
+                .collect::<Vec<_>>();
+            let (options, _) = normalize_options(&options, 0)?;
+            if configured_path == path && !options.contains("save") {
+                return Err(ValveError::ConfigError(format!(
+                    "Saving '{}' to '{}' is not supported by table options: {}",
+                    table,
+                    path,
+                    options.iter().join(", ")
+                ))
+                .into());
+            };
         }
 
+        // TODO: Check to make sure that the format exists, similarly to what is done for options
+        // above.
         let mut columns: Vec<String> = vec![];
         let mut labels: Vec<String> = vec![];
         let mut formats: Vec<String> = vec![];
 
         let sql = format!(
-            r#"SELECT "column", "label", "format" FROM "column" LEFT JOIN "datatype" ON "column"."datatype" = "datatype"."datatype" WHERE "table" = '{table}'"#
+            r#"SELECT "column", "label", "format"
+                 FROM "column"
+            LEFT JOIN "datatype"
+                   ON "column"."datatype" = "datatype"."datatype"
+                WHERE "table" = '{table}'"#
         );
         let mut stream = sqlx_query(&sql).fetch(&self.pool);
         while let Some(row) = stream.try_next().await? {
