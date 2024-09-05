@@ -1878,44 +1878,33 @@ impl Valve {
     /// Save all configured editable tables to their configured paths, unless save_dir is specified,
     /// in which case save them there instead.
     pub fn save_all_tables(&self, save_dir: &Option<String>) -> Result<&Self> {
-        let options_allowed = {
+        let options_missing = {
             if self.pool.any_kind() == AnyKind::Postgres {
                 let sql = r#"SELECT 1
                              FROM "information_schema"."columns"
                              WHERE "table_name" = 'table'
                                AND "column_name" = 'options'
                              LIMIT 1"#;
-                block_on(sqlx_query(&sql).fetch_all(&self.pool))?.len() > 0
+                block_on(sqlx_query(&sql).fetch_all(&self.pool))?.is_empty()
             } else {
                 let sql = r#"PRAGMA TABLE_INFO("table")"#;
                 block_on(sqlx_query(&sql).fetch_all(&self.pool))?
                     .iter()
                     .filter(|r| r.get::<&str, &str>("name") == "options")
                     .collect::<Vec<_>>()
-                    .len()
-                    > 0
+                    .is_empty()
             }
         };
 
-        fn get_options(table: &str, pool: &AnyPool) -> Result<Vec<String>> {
-            let sql = local_sql_syntax(
-                &pool,
-                &format!(
-                    r#"SELECT "options" FROM "table" WHERE "table" = {}"#,
-                    SQL_PARAM
-                ),
-            );
-            let options = block_on(sqlx_query(&sql).bind(table).fetch_one(pool))?
-                .try_get::<&str, &str>("options")?
-                .split(" ")
-                .map(|s| s.to_string())
-                .collect::<Vec<_>>();
-            Ok(options)
-        }
-
         // Collect tables from the 'table' table.
         let mut tables = vec![];
-        let sql = format!("SELECT \"table\" FROM \"table\"");
+        let sql = {
+            if options_missing {
+                r#"SELECT "table" FROM "table""#
+            } else {
+                r#"SELECT "table", "options" FROM "table""#
+            }
+        };
         let mut stream = sqlx_query(&sql).fetch(&self.pool);
         while let Some(row) = block_on(stream.try_next())? {
             let table = row
@@ -1924,9 +1913,11 @@ impl Valve {
                 .ok_or(ValveError::InputError(
                     "No column \"table\" found in row".to_string(),
                 ))?;
-            if options_allowed {
-                let options = get_options(table, &self.pool)?;
-                let options = options.iter().map(|s| s.as_str()).collect::<Vec<_>>();
+            if !options_missing {
+                let options = row
+                    .try_get::<&str, &str>("options")?
+                    .split(" ")
+                    .collect::<Vec<_>>();
                 let (options, _) = normalize_options(&options, 0)?;
                 if options.contains("save") {
                     tables.push(table.to_string());
