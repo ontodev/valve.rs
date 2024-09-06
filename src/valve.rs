@@ -2219,7 +2219,9 @@ impl Valve {
             let mut record: Vec<String> = vec![];
             for (i, column) in columns.iter().enumerate() {
                 let cell = row.try_get::<&str, &str>(column).ok().unwrap_or_default();
-                let colformat = formats.get(i).unwrap();
+                let colformat = formats.get(i).ok_or(ValveError::DataError(format!(
+                    "Error retrieving ith format for i == {i}"
+                )))?;
                 if *colformat != "" {
                     let formatted_cell = format_cell(&colformat, &format_regex, &cell);
                     record.push(formatted_cell.to_string());
