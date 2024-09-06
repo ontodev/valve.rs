@@ -2278,7 +2278,7 @@ impl Valve {
     /// if no format parameter has been configured or if none has been defined for that column.
     /// The format parameter indicates how values of the given column are to be formatted when
     /// saving a table to an external file.
-    pub async fn get_column_format_from_db(&self, table: &str, column: &str) -> Result<String> {
+    pub async fn get_column_format(&self, table: &str, column: &str) -> Result<String> {
         if !self
             .config
             .table
