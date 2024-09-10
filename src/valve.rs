@@ -24,7 +24,7 @@ use anyhow::Result;
 use csv::{QuoteStyle, ReaderBuilder, WriterBuilder};
 use enquote::unquote;
 use futures::{executor::block_on, TryStreamExt};
-use indexmap::{IndexMap, IndexSet};
+use indexmap::IndexMap;
 use itertools::Itertools;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -1897,18 +1897,26 @@ impl Valve {
         }
     }
 
-    /// Save all configured editable tables to their configured paths, unless save_dir is specified,
-    /// in which case save them there instead.
+    /// Save all configured savable tables to their configured paths, unless save_dir is specified,
+    /// in which case save them all there instead.
     pub async fn save_all_tables(&self, save_dir: &Option<String>) -> Result<&Self> {
         let options_enabled = self.column_enabled_in_db("table", "options").await?;
 
-        // Collect tables from the 'table' table.
+        // Get the list of potential tables to save by querying the table table for all tables
+        // whose paths are TSV files:
         let mut tables = vec![];
         let sql = {
-            if !options_enabled {
-                r#"SELECT "table" FROM "table""#
+            let select_from_table = String::from({
+                if !options_enabled {
+                    r#"SELECT "table" FROM "table""#
+                } else {
+                    r#"SELECT "table", "options" FROM "table""#
+                }
+            });
+            if self.pool.any_kind() == AnyKind::Postgres {
+                format!(r#"{select_from_table} WHERE "path" ILIKE '%.tsv'"#)
             } else {
-                r#"SELECT "table", "options" FROM "table""#
+                format!(r#"{select_from_table} WHERE LOWER("path") LIKE '%.tsv'"#)
             }
         };
         let mut stream = sqlx_query(&sql).fetch(&self.pool);
@@ -1931,7 +1939,7 @@ impl Valve {
                 }
             } else {
                 // If the options column is missing from the table table, then save is enabled
-                // by default:
+                // by default if the table has a .tsv path (which we have already verified above).
                 tables.push(table.to_string());
             }
         }
@@ -1951,6 +1959,8 @@ impl Valve {
         if self.verbose {
             println!("Saving tables: {} ...", tables.join(", "));
         }
+        // Collect the paths and possibly the options of all of the tables that were requested to be
+        // saved:
         let options_enabled = self.column_enabled_in_db("table", "options").await?;
         let sql = {
             if options_enabled {
@@ -1965,7 +1975,6 @@ impl Valve {
                 )
             }
         };
-
         let mut stream = sqlx_query(&sql).fetch(&self.pool);
         while let Some(row) = stream.try_next().await? {
             let table = row
@@ -1974,6 +1983,7 @@ impl Valve {
                 .ok_or(ValveError::InputError(
                     "No column \"table\" found in row".to_string(),
                 ))?;
+
             let options = row
                 .try_get::<&str, &str>("options")
                 .unwrap_or_default()
@@ -1984,6 +1994,8 @@ impl Valve {
             let path = row.try_get::<&str, &str>("path").ok().unwrap_or_default();
             let path = match save_dir {
                 Some(save_dir) => {
+                    // If the table is not saveable it can still be saved to the saved_dir if it
+                    // has been specified and if it is not identical to the table's configured path:
                     if !options.contains("save") {
                         let path_dir = Path::new(path)
                             .parent()
@@ -2012,7 +2024,7 @@ impl Valve {
                             table
                         ))
                         .into());
-                    } else if !path.ends_with(".tsv") {
+                    } else if !path.to_lowercase().ends_with(".tsv") {
                         return Err(ValveError::InputError(format!(
                             "Refusing to save to non-tsv file '{}'",
                             path
@@ -2087,7 +2099,14 @@ impl Valve {
             }
         }
 
-        if self.column_enabled_in_db("table", "options").await? {
+        // Check if we are allowed to save the table:
+        if !save_path.to_lowercase().ends_with(".tsv") {
+            return Err(ValveError::InputError(format!(
+                "Refusing to save to non-tsv file '{}'",
+                save_path
+            ))
+            .into());
+        } else if self.column_enabled_in_db("table", "options").await? {
             let sql = local_sql_syntax(
                 &self.pool,
                 &format!(
@@ -2114,6 +2133,8 @@ impl Valve {
             };
         }
 
+        // Begin by constructing a map from column names to their associated labels and formats, by
+        // querying the column table joined with information from the table and datatype tables.
         let mut columns: IndexMap<String, (String, String)> = IndexMap::new();
         let sql = {
             let mut sql_columns = r#"c."column", c."label", t."type" AS "table_type""#.to_string();
@@ -2130,11 +2151,11 @@ impl Valve {
                     LEFT JOIN "datatype" d
                            ON c."datatype" = d."datatype"
                         WHERE c."table" = t."table"
-                          AND c."table" = {SQL_PARAM}"#,
+                          AND c."table" = {SQL_PARAM}
+                    ORDER BY c."row_order""#,
                 ),
             )
         };
-
         let mut stream = sqlx_query(&sql).bind(table).fetch(&self.pool);
         while let Some(row) = stream.try_next().await? {
             let column = row
@@ -2151,7 +2172,9 @@ impl Valve {
             let format = row.try_get::<&str, &str>("format").ok().unwrap_or_default();
             // If the table type is not empty then it is either a special configuration table or an
             // internal table and, in either case, we want to ignore the label in the same way that
-            // we ignore it when initially reading the configuration files.
+            // we ignore it when initially reading the configuration files. Possibly we will want to
+            // allow labels for configuration table columns in the future, but for now we need to
+            // make sure that they are treated consistently at load-time and at save-time.
             if label == "" || table_type != "" {
                 columns.insert(column.into(), (column.into(), format.into()));
             } else {
@@ -2159,69 +2182,35 @@ impl Valve {
             }
         }
 
-        let mut labels = vec![];
-        let mut formats = vec![];
-        let configured_columns = &self
-            .config
-            .table
-            .get(table)
-            .ok_or(ValveError::InputError(format!(
-                "No table configuration found for '{}'.",
-                table
-            )))?
-            .column_order;
-        let mut leftover_columns = IndexSet::<String>::from_iter(columns.keys().cloned());
-        let mut formatted_columns = vec!["\"row_number\"".to_string()];
-
-        // First format the configured columns in the correct order:
-        for column in configured_columns {
-            if let Some((label, format)) = columns.get(column) {
-                formatted_columns.push(format!(r#""{}""#, column));
-                labels.push(label);
-                formats.push(format);
-                leftover_columns.remove(column);
-            }
-        }
-
-        // Now format any non-configured columns:
-        for column in &leftover_columns {
-            let (label, format) = columns.get(column).ok_or(ValveError::InputError(format!(
-                "No column '{}' found.",
-                column
-            )))?;
-            labels.push(label);
-            formats.push(format);
-            formatted_columns.push(format!(r#""{}""#, column));
-        }
-
-        // Construct the query to use on the basis of the formatted columns:
+        // Construct the query to use to retrieve the data:
         let query_table = format!("\"{}_text_view\"", table);
         let sql = format!(
-            r#"SELECT {} FROM {} ORDER BY "row_number""#,
-            formatted_columns.join(", "),
+            r#"SELECT "row_number", {} FROM {} ORDER BY "row_order""#,
+            columns
+                .keys()
+                .map(|c| format!(r#""{}""#, c))
+                .collect::<Vec<_>>()
+                .join(", "),
             query_table
         );
 
-        // Combine configured and non-configured columns in preparation for writing:
-        let mut columns = configured_columns.clone();
-        for column in &leftover_columns {
-            columns.push(column.to_string());
-        }
-
+        // Query the database and use the results to construct the records that will be written
+        // to the TSV file:
         let format_regex = Regex::new(PRINTF_RE)?;
         let mut writer = WriterBuilder::new()
             .delimiter(b'\t')
             .quote_style(QuoteStyle::Never)
             .from_path(save_path)?;
-        writer.write_record(labels)?;
+        let tsv_header_row = columns
+            .iter()
+            .map(|(_, (label, _))| label)
+            .collect::<Vec<_>>();
+        writer.write_record(tsv_header_row)?;
         let mut stream = sqlx_query(&sql).fetch(&self.pool);
         while let Some(row) = stream.try_next().await? {
             let mut record: Vec<String> = vec![];
-            for (i, column) in columns.iter().enumerate() {
+            for (column, (_, colformat)) in &columns {
                 let cell = row.try_get::<&str, &str>(column).ok().unwrap_or_default();
-                let colformat = formats.get(i).ok_or(ValveError::DataError(format!(
-                    "Error retrieving ith format for i == {i}"
-                )))?;
                 if *colformat != "" {
                     let formatted_cell = format_cell(&colformat, &format_regex, &cell);
                     record.push(formatted_cell.to_string());
