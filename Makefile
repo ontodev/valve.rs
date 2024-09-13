@@ -135,14 +135,14 @@ random_test_data: test/generate_random_test_data.py valve valve test/random_test
 	./$< $$(date +"%s") 100 5 $(word 3,$^) $|
 
 .PHONY: sqlite_random_test
-sqlite_random_test: valve random_test_data | build test/output
+sqlite_random_test: valve clean_random_data random_test_data | build test/output
 	@echo "Testing with random data on sqlite ..."
 	./$< --assume-yes load $(random_test_dir)/table.tsv $(sqlite_random_db)
 	test/round_trip.sh $(sqlite_random_db) $(random_test_dir)/table.tsv
 	@echo "Test succeeded!"
 
 .PHONY: pg_random_test
-pg_random_test: valve random_test_data | build test/output
+pg_random_test: valve clean_random_data random_test_data | build test/output
 	@echo "Testing with random data on postgresql ..."
 	./$< --assume-yes load $(random_test_dir)/table.tsv $(pg_connect_string)
 	test/round_trip.sh $(pg_connect_string) $(random_test_dir)/table.tsv
@@ -185,9 +185,10 @@ penguin_test: valve | test/penguins/src/data
 
 guess_test_dir = test/guess_test_data
 guess_test_db = build/valve_guess.db
+num_guess_test_rows = 30000
 
 $(guess_test_dir)/table1.tsv: test/generate_random_test_data.py valve $(guess_test_dir)/*.tsv
-	./$< 0 30000 5 $(guess_test_dir)/table.tsv $(guess_test_dir)
+	./$< 0 $(num_guess_test_rows) 5 $(guess_test_dir)/table.tsv $(guess_test_dir)
 
 $(guess_test_dir)/ontology:
 	mkdir -p $@
@@ -196,9 +197,9 @@ $(guess_test_dir)/ontology:
 guess_test_data: test/generate_random_test_data.py $(guess_test_dir)/table1.tsv valve confirm_overwrite.sh $(guess_test_dir)/*.tsv | $(guess_test_dir)/ontology
 	./confirm_overwrite.sh $(guess_test_dir)/ontology
 	rm -f $(guess_test_dir)/table1.tsv
-	./$< 0 30000 5 $(guess_test_dir)/table.tsv $(guess_test_dir)
+	./$< 0 $(num_guess_test_rows) 5 $(guess_test_dir)/table.tsv $(guess_test_dir)
 	rm -f $(guess_test_dir)/ontology/*.tsv
-	./$< 0 30000 5 $(guess_test_dir)/table_expected.tsv $|
+	./$< 0 $(num_guess_test_rows) 5 $(guess_test_dir)/table_expected.tsv $|
 	rm -f $(guess_test_dir)/ontology/table1.tsv
 
 $(guess_test_db): valve guess_test_data $(guess_test_dir)/*.tsv | build $(guess_test_dir)/ontology
@@ -248,6 +249,10 @@ perf_test: sqlite_perf_test pg_perf_test
 .PHONY: clean
 clean:
 	rm -Rf build/valve.db* build/valve_random.db* test/output $(random_test_dir)/ontology valve
+
+.PHONY: clean_random_data
+clean_random_data:
+	rm -Rf $(random_test_dir)/ontology
 
 .PHONY: clean_test_db
 clean_test_db:

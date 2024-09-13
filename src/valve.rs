@@ -93,7 +93,7 @@ pub fn unfold_json_row(json_row: &JsonRow) -> Result<JsonRow> {
 }
 
 /// Represents a particular row of data with validation results.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct ValveRow {
     /// The row number of this row. None indicates "unspecified".
     pub row_number: Option<u32>,
@@ -186,7 +186,7 @@ impl ValveRow {
 }
 
 /// Represents a particular cell in a particular row of data with vaildation results.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct ValveCell {
     /// If present, indicates that the value of the cell is considered to be a null value of
     /// the given type. If not present, indicates that the contents of the cell are not empty.
@@ -880,12 +880,15 @@ impl Valve {
                        JOIN information_schema.key_column_usage kcu
                          ON kcu.constraint_name = tco.constraint_name
                             AND kcu.constraint_schema = tco.constraint_schema
-                            AND kcu.table_name = '{}'
-                       WHERE tco.constraint_type = '{}'
-                         AND kcu.column_name = '{}'"#,
-                        table, constraint_type, column
+                            AND kcu.table_name = $1
+                       WHERE tco.constraint_type = $2
+                         AND kcu.column_name = $3"#,
                     );
-                    let rows = block_on(sqlx_query(&sql).fetch_all(&self.pool))?;
+                    let query = sqlx_query(&sql)
+                        .bind(table)
+                        .bind(constraint_type)
+                        .bind(column);
+                    let rows = block_on(query.fetch_all(&self.pool))?;
                     if rows.len() > 1 {
                         unreachable!();
                     }
@@ -983,6 +986,7 @@ impl Valve {
                                     }
                                 }
                             } else {
+                                println!("FAVVOOOM");
                                 let sql = format!(
                                     r#"SELECT
                                        ccu.table_name AS foreign_table_name,
@@ -994,11 +998,11 @@ impl Valve {
                                    JOIN information_schema.constraint_column_usage AS ccu
                                      ON ccu.constraint_name = tc.constraint_name
                                    WHERE tc.constraint_type = 'FOREIGN KEY'
-                                     AND tc.table_name = '{}'
-                                     AND kcu.column_name = '{}'"#,
-                                    table, column
+                                     AND tc.table_name = $1
+                                     AND kcu.column_name = $2"#,
                                 );
-                                let rows = block_on(sqlx_query(&sql).fetch_all(&self.pool))?;
+                                let query = sqlx_query(&sql).bind(table).bind(column);
+                                let rows = block_on(query.fetch_all(&self.pool))?;
                                 if rows.len() == 0 {
                                     // If the table doesn't even exist return true.
                                     return Ok(true);
@@ -1053,10 +1057,9 @@ impl Valve {
         let db_columns_in_order = {
             if self.pool.any_kind() == AnyKind::Sqlite {
                 let sql = format!(
-                    r#"SELECT 1 FROM sqlite_master WHERE "type" = 'table' AND "name" = '{}'"#,
-                    table
+                    r#"SELECT 1 FROM sqlite_master WHERE "type" = 'table' AND "name" = ?"#,
                 );
-                let rows = sqlx_query(&sql).fetch_all(&self.pool).await?;
+                let rows = sqlx_query(&sql).bind(table).fetch_all(&self.pool).await?;
                 if rows.len() == 0 {
                     if self.verbose {
                         println!(
@@ -1085,12 +1088,11 @@ impl Valve {
             } else {
                 let sql = format!(
                     r#"SELECT "column_name", "data_type"
-                   FROM "information_schema"."columns"
-                   WHERE "table_name" = '{}'
-                   ORDER BY "ordinal_position""#,
-                    table,
+                         FROM "information_schema"."columns"
+                        WHERE "table_name" = $1
+                       ORDER BY "ordinal_position""#,
                 );
-                let rows = sqlx_query(&sql).fetch_all(&self.pool).await?;
+                let rows = sqlx_query(&sql).bind(table).fetch_all(&self.pool).await?;
                 if rows.len() == 0 {
                     if self.verbose {
                         println!(
@@ -1520,22 +1522,20 @@ impl Valve {
                 format!(
                     r#"SELECT 1
                        FROM "sqlite_master"
-                       WHERE "type" = 'table' AND name = '{}'
+                       WHERE "type" = 'table' AND name = ?
                        LIMIT 1"#,
-                    table
                 )
             } else {
                 format!(
                     r#"SELECT 1
                        FROM "information_schema"."tables"
                        WHERE "table_schema" = 'public'
-                         AND "table_name" = '{}'
+                         AND "table_name" = $1
                          AND "table_type" LIKE '%TABLE'"#,
-                    table
                 )
             }
         };
-        let query = sqlx_query(&sql);
+        let query = sqlx_query(&sql).bind(table);
         let rows = query.fetch_all(&self.pool).await?;
         return Ok(rows.len() > 0);
     }
@@ -1547,22 +1547,20 @@ impl Valve {
                 format!(
                     r#"SELECT 1
                        FROM "sqlite_master"
-                       WHERE "type" = 'view' AND name = '{}'
+                       WHERE "type" = 'view' AND name = ?
                        LIMIT 1"#,
-                    view
                 )
             } else {
                 format!(
                     r#"SELECT 1
                        FROM "information_schema"."tables"
                        WHERE "table_schema" = 'public'
-                         AND "table_name" = '{}'
+                         AND "table_name" = $1
                          AND "table_type" = 'VIEW'"#,
-                    view
                 )
             }
         };
-        let query = sqlx_query(&sql);
+        let query = sqlx_query(&sql).bind(view);
         let rows = query.fetch_all(&self.pool).await?;
         return Ok(rows.len() > 0);
     }
@@ -1882,11 +1880,12 @@ impl Valve {
             let sql = format!(
                 r#"SELECT 1
                      FROM "information_schema"."columns"
-                    WHERE "table_name" = '{table}'
-                      AND "column_name" = '{column}'
+                    WHERE "table_name" = $1
+                      AND "column_name" = $2
                     LIMIT 1"#,
             );
-            Ok(!block_on(sqlx_query(&sql).fetch_all(&self.pool))?.is_empty())
+            let query = sqlx_query(&sql).bind(table).bind(column);
+            Ok(!block_on(query.fetch_all(&self.pool))?.is_empty())
         } else {
             let sql = format!(r#"PRAGMA TABLE_INFO("{table}")"#);
             Ok(!block_on(sqlx_query(&sql).fetch_all(&self.pool))?
@@ -1962,6 +1961,7 @@ impl Valve {
         // Collect the paths and possibly the options of all of the tables that were requested to be
         // saved:
         let options_enabled = self.column_enabled_in_db("table", "options").await?;
+        // TODO: Here.
         let sql = {
             if options_enabled {
                 format!(
@@ -2247,11 +2247,14 @@ impl Valve {
         {
             Ok("".to_string())
         } else {
-            let sql = format!(
-                r#"SELECT "format" FROM "datatype" WHERE "datatype" = '{}'"#,
-                datatype,
+            let sql = local_sql_syntax(
+                &self.pool,
+                &format!(r#"SELECT "format" FROM "datatype" WHERE "datatype" = {SQL_PARAM}"#,),
             );
-            let rows = sqlx_query(&sql).fetch_all(&self.pool).await?;
+            let rows = sqlx_query(&sql)
+                .bind(datatype)
+                .fetch_all(&self.pool)
+                .await?;
             if rows.len() > 0 {
                 let format_string = rows[0]
                     .try_get::<&str, &str>("format")
@@ -2281,15 +2284,21 @@ impl Valve {
         {
             Ok("".to_string())
         } else {
-            let sql = format!(
-                r#"SELECT d."format"
-                     FROM "column" c, "datatype" d
-                    WHERE c."table" = '{}'
-                      AND c."column" = '{}'
-                      AND c."datatype" = d."datatype""#,
-                table, column
+            let sql = local_sql_syntax(
+                &self.pool,
+                &format!(
+                    r#"SELECT d."format"
+                         FROM "column" c, "datatype" d
+                        WHERE c."table" = {SQL_PARAM}
+                          AND c."column" = {SQL_PARAM}
+                          AND c."datatype" = d."datatype""#,
+                ),
             );
-            let rows = sqlx_query(&sql).fetch_all(&self.pool).await?;
+            let rows = sqlx_query(&sql)
+                .bind(table)
+                .bind(column)
+                .fetch_all(&self.pool)
+                .await?;
             if rows.len() > 1 {
                 panic!(
                     "Multiple entries corresponding to '{}' in datatype table",
@@ -2391,7 +2400,16 @@ impl Valve {
 
         row.row_number = Some(rn);
         let serde_row = row.contents_to_rich_json()?;
-        record_row_change(&mut tx, table_name, &rn, None, Some(&serde_row), &self.user).await?;
+        record_row_change(
+            &self.pool,
+            &mut tx,
+            table_name,
+            &rn,
+            None,
+            Some(&serde_row),
+            &self.user,
+        )
+        .await?;
 
         tx.commit().await?;
         Ok((rn, row))
@@ -2458,6 +2476,7 @@ impl Valve {
         // Record the row update in the history table:
         let serde_row = row.contents_to_rich_json()?;
         record_row_change(
+            &self.pool,
             &mut tx,
             table_name,
             row_number,
@@ -2490,6 +2509,7 @@ impl Valve {
         let previous_row = get_previous_row_tx(table_name, row_number, &mut tx).await?;
         row.insert("previous_row".into(), json!(previous_row));
         record_row_change(
+            &self.pool,
             &mut tx,
             &table_name,
             row_number,
@@ -2995,7 +3015,6 @@ impl Valve {
                                     )))?;
                                 let child_column = &tree.child;
 
-                                let mut params = vec![];
                                 let tree_sql = with_tree_sql(&tree, &table_name.to_string(), None);
                                 let child_column_text =
                                     cast_column_sql_to_text(&child_column, &sql_type);
@@ -3006,14 +3025,11 @@ impl Valve {
                                         tree_sql, child_column, child_column_text, SQL_PARAM
                                     ),
                                 );
-                                params.push(matching_string);
 
-                                let mut query = sqlx_query(&sql);
-                                for param in &params {
-                                    query = query.bind(param);
-                                }
-
-                                let rows = query.fetch_all(pool).await?;
+                                let rows = sqlx_query(&sql)
+                                    .bind(matching_string)
+                                    .fetch_all(pool)
+                                    .await?;
                                 for row in rows.iter() {
                                     values.push(get_column_value_as_string(
                                         &row,

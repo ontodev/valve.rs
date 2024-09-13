@@ -310,6 +310,7 @@ pub async fn validate_rows_constraints(
                     get_sql_type_from_global_config(config, &fkey.ftable, &fkey.fcolumn, pool)
                         .to_lowercase();
 
+                // TODO: Here.
                 let values_str = received_values
                     .get(&*fkey.column)
                     .unwrap()
@@ -321,7 +322,7 @@ pub async fn validate_rows_constraints(
                         if vec!["integer", "numeric", "real"].contains(&sql_type.as_str()) {
                             format!("{}", value)
                         } else {
-                            format!("'{}'", value)
+                            format!("'{}'", value.replace("'", "''"))
                         }
                     })
                     .filter(|value| !is_sql_type_error(&sql_type, value))
@@ -410,6 +411,7 @@ pub async fn validate_rows_constraints(
                 }
             };
 
+            // TODO: Here.
             let sql_type =
                 get_sql_type_from_global_config(config, &table, &column, pool).to_lowercase();
             let values_str = received_values
@@ -423,7 +425,7 @@ pub async fn validate_rows_constraints(
                     if vec!["integer", "numeric", "real"].contains(&sql_type.as_str()) {
                         format!("{}", value)
                     } else {
-                        format!("'{}'", value)
+                        format!("'{}'", value.replace("'", "''"))
                     }
                 })
                 .filter(|value| !is_sql_type_error(&sql_type, value))
@@ -627,10 +629,20 @@ pub fn validate_rows_intra(
                     .expect(&format!("Undefined table '{}'", table_name))
                     .column_order;
 
+                // If a table has been configured with more columns than are actually in its
+                // associated .tsv file, then when we try to get a value for one of the extra
+                // columns from the row, it will not be found. Instead of panicking we will
+                // use unwrap_or() with an empty ValveCell as the default:
+                let mut default_cell = ValveCell {
+                    ..Default::default()
+                };
                 // We begin by determining the nulltype of all of the cells, since the rules
                 // validation step requires that all cells have this information.
                 for column_name in column_names {
-                    let cell = valve_row.contents.get_mut(column_name).unwrap();
+                    let cell = valve_row
+                        .contents
+                        .get_mut(column_name)
+                        .unwrap_or(&mut default_cell);
                     validate_cell_nulltype(
                         config,
                         datatype_conditions,
@@ -643,7 +655,10 @@ pub fn validate_rows_intra(
                 if !only_nulltype {
                     for column_name in column_names {
                         let context = valve_row.clone();
-                        let cell = valve_row.contents.get_mut(column_name).unwrap();
+                        let cell = valve_row
+                            .contents
+                            .get_mut(column_name)
+                            .unwrap_or(&mut default_cell);
                         validate_cell_rules(
                             config,
                             rule_conditions,
@@ -1231,8 +1246,9 @@ pub async fn validate_cell_foreign_constraints(
                         table,
                         column,
                         {
+                            // TODO: Here.
                             if sql_type == "text" || sql_type.starts_with("varchar(") {
-                                format!("'{}'", value)
+                                format!("'{}'", value.replace("'", "''"))
                             } else {
                                 format!("{}", value)
                             }

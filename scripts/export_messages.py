@@ -17,7 +17,7 @@ def get_column_order_and_info_for_postgres(cursor, table):
     sorted by priority, and a list of the table's unique keys. I.e., returns a dict of the form:
     {"unsorted_columns": [], "sorted_columns": [], "primary_keys": [], "unique_keys": []}. Note that
     for tables with primary keys, we sort by primary key first, then by all other columns from left
-    to right. For tables without primary keys, we sort by row_number.
+    to right. For tables without primary keys, we sort by row_order.
     """
     constraints_query_template = f"""
         SELECT kcu.column_name
@@ -35,22 +35,18 @@ def get_column_order_and_info_for_postgres(cursor, table):
 
     cursor.execute(
         f"""
-        SELECT column_name
-        FROM information_schema.columns
-        WHERE table_name = '{table}'
-        ORDER BY ordinal_position
+        SELECT "column" FROM "column" WHERE "table" = '{table}'
         """
     )
+    unsorted_columns = ["row_number", "row_order"] + [row[0] for row in cursor]
+
     if not primary_keys:
-        sorted_columns = ["row_number"]
-        unsorted_columns = [row[0] for row in cursor]
+        sorted_columns = ["row_order"]
     else:
-        unsorted_columns = []
         non_pk_columns = []
         for row in cursor:
             column_name = row[0]
-            unsorted_columns.append(column_name)
-            if column_name not in primary_keys and not column_name == "row_number":
+            if column_name not in primary_keys:
                 non_pk_columns.append(column_name)
         sorted_columns = primary_keys + non_pk_columns
 
@@ -72,23 +68,27 @@ def get_column_order_and_info_for_sqlite(cursor, table):
     sorted by priority, and a list of the table's unique keys. I.e., returns a dict of the form:
     {"unsorted_columns": [], "sorted_columns": [], "primary_keys": [], "unique_keys": []}. Note that
     for tables with primary keys, we sort by primary key first, then by all other columns from left
-    to right. For tables without primary keys, we sort by row_number.
+    to right. For tables without primary keys, we sort by row_order.
     """
+    cursor.execute(
+        f"""
+        SELECT "column" FROM "column" WHERE "table" = '{table}'
+        """
+    )
+    unsorted_columns = ["row_number", "row_order"] + [row[0] for row in cursor]
+
     cursor.execute(f'PRAGMA TABLE_INFO("{table}")')
     columns_info = [d[0] for d in cursor.description]
     pragma_rows = list(map(lambda r: dict(zip(columns_info, r)), cursor))
     primary_keys = dict()
     if not any([row["pk"] == 1 for row in pragma_rows]):
-        sorted_columns = ["row_number"]
-        unsorted_columns = [p["name"] for p in pragma_rows]
+        sorted_columns = ["row_order"]
     else:
-        unsorted_columns = []
         non_pk_columns = []
         for row in pragma_rows:
-            unsorted_columns.append(row["name"])
             if row["pk"] != 0:
                 primary_keys[row["pk"]] = row["name"]
-            elif not row["name"] == "row_number":
+            elif not row["name"] not in ("row_number", "row_order"):
                 non_pk_columns.append(row["name"])
         primary_keys = dict(sorted(primary_keys.items()))
         sorted_columns = [primary_keys[key] for key in primary_keys] + non_pk_columns

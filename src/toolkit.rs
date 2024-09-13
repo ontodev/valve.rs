@@ -602,7 +602,7 @@ pub fn read_config_files(
     // information related to each of those tables, to which further info will be added later.
     let mut specials_config = ValveSpecialConfig::default();
     let mut tables_config = HashMap::new();
-    let mut table_order = vec![];
+    let mut table_order: Vec<String> = vec![];
     let rows = {
         // Read in the table table from either a file or the database table called "table".
         if path.to_lowercase().ends_with(".tsv") {
@@ -1087,7 +1087,7 @@ pub fn read_config_files(
 
     // 5. Initialize the constraints config:
     let mut constraints_config = ValveConstraintConfig::default();
-    for (table_name, defined_columns) in defined_column_orderings.iter() {
+    for table_name in &table_order {
         let table_name = table_name.to_string();
         let this_table = tables_config
             .get(&table_name)
@@ -1161,31 +1161,24 @@ pub fn read_config_files(
                         .iter()
                         .map(|c| c.to_string())
                         .collect::<Vec<_>>();
-                    // Make sure that the actual columns found in the table file, and the columns
-                    // defined in the column config, exactly match in terms of their content:
+                    // Make sure that the actual columns found in the table file are all defined
+                    // in the column configuration:
                     for label_name in &actual_labels {
-                        if !defined_labels.contains(&&label_name.to_string())
-                            && !defined_columns.contains(&&label_name.to_string())
-                        {
+                        if !defined_labels.contains(&&label_name.to_string()) {
                             return Err(ValveError::ConfigError(format!(
                                 "Label '{}' of table '{}' not in column config",
                                 label_name, table_name
                             ))
                             .into());
                         }
+                    }
+                    // The defined_labels are what will be used to create the table's columns. In
+                    // the case where a defined_label is not also an actual_label.
+                    for label_name in &defined_labels {
                         let column_name =
                             get_column_for_label(&this_column_config, label_name, &table_name)?;
                         if !column_name.is_empty() {
                             column_order.push(column_name);
-                        }
-                    }
-                    for label_name in &defined_labels {
-                        if !actual_labels.contains(&label_name.to_string()) {
-                            return Err(ValveError::ConfigError(format!(
-                                "Defined label '{}.{}' not found in table",
-                                table_name, label_name
-                            ))
-                            .into());
                         }
                     }
                 } else {
@@ -1653,11 +1646,14 @@ pub fn get_sql_for_text_view(
     create_view_sql
 }
 
-/// Given a table name, a column name, and a database pool, construct an SQL string to extract the
-/// value of the column, such that when the value of a given column is null, the query attempts to
+/// Given a column name and a database pool, construct an SQL string to extract the value of the
+/// column from its table, such that when the value of a given column is null, the query attempts to
 /// extract it from the message table. Returns a String representing the SQL to retrieve the value
-/// of the column.
-pub fn query_column_with_message_value(table: &str, column: &str, pool: &AnyPool) -> String {
+/// of the column. The returned String will contain two SQL placeholders, which will need to be
+/// reformatted (for instance using the function [local_sql_syntax()]) in accordance with the syntax
+/// accepted by the underlying database, and then bound before being executed by sqlx.
+/// These placeholders represent: (1) the column name and (2) the table name.
+pub fn query_column_with_message_value(column: &str, pool: &AnyPool) -> String {
     let is_clause = if pool.any_kind() == AnyKind::Sqlite {
         "IS"
     } else {
@@ -1667,11 +1663,11 @@ pub fn query_column_with_message_value(table: &str, column: &str, pool: &AnyPool
     format!(
         r#"CASE
              WHEN "{column}" {is_clause} NULL THEN (
-               SELECT value
+               SELECT "value"
                FROM "message"
                WHERE "row" = "row_number"
-                 AND "column" = '{column}'
-                 AND "table" = '{table}'
+                 AND "column" = {placeholder}
+                 AND "table" = {placeholder}
                ORDER BY "message_id" DESC
                LIMIT 1
              )
@@ -1682,16 +1678,22 @@ pub fn query_column_with_message_value(table: &str, column: &str, pool: &AnyPool
         } else {
             format!("\"{}\"::TEXT", column)
         },
-        column = column,
-        table = table,
+        placeholder = SQL_PARAM,
     )
 }
 
 /// Given a table name, a global configuration map, and a database connection pool, construct an
 /// SQL query that one can use to get the logical contents of the table, such that when the value
 /// of a given column is null, the query attempts to extract it from the message table. Returns a
-/// String representing the query.
-pub fn query_with_message_values(table: &str, config: &ValveConfig, pool: &AnyPool) -> String {
+/// String representing the query and a vector with the parameters that need to be bound before the
+/// string is executed against the database. Note that the string returned from this function is
+/// generic and must first be put into the syntax of the managed database before being executed.
+/// The function [local_sql_syntax()] is provided for this purpose.
+pub fn generic_select_with_message_values(
+    table: &str,
+    config: &ValveConfig,
+    pool: &AnyPool,
+) -> (String, Vec<String>) {
     let real_columns = config
         .table
         .get(table)
@@ -1700,9 +1702,13 @@ pub fn query_with_message_values(table: &str, config: &ValveConfig, pool: &AnyPo
         .keys()
         .collect::<Vec<_>>();
 
+    let mut sql_params = vec![];
     let mut inner_columns = real_columns
         .iter()
-        .map(|column| query_column_with_message_value(table, column, pool))
+        .map(|column| {
+            sql_params.append(&mut vec![column.to_string(), table.to_string()]);
+            query_column_with_message_value(column, pool)
+        })
         .collect::<Vec<_>>();
 
     let mut outer_columns = real_columns
@@ -1722,15 +1728,18 @@ pub fn query_with_message_values(table: &str, config: &ValveConfig, pool: &AnyPo
         v
     };
 
-    format!(
-        r#"SELECT {outer_columns}
+    (
+        format!(
+            r#"SELECT {outer_columns}
                  FROM (
                    SELECT {inner_columns}
                    FROM "{table}_view"
                  ) t"#,
-        outer_columns = outer_columns.join(", "),
-        inner_columns = inner_columns.join(", "),
-        table = table,
+            outer_columns = outer_columns.join(", "),
+            inner_columns = inner_columns.join(", "),
+            table = table,
+        ),
+        sql_params,
     )
 }
 
@@ -1750,22 +1759,25 @@ pub async fn get_affected_rows(
     // Since the consequence of an update could involve currently invalid rows
     // (in the conflict table) becoming valid or vice versa, we need to check rows for
     // which the value of the column is the same as `value`
-    let sql = {
-        format!(
-            r#"{main_query} WHERE "{column}" = '{value}'{except}"#,
-            main_query = query_with_message_values(table, config, pool),
-            column = column,
-            value = value,
+    let (sql, mut sql_params) = generic_select_with_message_values(table, config, pool);
+    let sql = local_sql_syntax(
+        pool,
+        &format!(
+            r#"{sql} WHERE "{column}" = {SQL_PARAM}{except}"#,
             except = match except {
                 None => "".to_string(),
                 Some(row_number) => {
                     format!(" AND row_number != {}", row_number)
                 }
             },
-        )
-    };
+        ),
+    );
+    sql_params.push(value.to_string());
+    let mut query = sqlx_query(&sql);
+    for param in &sql_params {
+        query = query.bind(param);
+    }
 
-    let query = sqlx_query(&sql);
     let mut valve_rows = vec![];
     for row in query.fetch_all(tx.acquire().await?).await? {
         let mut contents = IndexMap::new();
@@ -1806,12 +1818,17 @@ pub async fn get_row_from_db(
     table: &str,
     row_number: &u32,
 ) -> Result<SerdeMap> {
+    let (sql, sql_params) = generic_select_with_message_values(table, config, pool);
     let sql = format!(
         "{} WHERE row_number = {}",
-        query_with_message_values(table, config, pool),
+        local_sql_syntax(pool, &sql),
         row_number
     );
-    let query = sqlx_query(&sql);
+    let mut query = sqlx_query(&sql);
+    for param in &sql_params {
+        query = query.bind(param);
+    }
+
     let rows = query.fetch_all(tx.acquire().await?).await?;
     if rows.len() == 0 {
         return Err(ValveError::DataError(
@@ -1851,8 +1868,8 @@ pub async fn get_row_from_db(
             let raw_value = sql_row.try_get_raw(format!(r#"{}"#, cname).as_str())?;
             let value;
             if !raw_value.is_null() {
-                // The extended query returned by query_with_message_values() casts all column
-                // values to text, so we pass "text" to get_column_value() for every column:
+                // The extended query returned by generic_select_with_message_values() casts all
+                // column values to text, so we pass "text" to get_column_value() for every column:
                 value = get_column_value_as_string(&sql_row, &cname, "text");
             } else {
                 value = String::from("");
@@ -1891,15 +1908,17 @@ pub async fn get_db_value(
     } else {
         "IS NOT DISTINCT FROM"
     };
-    let sql = format!(
-        r#"SELECT
+    let sql = local_sql_syntax(
+        pool,
+        &format!(
+            r#"SELECT
                  CASE
                    WHEN "{column}" {is_clause} NULL THEN (
                      SELECT value
                      FROM "message"
                      WHERE "row" = "row_number"
-                       AND "column" = '{column}'
-                       AND "table" = '{table}'
+                       AND "column" = {SQL_PARAM}
+                       AND "table" = {SQL_PARAM}
                      ORDER BY "message_id" DESC
                      LIMIT 1
                    )
@@ -1907,18 +1926,21 @@ pub async fn get_db_value(
                  END AS "{column}"
                FROM "{table}_view" WHERE "row_number" = {row_number}
             "#,
-        column = column,
-        is_clause = is_clause,
-        table = table,
-        row_number = row_number,
-        casted_column = if pool.any_kind() == AnyKind::Sqlite {
-            cast_column_sql_to_text(column, "non-text")
-        } else {
-            format!("\"{}\"::TEXT", column)
-        },
+            column = column,
+            is_clause = is_clause,
+            row_number = row_number,
+            casted_column = if pool.any_kind() == AnyKind::Sqlite {
+                cast_column_sql_to_text(column, "non-text")
+            } else {
+                format!("\"{}\"::TEXT", column)
+            },
+        ),
     );
 
-    let query = sqlx_query(&sql);
+    let mut query = sqlx_query(&sql);
+    for param in vec![column, table] {
+        query = query.bind(param);
+    }
     let rows = query.fetch_all(tx.acquire().await?).await?;
     if rows.len() == 0 {
         return Err(ValveError::DataError(
@@ -2272,10 +2294,20 @@ pub async fn record_row_move(
     let mut to_row = row.clone();
     from_row.insert("previous_row".to_string(), json!(old_previous_row));
     to_row.insert("previous_row".to_string(), json!(new_previous_row));
-    record_row_change(tx, table, row_num, Some(&from_row), Some(&to_row), &user).await
+    record_row_change(
+        pool,
+        tx,
+        table,
+        row_num,
+        Some(&from_row),
+        Some(&to_row),
+        &user,
+    )
+    .await
 }
 
-/// Given a database transaction, a table name, a row number, optionally: the version of the row we
+/// Given a database connection pool (used to determine the type of the underlying database), a
+/// database transaction, a table name, a row number, optionally: the version of the row we
 /// are going to change it from, optionally: the version of the row we are going to change it to,
 /// and the name of the user making the change, record the change to the history table in the
 /// database. Note that `from` and `to` cannot both be None: Either we are changing the row from
@@ -2298,6 +2330,7 @@ pub async fn record_row_move(
 /// },
 /// ```
 pub async fn record_row_change(
+    pool: &AnyPool,
     tx: &mut Transaction<'_, sqlx::Any>,
     table: &str,
     row_number: &u32,
@@ -2316,7 +2349,7 @@ pub async fn record_row_change(
         match row {
             None => "NULL".to_string(),
             Some(r) => {
-                let inner = format!("{}", json!(r)).replace("'", "''");
+                let inner = format!("{}", json!(r));
                 if !quoted {
                     inner
                 } else {
@@ -2423,19 +2456,51 @@ pub async fn record_row_change(
                         summary.push(column_summary);
                     }
                 }
-                Ok(format!("'[{}]'", summary.join(",")))
+                Ok(format!("[{}]", summary.join(",")))
             }
         }
     }
 
     let summary = summarize(from, to)?;
-    let (from, to) = (to_text(from, true), to_text(to, true));
+    let (from, to) = (to_text(from, false), to_text(to, false));
+    let mut params = vec![table];
+    let from_param = {
+        if from == "NULL" {
+            from.to_string()
+        } else {
+            params.push(&from);
+            SQL_PARAM.to_string()
+        }
+    };
+    let to_param = {
+        if to == "NULL" {
+            to.to_string()
+        } else {
+            params.push(&to);
+            SQL_PARAM.to_string()
+        }
+    };
+    let summary_param = {
+        if summary == "NULL" {
+            summary.to_string()
+        } else {
+            params.push(&summary);
+            SQL_PARAM.to_string()
+        }
+    };
+    params.push(user);
+
     let sql = format!(
         r#"INSERT INTO "history" ("table", "row", "from", "to", "summary", "user")
-           VALUES ('{}', {}, {}, {}, {}, '{}')"#,
-        table, row_number, from, to, summary, user
+           VALUES ({SQL_PARAM}, {row_number}, {from_param},
+                   {to_param}, {summary_param}, {SQL_PARAM})"#,
     );
-    let query = sqlx_query(&sql);
+    let sql = local_sql_syntax(pool, &sql);
+
+    let mut query = sqlx_query(&sql);
+    for param in &params {
+        query = query.bind(param)
+    }
     query.execute(tx.acquire().await?).await?;
 
     Ok(())
@@ -2720,18 +2785,24 @@ pub async fn switch_undone_state(
         }
     };
     let undone_by = if undone_state == true {
-        format!(r#""undone_by" = '{}', "timestamp" = {}"#, user, timestamp)
+        format!(
+            r#""undone_by" = {}, "timestamp" = {}"#,
+            SQL_PARAM, timestamp
+        )
     } else {
         format!(
-            r#""undone_by" = NULL, "user" = '{}', "timestamp" = {}"#,
-            user, timestamp
+            r#""undone_by" = NULL, "user" = {}, "timestamp" = {}"#,
+            SQL_PARAM, timestamp
         )
     };
-    let sql = format!(
-        r#"UPDATE "history" SET {} WHERE "history_id" = {}"#,
-        undone_by, history_id
+    let sql = local_sql_syntax(
+        pool,
+        &format!(
+            r#"UPDATE "history" SET {} WHERE "history_id" = {}"#,
+            undone_by, history_id
+        ),
     );
-    let query = sqlx_query(&sql);
+    let query = sqlx_query(&sql).bind(user);
     query.execute(tx.acquire().await?).await?;
     Ok(())
 }
@@ -3006,18 +3077,20 @@ pub async fn insert_new_row_tx(
     let new_row_number = match row.row_number {
         Some(n) => n,
         None => {
-            let sql = format!(
-                r#"SELECT MAX("row_number") AS "row_number" FROM (
-                     SELECT MAX("row_number") AS "row_number"
-                       FROM "{table}_view"
-                     UNION ALL
-                      SELECT MAX("row") AS "row_number"
-                        FROM "history"
-                       WHERE "table" = '{table}'
-                   ) t"#,
-                table = table
+            let sql = local_sql_syntax(
+                pool,
+                &format!(
+                    r#"SELECT MAX("row_number") AS "row_number" FROM (
+                         SELECT MAX("row_number") AS "row_number"
+                           FROM "{table}_view"
+                         UNION ALL
+                          SELECT MAX("row") AS "row_number"
+                            FROM "history"
+                           WHERE "table" = {SQL_PARAM}
+                       ) t"#,
+                ),
             );
-            let query = sqlx_query(&sql);
+            let query = sqlx_query(&sql).bind(table);
             let result_rows = query.fetch_all(tx.acquire().await?).await?;
             let new_row_number: i64;
             if result_rows.len() == 0 {
@@ -3133,14 +3206,19 @@ pub async fn insert_new_row_tx(
         let level = m.get("level").and_then(|c| c.as_str()).unwrap();
         let rule = m.get("rule").and_then(|c| c.as_str()).unwrap();
         let message = m.get("message").and_then(|c| c.as_str()).unwrap();
-        let message = message.replace("'", "''");
-        let message_sql = format!(
-            r#"INSERT INTO "message"
-               ("table", "row", "column", "value", "level", "rule", "message")
-               VALUES ('{}', {}, '{}', '{}', '{}', '{}', '{}')"#,
-            table, new_row_number, column, value, level, rule, message
+        let message_sql = local_sql_syntax(
+            pool,
+            &format!(
+                r#"INSERT INTO "message"
+                   ("table", "row", "column", "value", "level", "rule", "message")
+                   VALUES ({SQL_PARAM}, {new_row_number}, {SQL_PARAM}, {SQL_PARAM},
+                           {SQL_PARAM}, {SQL_PARAM}, {SQL_PARAM})"#,
+            ),
         );
-        let query = sqlx_query(&message_sql);
+        let mut query = sqlx_query(&message_sql);
+        for param in vec![table, column, &value, level, rule, &message] {
+            query = query.bind(param);
+        }
         query.execute(tx.acquire().await?).await?;
     }
 
@@ -3229,11 +3307,11 @@ pub async fn delete_row_tx(
         query.execute(tx.acquire().await?).await?;
     }
 
-    let sql = format!(
-        r#"DELETE FROM "message" WHERE "table" = '{}' AND "row" = {}"#,
-        table, row_number
+    let sql = local_sql_syntax(
+        pool,
+        &format!(r#"DELETE FROM "message" WHERE "table" = {SQL_PARAM} AND "row" = {row_number}"#,),
     );
-    let query = sqlx_query(&sql);
+    let query = sqlx_query(&sql).bind(table);
     query.execute(tx.acquire().await?).await?;
 
     // Now process the updates that need to be performed because of an insertion to a tree
@@ -4392,8 +4470,15 @@ pub async fn make_inserts(
             let use_conflict_table = is_conflict_row(&row, &conflict_columns);
             let mut row_values = vec![format!("{}, {}", row_number, row_order)];
             let mut row_params = vec![];
+            // If a table has been configured with more columns than are actually in its
+            // associated .tsv file, then when we try to get a value for one of the extra
+            // columns from the row, it will not be found. Instead of panicking we will
+            // use unwrap_or() with an empty ValveCell as the default:
+            let default_cell = ValveCell {
+                ..Default::default()
+            };
             for column in columns {
-                let cell = row.contents.get(column).unwrap();
+                let cell = row.contents.get(column).unwrap_or(&default_cell);
                 // Insert the value of the cell into the column unless inserting it will cause a db
                 // error or it has the nulltype field set, in which case insert NULL:
                 let sql_type = get_sql_type_from_global_config(config, &main_table, column, pool);
