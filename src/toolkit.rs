@@ -3753,7 +3753,7 @@ pub fn compile_condition(
 
 /// Given a list of [SerdeValue]s and the SQL type that they should all conform to, return
 /// a list of [QueryParam]s corresponding to each value, which can then be bound to an SQL string.
-pub fn get_mixed_query_params(values: &Vec<SerdeValue>, sql_type: &str) -> Vec<QueryParam> {
+pub fn get_query_params(values: &Vec<SerdeValue>, sql_type: &str) -> Vec<QueryParam> {
     let mut param_values = vec![];
 
     for value in values {

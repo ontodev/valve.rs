@@ -1,7 +1,7 @@
 //! Implementation of the column configuration guesser
 
 use crate::{
-    toolkit::{get_mixed_query_params, local_sql_syntax, QueryParam},
+    toolkit::{get_query_params, local_sql_syntax, QueryParam},
     valve::{Valve, ValveConfig, ValveDatatypeConfig},
     SQL_PARAM,
 };
@@ -668,7 +668,7 @@ pub fn annotate(
                         foreign.table, foreign.column, SQL_PARAM
                     ),
                 );
-                let param = get_mixed_query_params(&vec![json!(value)], &foreign.sql_type)
+                let param = get_query_params(&vec![json!(value)], &foreign.sql_type)
                     .pop()
                     .expect(&format!(
                         "Could not determine query parameter for '{}'",
