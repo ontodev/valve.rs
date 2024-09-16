@@ -986,7 +986,6 @@ impl Valve {
                                     }
                                 }
                             } else {
-                                println!("FAVVOOOM");
                                 let sql = format!(
                                     r#"SELECT
                                        ccu.table_name AS foreign_table_name,
@@ -1961,21 +1960,38 @@ impl Valve {
         // Collect the paths and possibly the options of all of the tables that were requested to be
         // saved:
         let options_enabled = self.column_enabled_in_db("table", "options").await?;
-        // TODO: Here.
+
+        // Build the query to get the path and options info from the table table:
+        let mut params = vec![];
+        let sql_param_str = tables
+            .iter()
+            .map(|table| {
+                params.push(table);
+                SQL_PARAM.to_string()
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
         let sql = {
             if options_enabled {
                 format!(
-                    r#"SELECT "table", "path", "options" FROM "table" WHERE "table" IN ('{}')"#,
-                    tables.join("', '")
+                    r#"SELECT "table", "path", "options" FROM "table" WHERE "table" IN ({})"#,
+                    sql_param_str
                 )
             } else {
                 format!(
-                    r#"SELECT "table", "path" FROM "table" WHERE "table" IN ('{}')"#,
-                    tables.join("', '")
+                    r#"SELECT "table", "path" FROM "table" WHERE "table" IN ({})"#,
+                    sql_param_str
                 )
             }
         };
-        let mut stream = sqlx_query(&sql).fetch(&self.pool);
+        let sql = local_sql_syntax(&self.pool, &sql);
+        let mut query = sqlx_query(&sql);
+        for param in &params {
+            query = query.bind(param);
+        }
+
+        // Query the db:
+        let mut stream = query.fetch(&self.pool);
         while let Some(row) = stream.try_next().await? {
             let table = row
                 .try_get::<&str, &str>("table")

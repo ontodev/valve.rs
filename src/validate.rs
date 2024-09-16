@@ -4,9 +4,9 @@ use crate::{
     ast::Expression,
     toolkit::{
         cast_sql_param_from_text, get_column_value, get_column_value_as_string,
-        get_datatype_ancestors, get_sql_type_from_global_config, get_table_options_from_config,
-        get_value_type, is_sql_type_error, local_sql_syntax, ColumnRule, CompiledCondition,
-        QueryAsIf, QueryAsIfKind, ValueType,
+        get_datatype_ancestors, get_mixed_query_params, get_sql_type_from_global_config,
+        get_table_options_from_config, get_value_type, is_sql_type_error, local_sql_syntax,
+        ColumnRule, CompiledCondition, QueryAsIf, QueryAsIfKind, QueryParam, ValueType,
     },
     valve::{
         ValveCell, ValveCellMessage, ValveConfig, ValveRow, ValveRuleConfig, ValveTreeConstraint,
@@ -309,34 +309,42 @@ pub async fn validate_rows_constraints(
                 let sql_type =
                     get_sql_type_from_global_config(config, &fkey.ftable, &fkey.fcolumn, pool)
                         .to_lowercase();
-
-                // TODO: Here.
-                let values_str = received_values
+                let values = received_values
                     .get(&*fkey.column)
                     .unwrap()
                     .iter()
-                    .map(|value| {
-                        let value = value
-                            .as_str()
-                            .expect(&format!("'{}' is not a string", value));
-                        if vec!["integer", "numeric", "real"].contains(&sql_type.as_str()) {
-                            format!("{}", value)
-                        } else {
-                            format!("'{}'", value.replace("'", "''"))
-                        }
+                    .filter(|value| {
+                        !is_sql_type_error(
+                            &sql_type,
+                            value
+                                .as_str()
+                                .expect(&format!("'{}' is not a string", value)),
+                        )
                     })
-                    .filter(|value| !is_sql_type_error(&sql_type, value))
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let (lookup_sql, param_values) = get_mixed_query_params(&values, &sql_type);
 
                 // Foreign keys always correspond to columns with unique constraints so we do not
                 // need to use the keyword 'DISTINCT' when querying the normal version of the table:
-                let sql = format!(
-                    r#"SELECT "{}" FROM "{}" WHERE "{}" IN ({})"#,
-                    fkey.fcolumn, fkey.ftable, fkey.fcolumn, values_str
+                let sql = local_sql_syntax(
+                    pool,
+                    &format!(
+                        r#"SELECT "{}" FROM "{}" WHERE "{}" IN ({})"#,
+                        fkey.fcolumn, fkey.ftable, fkey.fcolumn, lookup_sql
+                    ),
                 );
+                let mut query = sqlx_query(&sql);
+                for param_value in &param_values {
+                    match param_value {
+                        QueryParam::Integer(p) => query = query.bind(p),
+                        QueryParam::Numeric(p) => query = query.bind(p),
+                        QueryParam::Real(p) => query = query.bind(p),
+                        QueryParam::String(p) => query = query.bind(p),
+                    }
+                }
 
-                let allowed_values = sqlx_query(&sql)
+                let allowed_values = query
                     .fetch_all(pool)
                     .await?
                     .iter()
@@ -353,11 +361,23 @@ pub async fn validate_rows_constraints(
                         // The conflict table has no keys other than on row_number so in principle
                         // it could have duplicate values of the foreign constraint, therefore we
                         // add the DISTINCT keyword here:
-                        let sql = format!(
-                            r#"SELECT DISTINCT "{}" FROM "{}_conflict" WHERE "{}" IN ({})"#,
-                            fkey.fcolumn, fkey.ftable, fkey.fcolumn, values_str
+                        let sql = local_sql_syntax(
+                            pool,
+                            &format!(
+                                r#"SELECT DISTINCT "{}" FROM "{}_conflict" WHERE "{}" IN ({})"#,
+                                fkey.fcolumn, fkey.ftable, fkey.fcolumn, lookup_sql
+                            ),
                         );
-                        sqlx_query(&sql)
+                        let mut query = sqlx_query(&sql);
+                        for param_value in &param_values {
+                            match param_value {
+                                QueryParam::Integer(p) => query = query.bind(p),
+                                QueryParam::Numeric(p) => query = query.bind(p),
+                                QueryParam::Real(p) => query = query.bind(p),
+                                QueryParam::String(p) => query = query.bind(p),
+                            }
+                        }
+                        query
                             .fetch_all(pool)
                             .await?
                             .iter()
@@ -411,33 +431,42 @@ pub async fn validate_rows_constraints(
                 }
             };
 
-            // TODO: Here.
             let sql_type =
                 get_sql_type_from_global_config(config, &table, &column, pool).to_lowercase();
-            let values_str = received_values
+            let values = received_values
                 .get(&*column)
                 .unwrap()
                 .iter()
-                .map(|value| {
-                    let value = value
-                        .as_str()
-                        .expect(&format!("'{}' is not a string", value));
-                    if vec!["integer", "numeric", "real"].contains(&sql_type.as_str()) {
-                        format!("{}", value)
-                    } else {
-                        format!("'{}'", value.replace("'", "''"))
-                    }
+                .filter(|value| {
+                    !is_sql_type_error(
+                        &sql_type,
+                        value
+                            .as_str()
+                            .expect(&format!("'{}' is not a string", value)),
+                    )
                 })
-                .filter(|value| !is_sql_type_error(&sql_type, value))
-                .collect::<Vec<_>>()
-                .join(", ");
+                .cloned()
+                .collect::<Vec<_>>();
+            let (lookup_sql, param_values) = get_mixed_query_params(&values, &sql_type);
 
-            let sql = format!(
-                r#"SELECT {} "{}" FROM "{}" WHERE "{}" IN ({})"#,
-                query_modifier, column, query_table, column, values_str
+            let sql = local_sql_syntax(
+                pool,
+                &format!(
+                    r#"SELECT {} "{}" FROM "{}" WHERE "{}" IN ({})"#,
+                    query_modifier, column, query_table, column, lookup_sql
+                ),
             );
+            let mut query = sqlx_query(&sql);
+            for param_value in &param_values {
+                match param_value {
+                    QueryParam::Integer(p) => query = query.bind(p),
+                    QueryParam::Numeric(p) => query = query.bind(p),
+                    QueryParam::Real(p) => query = query.bind(p),
+                    QueryParam::String(p) => query = query.bind(p),
+                }
+            }
 
-            let forbidden_values = sqlx_query(&sql)
+            let forbidden_values = query
                 .fetch_all(pool)
                 .await?
                 .iter()

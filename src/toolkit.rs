@@ -156,6 +156,14 @@ pub enum QueryAsIfKind {
     Replace,
 }
 
+/// Used to represent a generic query parameter for binding to a SQLx query.
+pub enum QueryParam {
+    Numeric(f64),
+    Real(f64),
+    Integer(i32),
+    String(String),
+}
+
 /// Given a string representing the location of a database, return a database connection pool.
 pub async fn get_pool_from_connection_string(database: &str) -> Result<AnyPool> {
     let connection_options;
@@ -3741,6 +3749,44 @@ pub fn compile_condition(
         }
         _ => Err(ValveError::InputError(format!("Unrecognized condition: {}", condition)).into()),
     }
+}
+
+/// Given a list of [SerdeValue]s and the SQL type of the column that they come from, return
+/// a SQL string consisting of a comma-separated list of [SQL_PARAM] placeholders to use for the
+/// binding, and the list of parameters that will need to be bound to the string before executing.
+pub fn get_mixed_query_params(
+    values: &Vec<SerdeValue>,
+    sql_type: &str,
+) -> (String, Vec<QueryParam>) {
+    let mut param_values = vec![];
+    let mut param_placeholders = vec![];
+
+    for value in values {
+        param_placeholders.push(SQL_PARAM);
+        let param_value = value
+            .as_str()
+            .expect(&format!("'{}' is not a string", value));
+        if sql_type == "numeric" {
+            let numeric_value: f64 = param_value
+                .parse()
+                .expect(&format!("{param_value} is not numeric"));
+            param_values.push(QueryParam::Numeric(numeric_value));
+        } else if sql_type == "integer" {
+            let integer_value: i32 = param_value
+                .parse()
+                .expect(&format!("{param_value} is not an integer"));
+            param_values.push(QueryParam::Integer(integer_value));
+        } else if sql_type == "real" {
+            let real_value: f64 = param_value
+                .parse()
+                .expect(&format!("{param_value} is not a real"));
+            param_values.push(QueryParam::Real(real_value));
+        } else {
+            param_values.push(QueryParam::String(param_value.to_string()));
+        }
+    }
+
+    (param_placeholders.join(", "), param_values)
 }
 
 /// Given the config map, the name of a datatype, and a database connection pool used to determine
