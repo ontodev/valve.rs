@@ -1,7 +1,7 @@
 //! Implementation of the column configuration guesser
 
 use crate::{
-    toolkit::local_sql_syntax,
+    toolkit::{get_mixed_query_params, local_sql_syntax, QueryParam},
     valve::{Valve, ValveConfig, ValveDatatypeConfig},
     SQL_PARAM,
 };
@@ -11,6 +11,7 @@ use indexmap::IndexMap;
 use pad::{Alignment, PadStr};
 use rand::{distributions, rngs::StdRng, Rng, SeedableRng};
 use regex::Regex;
+use serde_json::json;
 use sqlx::{query as sqlx_query, Row, ValueRef};
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
@@ -660,19 +661,26 @@ pub fn annotate(
                     // if it exists in the foreign column. It is automatically a failed match.
                     continue;
                 }
-                // TODO: Here.
-                let value = {
-                    if foreign.sql_type == "text" {
-                        format!("'{}'", value.replace("'", "''"))
-                    } else {
-                        value.to_string()
-                    }
-                };
-                let sql = format!(
-                    r#"SELECT 1 FROM "{}" WHERE "{}" = {} LIMIT 1"#,
-                    foreign.table, foreign.column, value
+                let sql = local_sql_syntax(
+                    &valve.pool,
+                    &format!(
+                        r#"SELECT 1 FROM "{}" WHERE "{}" = {} LIMIT 1"#,
+                        foreign.table, foreign.column, SQL_PARAM
+                    ),
                 );
-                let query = sqlx_query(&sql);
+                let param = get_mixed_query_params(&vec![json!(value)], &foreign.sql_type)
+                    .pop()
+                    .expect(&format!(
+                        "Could not determine query parameter for '{}'",
+                        value
+                    ));
+                let mut query = sqlx_query(&sql);
+                match param {
+                    QueryParam::Integer(p) => query = query.bind(p),
+                    QueryParam::Numeric(p) => query = query.bind(p),
+                    QueryParam::Real(p) => query = query.bind(p),
+                    QueryParam::String(p) => query = query.bind(p),
+                }
                 num_matches += block_on(query.fetch_all(&valve.pool))
                     .expect(&format!("Error executing SQL: {}", sql))
                     .len();

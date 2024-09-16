@@ -35,7 +35,7 @@ def get_column_order_and_info_for_postgres(cursor, table):
 
     cursor.execute(
         f"""
-        SELECT "column" FROM "column" WHERE "table" = '{table}'
+        SELECT "column" FROM "column" WHERE "table" = '{table}' ORDER BY "row_order"
         """
     )
     unsorted_columns = ["row_number", "row_order"] + [row[0] for row in cursor]
@@ -72,7 +72,7 @@ def get_column_order_and_info_for_sqlite(cursor, table):
     """
     cursor.execute(
         f"""
-        SELECT "column" FROM "column" WHERE "table" = '{table}'
+        SELECT "column" FROM "column" WHERE "table" = '{table}' ORDER BY "row_order"
         """
     )
     unsorted_columns = ["row_number", "row_order"] + [row[0] for row in cursor]

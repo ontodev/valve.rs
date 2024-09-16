@@ -11,7 +11,7 @@ use crate::{
     valve::{
         ValveCell, ValveCellMessage, ValveConfig, ValveRow, ValveRuleConfig, ValveTreeConstraint,
     },
-    DT_CACHE_SIZE,
+    DT_CACHE_SIZE, SQL_PARAM,
 };
 use anyhow::Result;
 use indexmap::IndexMap;
@@ -323,7 +323,12 @@ pub async fn validate_rows_constraints(
                     })
                     .cloned()
                     .collect::<Vec<_>>();
-                let (lookup_sql, param_values) = get_mixed_query_params(&values, &sql_type);
+                let lookup_sql = values
+                    .iter()
+                    .map(|_| SQL_PARAM.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let param_values = get_mixed_query_params(&values, &sql_type);
 
                 // Foreign keys always correspond to columns with unique constraints so we do not
                 // need to use the keyword 'DISTINCT' when querying the normal version of the table:
@@ -447,7 +452,12 @@ pub async fn validate_rows_constraints(
                 })
                 .cloned()
                 .collect::<Vec<_>>();
-            let (lookup_sql, param_values) = get_mixed_query_params(&values, &sql_type);
+            let lookup_sql = values
+                .iter()
+                .map(|_| SQL_PARAM.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let param_values = get_mixed_query_params(&values, &sql_type);
 
             let sql = local_sql_syntax(
                 pool,
@@ -1271,24 +1281,27 @@ pub async fn validate_cell_foreign_constraints(
                     pool,
                     &format!(
                         r#"{}SELECT 1 FROM "{}" WHERE "{}" = {} LIMIT 1"#,
-                        as_if_clause,
-                        table,
-                        column,
-                        {
-                            // TODO: Here.
-                            if sql_type == "text" || sql_type.starts_with("varchar(") {
-                                format!("'{}'", value.replace("'", "''"))
-                            } else {
-                                format!("{}", value)
-                            }
-                        }
+                        as_if_clause, table, column, SQL_PARAM,
                     ),
                 );
+                let param = get_mixed_query_params(&vec![value.into()], &sql_type)
+                    .pop()
+                    .expect(&format!(
+                        "Could not determine query parameter for '{}'",
+                        value
+                    ));
                 let frows = {
+                    let mut query = sqlx_query(&fsql);
+                    match param {
+                        QueryParam::Integer(p) => query = query.bind(p),
+                        QueryParam::Numeric(p) => query = query.bind(p),
+                        QueryParam::Real(p) => query = query.bind(p),
+                        QueryParam::String(p) => query = query.bind(p),
+                    }
                     if let None = tx {
-                        sqlx_query(&fsql).fetch_all(pool).await?
+                        query.fetch_all(pool).await?
                     } else {
-                        sqlx_query(&fsql)
+                        query
                             .fetch_all(tx.as_mut().unwrap().acquire().await?)
                             .await?
                     }

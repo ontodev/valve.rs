@@ -3751,18 +3751,12 @@ pub fn compile_condition(
     }
 }
 
-/// Given a list of [SerdeValue]s and the SQL type of the column that they come from, return
-/// a SQL string consisting of a comma-separated list of [SQL_PARAM] placeholders to use for the
-/// binding, and the list of parameters that will need to be bound to the string before executing.
-pub fn get_mixed_query_params(
-    values: &Vec<SerdeValue>,
-    sql_type: &str,
-) -> (String, Vec<QueryParam>) {
+/// Given a list of [SerdeValue]s and the SQL type that they should all conform to, return
+/// a list of [QueryParam]s corresponding to each value, which can then be bound to an SQL string.
+pub fn get_mixed_query_params(values: &Vec<SerdeValue>, sql_type: &str) -> Vec<QueryParam> {
     let mut param_values = vec![];
-    let mut param_placeholders = vec![];
 
     for value in values {
-        param_placeholders.push(SQL_PARAM);
         let param_value = value
             .as_str()
             .expect(&format!("'{}' is not a string", value));
@@ -3786,7 +3780,7 @@ pub fn get_mixed_query_params(
         }
     }
 
-    (param_placeholders.join(", "), param_values)
+    param_values
 }
 
 /// Given the config map, the name of a datatype, and a database connection pool used to determine
