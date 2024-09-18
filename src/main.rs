@@ -5,6 +5,7 @@ use anyhow::Result;
 use clap::{ArgAction, Parser, Subcommand};
 use futures::executor::block_on;
 use ontodev_valve::{guess::guess, valve::Valve};
+use serde_json::{json, Value as SerdeValue};
 
 // Help strings that are used in more than one subcommand:
 static SOURCE_HELP: &str = "The location of a TSV file, representing the 'table' table, \
@@ -15,6 +16,10 @@ static DATABASE_HELP: &str = "Can be one of (A) A URL of the form `postgresql://
                               a sqlite database.";
 
 static SAVE_DIR_HELP: &str = "Save tables to DIR instead of to their configured paths";
+
+static TABLE_HELP: &str = "The name of a table";
+
+static ROW_HELP: &str = "A JSON representation of a row";
 
 #[derive(Parser)]
 #[command(version,
@@ -37,7 +42,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Loads a given database.
+    /// Loads all of the tables in a given database.
     Load {
         #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
         source: String,
@@ -103,6 +108,21 @@ enum Commands {
 
         #[arg(long, value_name = "DIR", action = ArgAction::Set, help = SAVE_DIR_HELP)]
         save_dir: Option<String>,
+    },
+
+    /// Add a given row to a given table.
+    Add {
+        #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
+        source: String,
+
+        #[arg(value_name = "DATABASE", action = ArgAction::Set, help = DATABASE_HELP)]
+        database: String,
+
+        #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
+        table: String,
+
+        #[arg(value_name = "ROW", action = ArgAction::Set, help = ROW_HELP)]
+        row: String,
     },
 
     /// Prints the Valve configuration as a JSON-formatted string to the terminal.
@@ -233,6 +253,25 @@ async fn main() -> Result<()> {
     }
 
     match &cli.command {
+        Commands::Add {
+            source,
+            database,
+            row,
+            table,
+        } => {
+            let row: SerdeValue = serde_json::from_str(row).expect(&format!("Invalid JSON: {row}"));
+            let row = row
+                .as_object()
+                .expect(&format!("{row} is not a JSON object"));
+            let valve = build_valve(source, database).expect("Unable to build Valve");
+            let (_, row) = valve
+                .insert_row(table, row)
+                .await
+                .expect("Error inserting row");
+            if cli.verbose {
+                println!("{}", json!(row.to_rich_json().unwrap()));
+            }
+        }
         Commands::Load {
             initial_load,
             source,
@@ -245,18 +284,12 @@ async fn main() -> Result<()> {
             }
             valve.load_all_tables(true).await.unwrap();
         }
-        Commands::Create {
-            source,
-            database,
-        } => {
+        Commands::Create { source, database } => {
             exit_unless_tsv(source);
             let valve = build_valve(source, database).unwrap();
             valve.create_all_tables().await.unwrap();
         }
-        Commands::DropAll {
-            source,
-            database,
-        } => {
+        Commands::DropAll { source, database } => {
             exit_unless_tsv(source);
             let valve = build_valve(source, database).unwrap();
             valve.drop_all_tables().await.unwrap();
@@ -332,18 +365,12 @@ async fn main() -> Result<()> {
                 cli.assume_yes,
             );
         }
-        Commands::TestApi {
-            source,
-            database,
-        } => {
+        Commands::TestApi { source, database } => {
             exit_unless_tsv(source);
             let valve = build_valve(source, database).unwrap();
             run_api_tests(&valve).await.unwrap();
         }
-        Commands::TestDtHierarchy {
-            source,
-            database,
-        } => {
+        Commands::TestDtHierarchy { source, database } => {
             exit_unless_tsv(source);
             let valve = build_valve(source, database).unwrap();
             run_dt_hierarchy_tests(&valve).unwrap();
