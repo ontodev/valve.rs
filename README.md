@@ -4,17 +4,51 @@ Valve - A lightweight validation engine written in rust.
 
 ## Table of contents
 
-- [Design and concepts](#design-and-concepts)
-- [Installation and configuration](#installation-and-configuration)
-- [Command line usage](#command-line-usage)
-- [Logging](#logging)
-- [Application Programmer Interface (API)](#api)
-- [Troubleshooting](#troubleshooting)
-- [Python bindings](#python-bindings)
+_Generated using [markdown-toc](https://github.com/jonschlinkert/markdown-toc)_
+
+* [Design and concepts](#design-and-concepts)
+  + [The Valve database](#the-valve-database)
+    - [Data tables and views](#data-tables-and-views)
+    - [The _message_ and _history_ tables](#the-message-and-history-tables)
+  + [Data validation and editing](#data-validation-and-editing)
+    - [Representing validated data](#representing-validated-data)
+      * [Rule violation identifiers](#rule-violation-identifiers)
+    - [The validation process](#the-validation-process)
+      * [Validating a row of data](#validating-a-row-of-data)
+        + [Determining the nulltype of a cell](#determining-the-nulltype-of-a-cell)
+        + [Validating rules](#validating-rules)
+        + [Validating datatypes](#validating-datatypes)
+        + [Validating foreign constraints](#validating-foreign-constraints)
+        + [Validating primary and unique constraints](#validating-primary-and-unique-constraints)
+        + [Validating tree-foreign keys](#validating-tree-foreign-keys)
+      * [Batch validation](#batch-validation)
+    - [Editing the data](#editing-the-data)
+    - [Saving data tables](#saving-data-tables)
+* [Installation and configuration](#installation-and-configuration)
+  + [Prerequisites](#prerequisites)
+  + [Installation](#installation)
+    - [Binary installation](#binary-installation)
+    - [Source installation](#source-installation)
+  + [Configuration](#configuration)
+    - [The table table](#the-table-table)
+      * [Further information on _path_](#further-information-on-path)
+      * [Further information on _options_](#further-information-on-options)
+      * [Commonly used path and option combinations](#commonly-used-path-and-option-combinations)
+    - [The column table](#the-column-table)
+    - [The datatype table](#the-datatype-table)
+      * [Condition types](#condition-types)
+      * [Required datatypes](#required-datatypes)
+    - [The rule table](#the-rule-table)
+    - [Using _guess_](#using-guess)
+* [Command line usage](#command-line-usage)
+* [Logging](#logging)
+* [API](#api)
+* [Troubleshooting](#troubleshooting)
+* [Python bindings](#python-bindings)
 
 ## Design and concepts
 
-Valve reads in the contents of user-defined data tables and represents them using a spreadsheet-like structure incorporating "rich" or annotated cells that may subsequently be edited and saved. The annotations are of two kinds:
+Valve reads in the contents of user-defined data tables and represents them using a spreadsheet-like structure incorporating annotated cells that may subsequently be edited and saved. The annotations are of two kinds:
 
 1. **Data validation messages** indicating that the value of a particular cell violates one or more of a number of user-defined data validation rules.
 2. **Data update messages** indicating that the value of a particular cell has changed as well as the details of the change.
@@ -29,58 +63,72 @@ Below is an example of one of the views Valve provides into a data table in whic
 
     valve_postgres=> select * from table11_text_view
 
- row_number | row_order |                                                                     message                                                    | history | child | xyzzy | foo | bar | parent 
-------------|-----------|--------------------------------------------------------------------------------------------------------------------------------|---------|-------|-------|-----|-----|--------
- 1 | 1000      |                                                                                                                                |         | a     | c     | d   | e   | b
- 2 | 2000      |                                                                                                                                |         | b     | d     | e   | f   | c
- 3 | 3000      | `[{"column":"foo","value":"d","level":"error","rule":"key:primary","message":"Values of foo must be unique"}]` | `[[{"column":"child","level":"update","message":"Value changed from 'z' to 'g'","old_value":"z","value":"g"}]]`        | g     | e     | d   | c   | f
- 4 | 4000      | `[{"column":"foo","value":"e","level":"error","rule":"key:primary","message":"Values of foo must be unique"}]` |         | f     | x     | e   | z   | g
- 5 | 5000      | `[{"column":"foo","value":"e","level":"error","rule":"key:primary","message":"Values of foo must be unique"}]` |         | d     | y     | e   | w   | h
+ row_number | row_order |                                                                     message                                                    | history | rank                        | name                  | employee_id
+------------|-----------|--------------------------------------------------------------------------------------------------------------------------------|---------|-------                      |-------                |-----
+ 1 | 1000      |                                                                                                                                         |         | Eastern division head       | Denise Laviolette     | denise_l
+ 2 | 2000      |                                                                                                                                         |         | Southwest division head     | Eddie Cahill          | eddie_c
+ 3 | 3000      | `[{"column":"employee_id","value":"denise_l","level":"error","rule":"key:primary","message":"Values of employee_id must be unique"}]` | `[[{"column":"rank","level":"update","message":"Value changed from 'intern' to 'Chief executive officer'","old_value":"intern","value":"Chief executive officer"}]]`        | Chief executive officer     | Denise Laurier     | denise_l   | c   | f
+ 4 | 4000      | `[{"column":"employee_id","value":"eddie_c","level":"error","rule":"key:primary","message":"Values of employee_id must be unique"}]`           |         | Development team lead     | Edward Coulombe  | eddie_c
+ 5 | 5000      | `[{"column":"employee_id","value":"eddie_c","level":"error","rule":"key:primary","message":"Values of employee_id must be unique"}]`           |         | Test team lead     | Ed Crantivera     | eddie_c
 
     (5 rows)
 
-Here, **row_number** is a fixed identifier assigned to each row at the time of creation, while **row_order**, which in principle might change multiple times throughout the lifetime of a given row, is used to manipulate the logical order of rows in the table. The **message** column, in this example, conveys that the value 'd' of the column "foo" in row 3, and the value 'e' of the same column in rows 4 and 5, are duplicates of already existing values of that column, which happens to be a primary key, and are therefore invalid. We can also see, from the **history** column, that there has been one change, in which one of values in row 3, namely the value of the column "child", has been changed from 'z' to 'g'. Finally, the names of the columns to the right of the **history** column correspond to the column names of the source table and will therefore vary from table to table. Normally these column names are specified in the header of a '.tsv' file from which the source data is read, though see **BELOW** for alternate input data formats and table options. In any case the data contained in the columns to the right of the **history** column will exactly match the contents of the source table unless the data has been edited since it was initially loaded.
+Here, **row_number** is a fixed identifier assigned to each row at the time of creation, while **row_order**, which in principle might change multiple times throughout the lifetime of a given row, is used to manipulate the logical order of rows in the table. The **message** column, in this example, conveys that the value 'denise_l' of the column "employee_id" in row 3, and the value 'eddie_c' of the same column in rows 4 and 5, are duplicates of already existing values of that column, which happens to be a primary key, and are therefore invalid. We can also see, from the **history** column, that there has been one change, in which one of the values in row 3, namely the value of the column "rank", has been changed from 'intern' to 'Chief executive officer'. Finally, the names of the columns to the right of the **history** column correspond to the column names of the source table and will therefore vary from table to table. Normally these column names are specified in the header of a '.tsv' file from which the source data is read, though see [below](#further-information-on-path) for alternate input data formats and associated table options. In any case the data contained in the columns to the right of the **history** column will exactly match the contents of the source table unless the data has been edited since it was initially loaded.
 
-For the example below we will assume that a file named `table6.tsv` exists on your hard disk in your current working directory with the following contents:
+For the example below we will assume that a file named `artists.tsv` exists on your hard disk in your current working directory with the following contents:
 
-child | parent | xyzzy | foo | bar
-------|--------|-------|-----|----
-1     | 2      | 4     | e   |
-2     | 3      | 5     |     | 25
-3     | 4      | 6     | e   | 25
-4     | 5      | 7     | e   | 23
-5     | 6      | 8     |     |
-6     | 7      | 1     |     |
-7     | 8      | 26    |     |
-8     |        |       |     |
-9     |        |       |     |
+name                        | type | number_of_members | health_insurance_provider | health_insurance_id | health_insurance_id_suffix
+----------------------------|------|-------------------|---------------------------|---------------------|----------------------------
+The Jimi Hendrix Experience | band | 3                 | Pittsfield Medical        | 9834564422          |
+Cream                       | band | 3                 | Blue Cross                | 9388883311          | XX54
+Jennifer Lopez              | solo |                   | Medi-Assist               | MA67886666881       |
+Janice Joplin               | solo |                   | Pittsfield Medical        | FFFHYZDFJ432        |
+Chrissie Hynde              | solo |                   | Blue Cross                | 4422393877          |
+Van Halen                   | band | 5                 | Blue Cross                | 9476587117          | BBDC
+Van Morrison                | solo |                   | Medi-Assist               | MA67920004571       |
+Paul McCartney              | solo |                   | Medi-Assisr               | MA60768763987       |
+The Band                    | band | five              | Blue Cross                | 0831133887          |
+Bob Dylan                   | solo |                   | Pittsfield Medical        | FFF GYU ZKJ 954     |
+Van Halen                   | band |                   | Blue Cr.                  | 9476587117          |
+
+We will also assume that a file named `providers.tsv` exists on your hard disk in your current working directory with the following contents:
+
+name               | address
+-------------------|----------
+Blue Cross         | 123 Fake Street, Fake Town, USA, 55123
+Medi-Assist        | 933 Phoney Boulevard, Accra, Ghana, GA008
+Pittsfield Medical | 510 North Street, Pittsfield, MA, 01201
 
 In order for Valve to read this table it must first be configured to do so. This is done using a number of special data tables called [configuration tables](#configuration), usually represented using further '.tsv' files, that contain information about:
 
-1. Where to find the data tables and other general properties of each managed data table.
-2. The datatypes represented in the various data tables.
-3. Information about the columns of each data table: their associated datatypes, data dependencies between the values in one table column and some other one, and any other constraints or restrictions on individual columns.
-4. Rules constraining the joint values of two different cells in a single given row of data.
+1. Where to find the data tables and other general properties of each managed data table (i.e., the [table table](#the-table-table)).
+2. The datatypes represented in the various data tables (i.e., the [datatype table](#the-datatype-table)).
+3. Information about the columns of each data table: their associated datatypes, data dependencies between the values in one table column and some other one, and any other constraints or restrictions on individual columns (i.e., the [column table](#the-column-table)).
+4. Rules constraining the joint values of two different cells in a single given row of data (i.e., the [rule table](#the-rule-table)).
 
 For our example we will assume that Valve's configuration tables contain the following entries:
 
-The table table
+* **Table table**
 
-table  | path       | description | type | options
--------|------------|-------------|------|---------
-table6 | table6.tsv |             |      |
+table     | path          | description | type | options
+----------|---------------|-------------|------|---------
+artists   | artists.tsv   |             |      |
+providers | providers.tsv |             |      |
 
-The column table
+* **Column table**
 
-table  | column | label | nulltype | default | datatype | structure          | description
--------|--------|-------|----------|---------|----------|--------------------|------------
-table6 | child  |       |          |         | integer  | from(table4.child) |
-table6 | parent |       | empty    |         | integer  | tree(child)        |
-table6 | xyzzy  |       | empty    |         | integer  |                    |
-table6 | foo    |       | empty    |         | text     |                    |
-table6 | bar    |       | empty    |         | integer  |                    |
+table     | column                     | label | nulltype | default | datatype     | structure            | description
+----------|----------------------------|-------|----------|---------|--------------|----------------------|------------
+artists   | name                       |       |          |         | trimmed_line | primary              |
+artists   | type                       |       |          |         | trimmed_line |                      |
+artists   | number_of_members          |       | empty    |         | integer      |                      |
+artists   | health_insurance_provider  |       |          |         | trimmed_line | from(providers.name) |
+artists   | health_insurance_id        |       |          |         | nonspace     |                      |
+artists   | health_insurance_id_suffix |       | empty    |         | word         |                      |
+providers | name                       |       |          |         | trimmed_line | primary              |
+providers | address                    |       |          |         | text         |                      |
 
-The datatype table
+* **Datatype table**
 
 datatype     | parent       | condition              | description | sql_type
 -------------|--------------|------------------------|-------------|---------
@@ -92,95 +140,104 @@ word         | nonspace     | exclude(/\W/)          |             |
 empty        | text         | equals('')             |             |
 text         |              |                        |             | TEXT
 
-The rule table
+* **Rule table**
 
-table  | when_column | when_condition | then_column | then_condition | level | description
------- |-------------|----------------|-------------|----------------|-------|------------
-table6 | foo         | null           | bar         | null           | error | bar must be null whenever foo is null
-table6 | foo         | not null       | bar         | not null       | error | bar cannot be null if foo is not null
-table6 | foo         | nonspace       | bar         | word           | error | bar must be a word if foo is nonspace
-table6 | foo         | equals(e)      | bar         | in(25, 26)     | error | bar must be 25 or 26 if foo = 'e'
+table   | when_column               | when_condition               | then_column                | then_condition | level | description
+------- |---------------------------|------------------------------|----------------------------|----------------|-------|------------
+artists | type                      | equals(band)                 | number_of_members          | not null       | error | a band must specify the number of members
+artists | health_insurance_provider | equals('Blue Cross')         | health_insurance_id_suffix | not null       | error | a health insurance id suffix is required for Blue Cross members
+artists | health_insurance_provider | equals('Pittsfield Medical') | health_insurance_id        | word           | error | a Pittsfield Medical ID must consist in a single word
 
-For the meanings of all of the columns in the configuration tables above, see the section on [configuration](#configuration). In the rest of this section we'll refrain from explaining the meaning of a particular configuration table column unless and until it becomes relevant to our example. What is relevant at this point is only that each configuration table is _also_ a data table whose contents are themselves subject to validation by Valve. In other words Valve will not necessarily fail to run if there are errors in its configuration (as long as those errors aren't critical) and it can moreover help to identify what those errors are. The upshot is that almost everything I mention below regarding `table6` also applies to the special configuration tables `table`, `column`, `datatype` and `rule` unless otherwise noted.
+For the meanings of all of the columns in the configuration tables above, see the section on [configuration](#configuration). In the rest of this section we'll refrain from explaining the meaning of a particular configuration table column unless and until it becomes relevant to our example. What is relevant at this point is only that each configuration table is _also_ a data table whose contents are themselves subject to validation by Valve. In other words Valve will not necessarily fail to run if there are errors in its configuration (as long as those errors aren't critical) and it can moreover help to identify what those errors are. The upshot is that almost everything I mention below regarding `artists` also applies to the special configuration tables `table`, `column`, `datatype` and `rule` unless otherwise noted.
 
-Once it has been read in by Valve from its source file, a given logical table will be represented, in the database, by between one and two database tables and by as many as two database views. In our example, the source data, contained in the file 'table6.tsv', represents (according to the table table configuration) a normal data table with the default options set, which means that all four database tables and views will be created. These are:
+Once it has been read in by Valve from its source file, a given logical table will be represented, in the database, by between one and two database tables and by as many as two database views. In our example, the source data, contained in the file 'artists.tsv', represents (according to the table table configuration) a normal data table with the default options set, which means that all four database tables and views will be created. These are:
 
-1. `table6`: The database table, having the same name as the logical table, that normally contains the bulk of the table's data.
-2. `table6_conflict` (only when the [_conflict_ option](#the-table-table) is set): Valve aims to represent user data whether or not that data is valid. When it is not valid, however, this presents an obstacle when it comes to representing it in a relational database like SQLite or PostgreSQL. For instance, if a table contains a primary key column, then data rows containing values for the column that already exist in the table should be marked as invalid, but still somehow represented by Valve. However the implied database constraint on the database table will prevent us from inserting duplicate values to a primary key column. A similar issue arises for unique and foreign key constraints. To get around the database limitations that are due to database constraints such as primary, unique, or foreign keys, Valve constructs a `_conflict` table that is identical to the normal version of the table, but that does not include those keys. In our example, any rows containing duplicate values of the primary key column will be inserted to the database table called `table6_conflict`, while the other rows will be inserted to `table6`.
-3. `table6_view` (only when the [_conflict_ option](#the-table-table) is set): When Valve validates a row from the logical table, `table6`, the validation messages it generates are not stored in the database table called `table6` but instead in a [special internal database table](#the-message-and-history-tables) called `message`. Similarly, when Valve adds, updates, or deletes a row from `table6`, a record of the change is not stored in `table6`, but in a [special internal database table](#the-message-and-history-tables) called `history`. Because it can be convenient for information about the validity of a particular cell to be presented side by side with the value of the cell itself, Valve constructs a table called `table6_view` which combines information from `table6` and `table6_conflict` with the `message` and `history` tables.
-4. `table6_text_view` (only when the [_conflict_ option](#the-table-table) is set): In addition to the restrictions associated with primary, unique, and foreign key constraints, the database will also not allow us to represent values that are invalid due to an incorrect SQL type, in particular when one attempts to insert a non-numeric string value to a numeric column of a database table. To get around this limitation, Valve constructs a database view called `table6_text_view`. Unlike `table6_view`, which is defined such that the datatype of each column in `table6_view` exactly matches the datatype of the corresponding datatype in `table6`, in `table6_text_view` all of the columns are cast to TEXT so that no SQL datatype errors can occur when representing the data.
+1. `artists`: The database table, having the same name as the logical table, that normally contains the bulk of the table's data.
+2. `artists_conflict` (only when the [_conflict_ option](#the-table-table) is set): Valve aims to represent user data whether or not that data is valid. When it is not valid, however, this presents an obstacle when it comes to representing it in a relational database like SQLite or PostgreSQL. For instance, if a table contains a primary key column, then data rows containing values for the column that already exist in the table should be marked as invalid, but still somehow represented by Valve. However the implied database constraint on the database table will prevent us from inserting duplicate values to a primary key column. A similar issue arises for unique and foreign key constraints. To get around the database limitations that are due to database constraints such as primary, unique, or foreign keys, Valve constructs a `_conflict` table that is identical to the normal version of the table, but that does not include those keys. In our example, any rows containing duplicate values of the primary key column will be inserted to the database table called `artists_conflict`, while the other rows will be inserted to `artists`.
+3. `artists_view` (only when the [_conflict_ option](#the-table-table) is set): When Valve validates a row from the logical table, `artists`, the validation messages it generates are not stored in the database table called `artists` but instead in a [special internal database table](#the-message-and-history-tables) called `message`. Similarly, when Valve adds, updates, or deletes a row from `artists`, a record of the change is not stored in `artists`, but in a [special internal database table](#the-message-and-history-tables) called `history`. Because it can be convenient for information about the validity of a particular cell to be presented side by side with the value of the cell itself, Valve constructs a table called `artists_view` which combines information from `artists` and `artists_conflict` with the `message` and `history` tables.
+4. `artists_text_view` (only when the [_conflict_ option](#the-table-table) is set): In addition to the restrictions associated with primary, unique, and foreign key constraints, the database will also not allow us to represent values that are invalid due to an incorrect SQL type, in particular when one attempts to insert a non-numeric string value to a numeric column of a database table. To get around this limitation, Valve constructs a database view called `artists_text_view`. Unlike `artists_view`, which is defined such that the datatype of each column in `artists_view` exactly matches the datatype of the corresponding datatype in `artists`, in `artists_text_view` all of the columns are cast to TEXT so that no SQL datatype errors can occur when representing the data.
 
-After loading the data from `table6.tsv` into the database, these four tables and views will be found to have the following contents:
+After loading the data from `artists.tsv` into the database, these four tables and views will be found to have the following contents:
 
-    valve_postgres=> select * from table6;
+    valve_postgres=> select * from artists;
 
-row_number | row_order | child | parent | xyzzy | foo | bar 
------------|-----------|-------|--------|-------|-----|-----
-1          | 1000      | 1     | 2      | 4     | e   |
-2          | 2000      | 2     | 3      | 5     |     | 25
-3          | 3000      | 3     | 4      | 6     | e   | 25
-4          | 4000      | 4     | 5      | 7     | e   | 23
-5          | 5000      | 5     | 6      | 8     |     |
-6          | 6000      | 6     | 7      | 1     |     |
-7          | 7000      | 7     | 8      | 26    |     |
-8          | 8000      | 8     |        |       |     |
+row_number| row_order | name                        | type | number_of_members | health_insurance_provider | health_insurance_id | health_insurance_id_suffix
+----------|-----------|-----------------------------|------|-------------------|---------------------------|---------------------|---------------------------
+1         | 1000      | The Jimi Hendrix Experience | band | 3                 | Pittsfield Medical        |9834564422|
+2         | 2000      | Cream                       | band | 3                 | Blue Cross                |9388883311|XX54
+3         | 3000      | Jennifer Lopez              | solo |                   | Medi-Assist               |MA67886666881|
+4         | 4000      | Janice Joplin               | solo |                   | Pittsfield Medical        |FFFHYZDFJ432|
+6         | 6000      | Van Halen                   | band | 5                 | Blue Cross                |9476587117|BBDC
+7         | 7000      | Van Morrison                | solo |                   | Medi-Assist               |MA67920004571|
 
-    (8 rows)
+    (6 rows)
 
-    valve_postgres=> select * from table6_conflict;
+    valve_postgres=> select * from artists_conflict
 
-row_number | row_order | child | parent | xyzzy | foo | bar 
------------|-----------|-------|--------|-------|-----|-----
-9          | 9000      | 9     |        |       |     |
-(1 row)
+row_number|row_order|name          |type|number_of_members|health_insurance_provider|health_insurance_id|health_insurance_id_suffix
+----------|---------|----          |----|-----------------|-------------------------|-------------------|--------------------------
+5         |5000     |Chrissie Hynde|solo|                 |Blue Cross               |4422393877         |
+8         |8000     |Paul McCartney|solo|                 |Medi-Assisr              |MA60768763987      |
+9         |9000     |The Band      |band|                 |Blue Cross               |0831133887         |
+10        |10000    |Bob Dylan     |solo|                 |Pittsfield Medical       |FFF GYU ZKJ 954    |
+11        |11000    |Van Halen     |band|5                |Pittsfield Med.          |9476587117         |
 
-    valve_postgres=> select * from table6_view order by row_order;
+    (5 rows)
 
- row_number | row_order | child | parent | xyzzy | foo | bar | message | history 
-------------|-----------|-------|--------|-------|-----|-----|---------|---------
- 1          | 1000      | 1     | 2      | 4     | e   |     | [{"column":"foo","value":"e","level":"error","rule":"rule:foo-2","message":"bar cannot be null if foo is not null"}, {"column":"foo","value":"e","level":"error","rule":"rule:foo-4","message":"bar must be 25 or 26 if foo = 'e'"}] |
- 2 |      2000 |     2 |      3 |     5 |     |  25 | [{"column":"foo","value":"","level":"error","rule":"rule:foo-1","message":"bar must be null whenever foo is null"}] |
- 3 |      3000 |     3 |      4 |     6 | e   |  25 | |
- 4 |      4000 |     4 |      5 |     7 | e   |  23 | [{"column":"foo","value":"e","level":"error","rule":"rule:foo-4","message":"bar must be 25 or 26 if foo = 'e'"}] |
- 5 |      5000 |     5 |      6 |     8 |     |     | |
- 6 |      6000 |     6 |      7 |     1 |     |     | |
- 7 |      7000 |     7 |      8 |    26 |     |     | |
- 8 |      8000 |     8 |        |       |     |     | |
- 9 |      9000 |     9 |        |       |     |     | [{"column":"child","value":"9","level":"error","rule":"key:foreign","message":"Value '9' of column child exists only in table4_conflict.numeric_foreign_column"}] |
+    valve_postgres=> select * from artists_view order by row_number;
 
-    (9 rows)
+ row_number | row_order |            name             | type | number_of_members | health_insurance_provider | health_insurance_id | health_insurance_id_suffix |                                                                                                  message                                                                                                   | history 
+------------|-----------|-----------------------------|------|-------------------|---------------------------|---------------------|----------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------
+ 1            | 1000        | The Jimi Hendrix Experience | band | 3                   | Pittsfield Medical        | 9834564422            |                            |                                                                                                                                                                                                            | 
+ 2            | 2000        | Cream                       | band | 3                   | Blue Cross                | 9388883311            | XX54                       |                                                                                                                                                                                                            | 
+ 3            | 3000        | Jennifer Lopez              | solo |                   | Medi-Assist               | MA67886666881       |                            |                                                                                                                                                                                                            | 
+ 4            | 4000        | Janice Joplin               | solo |                   | Pittsfield Medical        | FFFHYZDFJ432        |                            |                                                                                                                                                                                                            | 
+ 5            | 5000        | Chrissie Hynde              | solo |                   | Blue Cross                | 4422393877            |                            | [{"column":"health_insurance_provider","value":"Blue Cross","level":"error","rule":"rule:health_insurance_provider-1","message":"a health insurance id suffix must be specified for Blue Cross members"}]  | 
+ 6            | 6000        | Van Halen                   | band | 5                   | Blue Cross                | 9476587117            | BBDC                       |                                                                                                                                                                                                            | 
+ 7            | 7000        | Van Morrison                | solo |                   | Medi-Assist               | MA67920004571       |                            |                                                                                                                                                                                                            | 
+ 8            | 8000        | Paul McCartney              | solo |                   | Medi-Assisr               | MA60768763987       |                            | [{"column":"health_insurance_provider","value":"Medi-Assisr","level":"error","rule":"key:foreign","message":"Value 'Medi-Assisr' of column health_insurance_provider is not in providers.name"}]           | 
+ 9            | 9000        | The Band                    | band |                   | Blue Cross                | 0831133887            |                            | [{"column":"health_insurance_provider","value":"Blue Cross","level":"error","rule":"rule:health_insurance_provider-1","message":"a health insurance id suffix must be specified for Blue Cross members"},{"column":"number_of_members","value":"five","level":"error","rule":"datatype:integer","message":"number_of_members should be a positive or negative integer"}]                                           | 
+ 10           | 10000       | Bob Dylan                   | solo |                   | Pittsfield Medical        | FFF GYU ZKJ 954       |                            | [{"column":"health_insurance_id","value":"FFF GYU ZKJ 954  ","level":"error","rule":"datatype:nonspace","message":"health_insurance_id should be text without whitespace"},{"column":"health_insurance_provider","value":"Pittsfield Medical","level":"error","rule":"rule:health_insurance_provider-2","message":"a Pittsfield Medical health insurance id must be a single word"}] | 
+ 11           | 11000       | Van Halen                   | band | 5                   | Pittsfield Med.           | 9476587117            |                            | [{"column":"health_insurance_provider","value":"Pittsfield Med.","level":"error","rule":"key:foreign","message":"Value 'Pittsfield Med.' of column health_insurance_provider is not in providers.name"},{"column":"name","value":"Van Halen","level":"error","rule":"key:primary","message":"Values of name must be unique"}]
 
-    valve_postgres=> select * from table6_text_view order by row_order;
+    (11 rows)
 
- row_number | row_order | child | parent | xyzzy | foo | bar | message | history 
-------------|-----------|-------|--------|-------|-----|-----|---------|---------
- 1          | 1000      | 1     | 2      | 4     | e   |     | [{"column":"foo","value":"e","level":"error","rule":"rule:foo-2","message":"bar cannot be null if foo is not null"}, {"column":"foo","value":"e","level":"error","rule":"rule:foo-4","message":"bar must be 25 or 26 if foo = 'e'"}] |
- 2 |      2000 |     2 |      3 |     5 |     |  25 | [{"column":"foo","value":"","level":"error","rule":"rule:foo-1","message":"bar must be null whenever foo is null"}] |
- 3 |      3000 |     3 |      4 |     6 | e   |  25 | |
- 4 |      4000 |     4 |      5 |     7 | e   |  23 | [{"column":"foo","value":"e","level":"error","rule":"rule:foo-4","message":"bar must be 25 or 26 if foo = 'e'"}] |
- 5 |      5000 |     5 |      6 |     8 |     |     | |
- 6 |      6000 |     6 |      7 |     1 |     |     | |
- 7 |      7000 |     7 |      8 |    26 |     |     | |
- 8 |      8000 |     8 |        |       |     |     | |
- 9 |      9000 |     9 |        |       |     |     | [{"column":"child","value":"9","level":"error","rule":"key:foreign","message":"Value '9' of column child exists only in table4_conflict.numeric_foreign_column"}] |
+    valve_postgres=> select * from artists_text_view order by row_number;
 
-    (9 rows)
+ row_number | row_order |            name             | type | number_of_members | health_insurance_provider | health_insurance_id | health_insurance_id_suffix |                                                                                                  message                                                                                                   | history 
+------------|-----------|-----------------------------|------|-------------------|---------------------------|---------------------|----------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------
+ 1            | 1000        | The Jimi Hendrix Experience | band | 3                   | Pittsfield Medical        | 9834564422            |                            |                                                                                                                                                                                                            | 
+ 2            | 2000        | Cream                       | band | 3                   | Blue Cross                | 9388883311            | XX54                       |                                                                                                                                                                                                            | 
+ 3            | 3000        | Jennifer Lopez              | solo |                   | Medi-Assist               | MA67886666881       |                            |                                                                                                                                                                                                            | 
+ 4            | 4000        | Janice Joplin               | solo |                   | Pittsfield Medical        | FFFHYZDFJ432        |                            |                                                                                                                                                                                                            | 
+ 5            | 5000        | Chrissie Hynde              | solo |                   | Blue Cross                | 4422393877            |                            | [{"column":"health_insurance_provider","value":"Blue Cross","level":"error","rule":"rule:health_insurance_provider-1","message":"a health insurance id suffix must be specified for Blue Cross members"}]  | 
+ 6            | 6000        | Van Halen                   | band | 5                   | Blue Cross                | 9476587117            | BBDC                       |                                                                                                                                                                                                            | 
+ 7            | 7000        | Van Morrison                | solo |                   | Medi-Assist               | MA67920004571       |                            |                                                                                                                                                                                                            | 
+ 8            | 8000        | Paul McCartney              | solo |                   | Medi-Assisr               | MA60768763987       |                            | [{"column":"health_insurance_provider","value":"Medi-Assisr","level":"error","rule":"key:foreign","message":"Value 'Medi-Assisr' of column health_insurance_provider is not in providers.name"}]           | 
+ 9            | 9000        | The Band                    | band | five              | Blue Cross                | 0831133887            |                            | [{"column":"health_insurance_provider","value":"Blue Cross","level":"error","rule":"rule:health_insurance_provider-1","message":"a health insurance id suffix must be specified for Blue Cross members"},{"column":"number_of_members","value":"five","level":"error","rule":"datatype:integer","message":"number_of_members should be a positive or negative integer"}]                                           | 
+ 10           | 10000       | Bob Dylan                   | solo |                   | Pittsfield Medical        | FFF GYU ZKJ 954       |                            | [{"column":"health_insurance_id","value":"FFF GYU ZKJ 954  ","level":"error","rule":"datatype:nonspace","message":"health_insurance_id should be text without whitespace"},{"column":"health_insurance_provider","value":"Pittsfield Medical","level":"error","rule":"rule:health_insurance_provider-2","message":"a Pittsfield Medical health insurance id must be a single word"}] | 
+ 11           | 11000       | Van Halen                   | band | 5                   | Pittsfield Med.           | 9476587117            |                            | [{"column":"health_insurance_provider","value":"Pittsfield Med.","level":"error","rule":"key:foreign","message":"Value 'Pittsfield Med.' of column health_insurance_provider is not in providers.name"},{"column":"name","value":"Van Halen","level":"error","rule":"key:primary","message":"Values of name must be unique"}]
+
+    (11 rows)
 
 #### The **message** and **history** tables
 
-In the previous section we mentioned that `table6_view` and `table6_text_view` are defined in terms of a query that draws on data from `table6` and `table6_conflict` as well as from the special internal tables called `message` and `history`. The information in these tables can also be queried directly. After loading the data from `table6.tsv` into the database, one will find that the `message` table contains the following contents:
+In the previous section we mentioned that `artists_view` and `artists_text_view` are defined in terms of a query that draws on data from `artists` and `artists_conflict` as well as from the special internal tables called `message` and `history`. The information in these tables can also be queried directly. After loading the data from `artists.tsv` into the database, one will find that the `message` table contains the following contents:
 
-    valve_postgres=> select * from message where "table" = 'table6';
+    valve_postgres=> select * from message where "table" = 'artists';
 
-message_id | table  | row | column | value | level | rule     | message
------------|--------|-----|--------|-------|-------|----------|---------
-36 | table6 | 1 | foo    | e     | error | rule:foo-2  | bar cannot be null if foo is not null
-37 | table6 | 1 | foo    | e     | error | rule:foo-4  | bar must be 25 or 26 if foo = 'e'
-38 | table6 | 2 | foo    |       | error | rule:foo-1  | bar must be null whenever foo is null
-39 | table6 | 4 | foo    | e     | error | rule:foo-4  | bar must be 25 or 26 if foo = 'e'
-40 | table6 | 9 | child  | 9     | error | key:foreign | Value '9' of column child exists only in table4_conflict.numeric_foreign_column
+ message_id |  table  | row |          column           |       value        | level |               rule               |                                       message                                        
+------------|---------|-----|---------------------------|--------------------|-------|----------------------------------|--------------------------------------------------------------------------------------
+ 62           | artists | 5     | health_insurance_provider | Blue Cross         | error | rule:health_insurance_provider-1 | a health insurance id suffix must be specified for Blue Cross members
+ 63           | artists | 8     | health_insurance_provider | Medi-Assisr        | error | key:foreign                      | Value 'Medi-Assisr' of column health_insurance_provider is not in providers.name
+ 64           | artists | 9     | number_of_members         | five               | error | datatype:integer                 | number_of_members should be a positive or negative integer
+ 65           | artists | 9     | health_insurance_provider | Blue Cross         | error | rule:health_insurance_provider-1 | a health insurance id suffix must be specified for Blue Cross members
+ 66           | artists | 10    | health_insurance_provider | Pittsfield Medical | error | rule:health_insurance_provider-2 | a Pittsfield Medical health insurance id must be a single word
+ 67           | artists | 10    | health_insurance_id       | FFF GYU ZKJ 954      | error | datatype:nonspace                | health_insurance_id should be text without whitespace
+ 68           | artists | 11    | name                      | Van Halen          | error | key:primary                      | Values of name must be unique
+ 69           | artists | 11    | health_insurance_provider | Pittsfield Med.    | error | key:foreign                      | Value 'Pittsfield Med.' of column health_insurance_provider is not in providers.name
 
-    (5 rows)
+    (8 rows)
 
 Here,
 - **message_id** is a unique identifier for this message assigned when it is created.
@@ -194,7 +251,7 @@ Here,
 
 The **history** table will be empty immediately after the initial loading of the database.
 
-    valve_postgres=> select * from history where "table" = 'table6';
+    valve_postgres=> select * from history where "table" = 'artists';
 
 history_id | table | row | from | to | summary | user | undone_by | timestamp 
 -----------|-------|-----|------|----|---------|------|-----------|-----------
@@ -206,8 +263,8 @@ Here,
 - **history_id** is a unique identifier for this history record that is assigned when it is created.
 - **table** is the table that this record is associated with.
 - **row** is the row number of the table that this record is associated with.
-- **from** is a JSON representation of the row as it was before the change (see the section on [data validation](#data-validation)).
-- **to** is a JSON representation of the row after the change (see the section on [data validation](#data-validation)).
+- **from** is a rich JSON representation of the row as it was before the change (see the section on [data validation](#representing-validated-data)).
+- **to** is a rich JSON representation of the row after the change (see the section on [data validation](#representing-validated-data)).
 - **user** is the name of the user that initiated the change, or who undid or redid the change (if applicable).
 - **undone_by** is the name of the user that undid the change (if applicable).
 - **timestamp** records the time of the change, or the time that it was undone or redone (if applicable).
@@ -215,43 +272,43 @@ Here,
 ```json
         [
             {
-                "column":"bar",
+                "column":"name",
                 "level":"update",
-                "message":"Value changed from '' to 2",
-                "old_value":"",
-                "value":"2"
+                "message":"Value changed from 'Prince' to 'The artist formerly known as Prince'",
+                "old_value":"Prince",
+                "value":"The artist formerly known as Prince"
             },
             {
-                "column":"child",
+                "column":"health_insurance_provider",
                 "level":"update",
-                "message":"Value changed from 1 to 2",
-                "old_value":"1",
-                "value":"2"
+                "message":"Value changed from 'Blue Cross' to 'Medi-Assist'",
+                "old_value":"Blue Cross",
+                "value":"Medi-Assist"
             },
             {
-                "column":"foo",
+                "column":"health_insurance_id",
                 "level":"update",
-                "message":"Value changed from 'e' to 'a'",
-                "old_value":"e",
-                "value":"a"
+                "message":"Value changed from '9933991133' to 'MA0001122344'",
+                "old_value":"9933991133",
+                "value":"MA0001122344"
             },
             {
-                "column":"xyzzy",
+                "column":"health_insurance_id_suffix",
                 "level":"update",
-                "message":"Value changed from 4 to 23",
-                "old_value":"4",
-                "value":"23"
+                "message":"Value changed from 'GG77' to ''",
+                "old_value":"GG77",
+                "value":""
             }
         ]
 ```
 
-Note that the **summary** column of the **history** table is where the information in the view columns `table6_view.history` and `table6_text_view.history` is taken from, which is why these view columns are always in the form of an array of arrays, i.e., an array of summary records for the given row.
+Note that the **summary** column of the **history** table is where the information in the view columns `artists_view.history` and `artists_text_view.history` is taken from, which is why these view columns are always in the form of an array of arrays, i.e., an array of summary records for the given row.
 
 ### Data validation and editing
 
 #### Representing validated data
 
-For the purposes of this documentation, we are to understand a *row* (of data) to mean an array of cells, where each cell is associated a particular value of one of the columns in the given table. Once a given row of data has been inserted into the database and (optionally) validated, Valve represents it using a `ValveRow` struct (see the [API reference](#api)) which contains the following information:
+For the purposes of this section we will define a *cell* as a single value, that can either be valid or invalid, of one of the columns of a given data table. We will further define a *row* of data, from a given data table, to be an array of correlated cells, such that for every column in the table there is one and only one cell in the row corresponding to it. Once a given row of data has been inserted into the database and (optionally) validated, Valve represents it using a `ValveRow` struct (see the [API reference](#api)) containing the following information:
 
 1. The row's fixed, unique, identifier, or `row_number`.
 1. A map from the names of the columns contained in the row, to the `ValveCell` struct associated with each, where the latter represents the results of running Valve's validation engine (see [the validation process](#the-validation-process)) on the cell associated with that column.
@@ -265,11 +322,11 @@ In particular, each `ValveCell` contains the following information:
 
 Each `ValveCellMessage`, in turn, contains the following information:
 
-1. The level or severity of the message (e.g., "error", "warn", "info").
-1. An alphanumeric identifier for the rule violation described by the message.
+1. The level, or severity, of the message (e.g., "error", "warn", "info").
+1. An alphanumeric identifier for the rule violation described by the message (see the section on [rule violation identifiers](#rule-violation-identifiers)).
 1. The text of the message.
 
-The following is an example of a textual representation of the contents of a `ValveRow`:
+The following is a textual representation of an example of a `ValveRow`:
 
 ```rust
 ValveRow {
@@ -311,11 +368,11 @@ ValveRow {
 }
 ```
 
-#### Types of validation errors
+##### Rule violation identifiers
 
-Valve is designed to identify and report on the following rule violations:
+Valve uses the following to identify the rule that has been violated by a given cell value in the `ValveCellMessage` associated with the violation:
 
-- **key:foreign**: The column that the given value belongs to has a `from()` structure (see [the column table](#the-column-table) that references some column, F, in another table, but the given value is not in F.
+- **key:foreign**: The column that the given value belongs to has a `from()` structure (see [the column table](#the-column-table)) that references some column, F, in another table, but the given value is not in F.
 - **key:primary**: The column that the given value belongs to has a `primary` structure, and the given value already exists in the column.
 - **key:unique**: The column that the given value belongs to has a `unique` structure, and the given value already exists in the column.
 - **option:unrecognized** (table table only): The list of options specified in the **options** column of the [table table](#the-table-table) contains an unrecognized option.
@@ -324,91 +381,109 @@ Valve is designed to identify and report on the following rule violations:
 - **option:overrides**: (table table only): The list of options specified in the **options** column of the table table contains an option that overrides one of the other options.
 - **tree:foreign**: The column that the given value belongs to has a `tree()` structure that references some other column, T, of the same table; but the given value is not in T.
 - **datatype:_DATATYPE_**: The column that the given value belongs to has the datatype, _DATATYPE_, but applying _DATATYPE_'s associated condition to the given value results in a failure.
-- **rule:_COLUMN_-_N_**: The given value of _COLUMN_ causes the _Nth_ rule in the [rule table](#the-rule-table) that has been defined with respect to the `when_column`, _COLUMN_, to be violated.
+- **rule:_COLUMN_-_N_**: The given value of _COLUMN_ causes the _Nth_ rule in the [rule table](#the-rule-table) whose `when_column` is _COLUMN_ to be violated.
 
 #### The validation process
 
-##### Cell validation
+##### Validating a row of data
 
-For a given row of data, validation proceeds cell by cell. The validation consists in a series of checks schematically represented in the flowchart below and subsequently explained in more detail.
+For a given row of data in a given data table, Valve's validation process consists in a series of checks that are schematically represented in the flowchart below and subsequently explained in more detail.
 
 ```mermaid
 flowchart TD
-    node1["validate_cell_nulltype() (for all cells)"]
+    node1["1. Determine the nulltype (if any) of each cell in the row"]
     node1 -- "Then, for each cell:" --> node2
-    node2["validate_cell_rules()"]
+    node2["2. Validate rules"]
     node2 --> modal1
     modal1{"Does the cell have a nulltype?"}
     modal1 -- No --> node3
     modal1 -- Yes, skip further validation for this cell --> modal3
-    node3["validate_cell_datatype()"]
+    node3["3. Validate datatype"]
     node3 --> modal2
     modal2{"Does the cell value contain a SQL type error?"}
     modal2 -- No --> node4
     modal2 -- Yes --> modal3
-    node4["validate_cell_foreign_constraints()"]
+    node4["4. Validate foreign constraints"]
     node4 --> node5
-    node5["validate_cell_unique_constraints()"]
+    node5["5. Validate primary and unique Constraints"]
     node5 --> modal3
     modal3{"Have we iterated over all of the cells in the row?"}
     modal3 -- Yes, then over the table as a whole: --> node6
     modal3 -- No, go on to the next cell --> node2
-    node6["validate_tree_foreign_keys()"]
+    node6["6. Validate tree-foreign keys"]
 ```
 
-###### validate_cell_nulltype()
+###### Determining the nulltype of a cell
 
-TODO.
+The validation process begins by determining, for each cell in the row, whether the value of that cell matches the nulltype (if any) of its associated column, as defined in the [column table](#the-column-table). In particular, if the value of the cell matches the nulltype of its associated column, then the `nulltype` field of the `ValveCell` struct used to represent the cell will be set to indicate that the value is a null value of that type. Otherwise the `nulltype` field will remain unset, indicating that the value is not a null value. For instance, suppose that the cell value is '' (i.e., the empty string), and that the nulltype for its associated column, as defined in the [column table](#the-column-table), is `empty`. Since `empty`'s associated condition, as defined in the [datatype table](#the-datatype-table) is `equals('')`, applying it to the cell value will result in a match, and Valve will set the `nulltype` field for the `ValveCell` representing this particular cell to `empty`. In the case where the value of the cell does *not* match the condition associated with the datatype, `empty`, (i.e., when the cell value is something other than an empty string), the validation process will leave the `nulltype` field of the `ValveCell` unset.
 
-###### validate_cell_rules()
+###### Validating rules
 
-TODO.
+This step of the validation process determines whether any of the rules in the [rule table](#the-rule-table) that are applicable to a cell have been violated. A rule in the rule table is applicable to a cell when the cell's associated column is the same as the **when_column** associated with the rule. Note that since the rules in the rule table correspond to **if-then** conditionals, such that the antecedent and consequent of a given conditional refer (in general) to two distinct columns, a rule violation may indicate that there is a problem with the value of either or both. Whenever a rule violation occurs, a `ValveCellMessage` struct is added to the list of messages associated with the cell, identifying the particular violation that occurred (see the section on [rule violation IDs](#rule-violation-identifiers)) and its associated `level` and `description` as found in the [rule table](#the-rule-table).
 
-###### validate_cell_datatype()
+###### Validating datatypes
 
-TODO.
+This step of the validation process determines whether a cell's value violates the datatype condition, as defined in the [datatype table](#the-datatype-table), for the datatype associated with the cell's column in the [column table](#the-column-table). When a datatype violation occurs, a `ValveCellMessage` struct is added to the list of messages associated with the cell, identifying the particular datatype violation that occurred (see the section on [rule violation IDs](#rule-violation-identifiers)). The text of the message is taken from the description of the datatype that has been violated (see the [datatype table](#the-datatype-table)).
 
-###### validate_cell_foreign_constraints()
+###### Validating foreign constraints
 
-TODO.
+This step in the validation process verifies, for a given cell, that if the cell's associated column, `C`, has been configured with a structure of the form `from(T, F)` (see the [column-table](#the-column-table)), where `T` is a foreign table and `F` is a column in `T`, then the cell's value (or values if `C`'s datatype is a [list datatype](#the-datatype-table)) is (are) among the values of `F`. Note that if the foreign table has a `_conflict` version (see [the table table](#the-table-table)), then this function will distinguish between (a) the case in which a given value is not found in either the foreign table or its associated conflict table, and (b) the case in which a given value is found only in the conflict table. When a foreign constraint violation occurs, a `ValveCellMessage` struct is added to the list of messages associated with the cell with the identifier `key:foreign` (see also the section on [rule violation IDs](#rule-violation-identifiers)). The text of the message will be of the form: `Value 'V' of column C is not in T.F`, whenever `V` is neither found in the normal version of the table nor (if applicable) its conflict version, and it will be of the form `Value 'V' of column C exists only in T_conflict.F` whenever `V` exists in `T_conflict` but not in `T`.
 
-###### validate_cell_unique_constraints()
+###### Validating primary and unique constraints
 
-TODO.
+This step in the validation process verifies, for a given cell, that if the cell's associated column has been configured with either a `primary` or a `unique` constraint (see the [column-table](#the-column-table)), then the cell's value is not among the values of the column that have already been inserted into the table, neither in the normal version of the table nor in the conflict version (in the case where the *conflict* option has been set). When a primary or unique constraint violation occurs, a `ValveCellMessage` struct is added to the list of messages associated with the cell with the appropriate [rule violation ID](#rule-violation-identifiers). The text of the message is of the form `Values of COLUMN must be unique`.
 
-###### validate_tree_foreign_keys()
+###### Validating tree-foreign keys
 
-TODO.
+When a column, `column2` has a structure `tree(column1)` defined on it in the [column table](#the-column-table), then all non-null values of `column2` must exist in `column1`. This step in the validation process function verifies, for a given table, whether any of the values of any of the cells in any of the rows violate any of the table's `tree()` conditions. When a primary or unique constraint violation occurs, a `ValveCellMessage` struct is added to the list of messages associated with the cell with the appropriate [rule violation ID](#rule-violation-identifiers). The text of the message is of the form `Value 'VAL' of column COLUMN2 is not in COLUMN1`.
 
-##### Batch vs. one-off validation
+##### Batch validation
 
-TODO.
+The algorithm described in [the previous section](#validating-a-row-of-data) is applicable to a single row of data. When initially loading the many rows of a data table from its source into the database, however, a number of optimizations may be used to speed up the validation process. In particular, some of the steps for validating a row's cells from the previous section do not need to refer to any data external to a given row, and may therefore be performed in parallel. These are steps 1&ndash;3, i.e., the nulltype, rules, and datatype validation steps. Only the remaining steps: foreign and unique/primary constraint validation, need be performed row by row.
 
-#### Inserting a new row
+#### Editing the data
 
-TODO.
+Once a data table has been loaded into the database and validated, it may be desirable to further edit the data, for instance to resolve any outstanding validation messages, or for some other reason. The possible operations that can be performed on the data are `insert_row()`, `update_row()`, `delete_row()`, and `move_row()`. In addition the function `validate_row()` is used to generate validation information about the row during the editing process.
 
-#### Updating a row
+Note that `insert_row()`, `update_row()`, and `validate_row()` require that a row be specified in the following "simple" form:
 
-TODO.
+    {
+        "column_1": value1,
+        "column_2": value2,
+        ...
+    },
 
-#### Deleting a row
+The output of these three functions is a `ValveRow` (see [representing validated data](#representing-validated-data)).
 
-TODO.
+After editing the data, a record of the change will be inserted to the [history table](#the-message-and-history-tables). The `ValveRow` representing the row as it was before the change (in the case of an update, delete, or move operation), and the `ValveRow` representing it as it is after the change (in the case of an update, move, or insert), will be used as the values of the **from** and **to** columns, respectively. Note that to represent a `ValveRow` in the database, "rich" JSON format is used:
 
-#### Moving a row
+    {
+        "column_1": {
+            "valid": <true|false>,
+            "messages": [{"level": level, "rule": rule, "message": message}, ...],
+            "value": value1
+        },
+        "column_2": {
+            "valid": <true|false>,
+            "messages": [{"level": level, "rule": rule, "message": message}, ...],
+            "value": value2
+        },
+        ...
+    },
 
-TODO.
+
+Valve also provides the `undo()` and `redo()` functions, to undo the last insert, update, or delete operation, and to redo the last undo, respectively. For more information on the data manipulation and browsing operations provided by Valve see the section on the [Valve API](#api).
+
+#### Saving data tables
+
+To save a data table or tables to a '.tsv' file, one uses the API functions, `save_all_tables()`, `save_tables()`, or `save_table()`. Note that unless the [save option](#further-information-on-options) has been set, it is not possible to overwrite the source file from which the table was originally loaded. One must save the table to an alternate location. For more information on saving data tables Valve see the section on the [Valve API](#api).
 
 ## Installation and configuration
 
 ### Prerequisites
 
-TODO.
-
-#### Differences between PostgreSQL and SQLite
-
-TODO.
+- Building Valve from source requires installing a [rust development environment](https://www.rust-lang.org/learn/get-started). 
+- Valve also requires database management software to be installed. The currently supported databases are [SQLite](https://sqlite.org) and [PostgreSQL](https://www.postgresql.org). In the latter case the database server must be up and running and ready to accept connections. Note that although the database may be queried directly by using your favourite SQL client (e.g., [sqlite3](https://sqlite.org/cli.html) or [psql](https://www.postgresql.org/docs/current/app-psql.html)), one advantage to viewing and manipulating the data through Valve is that syntax and other [differences](https://www.digitalocean.com/community/tutorials/sqlite-vs-mysql-vs-postgresql-a-comparison-of-relational-database-management-systems) between the two database management systems become transparent to the user.
 
 ### Installation
 
@@ -466,7 +541,7 @@ user_view3           |                                      |             |     
 
 Note that in the first row above the table being described is the table table itself. In general the columns of the table table have the following significance:
 - **table**: the name of the table.
-- **path**: where to find information about the contents of the table (see below). Note that the path for one of the special configuration tables must be a '.tsv' file.
+- **path**: where to find information about the contents of the table (see below). Note that the path of a special configuration tables must be a '.tsv' file.
 - **description**: An optional description of the contents and/or the purpose of the table.
 - **type**: Valve recognizes four special configuration table types that can be specified using the **type** column of the table table. These are the `table`, `column`, `datatype`, and `rule` table types. Data tables (e.g., the 'user_*' tables in the above example) should not explicitly specify a type, and in general if a type other than the ones just mentioned is specified, Valve will exit with an "Unrecognized table type" error.
 - **options** (optional column): Allows the user to specify a number of further options for the table (see below).
@@ -515,7 +590,7 @@ If no options are specified, the options *db_table*, *truncate*, *load*, *save*,
   - *internal*: This option is reserved for internal use and is not allowed to be specified by the user.
   - *validate_on_load*: When set, Valve will validate a table's rows before loading them to the database. Note that this option is not compatible with *db_view*.
   - *edit*: When set, this option indicates that it is allowed to edit the table after it has been initially loaded. Note that this option is not compatible with *db_view*.
-  - *save*: When set, this indicates that it is allowed to save the table to a '.tsv' file. Note that this option is not compatible with *db_view*.
+  - *save*: When set, this indicates that overwriting the table's source file, as indicated by **path** (which must be a '.tsv' file) is allowed. If the *save* option is not set, the table may nevertheless be saved as long as it is to a different path. Note that the *save* option is not compatible with *db_view*.
   - *no-conflict*: Sets the *conflict* option (which is set to true by default unless *db_view* is true) to false.
   - *no-validate_on_load*: Sets the *validate_on_load* option (which is set to true by default unless *db_view* is true) to false.
   - *no-edit*: Sets the *edit* option (which is set to true by default unless *db_view* is true) to false.
@@ -601,7 +676,7 @@ The columns of the datatype table have the following significance:
 - `in(VAL1, ...)`: Violated if a given value is not one of the values in the list: `VAL1, ...`
 - `list(ITEM_DATATYPE, SEPARATOR)`: Violated if a given value is not in the form of a sequence of items, each of datatype `ITEM_DATATYPE`, separated by the string `SEPARATOR`. Otherwise the condition is violated if any of the items in the given list fail to conform to `ITEM_DATATYPE`.
 
-#### Required datatypes
+##### Required datatypes
 
 Valve requires that the following datatypes be defined:
 - `text`, `empty`, `line`, `trimmed_line`, `nonspace`, `word`

@@ -128,13 +128,11 @@ impl ValveRow {
     /// ```
     /// {
     ///     "column_1": {
-    ///         "nulltype": nulltype, // Optional
     ///         "valid": <true|false>,
     ///         "messages": [{"level": level, "rule": rule, "message": message}, ...],
     ///         "value": value1
     ///     },
     ///     "column_2": {
-    ///         "nulltype": nulltype, // Optional
     ///         "valid": <true|false>,
     ///         "messages": [{"level": level, "rule": rule, "message": message}, ...],
     ///         "value": value2
