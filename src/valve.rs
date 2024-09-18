@@ -8,11 +8,11 @@ use crate::{
         add_message_counts, cast_column_sql_to_text, convert_undo_or_redo_record_to_change,
         delete_row_tx, generate_datatype_conditions, generate_rule_conditions,
         get_column_for_label, get_column_value_as_string, get_json_array_from_row,
-        get_json_object_from_row, get_label_for_column, get_parsed_structure_conditions,
-        get_pool_from_connection_string, get_previous_row_tx, get_record_to_redo,
-        get_record_to_undo, get_row_from_db, get_sql_for_standard_view, get_sql_for_text_view,
-        get_sql_type, get_sql_type_from_global_config, insert_chunks, insert_new_row_tx,
-        local_sql_syntax, move_row_tx, read_config_files, record_row_change, record_row_move,
+        get_json_object_from_row, get_parsed_structure_conditions, get_pool_from_connection_string,
+        get_previous_row_tx, get_record_to_redo, get_record_to_undo, get_row_from_db,
+        get_sql_for_standard_view, get_sql_for_text_view, get_sql_type,
+        get_sql_type_from_global_config, insert_chunks, insert_new_row_tx, local_sql_syntax,
+        move_row_tx, normalize_options, read_config_files, record_row_change, record_row_move,
         switch_undone_state, undo_or_redo_move, update_row_tx, verify_table_deps_and_sort,
         ColumnRule, CompiledCondition, ParsedStructure, ValueType,
     },
@@ -93,7 +93,7 @@ pub fn unfold_json_row(json_row: &JsonRow) -> Result<JsonRow> {
 }
 
 /// Represents a particular row of data with validation results.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct ValveRow {
     /// The row number of this row. None indicates "unspecified".
     pub row_number: Option<u32>,
@@ -184,7 +184,7 @@ impl ValveRow {
 }
 
 /// Represents a particular cell in a particular row of data with vaildation results.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct ValveCell {
     /// If present, indicates that the value of the cell is considered to be a null value of
     /// the given type. If not present, indicates that the contents of the cell are not empty.
@@ -706,7 +706,7 @@ impl Valve {
             .iter()
             .filter(|t| {
                 let table_options = self
-                    .get_table_options(t)
+                    .get_table_options_from_config(t)
                     .expect(&format!("Error getting options for table '{}'", t));
                 table_options.contains(option)
             })
@@ -878,12 +878,15 @@ impl Valve {
                        JOIN information_schema.key_column_usage kcu
                          ON kcu.constraint_name = tco.constraint_name
                             AND kcu.constraint_schema = tco.constraint_schema
-                            AND kcu.table_name = '{}'
-                       WHERE tco.constraint_type = '{}'
-                         AND kcu.column_name = '{}'"#,
-                        table, constraint_type, column
+                            AND kcu.table_name = $1
+                       WHERE tco.constraint_type = $2
+                         AND kcu.column_name = $3"#,
                     );
-                    let rows = block_on(sqlx_query(&sql).fetch_all(&self.pool))?;
+                    let query = sqlx_query(&sql)
+                        .bind(table)
+                        .bind(constraint_type)
+                        .bind(column);
+                    let rows = block_on(query.fetch_all(&self.pool))?;
                     if rows.len() > 1 {
                         unreachable!();
                     }
@@ -992,11 +995,11 @@ impl Valve {
                                    JOIN information_schema.constraint_column_usage AS ccu
                                      ON ccu.constraint_name = tc.constraint_name
                                    WHERE tc.constraint_type = 'FOREIGN KEY'
-                                     AND tc.table_name = '{}'
-                                     AND kcu.column_name = '{}'"#,
-                                    table, column
+                                     AND tc.table_name = $1
+                                     AND kcu.column_name = $2"#,
                                 );
-                                let rows = block_on(sqlx_query(&sql).fetch_all(&self.pool))?;
+                                let query = sqlx_query(&sql).bind(table).bind(column);
+                                let rows = block_on(query.fetch_all(&self.pool))?;
                                 if rows.len() == 0 {
                                     // If the table doesn't even exist return true.
                                     return Ok(true);
@@ -1051,10 +1054,9 @@ impl Valve {
         let db_columns_in_order = {
             if self.pool.any_kind() == AnyKind::Sqlite {
                 let sql = format!(
-                    r#"SELECT 1 FROM sqlite_master WHERE "type" = 'table' AND "name" = '{}'"#,
-                    table
+                    r#"SELECT 1 FROM sqlite_master WHERE "type" = 'table' AND "name" = ?"#,
                 );
-                let rows = sqlx_query(&sql).fetch_all(&self.pool).await?;
+                let rows = sqlx_query(&sql).bind(table).fetch_all(&self.pool).await?;
                 if rows.len() == 0 {
                     if self.verbose {
                         println!(
@@ -1083,12 +1085,11 @@ impl Valve {
             } else {
                 let sql = format!(
                     r#"SELECT "column_name", "data_type"
-                   FROM "information_schema"."columns"
-                   WHERE "table_name" = '{}'
-                   ORDER BY "ordinal_position""#,
-                    table,
+                         FROM "information_schema"."columns"
+                        WHERE "table_name" = $1
+                       ORDER BY "ordinal_position""#,
                 );
-                let rows = sqlx_query(&sql).fetch_all(&self.pool).await?;
+                let rows = sqlx_query(&sql).bind(table).fetch_all(&self.pool).await?;
                 if rows.len() == 0 {
                     if self.verbose {
                         println!(
@@ -1518,22 +1519,20 @@ impl Valve {
                 format!(
                     r#"SELECT 1
                        FROM "sqlite_master"
-                       WHERE "type" = 'table' AND name = '{}'
+                       WHERE "type" = 'table' AND name = ?
                        LIMIT 1"#,
-                    table
                 )
             } else {
                 format!(
                     r#"SELECT 1
                        FROM "information_schema"."tables"
                        WHERE "table_schema" = 'public'
-                         AND "table_name" = '{}'
+                         AND "table_name" = $1
                          AND "table_type" LIKE '%TABLE'"#,
-                    table
                 )
             }
         };
-        let query = sqlx_query(&sql);
+        let query = sqlx_query(&sql).bind(table);
         let rows = query.fetch_all(&self.pool).await?;
         return Ok(rows.len() > 0);
     }
@@ -1545,29 +1544,27 @@ impl Valve {
                 format!(
                     r#"SELECT 1
                        FROM "sqlite_master"
-                       WHERE "type" = 'view' AND name = '{}'
+                       WHERE "type" = 'view' AND name = ?
                        LIMIT 1"#,
-                    view
                 )
             } else {
                 format!(
                     r#"SELECT 1
                        FROM "information_schema"."tables"
                        WHERE "table_schema" = 'public'
-                         AND "table_name" = '{}'
+                         AND "table_name" = $1
                          AND "table_type" = 'VIEW'"#,
-                    view
                 )
             }
         };
-        let query = sqlx_query(&sql);
+        let query = sqlx_query(&sql).bind(view);
         let rows = query.fetch_all(&self.pool).await?;
         return Ok(rows.len() > 0);
     }
 
     /// Given a table name, returns the options of the table.
-    pub fn get_table_options(&self, table: &str) -> Result<HashSet<String>> {
-        toolkit::get_table_options(&self.config, table)
+    pub fn get_table_options_from_config(&self, table: &str) -> Result<HashSet<String>> {
+        toolkit::get_table_options_from_config(&self.config, table)
     }
 
     /// Drop all configured tables, in reverse dependency order.
@@ -1630,7 +1627,7 @@ impl Valve {
         };
 
         for table in &truncate_list {
-            let table_options = self.get_table_options(table)?;
+            let table_options = self.get_table_options_from_config(table)?;
             if table_options.contains("truncate") {
                 let sql = truncate_sql(&table);
                 self.execute_sql(&sql).await?;
@@ -1873,44 +1870,144 @@ impl Valve {
         Ok(self)
     }
 
-    /// Save all configured editable tables to their configured paths, unless save_dir is specified,
-    /// in which case save them there instead.
-    pub fn save_all_tables(&self, save_dir: &Option<String>) -> Result<&Self> {
-        let tables = self.get_sorted_table_list_with_option("save", false);
-        self.save_tables(&tables, save_dir)?;
+    /// Returns true if the Valve instance has the given optional column enabled,
+    /// according to the database.
+    pub async fn column_enabled_in_db(&self, table: &str, column: &str) -> Result<bool> {
+        if self.pool.any_kind() == AnyKind::Postgres {
+            let sql = format!(
+                r#"SELECT 1
+                     FROM "information_schema"."columns"
+                    WHERE "table_name" = $1
+                      AND "column_name" = $2
+                    LIMIT 1"#,
+            );
+            let query = sqlx_query(&sql).bind(table).bind(column);
+            Ok(!block_on(query.fetch_all(&self.pool))?.is_empty())
+        } else {
+            let sql = format!(r#"PRAGMA TABLE_INFO("{table}")"#);
+            Ok(!block_on(sqlx_query(&sql).fetch_all(&self.pool))?
+                .iter()
+                .filter(|r| r.get::<&str, &str>("name") == column)
+                .collect::<Vec<_>>()
+                .is_empty())
+        }
+    }
+
+    /// Save all configured savable tables to their configured paths, unless save_dir is specified,
+    /// in which case save them all there instead.
+    pub async fn save_all_tables(&self, save_dir: &Option<String>) -> Result<&Self> {
+        let options_enabled = self.column_enabled_in_db("table", "options").await?;
+
+        // Get the list of potential tables to save by querying the table table for all tables
+        // whose paths are TSV files:
+        let mut tables = vec![];
+        let sql = {
+            let select_from_table = String::from({
+                if !options_enabled {
+                    r#"SELECT "table" FROM "table""#
+                } else {
+                    r#"SELECT "table", "options" FROM "table""#
+                }
+            });
+            if self.pool.any_kind() == AnyKind::Postgres {
+                format!(r#"{select_from_table} WHERE "path" ILIKE '%.tsv'"#)
+            } else {
+                format!(r#"{select_from_table} WHERE LOWER("path") LIKE '%.tsv'"#)
+            }
+        };
+        let mut stream = sqlx_query(&sql).fetch(&self.pool);
+        while let Some(row) = stream.try_next().await? {
+            let table = row
+                .try_get::<&str, &str>("table")
+                .ok()
+                .ok_or(ValveError::InputError(
+                    "No column \"table\" found in row".to_string(),
+                ))?;
+            if options_enabled {
+                let options = row
+                    .try_get::<&str, &str>("options")
+                    .unwrap_or_default()
+                    .split(" ")
+                    .collect::<Vec<_>>();
+                let (options, _) = normalize_options(&options, 0)?;
+                if options.contains("save") {
+                    tables.push(table.to_string());
+                }
+            } else {
+                // If the options column is missing from the table table, then save is enabled
+                // by default if the table has a .tsv path (which we have already verified above).
+                tables.push(table.to_string());
+            }
+        }
+
+        let tables = tables.iter().map(|s| s.as_str()).collect_vec();
+        self.save_tables(&tables, save_dir).await?;
         Ok(self)
     }
 
     /// Given a vector of table names, save those tables to their configured path's, unless
     /// save_dir is specified, in which case save them there instead.
-    pub fn save_tables(&self, tables: &Vec<&str>, save_dir: &Option<String>) -> Result<&Self> {
-        let table_paths: HashMap<String, String> = self
-            .config
-            .table
-            .iter()
-            .filter(|(k, v)| {
-                !INTERNAL_TABLES.contains(&k.as_str())
-                    && tables.contains(&k.as_str())
-                    && v.path != ""
-            })
-            .map(|(k, v)| (k.to_string(), v.path.to_string()))
-            .collect();
-
+    pub async fn save_tables(
+        &self,
+        tables: &Vec<&str>,
+        save_dir: &Option<String>,
+    ) -> Result<&Self> {
         if self.verbose {
-            println!(
-                "Saving tables: {} ...",
-                table_paths
-                    .keys()
-                    .map(|k| k.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
+            println!("Saving tables: {} ...", tables.join(", "));
+        }
+        // Build the query to get the path and possibly the options info from the table table for
+        // all of the tables that were requested to be saved:
+        let options_enabled = self.column_enabled_in_db("table", "options").await?;
+        let mut params = vec![];
+        let sql_param_str = tables
+            .iter()
+            .map(|table| {
+                params.push(table);
+                SQL_PARAM.to_string()
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = {
+            if options_enabled {
+                format!(
+                    r#"SELECT "table", "path", "options" FROM "table" WHERE "table" IN ({})"#,
+                    sql_param_str
+                )
+            } else {
+                format!(
+                    r#"SELECT "table", "path" FROM "table" WHERE "table" IN ({})"#,
+                    sql_param_str
+                )
+            }
+        };
+        let sql = local_sql_syntax(&self.pool, &sql);
+        let mut query = sqlx_query(&sql);
+        for param in &params {
+            query = query.bind(param);
         }
 
-        for (table, path) in table_paths.iter() {
-            let options = self.get_table_options(table)?;
+        // Query the db:
+        let mut stream = query.fetch(&self.pool);
+        while let Some(row) = stream.try_next().await? {
+            let table = row
+                .try_get::<&str, &str>("table")
+                .ok()
+                .ok_or(ValveError::InputError(
+                    "No column \"table\" found in row".to_string(),
+                ))?;
+
+            let options = row
+                .try_get::<&str, &str>("options")
+                .unwrap_or_default()
+                .split(" ")
+                .collect::<Vec<_>>();
+            let (options, _) = normalize_options(&options, 0)?;
+
+            let path = row.try_get::<&str, &str>("path").ok().unwrap_or_default();
             let path = match save_dir {
                 Some(save_dir) => {
+                    // If the table is not saveable it can still be saved to the saved_dir if one
+                    // has been specified and if it is not identical to the table's configured path:
                     if !options.contains("save") {
                         let path_dir = Path::new(path)
                             .parent()
@@ -1939,7 +2036,7 @@ impl Valve {
                             table
                         ))
                         .into());
-                    } else if !path.ends_with(".tsv") {
+                    } else if !path.to_lowercase().ends_with(".tsv") {
                         return Err(ValveError::InputError(format!(
                             "Refusing to save to non-tsv file '{}'",
                             path
@@ -1949,35 +2046,14 @@ impl Valve {
                     path.to_string()
                 }
             };
-
-            let table_config = self.get_table_config(table)?;
-            let column_config = &table_config.column;
-            let mut labels = vec![];
-            let columns: Vec<&str> = table_config
-                .column_order
-                .iter()
-                .map(|i| i.as_str())
-                .collect();
-            for column in &columns {
-                let label = get_label_for_column(&column_config, column, table)?;
-                labels.push(label);
-            }
-            let labels = labels.iter().map(|i| i.as_str()).collect();
-
-            self.save_table(table, &columns, &labels, &path)?;
+            self.save_table(table, path.as_str()).await?;
         }
 
         Ok(self)
     }
 
     /// Save the given table with the given columns at the given path as a TSV file.
-    pub fn save_table(
-        &self,
-        table: &str,
-        columns: &Vec<&str>,
-        labels: &Vec<&str>,
-        path: &str,
-    ) -> Result<&Self> {
+    pub async fn save_table(&self, table: &str, save_path: &str) -> Result<&Self> {
         // Uses the given (unverified) printf-style format string and the given compiled regular
         // expression (which is used to verify the given format) to format the given cell.
         fn format_cell(colformat: &str, format_regex: &Regex, cell: &str) -> String {
@@ -2035,47 +2111,119 @@ impl Valve {
             }
         }
 
-        if columns.len() != labels.len() {
+        // Check if we are allowed to save the table:
+        if !save_path.to_lowercase().ends_with(".tsv") {
             return Err(ValveError::InputError(format!(
-                "The column list: {:?} and label list: {:?} differ in length.",
-                columns, labels,
+                "Refusing to save to non-tsv file '{}'",
+                save_path
             ))
             .into());
+        } else if self.column_enabled_in_db("table", "options").await? {
+            let sql = local_sql_syntax(
+                &self.pool,
+                &format!(
+                    r#"SELECT "path", "options" FROM "table" WHERE "table" = {}"#,
+                    SQL_PARAM
+                ),
+            );
+            let row = sqlx_query(&sql).bind(table).fetch_one(&self.pool).await?;
+            let configured_path = row.try_get::<&str, &str>("path").unwrap_or_default();
+            let options = row
+                .try_get::<&str, &str>("options")
+                .unwrap_or_default()
+                .split(" ")
+                .collect::<Vec<_>>();
+            let (options, _) = normalize_options(&options, 0)?;
+            if configured_path == save_path && !options.contains("save") {
+                return Err(ValveError::ConfigError(format!(
+                    "Saving '{}' to '{}' is not supported by table options: {}",
+                    table,
+                    save_path,
+                    options.iter().join(", ")
+                ))
+                .into());
+            };
         }
 
-        let table_options = self.get_table_options(table)?;
-        if !table_options.contains("save") {
-            return Err(ValveError::InputError(format!(
-                "Unable to save '{}': Not supported",
-                table
-            ))
-            .into());
+        // Begin by constructing a map from column names to their associated labels and formats, by
+        // querying the column table joined with information from the table and datatype tables.
+        let mut columns: IndexMap<String, (String, String)> = IndexMap::new();
+        let sql = {
+            let mut sql_columns = r#"c."column", c."label", t."type" AS "table_type""#.to_string();
+            if self.column_enabled_in_db("datatype", "format").await? {
+                sql_columns.push_str(r#", d."format""#);
+            }
+            local_sql_syntax(
+                &self.pool,
+                &format!(
+                    r#"SELECT {sql_columns}
+                         FROM "column" c
+                         JOIN "table" t
+                           ON c."table" = t."table"
+                    LEFT JOIN "datatype" d
+                           ON c."datatype" = d."datatype"
+                        WHERE c."table" = t."table"
+                          AND c."table" = {SQL_PARAM}
+                    ORDER BY c."row_order""#,
+                ),
+            )
+        };
+        let mut stream = sqlx_query(&sql).bind(table).fetch(&self.pool);
+        while let Some(row) = stream.try_next().await? {
+            let column = row
+                .try_get::<&str, &str>("column")
+                .ok()
+                .ok_or(ValveError::DataError(
+                    "No column \"column\" found in row".to_string(),
+                ))?;
+            let label = row.try_get::<&str, &str>("label").ok().unwrap_or_default();
+            let table_type = row
+                .try_get::<&str, &str>("table_type")
+                .ok()
+                .unwrap_or_default();
+            let format = row.try_get::<&str, &str>("format").ok().unwrap_or_default();
+            // If the table type is not empty then it is either a special configuration table or an
+            // internal table and, in either case, we want to ignore the label in the same way that
+            // we ignore it when initially reading the configuration files. Possibly we will want to
+            // allow labels for configuration table columns in the future, but for now we need to
+            // make sure that they are treated consistently at load-time and at save-time.
+            if label == "" || table_type != "" {
+                columns.insert(column.into(), (column.into(), format.into()));
+            } else {
+                columns.insert(column.into(), (label.into(), format.into()));
+            }
         }
 
-        let mut formatted_columns = vec!["\"row_number\"".to_string()];
-        for column in columns {
-            formatted_columns.push(format!(r#""{}""#, column));
-        }
+        // Construct the query to use to retrieve the data:
         let query_table = format!("\"{}_text_view\"", table);
         let sql = format!(
-            r#"SELECT {} FROM {} ORDER BY "row_number""#,
-            formatted_columns.join(", "),
+            r#"SELECT "row_number", {} FROM {} ORDER BY "row_order""#,
+            columns
+                .keys()
+                .map(|c| format!(r#""{}""#, c))
+                .collect::<Vec<_>>()
+                .join(", "),
             query_table
         );
 
+        // Query the database and use the results to construct the records that will be written
+        // to the TSV file:
         let format_regex = Regex::new(PRINTF_RE)?;
         let mut writer = WriterBuilder::new()
             .delimiter(b'\t')
             .quote_style(QuoteStyle::Never)
-            .from_path(path)?;
-        writer.write_record(labels)?;
+            .from_path(save_path)?;
+        let tsv_header_row = columns
+            .iter()
+            .map(|(_, (label, _))| label)
+            .collect::<Vec<_>>();
+        writer.write_record(tsv_header_row)?;
         let mut stream = sqlx_query(&sql).fetch(&self.pool);
-        while let Some(row) = block_on(stream.try_next())? {
+        while let Some(row) = stream.try_next().await? {
             let mut record: Vec<String> = vec![];
-            for column in columns.iter() {
-                let colformat = block_on(self.get_column_format(table, column))?;
+            for (column, (_, colformat)) in &columns {
                 let cell = row.try_get::<&str, &str>(column).ok().unwrap_or_default();
-                if colformat != "" {
+                if *colformat != "" {
                     let formatted_cell = format_cell(&colformat, &format_regex, &cell);
                     record.push(formatted_cell.to_string());
                 } else {
@@ -2111,11 +2259,14 @@ impl Valve {
         {
             Ok("".to_string())
         } else {
-            let sql = format!(
-                r#"SELECT "format" FROM "datatype" WHERE "datatype" = '{}'"#,
-                datatype,
+            let sql = local_sql_syntax(
+                &self.pool,
+                &format!(r#"SELECT "format" FROM "datatype" WHERE "datatype" = {SQL_PARAM}"#,),
             );
-            let rows = sqlx_query(&sql).fetch_all(&self.pool).await?;
+            let rows = sqlx_query(&sql)
+                .bind(datatype)
+                .fetch_all(&self.pool)
+                .await?;
             if rows.len() > 0 {
                 let format_string = rows[0]
                     .try_get::<&str, &str>("format")
@@ -2145,15 +2296,21 @@ impl Valve {
         {
             Ok("".to_string())
         } else {
-            let sql = format!(
-                r#"SELECT d."format"
-                     FROM "column" c, "datatype" d
-                    WHERE c."table" = '{}'
-                      AND c."column" = '{}'
-                      AND c."datatype" = d."datatype""#,
-                table, column
+            let sql = local_sql_syntax(
+                &self.pool,
+                &format!(
+                    r#"SELECT d."format"
+                         FROM "column" c, "datatype" d
+                        WHERE c."table" = {SQL_PARAM}
+                          AND c."column" = {SQL_PARAM}
+                          AND c."datatype" = d."datatype""#,
+                ),
             );
-            let rows = sqlx_query(&sql).fetch_all(&self.pool).await?;
+            let rows = sqlx_query(&sql)
+                .bind(table)
+                .bind(column)
+                .fetch_all(&self.pool)
+                .await?;
             if rows.len() > 1 {
                 panic!(
                     "Multiple entries corresponding to '{}' in datatype table",
@@ -2217,7 +2374,7 @@ impl Valve {
     /// validate and insert the row to the table and return the row number of the inserted row
     /// and the row itself in the form of a [ValveRow].
     pub async fn insert_row(&self, table_name: &str, row: &JsonRow) -> Result<(u32, ValveRow)> {
-        let table_options = &self.get_table_options(table_name)?;
+        let table_options = &self.get_table_options_from_config(table_name)?;
         if !table_options.contains("edit") {
             return Err(ValveError::InputError(format!(
                 "Inserting to table '{}' is not allowed",
@@ -2255,7 +2412,16 @@ impl Valve {
 
         row.row_number = Some(rn);
         let serde_row = row.contents_to_rich_json()?;
-        record_row_change(&mut tx, table_name, &rn, None, Some(&serde_row), &self.user).await?;
+        record_row_change(
+            &self.pool,
+            &mut tx,
+            table_name,
+            &rn,
+            None,
+            Some(&serde_row),
+            &self.user,
+        )
+        .await?;
 
         tx.commit().await?;
         Ok((rn, row))
@@ -2277,7 +2443,7 @@ impl Valve {
         row_number: &u32,
         row: &JsonRow,
     ) -> Result<ValveRow> {
-        let table_options = &self.get_table_options(table_name)?;
+        let table_options = &self.get_table_options_from_config(table_name)?;
         if !table_options.contains("edit") {
             return Err(ValveError::InputError(format!(
                 "Updating table '{}' is not allowed",
@@ -2322,6 +2488,7 @@ impl Valve {
         // Record the row update in the history table:
         let serde_row = row.contents_to_rich_json()?;
         record_row_change(
+            &self.pool,
             &mut tx,
             table_name,
             row_number,
@@ -2337,7 +2504,7 @@ impl Valve {
 
     /// Given a table name and a row number, delete that row from the table.
     pub async fn delete_row(&self, table_name: &str, row_number: &u32) -> Result<()> {
-        let table_options = &self.get_table_options(table_name)?;
+        let table_options = &self.get_table_options_from_config(table_name)?;
         if !table_options.contains("edit") {
             return Err(ValveError::InputError(format!(
                 "Deleting from table '{}' is not allowed",
@@ -2354,6 +2521,7 @@ impl Valve {
         let previous_row = get_previous_row_tx(table_name, row_number, &mut tx).await?;
         row.insert("previous_row".into(), json!(previous_row));
         record_row_change(
+            &self.pool,
             &mut tx,
             &table_name,
             row_number,
@@ -2859,7 +3027,6 @@ impl Valve {
                                     )))?;
                                 let child_column = &tree.child;
 
-                                let mut params = vec![];
                                 let tree_sql = with_tree_sql(&tree, &table_name.to_string(), None);
                                 let child_column_text =
                                     cast_column_sql_to_text(&child_column, &sql_type);
@@ -2870,14 +3037,11 @@ impl Valve {
                                         tree_sql, child_column, child_column_text, SQL_PARAM
                                     ),
                                 );
-                                params.push(matching_string);
 
-                                let mut query = sqlx_query(&sql);
-                                for param in &params {
-                                    query = query.bind(param);
-                                }
-
-                                let rows = query.fetch_all(pool).await?;
+                                let rows = sqlx_query(&sql)
+                                    .bind(matching_string)
+                                    .fetch_all(pool)
+                                    .await?;
                                 for row in rows.iter() {
                                     values.push(get_column_value_as_string(
                                         &row,

@@ -10,9 +10,9 @@ use ontodev_valve::{guess::guess, valve::Valve};
 static SOURCE_HELP: &str = "The location of a TSV file, representing the 'table' table, \
                             from which to read the Valve configuration.";
 
-static DESTINATION_HELP: &str = "Can be one of (A) A URL of the form `postgresql://...` \
-                                 or `sqlite://...` (B) The filename (including path) of \
-                                 a sqlite database.";
+static DATABASE_HELP: &str = "Can be one of (A) A URL of the form `postgresql://...` \
+                              or `sqlite://...` (B) The filename (including path) of \
+                              a sqlite database.";
 
 static SAVE_DIR_HELP: &str = "Save tables to DIR instead of to their configured paths";
 
@@ -42,8 +42,8 @@ enum Commands {
         #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
         source: String,
 
-        #[arg(value_name = "DESTINATION", action = ArgAction::Set, help = DESTINATION_HELP)]
-        destination: String,
+        #[arg(value_name = "DATABASE", action = ArgAction::Set, help = DATABASE_HELP)]
+        database: String,
 
         #[arg(long,
               action = ArgAction::SetTrue,
@@ -61,8 +61,8 @@ enum Commands {
         #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
         source: String,
 
-        #[arg(value_name = "DESTINATION", action = ArgAction::Set, help = DESTINATION_HELP)]
-        destination: String,
+        #[arg(value_name = "DATABASE", action = ArgAction::Set, help = DATABASE_HELP)]
+        database: String,
     },
 
     /// Drops all of the configured tables in the given database.
@@ -70,8 +70,8 @@ enum Commands {
         #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
         source: String,
 
-        #[arg(value_name = "DESTINATION", action = ArgAction::Set, help = DESTINATION_HELP)]
-        destination: String,
+        #[arg(value_name = "DATABASE", action = ArgAction::Set, help = DATABASE_HELP)]
+        database: String,
     },
 
     /// Saves all configured data tables as TSV files.
@@ -79,8 +79,8 @@ enum Commands {
         #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
         source: String,
 
-        #[arg(value_name = "DESTINATION", action = ArgAction::Set, help = DESTINATION_HELP)]
-        destination: String,
+        #[arg(value_name = "DATABASE", action = ArgAction::Set, help = DATABASE_HELP)]
+        database: String,
 
         #[arg(long, value_name = "DIR", action = ArgAction::Set, help = SAVE_DIR_HELP)]
         save_dir: Option<String>,
@@ -91,8 +91,8 @@ enum Commands {
         #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
         source: String,
 
-        #[arg(value_name = "DESTINATION", action = ArgAction::Set, help = DESTINATION_HELP)]
-        destination: String,
+        #[arg(value_name = "DATABASE", action = ArgAction::Set, help = DATABASE_HELP)]
+        database: String,
 
         #[arg(value_name = "LIST",
               action = ArgAction::Set,
@@ -156,8 +156,8 @@ enum Commands {
         #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
         source: String,
 
-        #[arg(value_name = "DESTINATION", action = ArgAction::Set, help = DESTINATION_HELP)]
-        destination: String,
+        #[arg(value_name = "DATABASE", action = ArgAction::Set, help = DATABASE_HELP)]
+        database: String,
 
         #[arg(value_name = "TABLE_TSV", action = ArgAction::Set,
               help = "The TSV file representing the table whose column configuration will be \
@@ -171,8 +171,8 @@ enum Commands {
         #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
         source: String,
 
-        #[arg(value_name = "DESTINATION", action = ArgAction::Set, help = DESTINATION_HELP)]
-        destination: String,
+        #[arg(value_name = "DATABASE", action = ArgAction::Set, help = DATABASE_HELP)]
+        database: String,
     },
 
     /// Runs a set of predefined tests, on a specified pre-loaded database, that will test the
@@ -181,8 +181,8 @@ enum Commands {
         #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
         source: String,
 
-        #[arg(value_name = "DESTINATION", action = ArgAction::Set, help = DESTINATION_HELP)]
-        destination: String,
+        #[arg(value_name = "DATABASE", action = ArgAction::Set, help = DATABASE_HELP)]
+        database: String,
     },
 }
 
@@ -192,8 +192,8 @@ async fn main() -> Result<()> {
 
     // This has to be done multiple times so we declare a closure. We use a closure instead of a
     // function so that the cli.verbose and cli.assume_yes fields are in scope:
-    let build_valve = |source: &str, destination: &str| -> Result<Valve> {
-        let mut valve = block_on(Valve::build(&source, &destination)).unwrap();
+    let build_valve = |source: &str, database: &str| -> Result<Valve> {
+        let mut valve = block_on(Valve::build(&source, &database)).unwrap();
         valve.set_verbose(cli.verbose);
         valve.set_interactive(!cli.assume_yes);
         Ok(valve)
@@ -236,10 +236,10 @@ async fn main() -> Result<()> {
         Commands::Load {
             initial_load,
             source,
-            destination,
+            database,
         } => {
             exit_unless_tsv(source);
-            let mut valve = build_valve(source, destination).unwrap();
+            let mut valve = build_valve(source, database).unwrap();
             if *initial_load {
                 block_on(valve.configure_for_initial_load()).unwrap();
             }
@@ -247,18 +247,18 @@ async fn main() -> Result<()> {
         }
         Commands::Create {
             source,
-            destination,
+            database,
         } => {
             exit_unless_tsv(source);
-            let valve = build_valve(source, destination).unwrap();
+            let valve = build_valve(source, database).unwrap();
             valve.create_all_tables().await.unwrap();
         }
         Commands::DropAll {
             source,
-            destination,
+            database,
         } => {
             exit_unless_tsv(source);
-            let valve = build_valve(source, destination).unwrap();
+            let valve = build_valve(source, database).unwrap();
             valve.drop_all_tables().await.unwrap();
         }
         Commands::DumpConfig { source } => {
@@ -291,37 +291,37 @@ async fn main() -> Result<()> {
         Commands::SaveAll {
             save_dir,
             source,
-            destination,
+            database,
         } => {
             exit_unless_tsv(source);
-            let valve = build_valve(source, destination).unwrap();
-            valve.save_all_tables(&save_dir).unwrap();
+            let valve = build_valve(source, database).unwrap();
+            valve.save_all_tables(&save_dir).await.unwrap();
         }
         Commands::Save {
             save_dir,
             source,
-            destination,
+            database,
             tables,
         } => {
             exit_unless_tsv(source);
-            let valve = build_valve(source, destination).unwrap();
+            let valve = build_valve(source, database).unwrap();
             let tables = tables
                 .iter()
                 .filter(|s| *s != "")
                 .map(|s| s.as_str())
                 .collect::<Vec<_>>();
-            valve.save_tables(&tables, &save_dir).unwrap();
+            valve.save_tables(&tables, &save_dir).await.unwrap();
         }
         Commands::Guess {
             sample_size,
             error_rate,
             seed,
             source,
-            destination,
+            database,
             table_tsv,
         } => {
             exit_unless_tsv(source);
-            let valve = build_valve(source, destination).unwrap();
+            let valve = build_valve(source, database).unwrap();
             guess(
                 &valve,
                 cli.verbose,
@@ -334,18 +334,18 @@ async fn main() -> Result<()> {
         }
         Commands::TestApi {
             source,
-            destination,
+            database,
         } => {
             exit_unless_tsv(source);
-            let valve = build_valve(source, destination).unwrap();
+            let valve = build_valve(source, database).unwrap();
             run_api_tests(&valve).await.unwrap();
         }
         Commands::TestDtHierarchy {
             source,
-            destination,
+            database,
         } => {
             exit_unless_tsv(source);
-            let valve = build_valve(source, destination).unwrap();
+            let valve = build_valve(source, database).unwrap();
             run_dt_hierarchy_tests(&valve).unwrap();
         }
     }

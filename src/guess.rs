@@ -1,12 +1,17 @@
 //! Implementation of the column configuration guesser
 
-use crate::valve::{Valve, ValveConfig, ValveDatatypeConfig};
+use crate::{
+    toolkit::{get_query_param, local_sql_syntax, QueryParam},
+    valve::{Valve, ValveConfig, ValveDatatypeConfig},
+    SQL_PARAM,
+};
 use fix_fn::fix_fn;
 use futures::executor::block_on;
 use indexmap::IndexMap;
 use pad::{Alignment, PadStr};
 use rand::{distributions, rngs::StdRng, Rng, SeedableRng};
 use regex::Regex;
+use serde_json::json;
 use sqlx::{query as sqlx_query, Row, ValueRef};
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
@@ -218,15 +223,18 @@ pub fn guess(
             .map(|h| format!(r#""{}""#, h))
             .collect::<Vec<_>>()
             .join(", ");
-        format!(
-            r#"INSERT INTO "table" ("row_number", {}) VALUES ({}, '{}', '{}', NULL, NULL)"#,
-            column_names, row_number, table, table_tsv
+        local_sql_syntax(
+            &valve.pool,
+            &format!(
+                r#"INSERT INTO "table" ("row_number", {column_names}) VALUES
+                   ({row_number}, {SQL_PARAM}, {SQL_PARAM}, NULL, NULL)"#,
+            ),
         )
     };
     if verbose {
         println!("Executing SQL: {}", sql);
     }
-    let query = sqlx_query(&sql);
+    let query = sqlx_query(&sql).bind(table).bind(table_tsv);
     block_on(query.execute(&valve.pool)).expect(&format!("Error executing SQL '{}'", sql));
 
     // Column configuration
@@ -240,49 +248,78 @@ pub fn guess(
             .map(|h| format!(r#""{}""#, h))
             .collect::<Vec<_>>()
             .join(", ");
+        let mut params = vec![];
         let values = vec![
+            // row_number
             format!("{}", row_number),
-            format!("'{}'", table),
-            format!("'{}'", sample.normalized),
+            // table
+            {
+                params.push(table);
+                format!("{}", SQL_PARAM)
+            },
+            // column
+            {
+                params.push(&sample.normalized);
+                format!("{}", SQL_PARAM)
+            },
+            // label
             {
                 if *label != sample.normalized {
-                    format!("'{}'", label)
+                    params.push(label);
+                    format!("{}", SQL_PARAM)
                 } else {
                     "NULL".to_string()
                 }
             },
+            // nulltype
             {
                 if sample.nulltype != "" {
-                    format!("'{}'", sample.nulltype)
+                    params.push(&sample.nulltype);
+                    format!("{}", SQL_PARAM)
                 } else {
                     "NULL".to_string()
                 }
             },
-            format!("'{}'", sample.datatype),
+            // datatype
+            {
+                params.push(&sample.datatype);
+                format!("{}", SQL_PARAM)
+            },
+            // structure
             {
                 if sample.structure != "" {
-                    format!("'{}'", sample.structure)
+                    params.push(&sample.structure);
+                    format!("{}", SQL_PARAM)
                 } else {
                     "NULL".to_string()
                 }
             },
+            // description
             {
                 if sample.description != "" {
-                    format!("'{}'", sample.description)
+                    params.push(&sample.description);
+                    format!("{}", SQL_PARAM)
                 } else {
                     "NULL".to_string()
                 }
             },
         ]
         .join(", ");
-        let sql = format!(
-            r#"INSERT INTO "column" ("row_number", {}) VALUES ({})"#,
-            column_names, values
+
+        let sql = local_sql_syntax(
+            &valve.pool,
+            &format!(
+                r#"INSERT INTO "column" ("row_number", {}) VALUES ({})"#,
+                column_names, values
+            ),
         );
         if verbose {
             println!("Executing SQL: {}", sql);
         }
-        let query = sqlx_query(&sql);
+        let mut query = sqlx_query(&sql);
+        for param in &params {
+            query = query.bind(param);
+        }
         block_on(query.execute(&valve.pool)).expect(&format!("Error executing SQL '{}'", sql));
         row_number += 1;
     }
@@ -624,18 +661,21 @@ pub fn annotate(
                     // if it exists in the foreign column. It is automatically a failed match.
                     continue;
                 }
-                let value = {
-                    if foreign.sql_type == "text" {
-                        format!("'{}'", value)
-                    } else {
-                        value.to_string()
-                    }
-                };
-                let sql = format!(
-                    r#"SELECT 1 FROM "{}" WHERE "{}" = {} LIMIT 1"#,
-                    foreign.table, foreign.column, value
+                let sql = local_sql_syntax(
+                    &valve.pool,
+                    &format!(
+                        r#"SELECT 1 FROM "{}" WHERE "{}" = {} LIMIT 1"#,
+                        foreign.table, foreign.column, SQL_PARAM
+                    ),
                 );
-                let query = sqlx_query(&sql);
+                let param = get_query_param(&json!(value), &foreign.sql_type);
+                let mut query = sqlx_query(&sql);
+                match param {
+                    QueryParam::Integer(p) => query = query.bind(p),
+                    QueryParam::Numeric(p) => query = query.bind(p),
+                    QueryParam::Real(p) => query = query.bind(p),
+                    QueryParam::String(p) => query = query.bind(p),
+                }
                 num_matches += block_on(query.fetch_all(&valve.pool))
                     .expect(&format!("Error executing SQL: {}", sql))
                     .len();

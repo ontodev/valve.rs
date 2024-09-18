@@ -4,7 +4,7 @@ Valve - A lightweight validation engine written in rust.
 
 ## Table of contents
 
-_Generated using [markdown-toc](https://github.com/jonschlinkert/markdown-toc)_
+_ToC Generated using [markdown-toc](https://github.com/jonschlinkert/markdown-toc)_
 
 * [Design and concepts](#design-and-concepts)
   + [The Valve database](#the-valve-database)
@@ -723,11 +723,11 @@ The columns of the rule table have the following significance:
 
 In some cases it is useful to be able to try and guess what the table table and column table configuration should be, using information about the current state of the Valve instance, for a given data table not currently managed by Valve. To do this one may use Valve's command line interface to run the **guess** subcommand as follows:
 
-    ontodev_valve guess [OPTIONS] SOURCE DESTINATION TABLE_TSV
+    ontodev_valve guess [OPTIONS] SOURCE DATABASE TABLE_TSV
 
 where:
 - `SOURCE` is the location of the '.tsv' representing the table table.
-- `DESTINATION` is the path to a PostgreSQL or SQLite database.
+- `DATABASE` is the path to a PostgreSQL or SQLite database.
 - `TABLE_TSV` is the '.tsv' file representing the data table whose column configuration is to be guessed.
 
 For the list of possible options, and for general information on Valve's command line interface, see [command line usage](#command-line-usage).

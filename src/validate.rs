@@ -4,14 +4,14 @@ use crate::{
     ast::Expression,
     toolkit::{
         cast_sql_param_from_text, get_column_value, get_column_value_as_string,
-        get_datatype_ancestors, get_sql_type_from_global_config, get_table_options, get_value_type,
-        is_sql_type_error, local_sql_syntax, ColumnRule, CompiledCondition, QueryAsIf,
-        QueryAsIfKind, ValueType,
+        get_datatype_ancestors, get_query_param, get_sql_type_from_global_config,
+        get_table_options_from_config, get_value_type, is_sql_type_error, local_sql_syntax,
+        ColumnRule, CompiledCondition, QueryAsIf, QueryAsIfKind, QueryParam, ValueType,
     },
     valve::{
         ValveCell, ValveCellMessage, ValveConfig, ValveRow, ValveRuleConfig, ValveTreeConstraint,
     },
-    DT_CACHE_SIZE,
+    DT_CACHE_SIZE, SQL_PARAM,
 };
 use anyhow::Result;
 use indexmap::IndexMap;
@@ -165,7 +165,7 @@ pub async fn validate_tree_foreign_keys(
         .get(table_name)
         .expect(&format!("Undefined table '{}'", table_name));
 
-    let table_options = get_table_options(config, table_name)?;
+    let table_options = get_table_options_from_config(config, table_name)?;
     let query_table = {
         if !table_options.contains("conflict") {
             table_name.to_string()
@@ -309,33 +309,50 @@ pub async fn validate_rows_constraints(
                 let sql_type =
                     get_sql_type_from_global_config(config, &fkey.ftable, &fkey.fcolumn, pool)
                         .to_lowercase();
-
-                let values_str = received_values
+                let values = received_values
                     .get(&*fkey.column)
                     .unwrap()
                     .iter()
-                    .map(|value| {
-                        let value = value
-                            .as_str()
-                            .expect(&format!("'{}' is not a string", value));
-                        if vec!["integer", "numeric", "real"].contains(&sql_type.as_str()) {
-                            format!("{}", value)
-                        } else {
-                            format!("'{}'", value)
-                        }
+                    .filter(|value| {
+                        !is_sql_type_error(
+                            &sql_type,
+                            value
+                                .as_str()
+                                .expect(&format!("'{}' is not a string", value)),
+                        )
                     })
-                    .filter(|value| !is_sql_type_error(&sql_type, value))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let lookup_sql = values
+                    .iter()
+                    .map(|_| SQL_PARAM.to_string())
                     .collect::<Vec<_>>()
                     .join(", ");
+                let param_values = values
+                    .iter()
+                    .map(|value| get_query_param(value, &sql_type))
+                    .collect::<Vec<_>>();
 
                 // Foreign keys always correspond to columns with unique constraints so we do not
                 // need to use the keyword 'DISTINCT' when querying the normal version of the table:
-                let sql = format!(
-                    r#"SELECT "{}" FROM "{}" WHERE "{}" IN ({})"#,
-                    fkey.fcolumn, fkey.ftable, fkey.fcolumn, values_str
+                let sql = local_sql_syntax(
+                    pool,
+                    &format!(
+                        r#"SELECT "{}" FROM "{}" WHERE "{}" IN ({})"#,
+                        fkey.fcolumn, fkey.ftable, fkey.fcolumn, lookup_sql
+                    ),
                 );
+                let mut query = sqlx_query(&sql);
+                for param_value in &param_values {
+                    match param_value {
+                        QueryParam::Integer(p) => query = query.bind(p),
+                        QueryParam::Numeric(p) => query = query.bind(p),
+                        QueryParam::Real(p) => query = query.bind(p),
+                        QueryParam::String(p) => query = query.bind(p),
+                    }
+                }
 
-                let allowed_values = sqlx_query(&sql)
+                let allowed_values = query
                     .fetch_all(pool)
                     .await?
                     .iter()
@@ -352,11 +369,23 @@ pub async fn validate_rows_constraints(
                         // The conflict table has no keys other than on row_number so in principle
                         // it could have duplicate values of the foreign constraint, therefore we
                         // add the DISTINCT keyword here:
-                        let sql = format!(
-                            r#"SELECT DISTINCT "{}" FROM "{}_conflict" WHERE "{}" IN ({})"#,
-                            fkey.fcolumn, fkey.ftable, fkey.fcolumn, values_str
+                        let sql = local_sql_syntax(
+                            pool,
+                            &format!(
+                                r#"SELECT DISTINCT "{}" FROM "{}_conflict" WHERE "{}" IN ({})"#,
+                                fkey.fcolumn, fkey.ftable, fkey.fcolumn, lookup_sql
+                            ),
                         );
-                        sqlx_query(&sql)
+                        let mut query = sqlx_query(&sql);
+                        for param_value in &param_values {
+                            match param_value {
+                                QueryParam::Integer(p) => query = query.bind(p),
+                                QueryParam::Numeric(p) => query = query.bind(p),
+                                QueryParam::Real(p) => query = query.bind(p),
+                                QueryParam::String(p) => query = query.bind(p),
+                            }
+                        }
+                        query
                             .fetch_all(pool)
                             .await?
                             .iter()
@@ -412,30 +441,48 @@ pub async fn validate_rows_constraints(
 
             let sql_type =
                 get_sql_type_from_global_config(config, &table, &column, pool).to_lowercase();
-            let values_str = received_values
+            let values = received_values
                 .get(&*column)
                 .unwrap()
                 .iter()
-                .map(|value| {
-                    let value = value
-                        .as_str()
-                        .expect(&format!("'{}' is not a string", value));
-                    if vec!["integer", "numeric", "real"].contains(&sql_type.as_str()) {
-                        format!("{}", value)
-                    } else {
-                        format!("'{}'", value)
-                    }
+                .filter(|value| {
+                    !is_sql_type_error(
+                        &sql_type,
+                        value
+                            .as_str()
+                            .expect(&format!("'{}' is not a string", value)),
+                    )
                 })
-                .filter(|value| !is_sql_type_error(&sql_type, value))
+                .cloned()
+                .collect::<Vec<_>>();
+            let lookup_sql = values
+                .iter()
+                .map(|_| SQL_PARAM.to_string())
                 .collect::<Vec<_>>()
                 .join(", ");
+            let param_values = values
+                .iter()
+                .map(|value| get_query_param(value, &sql_type))
+                .collect::<Vec<_>>();
 
-            let sql = format!(
-                r#"SELECT {} "{}" FROM "{}" WHERE "{}" IN ({})"#,
-                query_modifier, column, query_table, column, values_str
+            let sql = local_sql_syntax(
+                pool,
+                &format!(
+                    r#"SELECT {} "{}" FROM "{}" WHERE "{}" IN ({})"#,
+                    query_modifier, column, query_table, column, lookup_sql
+                ),
             );
+            let mut query = sqlx_query(&sql);
+            for param_value in &param_values {
+                match param_value {
+                    QueryParam::Integer(p) => query = query.bind(p),
+                    QueryParam::Numeric(p) => query = query.bind(p),
+                    QueryParam::Real(p) => query = query.bind(p),
+                    QueryParam::String(p) => query = query.bind(p),
+                }
+            }
 
-            let forbidden_values = sqlx_query(&sql)
+            let forbidden_values = query
                 .fetch_all(pool)
                 .await?
                 .iter()
@@ -627,10 +674,20 @@ pub fn validate_rows_intra(
                     .expect(&format!("Undefined table '{}'", table_name))
                     .column_order;
 
+                // If a table has been configured with more columns than are actually in its
+                // associated .tsv file, then when we try to get a value for one of the extra
+                // columns from the row, it will not be found. Instead of panicking we will
+                // use unwrap_or() with an empty ValveCell as the default:
+                let mut default_cell = ValveCell {
+                    ..Default::default()
+                };
                 // We begin by determining the nulltype of all of the cells, since the rules
                 // validation step requires that all cells have this information.
                 for column_name in column_names {
-                    let cell = valve_row.contents.get_mut(column_name).unwrap();
+                    let cell = valve_row
+                        .contents
+                        .get_mut(column_name)
+                        .unwrap_or(&mut default_cell);
                     validate_cell_nulltype(
                         config,
                         datatype_conditions,
@@ -643,7 +700,10 @@ pub fn validate_rows_intra(
                 if !only_nulltype {
                     for column_name in column_names {
                         let context = valve_row.clone();
-                        let cell = valve_row.contents.get_mut(column_name).unwrap();
+                        let cell = valve_row
+                            .contents
+                            .get_mut(column_name)
+                            .unwrap_or(&mut default_cell);
                         validate_cell_rules(
                             config,
                             rule_conditions,
@@ -1227,23 +1287,21 @@ pub async fn validate_cell_foreign_constraints(
                     pool,
                     &format!(
                         r#"{}SELECT 1 FROM "{}" WHERE "{}" = {} LIMIT 1"#,
-                        as_if_clause,
-                        table,
-                        column,
-                        {
-                            if sql_type == "text" || sql_type.starts_with("varchar(") {
-                                format!("'{}'", value)
-                            } else {
-                                format!("{}", value)
-                            }
-                        }
+                        as_if_clause, table, column, SQL_PARAM,
                     ),
                 );
                 let frows = {
+                    let mut query = sqlx_query(&fsql);
+                    match get_query_param(&json!(value), &sql_type) {
+                        QueryParam::Integer(p) => query = query.bind(p),
+                        QueryParam::Numeric(p) => query = query.bind(p),
+                        QueryParam::Real(p) => query = query.bind(p),
+                        QueryParam::String(p) => query = query.bind(p),
+                    }
                     if let None = tx {
-                        sqlx_query(&fsql).fetch_all(pool).await?
+                        query.fetch_all(pool).await?
                     } else {
-                        sqlx_query(&fsql)
+                        query
                             .fetch_all(tx.as_mut().unwrap().acquire().await?)
                             .await?
                     }
@@ -1400,7 +1458,7 @@ pub async fn validate_cell_unique_constraints(
                 _ => cached_value.to_string() == cell.value,
             })),
             None => {
-                let table_options = get_table_options(config, table_name)?;
+                let table_options = get_table_options_from_config(config, table_name)?;
                 // If the table does not have a conflict table then there is no view to check, so
                 // we check the table itself.
                 let mut query_table = {
