@@ -88,7 +88,7 @@ def get_column_order_and_info_for_sqlite(cursor, table):
         for row in pragma_rows:
             if row["pk"] != 0:
                 primary_keys[row["pk"]] = row["name"]
-            elif not row["name"] not in ("row_number", "row_order"):
+            else:
                 non_pk_columns.append(row["name"])
         primary_keys = dict(sorted(primary_keys.items()))
         sorted_columns = [primary_keys[key] for key in primary_keys] + non_pk_columns

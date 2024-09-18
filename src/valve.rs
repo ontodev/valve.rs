@@ -1955,11 +1955,9 @@ impl Valve {
         if self.verbose {
             println!("Saving tables: {} ...", tables.join(", "));
         }
-        // Collect the paths and possibly the options of all of the tables that were requested to be
-        // saved:
+        // Build the query to get the path and possibly the options info from the table table for
+        // all of the tables that were requested to be saved:
         let options_enabled = self.column_enabled_in_db("table", "options").await?;
-
-        // Build the query to get the path and options info from the table table:
         let mut params = vec![];
         let sql_param_str = tables
             .iter()
@@ -2008,7 +2006,7 @@ impl Valve {
             let path = row.try_get::<&str, &str>("path").ok().unwrap_or_default();
             let path = match save_dir {
                 Some(save_dir) => {
-                    // If the table is not saveable it can still be saved to the saved_dir if it
+                    // If the table is not saveable it can still be saved to the saved_dir if one
                     // has been specified and if it is not identical to the table's configured path:
                     if !options.contains("save") {
                         let path_dir = Path::new(path)

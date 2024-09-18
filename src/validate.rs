@@ -4,7 +4,7 @@ use crate::{
     ast::Expression,
     toolkit::{
         cast_sql_param_from_text, get_column_value, get_column_value_as_string,
-        get_datatype_ancestors, get_query_params, get_sql_type_from_global_config,
+        get_datatype_ancestors, get_query_param, get_sql_type_from_global_config,
         get_table_options_from_config, get_value_type, is_sql_type_error, local_sql_syntax,
         ColumnRule, CompiledCondition, QueryAsIf, QueryAsIfKind, QueryParam, ValueType,
     },
@@ -328,7 +328,10 @@ pub async fn validate_rows_constraints(
                     .map(|_| SQL_PARAM.to_string())
                     .collect::<Vec<_>>()
                     .join(", ");
-                let param_values = get_query_params(&values, &sql_type);
+                let param_values = values
+                    .iter()
+                    .map(|value| get_query_param(value, &sql_type))
+                    .collect::<Vec<_>>();
 
                 // Foreign keys always correspond to columns with unique constraints so we do not
                 // need to use the keyword 'DISTINCT' when querying the normal version of the table:
@@ -457,7 +460,10 @@ pub async fn validate_rows_constraints(
                 .map(|_| SQL_PARAM.to_string())
                 .collect::<Vec<_>>()
                 .join(", ");
-            let param_values = get_query_params(&values, &sql_type);
+            let param_values = values
+                .iter()
+                .map(|value| get_query_param(value, &sql_type))
+                .collect::<Vec<_>>();
 
             let sql = local_sql_syntax(
                 pool,
@@ -1284,15 +1290,9 @@ pub async fn validate_cell_foreign_constraints(
                         as_if_clause, table, column, SQL_PARAM,
                     ),
                 );
-                let param = get_query_params(&vec![value.into()], &sql_type)
-                    .pop()
-                    .expect(&format!(
-                        "Could not determine query parameter for '{}'",
-                        value
-                    ));
                 let frows = {
                     let mut query = sqlx_query(&fsql);
-                    match param {
+                    match get_query_param(&json!(value), &sql_type) {
                         QueryParam::Integer(p) => query = query.bind(p),
                         QueryParam::Numeric(p) => query = query.bind(p),
                         QueryParam::Real(p) => query = query.bind(p),

@@ -211,7 +211,9 @@ pub fn get_column_for_label(
         .into())
     } else {
         // If we cannot find the column corresponding to the label, then we conclude that the label
-        // name we received was fact the column name, for a column that has no label:
+        // name we received was the column name of a column with an empty label. This is because an
+        // an empty label signifies, not that the column has no label, but that the column's label
+        // is the same as it's column name.
         Ok(label.to_string())
     }
 }
@@ -1185,9 +1187,7 @@ pub fn read_config_files(
                     for label_name in &defined_labels {
                         let column_name =
                             get_column_for_label(&this_column_config, label_name, &table_name)?;
-                        if !column_name.is_empty() {
-                            column_order.push(column_name);
-                        }
+                        column_order.push(column_name);
                     }
                 } else {
                     return Err(ValveError::ConfigError(format!("'{}' is empty", path)).into());
@@ -1661,7 +1661,7 @@ pub fn get_sql_for_text_view(
 /// reformatted (for instance using the function [local_sql_syntax()]) in accordance with the syntax
 /// accepted by the underlying database, and then bound before being executed by sqlx.
 /// These placeholders represent: (1) the column name and (2) the table name.
-pub fn query_column_with_message_value(column: &str, pool: &AnyPool) -> String {
+pub fn generic_select_with_message_value(column: &str, pool: &AnyPool) -> String {
     let is_clause = if pool.any_kind() == AnyKind::Sqlite {
         "IS"
     } else {
@@ -1715,7 +1715,7 @@ pub fn generic_select_with_message_values(
         .iter()
         .map(|column| {
             sql_params.append(&mut vec![column.to_string(), table.to_string()]);
-            query_column_with_message_value(column, pool)
+            generic_select_with_message_value(column, pool)
         })
         .collect::<Vec<_>>();
 
@@ -1781,11 +1781,11 @@ pub async fn get_affected_rows(
         ),
     );
     sql_params.push(value.to_string());
+
     let mut query = sqlx_query(&sql);
     for param in &sql_params {
         query = query.bind(param);
     }
-
     let mut valve_rows = vec![];
     for row in query.fetch_all(tx.acquire().await?).await? {
         let mut contents = IndexMap::new();
@@ -1934,9 +1934,6 @@ pub async fn get_db_value(
                  END AS "{column}"
                FROM "{table}_view" WHERE "row_number" = {row_number}
             "#,
-            column = column,
-            is_clause = is_clause,
-            row_number = row_number,
             casted_column = if pool.any_kind() == AnyKind::Sqlite {
                 cast_column_sql_to_text(column, "non-text")
             } else {
@@ -2353,17 +2350,10 @@ pub async fn record_row_change(
         .into());
     }
 
-    fn to_text(row: Option<&SerdeMap>, quoted: bool) -> String {
+    fn to_text(row: Option<&SerdeMap>) -> String {
         match row {
             None => "NULL".to_string(),
-            Some(r) => {
-                let inner = format!("{}", json!(r));
-                if !quoted {
-                    inner
-                } else {
-                    format!("'{}'", inner)
-                }
-            }
+            Some(r) => format!("{}", json!(r)),
         }
     }
 
@@ -2460,7 +2450,7 @@ pub async fn record_row_change(
                                 format_value(&new_value.to_string(), &numeric_re),
                             )),
                         );
-                        let column_summary = to_text(Some(&column_summary), false);
+                        let column_summary = to_text(Some(&column_summary));
                         summary.push(column_summary);
                     }
                 }
@@ -2470,11 +2460,11 @@ pub async fn record_row_change(
     }
 
     let summary = summarize(from, to)?;
-    let (from, to) = (to_text(from, false), to_text(to, false));
+    let (from, to) = (to_text(from), to_text(to));
     let mut params = vec![table];
     let from_param = {
         if from == "NULL" {
-            from.to_string()
+            from
         } else {
             params.push(&from);
             SQL_PARAM.to_string()
@@ -2482,7 +2472,7 @@ pub async fn record_row_change(
     };
     let to_param = {
         if to == "NULL" {
-            to.to_string()
+            to
         } else {
             params.push(&to);
             SQL_PARAM.to_string()
@@ -2490,7 +2480,7 @@ pub async fn record_row_change(
     };
     let summary_param = {
         if summary == "NULL" {
-            summary.to_string()
+            summary
         } else {
             params.push(&summary);
             SQL_PARAM.to_string()
@@ -3224,7 +3214,7 @@ pub async fn insert_new_row_tx(
             ),
         );
         let mut query = sqlx_query(&message_sql);
-        for param in vec![table, column, &value, level, rule, &message] {
+        for param in [table, column, &value, level, rule, &message] {
             query = query.bind(param);
         }
         query.execute(tx.acquire().await?).await?;
@@ -3751,36 +3741,34 @@ pub fn compile_condition(
     }
 }
 
-/// Given a list of [SerdeValue]s and the SQL type that they should all conform to, return
-/// a list of [QueryParam]s corresponding to each value, which can then be bound to an SQL string.
-pub fn get_query_params(values: &Vec<SerdeValue>, sql_type: &str) -> Vec<QueryParam> {
-    let mut param_values = vec![];
-
-    for value in values {
-        let param_value = value
-            .as_str()
-            .expect(&format!("'{}' is not a string", value));
-        if sql_type == "numeric" {
+/// Given a [SerdeValue] of the type [SerdeValue::String], as well as the SQL type that it will
+/// be converted to when it is inserted to the database (which can be a non-string), return a
+/// [QueryParam] corresponding to the value.
+pub fn get_query_param(value: &SerdeValue, sql_type: &str) -> QueryParam {
+    let param_value = value
+        .as_str()
+        .expect(&format!("'{}' is not a string", value));
+    match sql_type {
+        "numeric" => {
             let numeric_value: f64 = param_value
                 .parse()
                 .expect(&format!("{param_value} is not numeric"));
-            param_values.push(QueryParam::Numeric(numeric_value));
-        } else if sql_type == "integer" {
+            QueryParam::Numeric(numeric_value)
+        }
+        "integer" => {
             let integer_value: i32 = param_value
                 .parse()
                 .expect(&format!("{param_value} is not an integer"));
-            param_values.push(QueryParam::Integer(integer_value));
-        } else if sql_type == "real" {
+            QueryParam::Integer(integer_value)
+        }
+        "real" => {
             let real_value: f64 = param_value
                 .parse()
                 .expect(&format!("{param_value} is not a real"));
-            param_values.push(QueryParam::Real(real_value));
-        } else {
-            param_values.push(QueryParam::String(param_value.to_string()));
+            QueryParam::Real(real_value)
         }
+        _ => QueryParam::String(param_value.to_string()),
     }
-
-    param_values
 }
 
 /// Given the config map, the name of a datatype, and a database connection pool used to determine
