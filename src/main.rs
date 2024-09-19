@@ -117,24 +117,12 @@ enum Commands {
 
     /// Add tables and rows to a given database
     Add {
-        #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
-        source: String,
-
-        #[arg(value_name = "DATABASE", action = ArgAction::Set, help = DATABASE_HELP)]
-        database: String,
-
         #[command(subcommand)]
         add_subcommand: AddSubcommands,
     },
 
     /// Get data from the database
     Get {
-        #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
-        source: String,
-
-        #[arg(value_name = "DATABASE", action = ArgAction::Set, help = DATABASE_HELP)]
-        database: String,
-
         #[command(subcommand)]
         get_subcommand: GetSubcommands,
     },
@@ -227,12 +215,24 @@ enum AddSubcommands {
     /// (when the global --verbose flag has been set) a JSON representation of the row, including
     /// validation information and its assigned row_number, to the terminal before exiting.
     Row {
+        #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
+        source: String,
+
+        #[arg(value_name = "DATABASE", action = ArgAction::Set, help = DATABASE_HELP)]
+        database: String,
+
         #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
         table: String,
     },
 
     /// Add a table located at a given path.
     Table {
+        #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
+        source: String,
+
+        #[arg(value_name = "DATABASE", action = ArgAction::Set, help = DATABASE_HELP)]
+        database: String,
+
         #[arg(value_name = "PATH", action = ArgAction::Set,
               help = "The filesystem path of the table")]
         path: String,
@@ -243,12 +243,24 @@ enum AddSubcommands {
 enum GetSubcommands {
     /// TODO: Add a docstring.
     Table {
+        #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
+        source: String,
+
+        #[arg(value_name = "DATABASE", action = ArgAction::Set, help = DATABASE_HELP)]
+        database: String,
+
         #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
         table: String,
     },
 
     /// TODO: Add a docstring.
     Row {
+        #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
+        source: String,
+
+        #[arg(value_name = "DATABASE", action = ArgAction::Set, help = DATABASE_HELP)]
+        database: String,
+
         #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
         table: String,
 
@@ -258,6 +270,12 @@ enum GetSubcommands {
 
     /// TODO: Add a docstring.
     Cell {
+        #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
+        source: String,
+
+        #[arg(value_name = "DATABASE", action = ArgAction::Set, help = DATABASE_HELP)]
+        database: String,
+
         #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
         table: String,
 
@@ -270,6 +288,12 @@ enum GetSubcommands {
 
     /// TODO: Add a docstring.
     Value {
+        #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
+        source: String,
+
+        #[arg(value_name = "DATABASE", action = ArgAction::Set, help = DATABASE_HELP)]
+        database: String,
+
         #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
         table: String,
 
@@ -282,6 +306,12 @@ enum GetSubcommands {
 
     /// TODO: Add a docstring.
     Messages {
+        #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
+        source: String,
+
+        #[arg(value_name = "DATABASE", action = ArgAction::Set, help = DATABASE_HELP)]
+        database: String,
+
         #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
         table: String,
 
@@ -342,13 +372,13 @@ async fn main() -> Result<()> {
     }
 
     match &cli.command {
-        Commands::Add {
-            source,
-            database,
-            add_subcommand,
-        } => {
+        Commands::Add { add_subcommand } => {
             match add_subcommand {
-                AddSubcommands::Row { table } => {
+                AddSubcommands::Row {
+                    source,
+                    database,
+                    table,
+                } => {
                     let mut row = String::new();
                     io::stdin()
                         .read_line(&mut row)
@@ -402,14 +432,15 @@ async fn main() -> Result<()> {
             let schema = valve.dump_schema().await.expect("Error dumping schema");
             println!("{}", schema);
         }
-        Commands::Get {
-            source,
-            database,
-            get_subcommand,
-        } => {
+        Commands::Get { get_subcommand } => {
             match get_subcommand {
                 GetSubcommands::Table { .. } => todo!(),
-                GetSubcommands::Row { table, row } => {
+                GetSubcommands::Row {
+                    source,
+                    database,
+                    table,
+                    row,
+                } => {
                     let valve = build_valve(source, database).expect("Error building Valve");
                     let row = valve.get_row(table, row).await.expect("Error getting row");
                     println!(
