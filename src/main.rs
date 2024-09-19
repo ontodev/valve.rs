@@ -442,7 +442,10 @@ async fn main() -> Result<()> {
                     row,
                 } => {
                     let valve = build_valve(source, database).expect("Error building Valve");
-                    let row = valve.get_row(table, row).await.expect("Error getting row");
+                    let row = valve
+                        .get_row_from_db(table, row)
+                        .await
+                        .expect("Error getting row");
                     println!(
                         "{}",
                         json!(row

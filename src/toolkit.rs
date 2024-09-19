@@ -164,6 +164,11 @@ pub enum QueryParam {
     String(String),
 }
 
+// TODO: Functions in this file and elsewhere that only use the pool to determine the type of
+// the database being used should take a custom DbType enum instead of the pool (just like we
+// do in sqlrest.rs). That way it will be easy to distinguish functions that actually need to
+// access the database from those that don't.
+
 /// Given the path to a table table (either a table.tsv file or a database containing a
 /// table named "table"), load and check the 'table', 'column', and 'datatype' tables, and return
 /// the following items:
@@ -2656,7 +2661,7 @@ pub fn local_sql_syntax(pool: &AnyPool, sql: &String) -> String {
 /// Given a global configuration map, a database connection pool, a database transaction, a table
 /// name and a row number, get the logical contents of that row (whether or not it is valid),
 /// including any messages, from the database.
-pub async fn get_row_from_db(
+pub async fn get_row_from_db_tx(
     config: &ValveConfig,
     pool: &AnyPool,
     tx: &mut Transaction<'_, sqlx::Any>,
@@ -2678,7 +2683,7 @@ pub async fn get_row_from_db(
     if rows.len() == 0 {
         return Err(ValveError::DataError(
             format!(
-                "In get_row_from_db(). No rows found for row_number: {}",
+                "In get_row_from_db_tx(). No rows found for row_number: {}",
                 row_number
             )
             .into(),
@@ -3550,7 +3555,7 @@ pub async fn record_row_move(
     new_previous_row: &u32,
     user: &str,
 ) -> Result<()> {
-    let row = get_row_from_db(config, pool, tx, table, row_num).await?;
+    let row = get_row_from_db_tx(config, pool, tx, table, row_num).await?;
     let mut from_row = row.clone();
     let mut to_row = row.clone();
     from_row.insert("previous_row".to_string(), json!(old_previous_row));

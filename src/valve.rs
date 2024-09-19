@@ -9,7 +9,7 @@ use crate::{
         delete_row_tx, generate_datatype_conditions, generate_rule_conditions,
         get_column_for_label, get_column_value_as_string, get_json_array_from_row,
         get_json_object_from_row, get_parsed_structure_conditions, get_pool_from_connection_string,
-        get_previous_row_tx, get_record_to_redo, get_record_to_undo, get_row_from_db,
+        get_previous_row_tx, get_record_to_redo, get_record_to_undo, get_row_from_db_tx,
         get_sql_for_standard_view, get_sql_for_text_view, get_sql_type,
         get_sql_type_from_global_config, insert_chunks, insert_new_row_tx, local_sql_syntax,
         move_row_tx, normalize_options, read_config_files, record_row_change, record_row_move,
@@ -2326,9 +2326,9 @@ impl Valve {
     }
 
     /// Given a table name and a row number, return a [ValveRow] representing that row.
-    pub async fn get_row(&self, table: &str, row_number: &u32) -> Result<ValveRow> {
+    pub async fn get_row_from_db(&self, table: &str, row_number: &u32) -> Result<ValveRow> {
         let mut tx = self.pool.begin().await?;
-        let row = get_row_from_db(&self.config, &self.pool, &mut tx, table, row_number).await?;
+        let row = get_row_from_db_tx(&self.config, &self.pool, &mut tx, table, row_number).await?;
         ValveRow::from_rich_json(Some(*row_number), &row)
     }
 
@@ -2464,7 +2464,7 @@ impl Valve {
         // Get the old version of the row from the database so that we can later record it to the
         // history table:
         let old_row =
-            get_row_from_db(&self.config, &self.pool, &mut tx, table_name, &row_number).await?;
+            get_row_from_db_tx(&self.config, &self.pool, &mut tx, table_name, &row_number).await?;
 
         let row = ValveRow::from_simple_json(row, Some(*row_number))?;
         let row = validate_row_tx(
@@ -2523,7 +2523,7 @@ impl Valve {
         let mut tx = self.pool.begin().await?;
 
         let mut row =
-            get_row_from_db(&self.config, &self.pool, &mut tx, &table_name, row_number).await?;
+            get_row_from_db_tx(&self.config, &self.pool, &mut tx, &table_name, row_number).await?;
 
         let previous_row = get_previous_row_tx(table_name, row_number, &mut tx).await?;
         row.insert("previous_row".into(), json!(previous_row));
