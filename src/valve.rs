@@ -1163,7 +1163,8 @@ impl Valve {
                         "Undefined column '{}'",
                         cname
                     )))?;
-            let sql_type = get_sql_type_from_global_config(&self.config, table, &cname, &self.pool);
+            let sql_type =
+                get_sql_type_from_global_config(&self.config, table, &cname, &self.pool.any_kind());
 
             // Check the column's SQL type:
             if sql_type.to_lowercase() != ctype.to_lowercase() {
@@ -1245,7 +1246,7 @@ impl Valve {
     /// Given a table configuration struct, a datatype configuration struct, a parser, a table name,
     /// and a database connection pool, return a list of DDL statements that can be used to create
     /// the database tables.
-    pub fn get_table_ddl(&self, table_name: &String, pool: &AnyPool) -> Result<Vec<String>> {
+    pub fn get_table_ddl(&self, table_name: &String, kind: &AnyKind) -> Result<Vec<String>> {
         let tables_config = &self.config.table;
         let datatypes_config = &self.config.datatype;
 
@@ -1308,7 +1309,7 @@ impl Valve {
         let mut r = 0;
         for column_config in column_configs {
             r += 1;
-            let sql_type = get_sql_type(&datatypes_config, &column_config.datatype, pool);
+            let sql_type = get_sql_type(&datatypes_config, &column_config.datatype, kind);
 
             let short_sql_type = {
                 if sql_type.to_lowercase().as_str().starts_with("varchar(") {
@@ -1421,22 +1422,23 @@ impl Valve {
         for (table, table_config) in tables_config.iter() {
             // Generate DDL for the table and its corresponding conflict table:
             let mut table_statements = vec![];
-            let mut statements = self.get_table_ddl(&table, &self.pool)?;
+            let mut statements = self.get_table_ddl(&table, &self.pool.any_kind())?;
             table_statements.append(&mut statements);
             if table_config.options.contains("conflict") {
                 let cable = format!("{}_conflict", table);
-                let mut statements = self.get_table_ddl(&cable, &self.pool)?;
+                let mut statements = self.get_table_ddl(&cable, &self.pool.any_kind())?;
                 table_statements.append(&mut statements);
 
-                let create_view_sql = get_sql_for_standard_view(&table, &self.pool);
-                let create_text_view_sql = get_sql_for_text_view(tables_config, &table, &self.pool);
+                let create_view_sql = get_sql_for_standard_view(&table, &self.pool.any_kind());
+                let create_text_view_sql =
+                    get_sql_for_text_view(tables_config, &table, &self.pool.any_kind());
                 table_statements.push(create_view_sql);
                 table_statements.push(create_text_view_sql);
             }
             setup_statements.insert(table.to_string(), table_statements);
         }
 
-        let text_type = get_sql_type(datatypes_config, &"text".to_string(), &self.pool);
+        let text_type = get_sql_type(datatypes_config, &"text".to_string(), &self.pool.any_kind());
 
         // Generate DDL for the history and message tables:
         let history_statements =
@@ -1788,7 +1790,7 @@ impl Valve {
                     let message = record.get("message").and_then(|s| s.as_str()).unwrap();
 
                     let sql = local_sql_syntax(
-                        &self.pool,
+                        &self.pool.any_kind(),
                         &format!(
                             r#"INSERT INTO "message"
                        ("table", "row", "column", "value", "level", "rule", "message")
@@ -1980,7 +1982,7 @@ impl Valve {
                 )
             }
         };
-        let sql = local_sql_syntax(&self.pool, &sql);
+        let sql = local_sql_syntax(&self.pool.any_kind(), &sql);
         let mut query = sqlx_query(&sql);
         for param in &params {
             query = query.bind(param);
@@ -2120,7 +2122,7 @@ impl Valve {
             .into());
         } else if self.column_enabled_in_db("table", "options").await? {
             let sql = local_sql_syntax(
-                &self.pool,
+                &self.pool.any_kind(),
                 &format!(
                     r#"SELECT "path", "options" FROM "table" WHERE "table" = {}"#,
                     SQL_PARAM
@@ -2154,7 +2156,7 @@ impl Valve {
                 sql_columns.push_str(r#", d."format""#);
             }
             local_sql_syntax(
-                &self.pool,
+                &self.pool.any_kind(),
                 &format!(
                     r#"SELECT {sql_columns}
                          FROM "column" c
@@ -2260,7 +2262,7 @@ impl Valve {
             Ok("".to_string())
         } else {
             let sql = local_sql_syntax(
-                &self.pool,
+                &self.pool.any_kind(),
                 &format!(r#"SELECT "format" FROM "datatype" WHERE "datatype" = {SQL_PARAM}"#,),
             );
             let rows = sqlx_query(&sql)
@@ -2297,7 +2299,7 @@ impl Valve {
             Ok("".to_string())
         } else {
             let sql = local_sql_syntax(
-                &self.pool,
+                &self.pool.any_kind(),
                 &format!(
                     r#"SELECT d."format"
                          FROM "column" c, "datatype" d
@@ -2328,7 +2330,14 @@ impl Valve {
     /// Given a table name and a row number, return a [ValveRow] representing that row.
     pub async fn get_row_from_db(&self, table: &str, row_number: &u32) -> Result<ValveRow> {
         let mut tx = self.pool.begin().await?;
-        let row = get_row_from_db_tx(&self.config, &self.pool, &mut tx, table, row_number).await?;
+        let row = get_row_from_db_tx(
+            &self.config,
+            &self.pool.any_kind(),
+            &mut tx,
+            table,
+            row_number,
+        )
+        .await?;
         ValveRow::from_rich_json(Some(*row_number), &row)
     }
 
@@ -2420,7 +2429,7 @@ impl Valve {
         row.row_number = Some(rn);
         let serde_row = row.contents_to_rich_json()?;
         record_row_change(
-            &self.pool,
+            &self.pool.any_kind(),
             &mut tx,
             table_name,
             &rn,
@@ -2463,8 +2472,14 @@ impl Valve {
 
         // Get the old version of the row from the database so that we can later record it to the
         // history table:
-        let old_row =
-            get_row_from_db_tx(&self.config, &self.pool, &mut tx, table_name, &row_number).await?;
+        let old_row = get_row_from_db_tx(
+            &self.config,
+            &self.pool.any_kind(),
+            &mut tx,
+            table_name,
+            &row_number,
+        )
+        .await?;
 
         let row = ValveRow::from_simple_json(row, Some(*row_number))?;
         let row = validate_row_tx(
@@ -2495,7 +2510,7 @@ impl Valve {
         // Record the row update in the history table:
         let serde_row = row.contents_to_rich_json()?;
         record_row_change(
-            &self.pool,
+            &self.pool.any_kind(),
             &mut tx,
             table_name,
             row_number,
@@ -2522,13 +2537,19 @@ impl Valve {
 
         let mut tx = self.pool.begin().await?;
 
-        let mut row =
-            get_row_from_db_tx(&self.config, &self.pool, &mut tx, &table_name, row_number).await?;
+        let mut row = get_row_from_db_tx(
+            &self.config,
+            &self.pool.any_kind(),
+            &mut tx,
+            &table_name,
+            row_number,
+        )
+        .await?;
 
         let previous_row = get_previous_row_tx(table_name, row_number, &mut tx).await?;
         row.insert("previous_row".into(), json!(previous_row));
         record_row_change(
-            &self.pool,
+            &self.pool.any_kind(),
             &mut tx,
             &table_name,
             row_number,
@@ -2568,7 +2589,7 @@ impl Valve {
         // Record the move in the history table unless we have been explicitly told not to:
         record_row_move(
             &self.config,
-            &self.pool,
+            &self.pool.any_kind(),
             &mut tx,
             table,
             row,
@@ -2630,7 +2651,8 @@ impl Valve {
 
                 undo_or_redo_move(table, &last_change, history_id, &row_number, &mut tx, true)
                     .await?;
-                switch_undone_state(&self.user, history_id, true, &mut tx, &self.pool).await?;
+                switch_undone_state(&self.user, history_id, true, &mut tx, &self.pool.any_kind())
+                    .await?;
 
                 tx.commit().await?;
                 return Ok(None);
@@ -2663,7 +2685,8 @@ impl Valve {
                 )
                 .await?;
 
-                switch_undone_state(&self.user, history_id, true, &mut tx, &self.pool).await?;
+                switch_undone_state(&self.user, history_id, true, &mut tx, &self.pool.any_kind())
+                    .await?;
                 tx.commit().await?;
                 Ok(None)
             }
@@ -2712,7 +2735,8 @@ impl Valve {
                 // it was in before it was deleted:
                 move_row_tx(&mut tx, table, &rn, &previous_row).await?;
 
-                switch_undone_state(&self.user, history_id, true, &mut tx, &self.pool).await?;
+                switch_undone_state(&self.user, history_id, true, &mut tx, &self.pool.any_kind())
+                    .await?;
                 tx.commit().await?;
                 Ok(Some(from))
             }
@@ -2737,7 +2761,8 @@ impl Valve {
                 )
                 .await?;
 
-                switch_undone_state(&self.user, history_id, true, &mut tx, &self.pool).await?;
+                switch_undone_state(&self.user, history_id, true, &mut tx, &self.pool.any_kind())
+                    .await?;
                 tx.commit().await?;
                 Ok(Some(from))
             }
@@ -2783,7 +2808,14 @@ impl Valve {
 
                 undo_or_redo_move(table, &last_undo, history_id, &row_number, &mut tx, false)
                     .await?;
-                switch_undone_state(&self.user, history_id, false, &mut tx, &self.pool).await?;
+                switch_undone_state(
+                    &self.user,
+                    history_id,
+                    false,
+                    &mut tx,
+                    &self.pool.any_kind(),
+                )
+                .await?;
 
                 tx.commit().await?;
                 return Ok(None);
@@ -2824,7 +2856,14 @@ impl Valve {
                 )
                 .await?;
 
-                switch_undone_state(&self.user, history_id, false, &mut tx, &self.pool).await?;
+                switch_undone_state(
+                    &self.user,
+                    history_id,
+                    false,
+                    &mut tx,
+                    &self.pool.any_kind(),
+                )
+                .await?;
                 tx.commit().await?;
                 Ok(Some(to))
             }
@@ -2843,7 +2882,14 @@ impl Valve {
                 )
                 .await?;
 
-                switch_undone_state(&self.user, history_id, false, &mut tx, &self.pool).await?;
+                switch_undone_state(
+                    &self.user,
+                    history_id,
+                    false,
+                    &mut tx,
+                    &self.pool.any_kind(),
+                )
+                .await?;
                 tx.commit().await?;
                 Ok(None)
             }
@@ -2868,7 +2914,14 @@ impl Valve {
                 )
                 .await?;
 
-                switch_undone_state(&self.user, history_id, false, &mut tx, &self.pool).await?;
+                switch_undone_state(
+                    &self.user,
+                    history_id,
+                    false,
+                    &mut tx,
+                    &self.pool.any_kind(),
+                )
+                .await?;
                 tx.commit().await?;
                 Ok(Some(to))
             }
@@ -2976,8 +3029,12 @@ impl Valve {
                         .structure,
                 );
 
-                let sql_type =
-                    get_sql_type_from_global_config(&config, table_name, &column_name, &pool);
+                let sql_type = get_sql_type_from_global_config(
+                    &config,
+                    table_name,
+                    &column_name,
+                    &pool.any_kind(),
+                );
 
                 match structure {
                     Some(ParsedStructure { original, parsed }) => {
@@ -2994,7 +3051,7 @@ impl Valve {
                                 if let Expression::Field(ftable, fcolumn) = &**foreign_key {
                                     let fcolumn_text = cast_column_sql_to_text(&fcolumn, &sql_type);
                                     let sql = local_sql_syntax(
-                                        &pool,
+                                        &pool.any_kind(),
                                         &format!(
                                             r#"SELECT "{}" FROM "{}" WHERE {} LIKE {}"#,
                                             fcolumn, ftable, fcolumn_text, SQL_PARAM
@@ -3038,7 +3095,7 @@ impl Valve {
                                 let child_column_text =
                                     cast_column_sql_to_text(&child_column, &sql_type);
                                 let sql = local_sql_syntax(
-                                    &pool,
+                                    &pool.any_kind(),
                                     &format!(
                                         r#"{} SELECT "{}" FROM "tree" WHERE {} LIKE {}"#,
                                         tree_sql, child_column, child_column_text, SQL_PARAM
