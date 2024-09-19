@@ -164,378 +164,6 @@ pub enum QueryParam {
     String(String),
 }
 
-/// Given a string representing the location of a database, return a database connection pool.
-pub async fn get_pool_from_connection_string(database: &str) -> Result<AnyPool> {
-    let connection_options;
-    if database.starts_with("postgresql://") {
-        connection_options = AnyConnectOptions::from_str(database)?;
-    } else {
-        let connection_string;
-        if !database.starts_with("sqlite://") {
-            connection_string = format!("sqlite://{}?mode=rwc", database);
-        } else {
-            connection_string = database.to_string();
-        }
-        connection_options = AnyConnectOptions::from_str(connection_string.as_str())?;
-    }
-
-    let pool = AnyPoolOptions::new()
-        .max_connections(MAX_DB_CONNECTIONS)
-        .connect_with(connection_options)
-        .await?;
-    Ok(pool)
-}
-
-/// Given a column configuration map, a label, and a table name, return the column name
-/// corresponding to the label.
-pub fn get_column_for_label(
-    column_config_map: &HashMap<String, ValveColumnConfig>,
-    label: &str,
-    table: &str,
-) -> Result<String> {
-    let column_name = column_config_map
-        .iter()
-        .filter(|(_, v)| v.label == *label)
-        .map(|(k, _)| k)
-        .collect::<Vec<_>>();
-    let number_of_matches = column_name.len();
-
-    if number_of_matches == 1 {
-        Ok(column_name[0].to_string())
-    } else if number_of_matches > 1 {
-        Err(ValveError::ConfigError(format!(
-            "Error while reading column configuration for '{}': \
-             Labels must be unique.",
-            table,
-        ))
-        .into())
-    } else {
-        // If we cannot find the column corresponding to the label, then we conclude that the label
-        // name we received was the column name of a column with an empty label. This is because an
-        // an empty label signifies, not that the column has no label, but that the column's label
-        // is the same as it's column name.
-        Ok(label.to_string())
-    }
-}
-
-/// Given a column configuration map, a column and a table, return the label corresponding to the
-/// column.
-pub fn get_label_for_column(
-    column_config_map: &HashMap<String, ValveColumnConfig>,
-    column: &str,
-    table: &str,
-) -> Result<String> {
-    let label_name = column_config_map
-        .iter()
-        .filter(|(k, _)| *k == column)
-        .map(|(_, v)| v.label.to_string())
-        .collect::<Vec<_>>();
-    let num_matches = label_name.len();
-
-    if num_matches > 1 {
-        Err(ValveError::ConfigError(format!(
-            "Error while reading column configuration for '{}': \
-             Columns must be unique.",
-            table,
-        ))
-        .into())
-    } else if num_matches == 0 {
-        Err(ValveError::ConfigError(format!(
-            "Error while reading column configuration for '{}': \
-             Column not found.",
-            table,
-        ))
-        .into())
-    } else if label_name[0] != "" {
-        Ok(label_name[0].to_string())
-    } else {
-        // If the label is empty then just return the column name:
-        Ok(column.to_string())
-    }
-}
-
-/// Given a vector of string slices, return a set containing the distinct options contained therein.
-/// If there are logical conflicts between options, e.g., if both 'db_view' and 'load' are
-/// specified (views cannot be loaded), then resolve them in favour of the last specified option by
-/// removing the earlier conflicting option from the option set, and writing a warning to the log.
-/// Note that if there are unrecognized options in the list these will generate warning messages but
-/// will otherwise be ignored.
-pub fn normalize_options(
-    input_options: &Vec<&str>,
-    row_number: u32,
-) -> Result<(HashSet<String>, Vec<ValveMessage>)> {
-    fn warn_and_get_message(
-        row_number: u32,
-        message: &str,
-        violation: &str,
-        level: &str,
-        value: &str,
-    ) -> ValveMessage {
-        log::warn!(
-            "{}: '{}' in row {} of 'table' table",
-            message,
-            value,
-            row_number
-        );
-        ValveMessage {
-            column: "options".to_string(),
-            value: value.to_string(),
-            rule: format!("option:{}", violation),
-            level: level.to_string(),
-            message: message.to_string(),
-        }
-    }
-
-    // Collect all input options into a set, resolving any logical conflicts in favour of the last
-    // read input option if necessary.
-    let mut explicit_options = HashSet::new();
-    let mut messages = vec![];
-    for input_option in input_options {
-        let input_option = input_option.trim().to_string();
-        if input_option == "" {
-            continue;
-        }
-        if !ALLOWED_OPTIONS.contains(&input_option.as_str()) {
-            messages.push(warn_and_get_message(
-                row_number,
-                "unrecognized option",
-                "unrecognized",
-                "error",
-                &input_option.as_str(),
-            ));
-            continue;
-        }
-        if explicit_options.contains(&input_option) {
-            messages.push(warn_and_get_message(
-                row_number,
-                "redundant option",
-                "redundant",
-                "warning",
-                &input_option.as_str(),
-            ));
-            continue;
-        }
-
-        match input_option.as_str() {
-            "internal" => {
-                messages.push(warn_and_get_message(
-                    row_number,
-                    "reserved for internal use",
-                    "reserved",
-                    "error",
-                    &input_option.as_str(),
-                ));
-            }
-            "db_table" => {
-                if explicit_options.contains("db_view") {
-                    messages.push(warn_and_get_message(
-                        row_number,
-                        "overrides db_view",
-                        "overrides",
-                        "warning",
-                        &input_option.as_str(),
-                    ));
-                    explicit_options.remove("db_view");
-                }
-            }
-            "db_view" => {
-                for conflicting_option in [
-                    "db_table",
-                    "truncate",
-                    "load",
-                    "conflict",
-                    "save",
-                    "edit",
-                    "validate_on_load",
-                ] {
-                    if explicit_options.contains(conflicting_option) {
-                        messages.push(warn_and_get_message(
-                            row_number,
-                            &format!("overrides {}", conflicting_option),
-                            "overrides",
-                            "warning",
-                            &input_option.as_str(),
-                        ));
-                        explicit_options.remove(conflicting_option);
-                    }
-                }
-            }
-            "truncate" => {
-                if explicit_options.contains("db_view") {
-                    messages.push(warn_and_get_message(
-                        row_number,
-                        "overrides db_view",
-                        "overrides",
-                        "warning",
-                        &input_option.as_str(),
-                    ));
-                    explicit_options.remove("db_view");
-                }
-            }
-            "load" => {
-                if explicit_options.contains("db_view") {
-                    messages.push(warn_and_get_message(
-                        row_number,
-                        "overrides db_view",
-                        "overrides",
-                        "warning",
-                        &input_option.as_str(),
-                    ));
-                    explicit_options.remove("db_view");
-                }
-            }
-            "conflict" => {
-                for conflicting_option in ["db_view", "no-conflict"] {
-                    if explicit_options.contains(conflicting_option) {
-                        messages.push(warn_and_get_message(
-                            row_number,
-                            &format!("overrides {}", conflicting_option),
-                            "overrides",
-                            "warning",
-                            &input_option.as_str(),
-                        ));
-                        explicit_options.remove(conflicting_option);
-                    }
-                }
-            }
-            "no-conflict" => {
-                if explicit_options.contains("conflict") {
-                    messages.push(warn_and_get_message(
-                        row_number,
-                        "overrides conflict",
-                        "overrides",
-                        "warning",
-                        &input_option.as_str(),
-                    ));
-                    explicit_options.remove("conflict");
-                }
-            }
-            "save" => {
-                for conflicting_option in ["db_view", "no-save"] {
-                    if explicit_options.contains(conflicting_option) {
-                        messages.push(warn_and_get_message(
-                            row_number,
-                            &format!("overrides {}", conflicting_option),
-                            "overrides",
-                            "warning",
-                            &input_option.as_str(),
-                        ));
-                        explicit_options.remove(conflicting_option);
-                    }
-                }
-            }
-            "no-save" => {
-                if explicit_options.contains("save") {
-                    messages.push(warn_and_get_message(
-                        row_number,
-                        "overrides save",
-                        "overrides",
-                        "warning",
-                        &input_option.as_str(),
-                    ));
-                    explicit_options.remove("save");
-                }
-            }
-            "edit" => {
-                for conflicting_option in ["db_view", "no-edit"] {
-                    if explicit_options.contains(conflicting_option) {
-                        messages.push(warn_and_get_message(
-                            row_number,
-                            &format!("overrides {}", conflicting_option),
-                            "overrides",
-                            "warning",
-                            &input_option.as_str(),
-                        ));
-                        explicit_options.remove(conflicting_option);
-                    }
-                }
-            }
-            "no-edit" => {
-                if explicit_options.contains("edit") {
-                    messages.push(warn_and_get_message(
-                        row_number,
-                        "overrides edit",
-                        "overrides",
-                        "warning",
-                        &input_option.as_str(),
-                    ));
-                    explicit_options.remove("edit");
-                }
-            }
-            "validate_on_load" => {
-                for conflicting_option in ["db_view", "no-validate_on_load"] {
-                    if explicit_options.contains(conflicting_option) {
-                        messages.push(warn_and_get_message(
-                            row_number,
-                            &format!("overrides {}", conflicting_option),
-                            "overrides",
-                            "warning",
-                            &input_option.as_str(),
-                        ));
-                        explicit_options.remove(conflicting_option);
-                    }
-                }
-            }
-            "no-validate_on_load" => {
-                if explicit_options.contains("validate_on_load") {
-                    messages.push(warn_and_get_message(
-                        row_number,
-                        "overrides validate_on_load",
-                        "overrides",
-                        "warning",
-                        &input_option.as_str(),
-                    ));
-                    explicit_options.remove("validate_on_load");
-                }
-            }
-            _ => (),
-        };
-
-        explicit_options.insert(input_option);
-    }
-
-    // Construct the base options for this view or table
-    let mut base_options = HashSet::new();
-    if explicit_options.contains("db_view") {
-        base_options.insert("db_view".to_string());
-    } else {
-        base_options.insert("db_table".to_string());
-        base_options.insert("truncate".to_string());
-        base_options.insert("load".to_string());
-
-        // If no options were specified, the user wants the default, which is a db_table with all
-        // "extra" options enabled:
-        if input_options.is_empty() || *input_options == vec![""] {
-            explicit_options.insert("save".to_string());
-            explicit_options.insert("edit".to_string());
-            explicit_options.insert("validate_on_load".to_string());
-            explicit_options.insert("conflict".to_string());
-        } else {
-            if !explicit_options.contains("no-save") {
-                explicit_options.insert("save".to_string());
-            } else if !explicit_options.contains("no-edit") {
-                explicit_options.insert("edit".to_string());
-            } else if !explicit_options.contains("no-validate_on_load") {
-                explicit_options.insert("validate_on_load".to_string());
-            } else if !explicit_options.contains("no-conflict") {
-                explicit_options.insert("conflict".to_string());
-            }
-        }
-    }
-    // Remove any negative options here. They are no longer needed.
-    explicit_options.remove("no-save");
-    explicit_options.remove("no-edit");
-    explicit_options.remove("no-validate_on_load");
-    explicit_options.remove("no-conflict");
-    // If the user specified the 'internal' option we also remove this here (a warning will have
-    // been generated above);
-    explicit_options.remove("internal");
-
-    // Construct the union of the base and explicit sets of options and return it:
-    let normalized_options = base_options.union(&explicit_options).cloned().collect();
-    Ok((normalized_options, messages))
-}
-
 /// Given the path to a table table (either a table.tsv file or a database containing a
 /// table named "table"), load and check the 'table', 'column', and 'datatype' tables, and return
 /// the following items:
@@ -1325,6 +953,689 @@ pub fn read_config_files(
     ))
 }
 
+/// Given a string representing the location of a database, return a database connection pool.
+pub async fn get_pool_from_connection_string(database: &str) -> Result<AnyPool> {
+    let connection_options;
+    if database.starts_with("postgresql://") {
+        connection_options = AnyConnectOptions::from_str(database)?;
+    } else {
+        let connection_string;
+        if !database.starts_with("sqlite://") {
+            connection_string = format!("sqlite://{}?mode=rwc", database);
+        } else {
+            connection_string = database.to_string();
+        }
+        connection_options = AnyConnectOptions::from_str(connection_string.as_str())?;
+    }
+
+    let pool = AnyPoolOptions::new()
+        .max_connections(MAX_DB_CONNECTIONS)
+        .connect_with(connection_options)
+        .await?;
+    Ok(pool)
+}
+
+/// Given a path, read a TSV file and return a vector of rows represented as [SerdeMaps](SerdeMap).
+/// Note: Use this function to read "small" TSVs only. In particular, use this for the special
+/// configuration tables.
+pub fn read_tsv_into_vector(path: &str) -> Result<Vec<SerdeMap>> {
+    let mut rdr =
+        ReaderBuilder::new()
+            .delimiter(b'\t')
+            .from_reader(File::open(path).map_err(|err| {
+                ValveError::ConfigError(format!("Unable to open '{}': {}", path, err))
+            })?);
+
+    let mut rows: Vec<SerdeMap> = vec![];
+    for result in rdr.deserialize() {
+        match result {
+            Err(e) => {
+                return Err(ValveError::InputError(format!("Error reading {}: {}", path, e)).into())
+            }
+            Ok(row) => rows.push(row),
+        }
+    }
+
+    if rows.len() < 1 {
+        return Err(ValveError::DataError(format!("No rows in {}", path)).into());
+    }
+
+    for (i, row) in rows.iter().enumerate() {
+        // enumerate() begins at 0 but we want to count rows from 1:
+        let i = i + 1;
+        for (col, val) in row {
+            let val = match val {
+                SerdeValue::String(s) => s.to_string(),
+                _ => val.to_string(),
+            };
+            let trimmed_val = val.trim();
+            if trimmed_val != val {
+                return Err(ValveError::DataError(format!(
+                    "Value '{}' of column '{}' in row {} of table '{}' {}",
+                    val, col, i, path, "has leading and/or trailing whitespace."
+                ))
+                .into());
+            }
+        }
+    }
+
+    Ok(rows)
+}
+
+/// Given a database at the specified location, query the given table and return a vector of rows
+/// represented as [SerdeMaps](SerdeMap).
+pub fn read_db_table_into_vector(pool: &AnyPool, config_table: &str) -> Result<Vec<SerdeMap>> {
+    let sql = format!("SELECT * FROM \"{}\"", config_table);
+    let rows = block_on(sqlx_query(&sql).fetch_all(pool)).map_err(|e| {
+        ValveError::InputError(format!(
+            "Error while reading table '{}' from database: {}",
+            config_table, e
+        ))
+    })?;
+    let mut table_rows = vec![];
+    for row in rows {
+        let mut table_row = SerdeMap::new();
+        for column in row.columns() {
+            let cname = column.name();
+            if cname != "row_number" && cname != "row_order" {
+                let raw_value = row.try_get_raw(format!(r#"{}"#, cname).as_str()).unwrap();
+                if !raw_value.is_null() {
+                    let value = get_column_value_as_string(&row, &cname, "text");
+                    table_row.insert(cname.to_string(), json!(value));
+                } else {
+                    table_row.insert(cname.to_string(), json!(""));
+                }
+            }
+        }
+        table_rows.push(table_row);
+    }
+    Ok(table_rows)
+}
+
+/// Given a condition on a datatype, if the condition is a Function, then parse it using
+/// StartParser, create a corresponding CompiledCondition, and return it. If the condition is a
+/// Label, then look for the CompiledCondition corresponding to it in datatype_conditions
+/// and return it.
+pub fn compile_condition(
+    condition: &str,
+    parser: &StartParser,
+    datatype_conditions: &HashMap<String, CompiledCondition>,
+) -> Result<CompiledCondition> {
+    if condition == "null" || condition == "not null" {
+        // The case of a "null" or "not null" condition will be treated specially later during the
+        // validation phase in a way that does not utilise the associated closure. Since we still
+        // have to assign some closure in these cases, we use a constant closure that always
+        // returns true:
+        return Ok(CompiledCondition {
+            value_type: ValueType::Single,
+            original: String::from(""),
+            parsed: Expression::None,
+            compiled: Arc::new(|_| true),
+        });
+    }
+
+    let unquoted_re = Regex::new(r#"^['"](?P<unquoted>.*)['"]$"#)?;
+    let parsed_condition = match parser.parse(condition) {
+        Err(_) => {
+            return Err(
+                ValveError::InputError(format!("Could not parse condition: {}", condition)).into(),
+            )
+        }
+        Ok(parsed_condition) => parsed_condition,
+    };
+    if parsed_condition.len() != 1 {
+        return Err(ValveError::InputError(format!(
+            "Invalid condition: '{}'. Only one condition per column is allowed.",
+            condition
+        ))
+        .into());
+    }
+    let parsed_condition = &parsed_condition[0];
+    match &**parsed_condition {
+        Expression::Function(name, args) if name == "equals" => match &*args[0] {
+            Expression::Label(label) => {
+                let label = String::from(unquoted_re.replace(label, "$unquoted"));
+                Ok(CompiledCondition {
+                    value_type: ValueType::Single,
+                    original: condition.to_string(),
+                    parsed: *parsed_condition.clone(),
+                    compiled: Arc::new(move |x| x == label),
+                })
+            }
+            _ => Err(
+                ValveError::InputError(format!("ERROR: Invalid condition: {}", condition)).into(),
+            ),
+        },
+        Expression::Function(name, args)
+            if vec!["exclude", "match", "search"].contains(&name.as_str()) =>
+        {
+            if let Expression::RegexMatch(pattern, flags) = &*args[0] {
+                let mut pattern = String::from(unquoted_re.replace(pattern, "$unquoted"));
+                let mut flags = String::from(flags);
+                if flags != "" {
+                    flags = format!("(?{})", flags.as_str());
+                }
+                match name.as_str() {
+                    "exclude" => {
+                        pattern = format!("{}{}", flags, pattern);
+                        let re = Regex::new(pattern.as_str())?;
+                        Ok(CompiledCondition {
+                            value_type: ValueType::Single,
+                            original: condition.to_string(),
+                            parsed: *parsed_condition.clone(),
+                            compiled: Arc::new(move |x| !re.is_match(x)),
+                        })
+                    }
+                    "match" => {
+                        pattern = format!("^({}{})$", flags, pattern);
+                        let re = Regex::new(pattern.as_str())?;
+                        Ok(CompiledCondition {
+                            value_type: ValueType::Single,
+                            original: condition.to_string(),
+                            parsed: *parsed_condition.clone(),
+                            compiled: Arc::new(move |x| re.is_match(x)),
+                        })
+                    }
+                    "search" => {
+                        pattern = format!("{}{}", flags, pattern);
+                        let re = Regex::new(pattern.as_str())?;
+                        Ok(CompiledCondition {
+                            value_type: ValueType::Single,
+                            original: condition.to_string(),
+                            parsed: *parsed_condition.clone(),
+                            compiled: Arc::new(move |x| re.is_match(x)),
+                        })
+                    }
+                    _ => Err(ValveError::InputError(format!(
+                        "Unrecognized function name: {}",
+                        name
+                    ))
+                    .into()),
+                }
+            } else {
+                Err(ValveError::InputError(format!(
+                    "Argument to condition: {} is not a regular expression",
+                    condition
+                ))
+                .into())
+            }
+        }
+        Expression::Function(name, args) if name == "in" => {
+            let mut alternatives: Vec<String> = vec![];
+            for arg in args {
+                if let Expression::Label(value) = &**arg {
+                    let value = unquoted_re.replace(value, "$unquoted");
+                    alternatives.push(value.to_string());
+                } else {
+                    return Err(ValveError::InputError(format!(
+                        "Argument: {:?} to function 'in' is not a label",
+                        arg
+                    ))
+                    .into());
+                }
+            }
+            Ok(CompiledCondition {
+                value_type: ValueType::Single,
+                original: condition.to_string(),
+                parsed: *parsed_condition.clone(),
+                compiled: Arc::new(move |x| alternatives.contains(&x.to_string())),
+            })
+        }
+        Expression::Function(name, args) if name == "list" => {
+            let syntax_error =
+                ValveError::InputError(format!("Invalid arguments for 'list': {:?}", args));
+            match &*args[0] {
+                Expression::Label(datatype) => match &*args[1] {
+                    Expression::Label(separator) => {
+                        let datatype_not_found_error = ValveError::InputError(format!(
+                            "Datatype not found: '{}' in arguments for 'list': {:?}",
+                            datatype, args
+                        ));
+                        let compiled = match datatype_conditions.get(datatype) {
+                            Some(condition) => condition.compiled.clone(),
+                            _ => return Err(datatype_not_found_error.into()),
+                        };
+                        let separator = String::from(unquoted_re.replace(separator, "$unquoted"));
+                        Ok(CompiledCondition {
+                            value_type: ValueType::List(separator.to_string()),
+                            original: condition.to_string(),
+                            parsed: *parsed_condition.clone(),
+                            compiled: compiled,
+                        })
+                    }
+                    _ => Err(syntax_error.into()),
+                },
+                _ => Err(syntax_error.into()),
+            }
+        }
+        Expression::Label(value) if datatype_conditions.contains_key(&value.to_string()) => {
+            let condition = datatype_conditions.get(&value.to_string()).unwrap();
+            Ok(CompiledCondition {
+                value_type: ValueType::Single,
+                original: value.to_string(),
+                parsed: condition.parsed.clone(),
+                compiled: condition.compiled.clone(),
+            })
+        }
+        _ => Err(ValveError::InputError(format!("Unrecognized condition: {}", condition)).into()),
+    }
+}
+
+/// Given a vector of string slices, return a set containing the distinct options contained therein.
+/// If there are logical conflicts between options, e.g., if both 'db_view' and 'load' are
+/// specified (views cannot be loaded), then resolve them in favour of the last specified option by
+/// removing the earlier conflicting option from the option set, and writing a warning to the log.
+/// Note that if there are unrecognized options in the list these will generate warning messages but
+/// will otherwise be ignored.
+pub fn normalize_options(
+    input_options: &Vec<&str>,
+    row_number: u32,
+) -> Result<(HashSet<String>, Vec<ValveMessage>)> {
+    fn warn_and_get_message(
+        row_number: u32,
+        message: &str,
+        violation: &str,
+        level: &str,
+        value: &str,
+    ) -> ValveMessage {
+        log::warn!(
+            "{}: '{}' in row {} of 'table' table",
+            message,
+            value,
+            row_number
+        );
+        ValveMessage {
+            column: "options".to_string(),
+            value: value.to_string(),
+            rule: format!("option:{}", violation),
+            level: level.to_string(),
+            message: message.to_string(),
+        }
+    }
+
+    // Collect all input options into a set, resolving any logical conflicts in favour of the last
+    // read input option if necessary.
+    let mut explicit_options = HashSet::new();
+    let mut messages = vec![];
+    for input_option in input_options {
+        let input_option = input_option.trim().to_string();
+        if input_option == "" {
+            continue;
+        }
+        if !ALLOWED_OPTIONS.contains(&input_option.as_str()) {
+            messages.push(warn_and_get_message(
+                row_number,
+                "unrecognized option",
+                "unrecognized",
+                "error",
+                &input_option.as_str(),
+            ));
+            continue;
+        }
+        if explicit_options.contains(&input_option) {
+            messages.push(warn_and_get_message(
+                row_number,
+                "redundant option",
+                "redundant",
+                "warning",
+                &input_option.as_str(),
+            ));
+            continue;
+        }
+
+        match input_option.as_str() {
+            "internal" => {
+                messages.push(warn_and_get_message(
+                    row_number,
+                    "reserved for internal use",
+                    "reserved",
+                    "error",
+                    &input_option.as_str(),
+                ));
+            }
+            "db_table" => {
+                if explicit_options.contains("db_view") {
+                    messages.push(warn_and_get_message(
+                        row_number,
+                        "overrides db_view",
+                        "overrides",
+                        "warning",
+                        &input_option.as_str(),
+                    ));
+                    explicit_options.remove("db_view");
+                }
+            }
+            "db_view" => {
+                for conflicting_option in [
+                    "db_table",
+                    "truncate",
+                    "load",
+                    "conflict",
+                    "save",
+                    "edit",
+                    "validate_on_load",
+                ] {
+                    if explicit_options.contains(conflicting_option) {
+                        messages.push(warn_and_get_message(
+                            row_number,
+                            &format!("overrides {}", conflicting_option),
+                            "overrides",
+                            "warning",
+                            &input_option.as_str(),
+                        ));
+                        explicit_options.remove(conflicting_option);
+                    }
+                }
+            }
+            "truncate" => {
+                if explicit_options.contains("db_view") {
+                    messages.push(warn_and_get_message(
+                        row_number,
+                        "overrides db_view",
+                        "overrides",
+                        "warning",
+                        &input_option.as_str(),
+                    ));
+                    explicit_options.remove("db_view");
+                }
+            }
+            "load" => {
+                if explicit_options.contains("db_view") {
+                    messages.push(warn_and_get_message(
+                        row_number,
+                        "overrides db_view",
+                        "overrides",
+                        "warning",
+                        &input_option.as_str(),
+                    ));
+                    explicit_options.remove("db_view");
+                }
+            }
+            "conflict" => {
+                for conflicting_option in ["db_view", "no-conflict"] {
+                    if explicit_options.contains(conflicting_option) {
+                        messages.push(warn_and_get_message(
+                            row_number,
+                            &format!("overrides {}", conflicting_option),
+                            "overrides",
+                            "warning",
+                            &input_option.as_str(),
+                        ));
+                        explicit_options.remove(conflicting_option);
+                    }
+                }
+            }
+            "no-conflict" => {
+                if explicit_options.contains("conflict") {
+                    messages.push(warn_and_get_message(
+                        row_number,
+                        "overrides conflict",
+                        "overrides",
+                        "warning",
+                        &input_option.as_str(),
+                    ));
+                    explicit_options.remove("conflict");
+                }
+            }
+            "save" => {
+                for conflicting_option in ["db_view", "no-save"] {
+                    if explicit_options.contains(conflicting_option) {
+                        messages.push(warn_and_get_message(
+                            row_number,
+                            &format!("overrides {}", conflicting_option),
+                            "overrides",
+                            "warning",
+                            &input_option.as_str(),
+                        ));
+                        explicit_options.remove(conflicting_option);
+                    }
+                }
+            }
+            "no-save" => {
+                if explicit_options.contains("save") {
+                    messages.push(warn_and_get_message(
+                        row_number,
+                        "overrides save",
+                        "overrides",
+                        "warning",
+                        &input_option.as_str(),
+                    ));
+                    explicit_options.remove("save");
+                }
+            }
+            "edit" => {
+                for conflicting_option in ["db_view", "no-edit"] {
+                    if explicit_options.contains(conflicting_option) {
+                        messages.push(warn_and_get_message(
+                            row_number,
+                            &format!("overrides {}", conflicting_option),
+                            "overrides",
+                            "warning",
+                            &input_option.as_str(),
+                        ));
+                        explicit_options.remove(conflicting_option);
+                    }
+                }
+            }
+            "no-edit" => {
+                if explicit_options.contains("edit") {
+                    messages.push(warn_and_get_message(
+                        row_number,
+                        "overrides edit",
+                        "overrides",
+                        "warning",
+                        &input_option.as_str(),
+                    ));
+                    explicit_options.remove("edit");
+                }
+            }
+            "validate_on_load" => {
+                for conflicting_option in ["db_view", "no-validate_on_load"] {
+                    if explicit_options.contains(conflicting_option) {
+                        messages.push(warn_and_get_message(
+                            row_number,
+                            &format!("overrides {}", conflicting_option),
+                            "overrides",
+                            "warning",
+                            &input_option.as_str(),
+                        ));
+                        explicit_options.remove(conflicting_option);
+                    }
+                }
+            }
+            "no-validate_on_load" => {
+                if explicit_options.contains("validate_on_load") {
+                    messages.push(warn_and_get_message(
+                        row_number,
+                        "overrides validate_on_load",
+                        "overrides",
+                        "warning",
+                        &input_option.as_str(),
+                    ));
+                    explicit_options.remove("validate_on_load");
+                }
+            }
+            _ => (),
+        };
+
+        explicit_options.insert(input_option);
+    }
+
+    // Construct the base options for this view or table
+    let mut base_options = HashSet::new();
+    if explicit_options.contains("db_view") {
+        base_options.insert("db_view".to_string());
+    } else {
+        base_options.insert("db_table".to_string());
+        base_options.insert("truncate".to_string());
+        base_options.insert("load".to_string());
+
+        // If no options were specified, the user wants the default, which is a db_table with all
+        // "extra" options enabled:
+        if input_options.is_empty() || *input_options == vec![""] {
+            explicit_options.insert("save".to_string());
+            explicit_options.insert("edit".to_string());
+            explicit_options.insert("validate_on_load".to_string());
+            explicit_options.insert("conflict".to_string());
+        } else {
+            if !explicit_options.contains("no-save") {
+                explicit_options.insert("save".to_string());
+            } else if !explicit_options.contains("no-edit") {
+                explicit_options.insert("edit".to_string());
+            } else if !explicit_options.contains("no-validate_on_load") {
+                explicit_options.insert("validate_on_load".to_string());
+            } else if !explicit_options.contains("no-conflict") {
+                explicit_options.insert("conflict".to_string());
+            }
+        }
+    }
+    // Remove any negative options here. They are no longer needed.
+    explicit_options.remove("no-save");
+    explicit_options.remove("no-edit");
+    explicit_options.remove("no-validate_on_load");
+    explicit_options.remove("no-conflict");
+    // If the user specified the 'internal' option we also remove this here (a warning will have
+    // been generated above);
+    explicit_options.remove("internal");
+
+    // Construct the union of the base and explicit sets of options and return it:
+    let normalized_options = base_options.union(&explicit_options).cloned().collect();
+    Ok((normalized_options, messages))
+}
+
+/// Given a global configuration struct and a table name, returns the options for the table.
+pub fn get_table_options_from_config(config: &ValveConfig, table: &str) -> Result<HashSet<String>> {
+    Ok(config
+        .table
+        .get(table)
+        .ok_or::<ValveError>(
+            ValveError::InputError(format!("'{}' is not in table config", table)).into(),
+        )?
+        .options
+        .clone())
+}
+
+/// Given a table configuration map and a datatype configuration map, a parser, a table name, and a
+/// database connection pool, return lists of: primary keys, unique constraints, foreign keys,
+/// and trees.
+pub fn get_table_constraints(
+    tables_config: &HashMap<String, ValveTableConfig>,
+    datatypes_config: &HashMap<String, ValveDatatypeConfig>,
+    parser: &StartParser,
+    table_name: &str,
+    pool: &AnyPool,
+) -> (
+    Vec<String>,
+    Vec<String>,
+    Vec<ValveForeignConstraint>,
+    Vec<ValveTreeConstraint>,
+) {
+    let mut primaries = vec![];
+    let mut uniques = vec![];
+    let mut foreigns = vec![];
+    let mut trees = vec![];
+
+    let columns = tables_config
+        .get(table_name)
+        .and_then(|t| Some(t.column.clone()))
+        .expect(&format!("Undefined table '{}'", table_name));
+    let mut colvals = vec![];
+    for (_, column) in columns.iter() {
+        colvals.push(column.clone());
+    }
+
+    for row in colvals {
+        let datatype = &row.datatype;
+        let sql_type = get_sql_type(datatypes_config, datatype, pool);
+        let column_name = &row.column;
+        let structure = &row.structure;
+        if structure != "" {
+            let parsed_structure = parser
+                .parse(&structure)
+                .expect(&format!("Could not parse structure '{}'", structure));
+            for expression in parsed_structure {
+                match *expression {
+                    Expression::Label(value) if value == "primary" => {
+                        primaries.push(column_name.to_string());
+                    }
+                    Expression::Label(value) if value == "unique" => {
+                        uniques.push(column_name.to_string());
+                    }
+                    Expression::Function(name, args) if name == "from" => {
+                        if args.len() != 1 {
+                            panic!("Invalid foreign key: {} for: {}", structure, table_name);
+                        }
+                        match &*args[0] {
+                            Expression::Field(ftable, fcolumn) => {
+                                foreigns.push(ValveForeignConstraint {
+                                    table: table_name.to_string(),
+                                    column: column_name.to_string(),
+                                    ftable: ftable.to_string(),
+                                    fcolumn: fcolumn.to_string(),
+                                });
+                            }
+                            _ => {
+                                panic!("Invalid foreign key: {} for: {}", structure, table_name)
+                            }
+                        };
+                    }
+                    Expression::Function(name, args) if name == "tree" => {
+                        if args.len() != 1 {
+                            panic!(
+                                "Invalid 'tree' constraint: {} for: {}",
+                                structure, table_name
+                            );
+                        }
+                        match &*args[0] {
+                            Expression::Label(child) => {
+                                let child_datatype = columns
+                                    .get(child)
+                                    .and_then(|c| Some(c.datatype.to_string()));
+                                if let None = child_datatype {
+                                    panic!(
+                                        "Could not determine datatype for {} of tree({})",
+                                        child, child
+                                    );
+                                }
+                                let child_datatype = child_datatype.unwrap();
+                                let parent = column_name;
+                                let child_sql_type = get_sql_type(
+                                    datatypes_config,
+                                    &child_datatype.to_string(),
+                                    pool,
+                                );
+                                if sql_type != child_sql_type {
+                                    panic!(
+                                        "SQL type '{}' of '{}' in 'tree({})' for table \
+                                         '{}' doe snot match SQL type: '{}' of parent: '{}'.",
+                                        child_sql_type, child, child, table_name, sql_type, parent
+                                    );
+                                }
+                                trees.push(ValveTreeConstraint {
+                                    child: child.to_string(),
+                                    parent: column_name.to_string(),
+                                });
+                            }
+                            _ => {
+                                panic!(
+                                    "Invalid 'tree' constraint: {} for: {}",
+                                    structure, table_name
+                                );
+                            }
+                        };
+                    }
+                    _ => panic!(
+                        "Unrecognized structure: {} for {}.{}",
+                        structure, table_name, column_name
+                    ),
+                };
+            }
+        }
+    }
+
+    return (primaries, uniques, foreigns, trees);
+}
+
 /// Given the global configuration struct and a parser, compile all of the datatype conditions,
 /// add them to a hash map whose keys are the text versions of the conditions and whose values
 /// are the compiled conditions, and then finally return the hash map.
@@ -1451,6 +1762,434 @@ pub fn get_parsed_structure_conditions(
         }
     }
     Ok(parsed_structure_conditions)
+}
+
+/// Takes as arguments a list of tables and a configuration struct describing all of the constraints
+/// between tables. After validating that there are no cycles amongst the foreign, and tree
+/// dependencies, returns (i) the list of tables sorted according to their foreign key
+/// dependencies, such that if table_a depends on table_b, then table_b comes before table_a in the
+/// list; (ii) A map from table names to the lists of tables that depend on a given table; (iii) a
+/// map from table names to the lists of tables that a given table depends on.
+pub fn verify_table_deps_and_sort(
+    table_list: &Vec<String>,
+    constraints: &ValveConstraintConfig,
+) -> (
+    Vec<String>,
+    HashMap<String, Vec<String>>,
+    HashMap<String, Vec<String>>,
+) {
+    fn get_cycles(g: &DiGraphMap<&str, ()>) -> Result<Vec<String>, Vec<Vec<String>>> {
+        let mut cycles = vec![];
+        match toposort(&g, None) {
+            Err(cycle) => {
+                let problem_node = cycle.node_id();
+                let neighbours = g.neighbors_directed(problem_node, Direction::Outgoing);
+                for neighbour in neighbours {
+                    let ways_to_problem_node =
+                        all_simple_paths::<Vec<_>, _>(&g, neighbour, problem_node, 0, None);
+                    for mut way in ways_to_problem_node {
+                        let mut cycle = vec![problem_node];
+                        cycle.append(&mut way);
+                        let cycle = cycle
+                            .iter()
+                            .map(|&item| item.to_string())
+                            .collect::<Vec<_>>();
+                        cycles.push(cycle);
+                    }
+                }
+                Err(cycles)
+            }
+            Ok(sorted) => {
+                let mut sorted = sorted
+                    .iter()
+                    .map(|&item| item.to_string())
+                    .collect::<Vec<_>>();
+                sorted.reverse();
+                Ok(sorted)
+            }
+        }
+    }
+
+    // Check for intra-table cycles:
+    let trees = &constraints.tree;
+    for table_name in table_list {
+        let mut dependency_graph = DiGraphMap::<&str, ()>::new();
+        let table_trees = trees
+            .get(table_name)
+            .expect(&format!("Undefined table '{}'", table_name));
+        for tree in table_trees {
+            let child = &tree.child;
+            let parent = &tree.parent;
+            let c_index = dependency_graph.add_node(&child);
+            let p_index = dependency_graph.add_node(&parent);
+            dependency_graph.add_edge(c_index, p_index, ());
+        }
+        match get_cycles(&dependency_graph) {
+            Ok(_) => (),
+            Err(cycles) => {
+                let mut message = String::new();
+                for cycle in cycles {
+                    message.push_str(
+                        format!("Cyclic dependency in table '{}': ", table_name).as_str(),
+                    );
+                    let end_index = cycle.len() - 1;
+                    for (i, child) in cycle.iter().enumerate() {
+                        if i < end_index {
+                            let dep = table_trees.iter().find(|d| d.child == *child).unwrap();
+                            let parent = &dep.parent;
+                            message.push_str(
+                                format!("tree({}) references {}", child, parent).as_str(),
+                            );
+                        }
+                        if i < (end_index - 1) {
+                            message.push_str(" and ");
+                        }
+                    }
+                    message.push_str(". ");
+                }
+                panic!("{}", message);
+            }
+        };
+    }
+
+    // Check for inter-table cycles:
+    let foreign_keys = &constraints.foreign;
+    let mut dependency_graph = DiGraphMap::<&str, ()>::new();
+    for table_name in table_list {
+        let t_index = dependency_graph.add_node(table_name);
+        let fkeys = foreign_keys
+            .get(table_name)
+            .expect(&format!("Undefined table '{}'", table_name));
+        for fkey in fkeys {
+            let ftable = &fkey.ftable;
+            let f_index = dependency_graph.add_node(&ftable);
+            dependency_graph.add_edge(t_index, f_index, ());
+        }
+    }
+
+    match get_cycles(&dependency_graph) {
+        Ok(sorted_table_list) => {
+            let mut table_dependencies_in = HashMap::new();
+            for node in dependency_graph.nodes() {
+                let neighbors = dependency_graph
+                    .neighbors_directed(node, petgraph::Direction::Incoming)
+                    .map(|n| n.to_string())
+                    .collect::<Vec<_>>();
+                table_dependencies_in.insert(node.to_string(), neighbors);
+            }
+            let mut table_dependencies_out = HashMap::new();
+            for node in dependency_graph.nodes() {
+                let neighbors = dependency_graph
+                    .neighbors_directed(node, petgraph::Direction::Outgoing)
+                    .map(|n| n.to_string())
+                    .collect::<Vec<_>>();
+                table_dependencies_out.insert(node.to_string(), neighbors);
+            }
+            let mut sorted_table_list = sorted_table_list.clone();
+            let mut with_internals = INTERNAL_TABLES
+                .iter()
+                .map(|t| t.to_string())
+                .collect::<Vec<_>>();
+            with_internals.append(&mut sorted_table_list);
+            return (
+                with_internals,
+                table_dependencies_in,
+                table_dependencies_out,
+            );
+        }
+        Err(cycles) => {
+            let mut message = String::new();
+            for cycle in cycles {
+                message.push_str(
+                    format!("Cyclic dependency between tables {}: ", cycle.join(", ")).as_str(),
+                );
+                let end_index = cycle.len() - 1;
+                for (i, table) in cycle.iter().enumerate() {
+                    if i < end_index {
+                        let dep_name = cycle.get(i + 1).unwrap().as_str();
+                        let fkeys = foreign_keys.get(table).unwrap();
+                        let column;
+                        let ref_table;
+                        let ref_column;
+                        if let Some(dep) = fkeys.iter().find(|d| d.ftable == *dep_name) {
+                            column = &dep.column;
+                            ref_table = &dep.ftable;
+                            ref_column = &dep.fcolumn;
+                        } else {
+                            panic!("{}. Unable to retrieve the details.", message);
+                        }
+
+                        message.push_str(
+                            format!(
+                                "{}.{} depends on {}.{}",
+                                table, column, ref_table, ref_column,
+                            )
+                            .as_str(),
+                        );
+                    }
+                    if i < (end_index - 1) {
+                        message.push_str(" and ");
+                    }
+                }
+                message.push_str(". ");
+            }
+            panic!("{}", message);
+        }
+    };
+}
+
+/// Given a global configuration struct, a map of compiled datatype conditions, and the name of a
+/// datatype, returns the configuration information for all of the datatype's ancestors if
+/// only_conditioned is set to false, otherwise returns the configuration information only for
+/// those ancestors that define a datatype condition. Note that this function will panic if
+/// the datatype name is not defined in the given config.
+pub fn get_datatype_ancestors(
+    config: &ValveConfig,
+    datatype_conditions: &HashMap<String, CompiledCondition>,
+    dt_name: &str,
+    only_conditioned: bool,
+) -> Vec<ValveDatatypeConfig> {
+    fn build_hierarchy(
+        config: &ValveConfig,
+        datatype_conditions: &HashMap<String, CompiledCondition>,
+        start_dt_name: &str,
+        dt_name: &str,
+        only_conditioned: bool,
+    ) -> Vec<ValveDatatypeConfig> {
+        let mut datatypes = vec![];
+        if dt_name != "" {
+            let datatype = config
+                .datatype
+                .get(dt_name)
+                .expect(&format!("Undefined datatype '{}'", dt_name));
+            let dt_name = datatype.datatype.as_str();
+            let dt_condition = datatype_conditions.get(dt_name);
+            let dt_parent = datatype.parent.as_str();
+            if dt_name != start_dt_name {
+                if !only_conditioned {
+                    datatypes.push(datatype.clone());
+                } else {
+                    if let Some(_) = dt_condition {
+                        datatypes.push(datatype.clone());
+                    }
+                }
+            }
+            let mut more_datatypes = build_hierarchy(
+                config,
+                datatype_conditions,
+                start_dt_name,
+                dt_parent,
+                only_conditioned,
+            );
+            datatypes.append(&mut more_datatypes);
+        }
+        datatypes
+    }
+    build_hierarchy(
+        config,
+        datatype_conditions,
+        dt_name,
+        dt_name,
+        only_conditioned,
+    )
+}
+
+/// Given a global config struct, return a list of defined datatype names such that:
+/// - if datatype_1 is an ancestor of datatype_2, datatype_1 appears before datatype_2 in the list
+/// - if datatype_1 is not an ancestor of datatype_2, then their relative order in the list is
+///   arbitrary (unless otherwise constrained by their relations to other datatypes in the lsit).
+/// Note that this function will panic if circular dependencies are encountered.
+pub fn get_sorted_datatypes(config: &ValveConfig) -> Vec<&str> {
+    let mut graph = DiGraphMap::<&str, ()>::new();
+    let dt_config = &config.datatype;
+    for (dt_name, dt_obj) in dt_config.iter() {
+        let d_index = graph.add_node(dt_name);
+        if dt_obj.parent != "" {
+            let p_index = graph.add_node(&dt_obj.parent);
+            graph.add_edge(d_index, p_index, ());
+        }
+    }
+
+    let mut cycles = vec![];
+    match toposort(&graph, None) {
+        Err(cycle) => {
+            let problem_node = cycle.node_id();
+            let neighbours = graph.neighbors_directed(problem_node, Direction::Outgoing);
+            for neighbour in neighbours {
+                let ways_to_problem_node =
+                    all_simple_paths::<Vec<_>, _>(&graph, neighbour, problem_node, 0, None);
+                for mut way in ways_to_problem_node {
+                    let mut cycle = vec![problem_node];
+                    cycle.append(&mut way);
+                    let cycle = cycle
+                        .iter()
+                        .map(|&item| item.to_string())
+                        .collect::<Vec<_>>();
+                    cycles.push(cycle);
+                }
+            }
+            panic!(
+                "Defined datatypes contain circular dependencies: {:?}",
+                cycles
+            );
+        }
+        Ok(mut sorted) => {
+            sorted.reverse();
+            sorted
+        }
+    }
+}
+
+/// Given a column configuration map, a label, and a table name, return the column name
+/// corresponding to the label.
+pub fn get_column_for_label(
+    column_config_map: &HashMap<String, ValveColumnConfig>,
+    label: &str,
+    table: &str,
+) -> Result<String> {
+    let column_name = column_config_map
+        .iter()
+        .filter(|(_, v)| v.label == *label)
+        .map(|(k, _)| k)
+        .collect::<Vec<_>>();
+    let number_of_matches = column_name.len();
+
+    if number_of_matches == 1 {
+        Ok(column_name[0].to_string())
+    } else if number_of_matches > 1 {
+        Err(ValveError::ConfigError(format!(
+            "Error while reading column configuration for '{}': \
+             Labels must be unique.",
+            table,
+        ))
+        .into())
+    } else {
+        // If we cannot find the column corresponding to the label, then we conclude that the label
+        // name we received was the column name of a column with an empty label. This is because an
+        // an empty label signifies, not that the column has no label, but that the column's label
+        // is the same as it's column name.
+        Ok(label.to_string())
+    }
+}
+
+/// Given a column configuration map, a column and a table, return the label corresponding to the
+/// column.
+pub fn get_label_for_column(
+    column_config_map: &HashMap<String, ValveColumnConfig>,
+    column: &str,
+    table: &str,
+) -> Result<String> {
+    let label_name = column_config_map
+        .iter()
+        .filter(|(k, _)| *k == column)
+        .map(|(_, v)| v.label.to_string())
+        .collect::<Vec<_>>();
+    let num_matches = label_name.len();
+
+    if num_matches > 1 {
+        Err(ValveError::ConfigError(format!(
+            "Error while reading column configuration for '{}': \
+             Columns must be unique.",
+            table,
+        ))
+        .into())
+    } else if num_matches == 0 {
+        Err(ValveError::ConfigError(format!(
+            "Error while reading column configuration for '{}': \
+             Column not found.",
+            table,
+        ))
+        .into())
+    } else if label_name[0] != "" {
+        Ok(label_name[0].to_string())
+    } else {
+        // If the label is empty then just return the column name:
+        Ok(column.to_string())
+    }
+}
+
+/// Given a global config map, a map of compiled datatype conditions, a table name and a column
+/// name, get the value type of the column.
+pub fn get_value_type(
+    config: &ValveConfig,
+    datatype_conditions: &HashMap<String, CompiledCondition>,
+    table_name: &str,
+    column_name: &str,
+) -> ValueType {
+    let datatype = &config
+        .table
+        .get(table_name)
+        .expect(&format!("No config found for table '{}'", table_name))
+        .column
+        .get(column_name)
+        .expect(&format!(
+            "No config found for column '{}' of table '{}'",
+            column_name, table_name
+        ))
+        .datatype;
+    match datatype_conditions.get(datatype) {
+        None => ValueType::Single,
+        Some(condition) => condition.value_type.clone(),
+    }
+}
+
+/// Given a global config map and a table name, return a list of the columns from the table
+/// that may potentially result in database conflicts.
+pub fn get_conflict_columns(config: &ValveConfig, table_name: &str) -> Vec<String> {
+    let mut conflict_columns = vec![];
+    let primaries = config
+        .constraint
+        .primary
+        .get(table_name)
+        .expect(&format!("Undefined table '{}'", table_name));
+    let uniques = config
+        .constraint
+        .unique
+        .get(table_name)
+        .expect(&format!("Undefined table '{}'", table_name));
+    // We take tree-children because these imply a unique database constraint on the corresponding
+    // column.
+    let tree_children = config
+        .constraint
+        .tree
+        .get(table_name)
+        .expect(&format!("Undefined table '{}'", table_name))
+        .iter()
+        .map(|t| t.child.to_string())
+        .collect::<Vec<_>>();
+    let foreign_sources = config
+        .constraint
+        .foreign
+        .get(table_name)
+        .expect(&format!("Undefined table '{}'", table_name))
+        .iter()
+        .map(|t| t.column.to_string())
+        .collect::<Vec<_>>();
+    let foreign_targets = config
+        .constraint
+        .foreign
+        .get(table_name)
+        .expect(&format!("Undefined table '{}'", table_name))
+        .iter()
+        .filter(|t| t.ftable == *table_name)
+        .map(|t| t.fcolumn.to_string())
+        .collect::<Vec<_>>();
+
+    for key_columns in vec![
+        primaries,
+        uniques,
+        &tree_children,
+        &foreign_sources,
+        &foreign_targets,
+    ] {
+        for column in key_columns {
+            if !conflict_columns.contains(column) {
+                conflict_columns.push(column.to_string());
+            }
+        }
+    }
+
+    conflict_columns
 }
 
 /// Given the name of a table and a database connection pool, generate SQL for creating a view
@@ -1751,69 +2490,167 @@ pub fn generic_select_with_message_values(
     )
 }
 
-/// Given a global config map, a database connection pool, a database transaction, a table name, a
-/// column name, and a value for that column: get the rows, other than the one indicated by
-/// `except`, that would need to be revalidated if the given value were to replace the actual
-/// value of the column in that row.
-pub async fn get_affected_rows(
+/// Given a [SerdeValue] of the type [SerdeValue::String], as well as the SQL type that it will
+/// be converted to when it is inserted to the database (which can be a non-string), return a
+/// [QueryParam] corresponding to the value.
+pub fn get_query_param(value: &SerdeValue, sql_type: &str) -> QueryParam {
+    let param_value = value
+        .as_str()
+        .expect(&format!("'{}' is not a string", value));
+    match sql_type {
+        "numeric" => {
+            let numeric_value: f64 = param_value
+                .parse()
+                .expect(&format!("{param_value} is not numeric"));
+            QueryParam::Numeric(numeric_value)
+        }
+        "integer" => {
+            let integer_value: i32 = param_value
+                .parse()
+                .expect(&format!("{param_value} is not an integer"));
+            QueryParam::Integer(integer_value)
+        }
+        "real" => {
+            let real_value: f64 = param_value
+                .parse()
+                .expect(&format!("{param_value} is not a real"));
+            QueryParam::Real(real_value)
+        }
+        _ => QueryParam::String(param_value.to_string()),
+    }
+}
+
+/// Given a SQL type, return the appropriate CAST(...) statement for casting the SQL_PARAM
+/// from a TEXT column.
+pub fn cast_sql_param_from_text(sql_type: &str) -> String {
+    let s = sql_type.to_lowercase();
+    if s == "numeric" {
+        format!("CAST(NULLIF({}, '') AS NUMERIC)", SQL_PARAM)
+    } else if s == "integer" {
+        format!("CAST(NULLIF({}, '') AS INTEGER)", SQL_PARAM)
+    } else if s == "real" {
+        format!("CAST(NULLIF({}, '') AS REAL)", SQL_PARAM)
+    } else {
+        String::from(SQL_PARAM)
+    }
+}
+
+/// Given a SQL type, return the appropriate CAST(...) statement for casting the SQL_PARAM
+/// to a TEXT column.
+pub fn cast_column_sql_to_text(column: &str, sql_type: &str) -> String {
+    if sql_type.to_lowercase() == "text" {
+        format!(r#""{}""#, column)
+    } else {
+        format!(r#"CAST("{}" AS TEXT)"#, column)
+    }
+}
+
+/// Given the config map, the name of a datatype, and a database connection pool used to determine
+/// the database type, climb the datatype tree (as required), and return the first 'SQL type' found.
+/// If there is no SQL type defined for the given datatype, return TEXT.
+pub fn get_sql_type(
+    dt_config: &HashMap<String, ValveDatatypeConfig>,
+    datatype: &String,
+    pool: &AnyPool,
+) -> String {
+    match dt_config.get(datatype) {
+        None => return "TEXT".to_string(),
+        Some(datatype) if datatype.sql_type != "" => {
+            return datatype.sql_type.to_string();
+        }
+        _ => (),
+    };
+
+    let parent_datatype = dt_config
+        .get(datatype)
+        .and_then(|d| Some(d.parent.to_string()))
+        .expect(&format!("Undefined datatype '{}'", datatype));
+
+    return get_sql_type(dt_config, &parent_datatype, pool);
+}
+
+/// Given the global config map, a table name, a column name, and a database connection pool,
+/// return the column's SQL type.
+pub fn get_sql_type_from_global_config(
+    config: &ValveConfig,
     table: &str,
     column: &str,
-    value: &str,
-    except: Option<&u32>,
-    config: &ValveConfig,
     pool: &AnyPool,
-    tx: &mut Transaction<'_, sqlx::Any>,
-) -> Result<Vec<ValveRow>> {
-    // Since the consequence of an update could involve currently invalid rows
-    // (in the conflict table) becoming valid or vice versa, we need to check rows for
-    // which the value of the column is the same as `value`
-    let (sql, mut sql_params) = generic_select_with_message_values(table, config, pool);
-    let sql = local_sql_syntax(
-        pool,
-        &format!(
-            r#"{sql} WHERE "{column}" = {SQL_PARAM}{except}"#,
-            except = match except {
-                None => "".to_string(),
-                Some(row_number) => {
-                    format!(" AND row_number != {}", row_number)
-                }
-            },
-        ),
-    );
-    sql_params.push(value.to_string());
+) -> String {
+    let dt_config = &config.datatype;
+    let dt = &config
+        .table
+        .get(table)
+        .and_then(|t| t.column.get(column))
+        .and_then(|c| Some(c.datatype.to_string()))
+        .expect(&format!(
+            "Could not determine datatype for '{}.{}'",
+            table, column
+        ));
+    get_sql_type(dt_config, &dt, pool)
+}
 
-    let mut query = sqlx_query(&sql);
-    for param in &sql_params {
-        query = query.bind(param);
-    }
-    let mut valve_rows = vec![];
-    for row in query.fetch_all(tx.acquire().await?).await? {
-        let mut contents = IndexMap::new();
-        let mut row_number: Option<u32> = None;
-        for column in row.columns() {
-            let cname = column.name();
-            if cname == "row_number" {
-                row_number = Some(row.get::<i64, _>("row_number") as u32);
-            } else if cname != "message" {
-                let raw_value = row.try_get_raw(format!(r#"{}"#, cname).as_str()).unwrap();
-                let value;
-                if !raw_value.is_null() {
-                    value = get_column_value_as_string(&row, &cname, "text");
-                } else {
-                    value = String::from("");
-                }
-                contents.insert(cname.to_string(), ValveCell::new(&json!(value)));
-            }
+/// Given a SQL type and a value, return true if the value does not conform to the SQL type.
+pub fn is_sql_type_error(sql_type: &str, value: &str) -> bool {
+    let sql_type = sql_type.to_lowercase();
+    if sql_type == "numeric" {
+        // f64
+        let numeric_value: Result<f64, std::num::ParseFloatError> = value.parse();
+        match numeric_value {
+            Ok(_) => false,
+            Err(_) => true,
         }
-        let row_number =
-            row_number.ok_or(ValveError::DataError("Row: has no row number".to_string()))?;
-        valve_rows.push(ValveRow {
-            row_number: Some(row_number),
-            contents: contents,
-        });
+    } else if sql_type == "integer" {
+        // i32
+        let integer_value: Result<i32, std::num::ParseIntError> = value.parse();
+        match integer_value {
+            Ok(_) => false,
+            Err(_) => true,
+        }
+    } else if sql_type == "real" {
+        // f64 (actually f32)
+        let float_value: Result<f64, std::num::ParseFloatError> = value.parse();
+        match float_value {
+            Ok(_) => false,
+            Err(_) => true,
+        }
+    } else {
+        false
     }
+}
 
-    Ok(valve_rows)
+/// Given a SQL string, possibly with unbound parameters represented by the placeholder string
+/// SQL_PARAM, and given a database pool, if the pool is of type Sqlite, then change the syntax used
+/// for unbound parameters to Sqlite syntax, which uses "?", otherwise use Postgres syntax, which
+/// uses numbered parameters, i.e., $1, $2, ...
+pub fn local_sql_syntax(pool: &AnyPool, sql: &String) -> String {
+    // Do not replace instances of SQL_PARAM if they are within quotation marks.
+    let rx = Regex::new(&format!(
+        r#"('[^'\\]*(?:\\.[^'\\]*)*'|"[^"\\]*(?:\\.[^"\\]*)*")|\b{}\b"#,
+        SQL_PARAM
+    ))
+    .unwrap();
+
+    let mut final_sql = String::from("");
+    let mut pg_param_idx = 1;
+    let mut saved_start = 0;
+    for m in rx.find_iter(sql) {
+        let this_match = &sql[m.start()..m.end()];
+        final_sql.push_str(&sql[saved_start..m.start()]);
+        if this_match == SQL_PARAM {
+            if pool.any_kind() == AnyKind::Postgres {
+                final_sql.push_str(&format!("${}", pg_param_idx));
+                pg_param_idx += 1;
+            } else {
+                final_sql.push_str(&format!("?"));
+            }
+        } else {
+            final_sql.push_str(&format!("{}", this_match));
+        }
+        saved_start = m.start() + this_match.len();
+    }
+    final_sql.push_str(&sql[saved_start..]);
+    final_sql
 }
 
 /// Given a global configuration map, a database connection pool, a database transaction, a table
@@ -1902,6 +2739,52 @@ pub async fn get_row_from_db(
     Ok(row)
 }
 
+/// Given a row and a column name, extract the contents of the row as a JSON array and return it.
+pub fn get_json_array_from_row(row: &AnyRow, column: &str) -> Option<Vec<SerdeValue>> {
+    let raw_value = row
+        .try_get_raw(column)
+        .expect("Unable to get raw value from row");
+    if !raw_value.is_null() {
+        let value: &str = row.get(column);
+        match serde_json::from_str::<SerdeValue>(value) {
+            Err(e) => {
+                log::warn!("{}", e);
+                None
+            }
+            Ok(SerdeValue::Array(value)) => Some(value),
+            _ => {
+                log::warn!("{} is not an array.", value);
+                None
+            }
+        }
+    } else {
+        None
+    }
+}
+
+/// Given a row and a column name, extract the contents of the row as a JSON object and return it.
+pub fn get_json_object_from_row(row: &AnyRow, column: &str) -> Option<SerdeMap> {
+    let raw_value = row
+        .try_get_raw(column)
+        .expect("Unable to get raw value from row");
+    if !raw_value.is_null() {
+        let value: &str = row.get(column);
+        match serde_json::from_str::<SerdeValue>(value) {
+            Err(e) => {
+                log::warn!("{}", e);
+                None
+            }
+            Ok(SerdeValue::Object(value)) => Some(value),
+            _ => {
+                log::warn!("{} is not an object.", value);
+                None
+            }
+        }
+    } else {
+        None
+    }
+}
+
 /// Given a database connection pool, a database transaction, a table name, a column name, and a row
 /// number, get the current value of the given column in the database.
 pub async fn get_db_value(
@@ -1962,934 +2845,57 @@ pub async fn get_db_value(
     Ok(value.to_string())
 }
 
-/// Given a global config map, a database connection pool, a database transaction, a table name,
-/// and a [QueryAsIf] struct representing a custom modification to the query of the table, get
-/// the rows that will potentially be affected by the database change to the row indicated in
-/// query_as_if. These are divided into three: The rows that must be updated before the current
-/// update, the rows that must be updated after the current update, and the rows from the same
-/// table as the current update that need to be updated.
-pub async fn get_rows_to_update(
-    config: &ValveConfig,
-    pool: &AnyPool,
-    tx: &mut Transaction<'_, sqlx::Any>,
-    table: &str,
-    query_as_if: &QueryAsIf,
-) -> Result<(
-    IndexMap<String, Vec<ValveRow>>,
-    IndexMap<String, Vec<ValveRow>>,
-    IndexMap<String, Vec<ValveRow>>,
-    IndexMap<String, Vec<ValveRow>>,
-)> {
-    fn get_cell_value(row: &ValveRow, column: &str) -> Result<String> {
-        row.contents
-            .get(column)
-            .and_then(|cell| Some(cell.strvalue()))
-            .ok_or(
-                ValveError::InputError(format!(
-                    "Value missing or of unknown type in column {} of row to update: {:?}",
-                    column, row
-                ))
-                .into(),
-            )
-    }
-
-    // Collect foreign key dependencies:
-    let foreign_dependencies = {
-        let mut foreign_dependencies = vec![];
-        let global_fconstraints = &config.constraint.foreign;
-        for (_, fconstraints) in global_fconstraints {
-            for entry in fconstraints {
-                if entry.ftable == *table {
-                    foreign_dependencies.push(entry);
-                }
-            }
-        }
-        foreign_dependencies
-    };
-
-    let mut rows_to_update_before = IndexMap::new();
-    let mut rows_to_update_after = IndexMap::new();
-    let mut rows_to_update_unique = IndexMap::new();
-    let mut rows_to_update_tree = IndexMap::new();
-    for fdep in &foreign_dependencies {
-        let dependent_table = &fdep.table;
-        let dependent_column = &fdep.column;
-        let target_column = &fdep.fcolumn;
-        let target_table = &fdep.ftable;
-
-        // Query the database using `row_number` to get the current value of the column for
-        // the row.
-        let updates_before = match query_as_if.kind {
-            QueryAsIfKind::Add => {
-                if let None = query_as_if.row {
-                    log::warn!(
-                        "No row in query_as_if: {:?} for {:?}",
-                        query_as_if,
-                        query_as_if.kind
-                    );
-                }
-                vec![]
-            }
-            _ => {
-                let current_value = get_db_value(
-                    target_table,
-                    target_column,
-                    &query_as_if.row_number,
-                    pool,
-                    tx,
-                )
-                .await?;
-
-                // Query dependent_table.dependent_column for the rows that will be affected by the
-                // change from the current value:
-                get_affected_rows(
-                    dependent_table,
-                    dependent_column,
-                    &current_value,
-                    None,
-                    config,
-                    pool,
-                    tx,
-                )
-                .await?
-            }
-        };
-
-        let updates_after = match &query_as_if.row {
-            None => {
-                if query_as_if.kind != QueryAsIfKind::Remove {
-                    log::warn!(
-                        "No row in query_as_if: {:?} for {:?}",
-                        query_as_if,
-                        query_as_if.kind
-                    );
-                }
-                vec![]
-            }
-            Some(row) => {
-                // Fetch the cell corresponding to `column` from `row`, and the value of that cell,
-                // which is the new value for the row.
-                let new_value = get_cell_value(&row, target_column)?;
-                get_affected_rows(
-                    dependent_table,
-                    dependent_column,
-                    &new_value,
-                    None,
-                    config,
-                    pool,
-                    tx,
-                )
-                .await?
-            }
-        };
-        rows_to_update_before.insert(dependent_table.to_string(), updates_before);
-        rows_to_update_after.insert(dependent_table.to_string(), updates_after);
-    }
-
-    let primaries = config
-        .constraint
-        .primary
-        .get(table)
-        .expect(&format!("Undefined table '{}'", table));
-    let uniques = config
-        .constraint
-        .unique
-        .get(table)
-        .expect(&format!("Undefined table '{}'", table));
-    let columns = config
-        .table
-        .get(table)
-        .expect(&format!("Undefined table '{}'", table))
-        .column
-        .keys()
-        .map(|k| k.to_string())
-        .collect::<Vec<_>>();
-
-    for column in &columns {
-        if !uniques.contains(column) && !primaries.contains(column) {
-            continue;
-        }
-
-        // Query the database using `row_number` to get the current value of the column for
-        // the row. We only look for rows to update that match the current value of the column.
-        // Rows matching the column's new value don't also need to be updated. Those will result
-        // in a validation error for the new/modified row but that is fine.
-        let updates = match query_as_if.kind {
-            QueryAsIfKind::Add => {
-                if let None = query_as_if.row {
-                    log::warn!(
-                        "No row in query_as_if: {:?} for {:?}",
-                        query_as_if,
-                        query_as_if.kind
-                    );
-                }
-                vec![]
-            }
-            _ => {
-                let current_value =
-                    get_db_value(table, column, &query_as_if.row_number, pool, tx).await?;
-
-                // Query table.column for the rows that will be affected by the change from the
-                // current to the new value:
-                get_affected_rows(
-                    table,
-                    column,
-                    &current_value,
-                    Some(&query_as_if.row_number),
-                    config,
-                    pool,
-                    tx,
-                )
-                .await?
-            }
-        };
-        rows_to_update_unique.insert(table.to_string(), updates);
-    }
-
-    // Collect tree-foreign dependencies:
-    let trees = config
-        .constraint
-        .tree
-        .get(table)
-        .expect(&format!("Undefined table '{}'", table));
-
-    for tree in trees {
-        let dependent_column = &tree.parent;
-        let target_column = &tree.child;
-        // Query the database using `row_number` to get the current value of the column for
-        // the row.
-        let updates_tree = match &query_as_if.row {
-            None => {
-                if query_as_if.kind != QueryAsIfKind::Remove {
-                    log::warn!(
-                        "No row in query_as_if: {:?} for {:?}",
-                        query_as_if,
-                        query_as_if.kind
-                    );
-                }
-                vec![]
-            }
-            Some(row) => {
-                // Fetch the cell corresponding to `column` from `row`, and the value of that cell,
-                // which is the new value for the row.
-                let new_value = get_cell_value(&row, target_column)?;
-                let rows = get_affected_rows(
-                    table,
-                    dependent_column,
-                    &new_value,
-                    Some(&query_as_if.row_number),
-                    config,
-                    pool,
-                    tx,
-                )
-                .await?;
-                rows
-            }
-        };
-        rows_to_update_tree.insert(table.to_string(), updates_tree);
-    }
-
-    Ok((
-        rows_to_update_before,
-        rows_to_update_tree,
-        rows_to_update_unique,
-        rows_to_update_after,
-    ))
-}
-
-/// Given a global config map, maps of datatype and rule conditions, a database connection pool,
-/// a database transaction, some updates to process, a [QueryAsIf] struct indicating how
-/// we should counterfactually modify the current state of the database, and a flag indicating
-/// whether we should allow recursive updates, validate and then update each row indicated in
-/// `updates`.
-pub async fn process_updates(
-    config: &ValveConfig,
-    datatype_conditions: &HashMap<String, CompiledCondition>,
-    rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
-    pool: &AnyPool,
-    tx: &mut Transaction<'_, sqlx::Any>,
-    updates: &IndexMap<String, Vec<ValveRow>>,
-    query_as_if: &QueryAsIf,
-    do_not_recurse: bool,
-) -> Result<()> {
-    for (update_table, rows_to_update) in updates {
-        for row in rows_to_update {
-            // Validate each row 'counterfactually':
-            let vrow = validate_row_tx(
-                config,
-                datatype_conditions,
-                rule_conditions,
-                pool,
-                Some(tx),
-                update_table,
-                row,
-                Some(&query_as_if),
-            )
-            .await?;
-
-            // Update the row in the database:
-            update_row_tx(
-                config,
-                datatype_conditions,
-                rule_conditions,
-                pool,
-                tx,
-                update_table,
-                &vrow,
-                false,
-                do_not_recurse,
-            )
-            .await?;
-        }
-    }
-    Ok(())
-}
-
-/// Given a table name, a row number, the new row order to assign to the row, and a database
-/// transaction, update the row order for the row in the database. Note that the row_order is
-/// represented using the signed i64 type but it can never actually be negative. This function
-/// will return an error when a negative row_order is provided.
-pub async fn update_row_order(
-    table: &str,
-    row: &u32,
-    row_order: &i64,
-    tx: &mut Transaction<'_, sqlx::Any>,
-) -> Result<()> {
-    if *row_order < 0 {
-        return Err(ValveError::InputError(format!(
-            "Refusing to assign a negative row_order, {}, to row {} of table {}.",
-            row_order, row, table
-        ))
-        .into());
-    }
-
-    let sql = format!(
-        r#"UPDATE "{}" SET "row_order" = {} WHERE "row_number" = {} RETURNING 1 AS "updated""#,
-        table, row_order, row,
-    );
-    let rows = sqlx_query(&sql).fetch_all(tx.acquire().await?).await?;
-    if rows.len() == 0 {
-        // If the update of the normal table yielded zero affected rows, then the row must be
-        // in the conflict table, so we try updating that instead:
-        let sql = format!(
-            r#"UPDATE "{}_conflict" SET "row_order" = {} WHERE "row_number" = {}"#,
-            table, row_order, row,
-        );
-        sqlx_query(&sql).execute(tx.acquire().await?).await?;
-    }
-    Ok(())
-}
-
-/// Given a global configuration struct, a database connection pool used to determine the SQL syntax
-/// to use, a database transaction through which to execute queries over the database, a table name,
-/// a row number, the old previous row for the row, and the new previous row for the row, record the
-/// move in the history table in the database.
-pub async fn record_row_move(
-    config: &ValveConfig,
-    pool: &AnyPool,
-    tx: &mut Transaction<'_, sqlx::Any>,
-    table: &str,
-    row_num: &u32,
-    old_previous_row: &u32,
-    new_previous_row: &u32,
-    user: &str,
-) -> Result<()> {
-    let row = get_row_from_db(config, pool, tx, table, row_num).await?;
-    let mut from_row = row.clone();
-    let mut to_row = row.clone();
-    from_row.insert("previous_row".to_string(), json!(old_previous_row));
-    to_row.insert("previous_row".to_string(), json!(new_previous_row));
-    record_row_change(
-        pool,
-        tx,
-        table,
-        row_num,
-        Some(&from_row),
-        Some(&to_row),
-        &user,
-    )
-    .await
-}
-
-/// Given a database connection pool (used to determine the type of the underlying database), a
-/// database transaction, a table name, a row number, optionally: the version of the row we
-/// are going to change it from, optionally: the version of the row we are going to change it to,
-/// and the name of the user making the change, record the change to the history table in the
-/// database. Note that `from` and `to` cannot both be None: Either we are changing the row from
-/// something to nothing (i.e., deleting), changing it from nothing to something (i.e., inserting),
-/// or changing it from something to something else (i.e., updating).
-/// Note that `from` and `to` must both be in the ('rich') format:
-/// ```
-/// {
-///     "column_1": {
-///         "valid": <true|false>,
-///         "messages": [{"level": level, "rule": rule, "message": message}, ...],
-///         "value": value1
-///     },
-///     "column_2": {
-///         "valid": <true|false>,
-///         "messages": [{"level": level, "rule": rule, "message": message}, ...],
-///         "value": value2
-///     },
-///     ...
-/// },
-/// ```
-pub async fn record_row_change(
-    pool: &AnyPool,
-    tx: &mut Transaction<'_, sqlx::Any>,
-    table: &str,
-    row_number: &u32,
-    from: Option<&SerdeMap>,
-    to: Option<&SerdeMap>,
-    user: &str,
-) -> Result<()> {
-    if let (None, None) = (from, to) {
-        return Err(ValveError::InputError(
-            "Arguments 'from' and 'to' to function record_row_change() cannot both be None".into(),
-        )
-        .into());
-    }
-
-    fn to_text(row: Option<&SerdeMap>) -> String {
-        match row {
-            None => "NULL".to_string(),
-            Some(r) => format!("{}", json!(r)),
-        }
-    }
-
-    fn format_value(value: &String, numeric_re: &Regex) -> String {
-        if numeric_re.is_match(value) {
-            value.to_string()
-        } else {
-            format!("'{}'", value)
-        }
-    }
-
-    fn summarize(from: Option<&SerdeMap>, to: Option<&SerdeMap>) -> Result<String> {
-        // Constructs a summary of the form:
-        // {
-        //   "column":"bar",
-        //   "level":"update|move",
-        //   "message":"Value changed from 'A' to 'B'",
-        //   "old_value":"'A'",
-        //   "value":"'B'"
-        // }
-        let mut summary = vec![];
-        match (from, to) {
-            (None, _) | (_, None) => Ok("NULL".to_string()),
-            (Some(from), Some(to)) => {
-                let numeric_re = Regex::new(r"^[0-9]*\.?[0-9]+$")?;
-                for (column, cell) in from.iter() {
-                    let old_value = match column.as_str() {
-                        "previous_row" => match cell {
-                            SerdeValue::Number(n) => format!("{}", n),
-                            _ => {
-                                return Err(ValveError::DataError(format!(
-                                    "Value {:?} for column '{}' is not a number",
-                                    cell, column,
-                                ))
-                                .into())
-                            }
-                        },
-                        _ => cell
-                            .get("value")
-                            .and_then(|v| match v {
-                                SerdeValue::String(s) => Some(format!("{}", s)),
-                                SerdeValue::Number(n) => Some(format!("{}", n)),
-                                SerdeValue::Bool(b) => Some(format!("{}", b)),
-                                _ => None,
-                            })
-                            .ok_or(ValveError::DataError(
-                                format!("No value in {}", cell).into(),
-                            ))?,
-                    };
-                    let new_value = match column.as_str() {
-                        "previous_row" => to
-                            .get(column)
-                            .and_then(|v| match v {
-                                SerdeValue::Number(n) => Some(format!("{}", n)),
-                                _ => None,
-                            })
-                            .ok_or(ValveError::DataError(
-                                format!(
-                                    "Value of column: '{}' in row {:?} is not a number",
-                                    column, to
-                                )
-                                .into(),
-                            ))?,
-                        _ => to
-                            .get(column)
-                            .and_then(|v| v.get("value"))
-                            .and_then(|v| match v {
-                                SerdeValue::String(s) => Some(format!("{}", s)),
-                                SerdeValue::Number(n) => Some(format!("{}", n)),
-                                SerdeValue::Bool(b) => Some(format!("{}", b)),
-                                _ => None,
-                            })
-                            .ok_or(ValveError::DataError(
-                                format!("No value for column: {} in {:?}", column, to).into(),
-                            ))?,
-                    };
-                    if new_value != old_value {
-                        let mut column_summary = SerdeMap::new();
-                        column_summary.insert("column".to_string(), json!(column));
-                        column_summary.insert(
-                            "level".to_string(),
-                            match column.as_str() {
-                                "previous_row" => json!("move"),
-                                _ => json!("update"),
-                            },
-                        );
-                        column_summary.insert("old_value".to_string(), json!(old_value));
-                        column_summary.insert("value".to_string(), json!(new_value));
-                        column_summary.insert(
-                            "message".to_string(),
-                            json!(format!(
-                                "Value changed from {} to {}",
-                                format_value(&old_value.to_string(), &numeric_re),
-                                format_value(&new_value.to_string(), &numeric_re),
-                            )),
-                        );
-                        let column_summary = to_text(Some(&column_summary));
-                        summary.push(column_summary);
-                    }
-                }
-                Ok(format!("[{}]", summary.join(",")))
-            }
-        }
-    }
-
-    let summary = summarize(from, to)?;
-    let (from, to) = (to_text(from), to_text(to));
-    let mut params = vec![table];
-    let from_param = {
-        if from == "NULL" {
-            from
-        } else {
-            params.push(&from);
-            SQL_PARAM.to_string()
-        }
-    };
-    let to_param = {
-        if to == "NULL" {
-            to
-        } else {
-            params.push(&to);
-            SQL_PARAM.to_string()
-        }
-    };
-    let summary_param = {
-        if summary == "NULL" {
-            summary
-        } else {
-            params.push(&summary);
-            SQL_PARAM.to_string()
-        }
-    };
-    params.push(user);
-
-    let sql = format!(
-        r#"INSERT INTO "history" ("table", "row", "from", "to", "summary", "user")
-           VALUES ({SQL_PARAM}, {row_number}, {from_param},
-                   {to_param}, {summary_param}, {SQL_PARAM})"#,
-    );
-    let sql = local_sql_syntax(pool, &sql);
-
-    let mut query = sqlx_query(&sql);
-    for param in &params {
-        query = query.bind(param)
-    }
-    query.execute(tx.acquire().await?).await?;
-
-    Ok(())
-}
-
-/// Given a database record representing either an undo or a redo from the history table,
-/// convert it to a vector of [ValveChange] structs.
-pub fn convert_undo_or_redo_record_to_change(record: &AnyRow) -> Result<Option<ValveRowChange>> {
-    let table: &str = record.get("table");
-    let row_number: i64 = record.get("row");
-    let row_number = row_number as u32;
-    let from = get_json_object_from_row(&record, "from");
-    let to = get_json_object_from_row(&record, "to");
-    let summary = {
-        let summary = record.try_get_raw("summary")?;
-        if !summary.is_null() {
-            let summary: &str = record.get("summary");
-            match serde_json::from_str::<SerdeValue>(summary) {
-                Ok(SerdeValue::Array(v)) => Some(v),
-                _ => panic!("{} is not an array.", summary),
-            }
-        } else {
-            None
-        }
-    };
-
-    // If the `summary` part of the record is present, then just use it to populate the fields
-    // of the ValveChange structs representing the changes to each column in the table row.
-    if let Some(summary) = summary {
-        let mut column_changes = vec![];
-        for entry in summary {
-            let column = entry.get("column").and_then(|s| s.as_str()).unwrap();
-            let level = entry.get("level").and_then(|s| s.as_str()).unwrap();
-            let old_value = entry.get("old_value").and_then(|s| s.as_str()).unwrap();
-            let value = entry.get("value").and_then(|s| s.as_str()).unwrap();
-            let message = entry.get("message").and_then(|s| s.as_str()).unwrap();
-            column_changes.push(ValveChange {
-                column: column.to_string(),
-                level: level.to_string(),
-                old_value: old_value.to_string(),
-                value: value.to_string(),
-                message: message.to_string(),
-            });
-        }
-        return Ok(Some(ValveRowChange {
-            table: table.to_string(),
-            row: row_number,
-            message: format!("Update row {row_number} of '{table}'"),
-            changes: column_changes,
-        }));
-    }
-
-    // If the `summary` part of the record is not present, then either the `from` or the `to`
-    // parts of the record will be null. If `from` is not null then this is a delete (i.e.,
-    // the row has changed from something to nothing).
-    if let Some(from) = from {
-        let mut column_changes = vec![];
-        for (column, change) in from {
-            let old_value = change.get("value").and_then(|s| s.as_str()).unwrap();
-            column_changes.push(ValveChange {
-                column: column.to_string(),
-                level: "delete".to_string(),
-                old_value: old_value.to_string(),
-                value: "".to_string(),
-                message: "".to_string(),
-            });
-        }
-        return Ok(Some(ValveRowChange {
-            table: table.to_string(),
-            row: row_number,
-            message: format!("Delete row {} from '{}'", row_number, table),
-            changes: column_changes,
-        }));
-    }
-
-    // If `to` is not null then this is an insert (i.e., the row has changed from nothing to
-    // something).
-    if let Some(to) = to {
-        let mut column_changes = vec![];
-        for (column, change) in to {
-            let value = change.get("value").and_then(|s| s.as_str()).unwrap();
-            column_changes.push(ValveChange {
-                column: column.to_string(),
-                level: "insert".to_string(),
-                old_value: "".to_string(),
-                value: value.to_string(),
-                message: "".to_string(),
-            });
-        }
-        return Ok(Some(ValveRowChange {
-            table: table.to_string(),
-            row: row_number,
-            message: format!("Add row {} to '{}'", row_number, table),
-            changes: column_changes,
-        }));
-    }
-
-    // If we get to here, then `summary`, `from`, and `to` are all null so we return an error.
-    Err(ValveError::InputError(
-        "All of summary, from, and to are NULL in undo/redo record".to_string(),
-    )
-    .into())
-}
-
-/// Return the next recorded change to the data that can be undone, or None if there isn't any.
-pub async fn get_record_to_undo(pool: &AnyPool) -> Result<Option<AnyRow>> {
-    // Look in the history table, get the row with the greatest ID, get the row number,
-    // from, and to, and determine whether the last operation was a delete, insert, or update.
-    let is_clause = if pool.any_kind() == AnyKind::Sqlite {
-        "IS"
+/// Given a database row, the name of a column, and it's SQL type, return the value of that column
+/// from the given row as a String.
+pub fn get_column_value_as_string(row: &AnyRow, column: &str, sql_type: &str) -> String {
+    let s = sql_type.to_lowercase();
+    if s == "numeric" {
+        let value: f64 = row
+            .try_get(format!(r#"{}"#, column).as_str())
+            .unwrap_or_default();
+        value.to_string()
+    } else if s == "integer" {
+        let value: i32 = row
+            .try_get(format!(r#"{}"#, column).as_str())
+            .unwrap_or_default();
+        value.to_string()
+    } else if s == "real" {
+        let value: f64 = row
+            .try_get(format!(r#"{}"#, column).as_str())
+            .unwrap_or_default();
+        value.to_string()
     } else {
-        "IS NOT DISTINCT FROM"
-    };
-    let sql = format!(
-        r#"SELECT * FROM "history"
-               WHERE "undone_by" {} NULL
-               ORDER BY "history_id" DESC LIMIT 1"#,
-        is_clause
-    );
-    let query = sqlx_query(&sql);
-    let result_row = query.fetch_optional(pool).await?;
-    Ok(result_row)
-}
-
-/// Return the next recorded change to the data that can be redone, or None if there isn't any.
-pub async fn get_record_to_redo(pool: &AnyPool) -> Result<Option<AnyRow>> {
-    // Look in the history table, get the row with the greatest ID, get the row number,
-    // from, and to, and determine whether the last operation was a delete, insert, or update.
-    let is_not_clause = if pool.any_kind() == AnyKind::Sqlite {
-        "IS NOT"
-    } else {
-        "IS DISTINCT FROM"
-    };
-    let sql = format!(
-        r#"SELECT * FROM "history"
-           WHERE "undone_by" {} NULL
-           ORDER BY "timestamp" DESC LIMIT 1"#,
-        is_not_clause
-    );
-    let query = sqlx_query(&sql);
-    let result_row = query.fetch_optional(pool).await?;
-    Ok(result_row)
-}
-
-/// Given a row and a column name, extract the contents of the row as a JSON array and return it.
-pub fn get_json_array_from_row(row: &AnyRow, column: &str) -> Option<Vec<SerdeValue>> {
-    let raw_value = row
-        .try_get_raw(column)
-        .expect("Unable to get raw value from row");
-    if !raw_value.is_null() {
-        let value: &str = row.get(column);
-        match serde_json::from_str::<SerdeValue>(value) {
-            Err(e) => {
-                log::warn!("{}", e);
-                None
-            }
-            Ok(SerdeValue::Array(value)) => Some(value),
-            _ => {
-                log::warn!("{} is not an array.", value);
-                None
-            }
-        }
-    } else {
-        None
+        let value: &str = row
+            .try_get(format!(r#"{}"#, column).as_str())
+            .unwrap_or_default();
+        value.to_string()
     }
 }
 
-/// Given a row and a column name, extract the contents of the row as a JSON object and return it.
-pub fn get_json_object_from_row(row: &AnyRow, column: &str) -> Option<SerdeMap> {
-    let raw_value = row
-        .try_get_raw(column)
-        .expect("Unable to get raw value from row");
-    if !raw_value.is_null() {
-        let value: &str = row.get(column);
-        match serde_json::from_str::<SerdeValue>(value) {
-            Err(e) => {
-                log::warn!("{}", e);
-                None
-            }
-            Ok(SerdeValue::Object(value)) => Some(value),
-            _ => {
-                log::warn!("{} is not an object.", value);
-                None
-            }
-        }
+/// Given a database row, the name of a column, and it's SQL type, return the value of that column
+/// from the given row as a [SerdeValue].
+pub fn get_column_value(row: &AnyRow, column: &str, sql_type: &str) -> SerdeValue {
+    let s = sql_type.to_lowercase();
+    if s == "numeric" {
+        let value: f64 = row
+            .try_get(format!(r#"{}"#, column).as_str())
+            .unwrap_or_default();
+        json!(value)
+    } else if s == "integer" {
+        let value: i32 = row
+            .try_get(format!(r#"{}"#, column).as_str())
+            .unwrap_or_default();
+        json!(value)
+    } else if s == "real" {
+        let value: f64 = row
+            .try_get(format!(r#"{}"#, column).as_str())
+            .unwrap_or_default();
+        json!(value)
     } else {
-        None
-    }
-}
-
-pub async fn undo_or_redo_move(
-    table: &str,
-    last_change: &AnyRow,
-    history_id: u16,
-    row_number: &u32,
-    tx: &mut Transaction<'_, sqlx::Any>,
-    undo: bool,
-) -> Result<()> {
-    let summary = match get_json_array_from_row(&last_change, "summary") {
-        None => {
-            return Err(ValveError::DataError(format!(
-                "No summary found in undo record for history_id == {}",
-                history_id,
-            ))
-            .into())
-        }
-        Some(summary) => summary[0].clone(),
-    };
-    let column = summary
-        .get("column")
-        .and_then(|c| c.as_str())
-        .ok_or(ValveError::DataError(format!(
-            "No property 'column' found in summary for history_id == {}",
-            history_id,
-        )))?;
-    if column != "previous_row" {
-        return Err(ValveError::DataError(format!(
-            "Unexpected column '{}' in summary record for history_id == {}. \
-             Expected: 'previous_row'",
-            column, history_id
-        ))
-        .into());
-    }
-    let level = summary
-        .get("level")
-        .and_then(|l| l.as_str())
-        .ok_or(ValveError::DataError(format!(
-            "No property 'level' found in summary for history_id == {}",
-            history_id,
-        )))?;
-    if level != "move" {
-        return Err(ValveError::DataError(format!(
-            "Unexpected level '{}' in summary record for history_id == {}. \
-             Expected 'move'",
-            level, history_id
-        ))
-        .into());
-    }
-    let update_value = {
-        if undo {
-            summary
-                .get("old_value")
-                .and_then(|l| l.as_str())
-                .ok_or(ValveError::DataError(format!(
-                    "No property 'old_value' found in summary for history_id == {}",
-                    history_id,
-                )))?
-                .parse::<u32>()?
-        } else {
-            summary
-                .get("value")
-                .and_then(|l| l.as_str())
-                .ok_or(ValveError::DataError(format!(
-                    "No property 'old_value' found in summary for history_id == {}",
-                    history_id,
-                )))?
-                .parse::<u32>()?
-        }
-    };
-    move_row_tx(tx, table, &row_number, &update_value).await?;
-    Ok(())
-}
-
-/// Given a user, a history_id, a database transaction, and an undone_state indicating whether to
-/// set the associated history record as undone (if undone_state == true) or as not undone
-/// (otherwise), do the following: When setting the record to undone, `user` is used for the
-/// 'undone_by' field of the history table, otherwise undone_by is set to NULL and the user is
-/// indicated as the one responsible for the change (instead of whoever made the change originally).
-pub async fn switch_undone_state(
-    user: &str,
-    history_id: u16,
-    undone_state: bool,
-    tx: &mut Transaction<'_, sqlx::Any>,
-    pool: &AnyPool,
-) -> Result<()> {
-    // Set the history record to undone:
-    let timestamp = {
-        if pool.any_kind() == AnyKind::Sqlite {
-            "STRFTIME('%Y-%m-%d %H:%M:%f', 'NOW')"
-        } else {
-            "CURRENT_TIMESTAMP"
-        }
-    };
-    let undone_by = if undone_state == true {
-        format!(
-            r#""undone_by" = {}, "timestamp" = {}"#,
-            SQL_PARAM, timestamp
-        )
-    } else {
-        format!(
-            r#""undone_by" = NULL, "user" = {}, "timestamp" = {}"#,
-            SQL_PARAM, timestamp
-        )
-    };
-    let sql = local_sql_syntax(
-        pool,
-        &format!(
-            r#"UPDATE "history" SET {} WHERE "history_id" = {}"#,
-            undone_by, history_id
-        ),
-    );
-    let query = sqlx_query(&sql).bind(user);
-    query.execute(tx.acquire().await?).await?;
-    Ok(())
-}
-
-/// Given a global config map and a table name, return a list of the columns from the table
-/// that may potentially result in database conflicts.
-pub fn get_conflict_columns(config: &ValveConfig, table_name: &str) -> Vec<String> {
-    let mut conflict_columns = vec![];
-    let primaries = config
-        .constraint
-        .primary
-        .get(table_name)
-        .expect(&format!("Undefined table '{}'", table_name));
-    let uniques = config
-        .constraint
-        .unique
-        .get(table_name)
-        .expect(&format!("Undefined table '{}'", table_name));
-    // We take tree-children because these imply a unique database constraint on the corresponding
-    // column.
-    let tree_children = config
-        .constraint
-        .tree
-        .get(table_name)
-        .expect(&format!("Undefined table '{}'", table_name))
-        .iter()
-        .map(|t| t.child.to_string())
-        .collect::<Vec<_>>();
-    let foreign_sources = config
-        .constraint
-        .foreign
-        .get(table_name)
-        .expect(&format!("Undefined table '{}'", table_name))
-        .iter()
-        .map(|t| t.column.to_string())
-        .collect::<Vec<_>>();
-    let foreign_targets = config
-        .constraint
-        .foreign
-        .get(table_name)
-        .expect(&format!("Undefined table '{}'", table_name))
-        .iter()
-        .filter(|t| t.ftable == *table_name)
-        .map(|t| t.fcolumn.to_string())
-        .collect::<Vec<_>>();
-
-    for key_columns in vec![
-        primaries,
-        uniques,
-        &tree_children,
-        &foreign_sources,
-        &foreign_targets,
-    ] {
-        for column in key_columns {
-            if !conflict_columns.contains(column) {
-                conflict_columns.push(column.to_string());
-            }
-        }
-    }
-
-    conflict_columns
-}
-
-/// Given a SQL type and a value, return true if the value does not conform to the SQL type.
-pub fn is_sql_type_error(sql_type: &str, value: &str) -> bool {
-    let sql_type = sql_type.to_lowercase();
-    if sql_type == "numeric" {
-        // f64
-        let numeric_value: Result<f64, std::num::ParseFloatError> = value.parse();
-        match numeric_value {
-            Ok(_) => false,
-            Err(_) => true,
-        }
-    } else if sql_type == "integer" {
-        // i32
-        let integer_value: Result<i32, std::num::ParseIntError> = value.parse();
-        match integer_value {
-            Ok(_) => false,
-            Err(_) => true,
-        }
-    } else if sql_type == "real" {
-        // f64 (actually f32)
-        let float_value: Result<f64, std::num::ParseFloatError> = value.parse();
-        match float_value {
-            Ok(_) => false,
-            Err(_) => true,
-        }
-    } else {
-        false
+        let value: &str = row
+            .try_get(format!(r#"{}"#, column).as_str())
+            .unwrap_or_default();
+        json!(value)
     }
 }
 
@@ -2942,6 +2948,41 @@ pub async fn get_previous_row_tx(
         let rn: i64 = rows[0].get("row_number");
         Ok(rn as u32)
     }
+}
+
+/// Given a table name, a row number, the new row order to assign to the row, and a database
+/// transaction, update the row order for the row in the database. Note that the row_order is
+/// represented using the signed i64 type but it can never actually be negative. This function
+/// will return an error when a negative row_order is provided.
+pub async fn update_row_order(
+    table: &str,
+    row: &u32,
+    row_order: &i64,
+    tx: &mut Transaction<'_, sqlx::Any>,
+) -> Result<()> {
+    if *row_order < 0 {
+        return Err(ValveError::InputError(format!(
+            "Refusing to assign a negative row_order, {}, to row {} of table {}.",
+            row_order, row, table
+        ))
+        .into());
+    }
+
+    let sql = format!(
+        r#"UPDATE "{}" SET "row_order" = {} WHERE "row_number" = {} RETURNING 1 AS "updated""#,
+        table, row_order, row,
+    );
+    let rows = sqlx_query(&sql).fetch_all(tx.acquire().await?).await?;
+    if rows.len() == 0 {
+        // If the update of the normal table yielded zero affected rows, then the row must be
+        // in the conflict table, so we try updating that instead:
+        let sql = format!(
+            r#"UPDATE "{}_conflict" SET "row_order" = {} WHERE "row_number" = {}"#,
+            table, row_order, row,
+        );
+        sqlx_query(&sql).execute(tx.acquire().await?).await?;
+    }
+    Ok(())
 }
 
 /// Given a database transaction, a table name, `table`, a row number, `row`, and the number of the
@@ -3495,770 +3536,831 @@ pub async fn update_row_tx(
     Ok(())
 }
 
-/// Given a path, read a TSV file and return a vector of rows represented as [SerdeMaps](SerdeMap).
-/// Note: Use this function to read "small" TSVs only. In particular, use this for the special
-/// configuration tables.
-pub fn read_tsv_into_vector(path: &str) -> Result<Vec<SerdeMap>> {
-    let mut rdr =
-        ReaderBuilder::new()
-            .delimiter(b'\t')
-            .from_reader(File::open(path).map_err(|err| {
-                ValveError::ConfigError(format!("Unable to open '{}': {}", path, err))
-            })?);
-
-    let mut rows: Vec<SerdeMap> = vec![];
-    for result in rdr.deserialize() {
-        match result {
-            Err(e) => {
-                return Err(ValveError::InputError(format!("Error reading {}: {}", path, e)).into())
-            }
-            Ok(row) => rows.push(row),
-        }
-    }
-
-    if rows.len() < 1 {
-        return Err(ValveError::DataError(format!("No rows in {}", path)).into());
-    }
-
-    for (i, row) in rows.iter().enumerate() {
-        // enumerate() begins at 0 but we want to count rows from 1:
-        let i = i + 1;
-        for (col, val) in row {
-            let val = match val {
-                SerdeValue::String(s) => s.to_string(),
-                _ => val.to_string(),
-            };
-            let trimmed_val = val.trim();
-            if trimmed_val != val {
-                return Err(ValveError::DataError(format!(
-                    "Value '{}' of column '{}' in row {} of table '{}' {}",
-                    val, col, i, path, "has leading and/or trailing whitespace."
-                ))
-                .into());
-            }
-        }
-    }
-
-    Ok(rows)
+/// Given a global configuration struct, a database connection pool used to determine the SQL syntax
+/// to use, a database transaction through which to execute queries over the database, a table name,
+/// a row number, the old previous row for the row, and the new previous row for the row, record the
+/// move in the history table in the database.
+pub async fn record_row_move(
+    config: &ValveConfig,
+    pool: &AnyPool,
+    tx: &mut Transaction<'_, sqlx::Any>,
+    table: &str,
+    row_num: &u32,
+    old_previous_row: &u32,
+    new_previous_row: &u32,
+    user: &str,
+) -> Result<()> {
+    let row = get_row_from_db(config, pool, tx, table, row_num).await?;
+    let mut from_row = row.clone();
+    let mut to_row = row.clone();
+    from_row.insert("previous_row".to_string(), json!(old_previous_row));
+    to_row.insert("previous_row".to_string(), json!(new_previous_row));
+    record_row_change(
+        pool,
+        tx,
+        table,
+        row_num,
+        Some(&from_row),
+        Some(&to_row),
+        &user,
+    )
+    .await
 }
 
-/// Given a database at the specified location, query the given table and return a vector of rows
-/// represented as [SerdeMaps](SerdeMap).
-pub fn read_db_table_into_vector(pool: &AnyPool, config_table: &str) -> Result<Vec<SerdeMap>> {
-    let sql = format!("SELECT * FROM \"{}\"", config_table);
-    let rows = block_on(sqlx_query(&sql).fetch_all(pool)).map_err(|e| {
-        ValveError::InputError(format!(
-            "Error while reading table '{}' from database: {}",
-            config_table, e
-        ))
-    })?;
-    let mut table_rows = vec![];
-    for row in rows {
-        let mut table_row = SerdeMap::new();
-        for column in row.columns() {
-            let cname = column.name();
-            if cname != "row_number" && cname != "row_order" {
-                let raw_value = row.try_get_raw(format!(r#"{}"#, cname).as_str()).unwrap();
-                if !raw_value.is_null() {
-                    let value = get_column_value_as_string(&row, &cname, "text");
-                    table_row.insert(cname.to_string(), json!(value));
-                } else {
-                    table_row.insert(cname.to_string(), json!(""));
+/// Given a database connection pool (used to determine the type of the underlying database), a
+/// database transaction, a table name, a row number, optionally: the version of the row we
+/// are going to change it from, optionally: the version of the row we are going to change it to,
+/// and the name of the user making the change, record the change to the history table in the
+/// database. Note that `from` and `to` cannot both be None: Either we are changing the row from
+/// something to nothing (i.e., deleting), changing it from nothing to something (i.e., inserting),
+/// or changing it from something to something else (i.e., updating).
+/// Note that `from` and `to` must both be in the ('rich') format:
+/// ```
+/// {
+///     "column_1": {
+///         "valid": <true|false>,
+///         "messages": [{"level": level, "rule": rule, "message": message}, ...],
+///         "value": value1
+///     },
+///     "column_2": {
+///         "valid": <true|false>,
+///         "messages": [{"level": level, "rule": rule, "message": message}, ...],
+///         "value": value2
+///     },
+///     ...
+/// },
+/// ```
+pub async fn record_row_change(
+    pool: &AnyPool,
+    tx: &mut Transaction<'_, sqlx::Any>,
+    table: &str,
+    row_number: &u32,
+    from: Option<&SerdeMap>,
+    to: Option<&SerdeMap>,
+    user: &str,
+) -> Result<()> {
+    if let (None, None) = (from, to) {
+        return Err(ValveError::InputError(
+            "Arguments 'from' and 'to' to function record_row_change() cannot both be None".into(),
+        )
+        .into());
+    }
+
+    fn to_text(row: Option<&SerdeMap>) -> String {
+        match row {
+            None => "NULL".to_string(),
+            Some(r) => format!("{}", json!(r)),
+        }
+    }
+
+    fn format_value(value: &String, numeric_re: &Regex) -> String {
+        if numeric_re.is_match(value) {
+            value.to_string()
+        } else {
+            format!("'{}'", value)
+        }
+    }
+
+    fn summarize(from: Option<&SerdeMap>, to: Option<&SerdeMap>) -> Result<String> {
+        // Constructs a summary of the form:
+        // {
+        //   "column":"bar",
+        //   "level":"update|move",
+        //   "message":"Value changed from 'A' to 'B'",
+        //   "old_value":"'A'",
+        //   "value":"'B'"
+        // }
+        let mut summary = vec![];
+        match (from, to) {
+            (None, _) | (_, None) => Ok("NULL".to_string()),
+            (Some(from), Some(to)) => {
+                let numeric_re = Regex::new(r"^[0-9]*\.?[0-9]+$")?;
+                for (column, cell) in from.iter() {
+                    let old_value = match column.as_str() {
+                        "previous_row" => match cell {
+                            SerdeValue::Number(n) => format!("{}", n),
+                            _ => {
+                                return Err(ValveError::DataError(format!(
+                                    "Value {:?} for column '{}' is not a number",
+                                    cell, column,
+                                ))
+                                .into())
+                            }
+                        },
+                        _ => cell
+                            .get("value")
+                            .and_then(|v| match v {
+                                SerdeValue::String(s) => Some(format!("{}", s)),
+                                SerdeValue::Number(n) => Some(format!("{}", n)),
+                                SerdeValue::Bool(b) => Some(format!("{}", b)),
+                                _ => None,
+                            })
+                            .ok_or(ValveError::DataError(
+                                format!("No value in {}", cell).into(),
+                            ))?,
+                    };
+                    let new_value = match column.as_str() {
+                        "previous_row" => to
+                            .get(column)
+                            .and_then(|v| match v {
+                                SerdeValue::Number(n) => Some(format!("{}", n)),
+                                _ => None,
+                            })
+                            .ok_or(ValveError::DataError(
+                                format!(
+                                    "Value of column: '{}' in row {:?} is not a number",
+                                    column, to
+                                )
+                                .into(),
+                            ))?,
+                        _ => to
+                            .get(column)
+                            .and_then(|v| v.get("value"))
+                            .and_then(|v| match v {
+                                SerdeValue::String(s) => Some(format!("{}", s)),
+                                SerdeValue::Number(n) => Some(format!("{}", n)),
+                                SerdeValue::Bool(b) => Some(format!("{}", b)),
+                                _ => None,
+                            })
+                            .ok_or(ValveError::DataError(
+                                format!("No value for column: {} in {:?}", column, to).into(),
+                            ))?,
+                    };
+                    if new_value != old_value {
+                        let mut column_summary = SerdeMap::new();
+                        column_summary.insert("column".to_string(), json!(column));
+                        column_summary.insert(
+                            "level".to_string(),
+                            match column.as_str() {
+                                "previous_row" => json!("move"),
+                                _ => json!("update"),
+                            },
+                        );
+                        column_summary.insert("old_value".to_string(), json!(old_value));
+                        column_summary.insert("value".to_string(), json!(new_value));
+                        column_summary.insert(
+                            "message".to_string(),
+                            json!(format!(
+                                "Value changed from {} to {}",
+                                format_value(&old_value.to_string(), &numeric_re),
+                                format_value(&new_value.to_string(), &numeric_re),
+                            )),
+                        );
+                        let column_summary = to_text(Some(&column_summary));
+                        summary.push(column_summary);
+                    }
                 }
+                Ok(format!("[{}]", summary.join(",")))
             }
         }
-        table_rows.push(table_row);
     }
-    Ok(table_rows)
+
+    let summary = summarize(from, to)?;
+    let (from, to) = (to_text(from), to_text(to));
+    let mut params = vec![table];
+    let from_param = {
+        if from == "NULL" {
+            from
+        } else {
+            params.push(&from);
+            SQL_PARAM.to_string()
+        }
+    };
+    let to_param = {
+        if to == "NULL" {
+            to
+        } else {
+            params.push(&to);
+            SQL_PARAM.to_string()
+        }
+    };
+    let summary_param = {
+        if summary == "NULL" {
+            summary
+        } else {
+            params.push(&summary);
+            SQL_PARAM.to_string()
+        }
+    };
+    params.push(user);
+
+    let sql = format!(
+        r#"INSERT INTO "history" ("table", "row", "from", "to", "summary", "user")
+           VALUES ({SQL_PARAM}, {row_number}, {from_param},
+                   {to_param}, {summary_param}, {SQL_PARAM})"#,
+    );
+    let sql = local_sql_syntax(pool, &sql);
+
+    let mut query = sqlx_query(&sql);
+    for param in &params {
+        query = query.bind(param)
+    }
+    query.execute(tx.acquire().await?).await?;
+
+    Ok(())
 }
 
-/// Given a condition on a datatype, if the condition is a Function, then parse it using
-/// StartParser, create a corresponding CompiledCondition, and return it. If the condition is a
-/// Label, then look for the CompiledCondition corresponding to it in datatype_conditions
-/// and return it.
-pub fn compile_condition(
-    condition: &str,
-    parser: &StartParser,
-    datatype_conditions: &HashMap<String, CompiledCondition>,
-) -> Result<CompiledCondition> {
-    if condition == "null" || condition == "not null" {
-        // The case of a "null" or "not null" condition will be treated specially later during the
-        // validation phase in a way that does not utilise the associated closure. Since we still
-        // have to assign some closure in these cases, we use a constant closure that always
-        // returns true:
-        return Ok(CompiledCondition {
-            value_type: ValueType::Single,
-            original: String::from(""),
-            parsed: Expression::None,
-            compiled: Arc::new(|_| true),
-        });
+/// Given a database record representing either an undo or a redo from the history table,
+/// convert it to a vector of [ValveChange] structs.
+pub fn convert_undo_or_redo_record_to_change(record: &AnyRow) -> Result<Option<ValveRowChange>> {
+    let table: &str = record.get("table");
+    let row_number: i64 = record.get("row");
+    let row_number = row_number as u32;
+    let from = get_json_object_from_row(&record, "from");
+    let to = get_json_object_from_row(&record, "to");
+    let summary = {
+        let summary = record.try_get_raw("summary")?;
+        if !summary.is_null() {
+            let summary: &str = record.get("summary");
+            match serde_json::from_str::<SerdeValue>(summary) {
+                Ok(SerdeValue::Array(v)) => Some(v),
+                _ => panic!("{} is not an array.", summary),
+            }
+        } else {
+            None
+        }
+    };
+
+    // If the `summary` part of the record is present, then just use it to populate the fields
+    // of the ValveChange structs representing the changes to each column in the table row.
+    if let Some(summary) = summary {
+        let mut column_changes = vec![];
+        for entry in summary {
+            let column = entry.get("column").and_then(|s| s.as_str()).unwrap();
+            let level = entry.get("level").and_then(|s| s.as_str()).unwrap();
+            let old_value = entry.get("old_value").and_then(|s| s.as_str()).unwrap();
+            let value = entry.get("value").and_then(|s| s.as_str()).unwrap();
+            let message = entry.get("message").and_then(|s| s.as_str()).unwrap();
+            column_changes.push(ValveChange {
+                column: column.to_string(),
+                level: level.to_string(),
+                old_value: old_value.to_string(),
+                value: value.to_string(),
+                message: message.to_string(),
+            });
+        }
+        return Ok(Some(ValveRowChange {
+            table: table.to_string(),
+            row: row_number,
+            message: format!("Update row {row_number} of '{table}'"),
+            changes: column_changes,
+        }));
     }
 
-    let unquoted_re = Regex::new(r#"^['"](?P<unquoted>.*)['"]$"#)?;
-    let parsed_condition = match parser.parse(condition) {
-        Err(_) => {
-            return Err(
-                ValveError::InputError(format!("Could not parse condition: {}", condition)).into(),
-            )
+    // If the `summary` part of the record is not present, then either the `from` or the `to`
+    // parts of the record will be null. If `from` is not null then this is a delete (i.e.,
+    // the row has changed from something to nothing).
+    if let Some(from) = from {
+        let mut column_changes = vec![];
+        for (column, change) in from {
+            let old_value = change.get("value").and_then(|s| s.as_str()).unwrap();
+            column_changes.push(ValveChange {
+                column: column.to_string(),
+                level: "delete".to_string(),
+                old_value: old_value.to_string(),
+                value: "".to_string(),
+                message: "".to_string(),
+            });
         }
-        Ok(parsed_condition) => parsed_condition,
+        return Ok(Some(ValveRowChange {
+            table: table.to_string(),
+            row: row_number,
+            message: format!("Delete row {} from '{}'", row_number, table),
+            changes: column_changes,
+        }));
+    }
+
+    // If `to` is not null then this is an insert (i.e., the row has changed from nothing to
+    // something).
+    if let Some(to) = to {
+        let mut column_changes = vec![];
+        for (column, change) in to {
+            let value = change.get("value").and_then(|s| s.as_str()).unwrap();
+            column_changes.push(ValveChange {
+                column: column.to_string(),
+                level: "insert".to_string(),
+                old_value: "".to_string(),
+                value: value.to_string(),
+                message: "".to_string(),
+            });
+        }
+        return Ok(Some(ValveRowChange {
+            table: table.to_string(),
+            row: row_number,
+            message: format!("Add row {} to '{}'", row_number, table),
+            changes: column_changes,
+        }));
+    }
+
+    // If we get to here, then `summary`, `from`, and `to` are all null so we return an error.
+    Err(ValveError::InputError(
+        "All of summary, from, and to are NULL in undo/redo record".to_string(),
+    )
+    .into())
+}
+
+/// Return the next recorded change to the data that can be redone, or None if there isn't any.
+pub async fn get_record_to_redo(pool: &AnyPool) -> Result<Option<AnyRow>> {
+    // Look in the history table, get the row with the greatest ID, get the row number,
+    // from, and to, and determine whether the last operation was a delete, insert, or update.
+    let is_not_clause = if pool.any_kind() == AnyKind::Sqlite {
+        "IS NOT"
+    } else {
+        "IS DISTINCT FROM"
     };
-    if parsed_condition.len() != 1 {
-        return Err(ValveError::InputError(format!(
-            "Invalid condition: '{}'. Only one condition per column is allowed.",
-            condition
+    let sql = format!(
+        r#"SELECT * FROM "history"
+           WHERE "undone_by" {} NULL
+           ORDER BY "timestamp" DESC LIMIT 1"#,
+        is_not_clause
+    );
+    let query = sqlx_query(&sql);
+    let result_row = query.fetch_optional(pool).await?;
+    Ok(result_row)
+}
+
+/// Return the next recorded change to the data that can be undone, or None if there isn't any.
+pub async fn get_record_to_undo(pool: &AnyPool) -> Result<Option<AnyRow>> {
+    // Look in the history table, get the row with the greatest ID, get the row number,
+    // from, and to, and determine whether the last operation was a delete, insert, or update.
+    let is_clause = if pool.any_kind() == AnyKind::Sqlite {
+        "IS"
+    } else {
+        "IS NOT DISTINCT FROM"
+    };
+    let sql = format!(
+        r#"SELECT * FROM "history"
+               WHERE "undone_by" {} NULL
+               ORDER BY "history_id" DESC LIMIT 1"#,
+        is_clause
+    );
+    let query = sqlx_query(&sql);
+    let result_row = query.fetch_optional(pool).await?;
+    Ok(result_row)
+}
+
+pub async fn undo_or_redo_move(
+    table: &str,
+    last_change: &AnyRow,
+    history_id: u16,
+    row_number: &u32,
+    tx: &mut Transaction<'_, sqlx::Any>,
+    undo: bool,
+) -> Result<()> {
+    let summary = match get_json_array_from_row(&last_change, "summary") {
+        None => {
+            return Err(ValveError::DataError(format!(
+                "No summary found in undo record for history_id == {}",
+                history_id,
+            ))
+            .into())
+        }
+        Some(summary) => summary[0].clone(),
+    };
+    let column = summary
+        .get("column")
+        .and_then(|c| c.as_str())
+        .ok_or(ValveError::DataError(format!(
+            "No property 'column' found in summary for history_id == {}",
+            history_id,
+        )))?;
+    if column != "previous_row" {
+        return Err(ValveError::DataError(format!(
+            "Unexpected column '{}' in summary record for history_id == {}. \
+             Expected: 'previous_row'",
+            column, history_id
         ))
         .into());
     }
-    let parsed_condition = &parsed_condition[0];
-    match &**parsed_condition {
-        Expression::Function(name, args) if name == "equals" => match &*args[0] {
-            Expression::Label(label) => {
-                let label = String::from(unquoted_re.replace(label, "$unquoted"));
-                Ok(CompiledCondition {
-                    value_type: ValueType::Single,
-                    original: condition.to_string(),
-                    parsed: *parsed_condition.clone(),
-                    compiled: Arc::new(move |x| x == label),
-                })
-            }
-            _ => Err(
-                ValveError::InputError(format!("ERROR: Invalid condition: {}", condition)).into(),
-            ),
-        },
-        Expression::Function(name, args)
-            if vec!["exclude", "match", "search"].contains(&name.as_str()) =>
-        {
-            if let Expression::RegexMatch(pattern, flags) = &*args[0] {
-                let mut pattern = String::from(unquoted_re.replace(pattern, "$unquoted"));
-                let mut flags = String::from(flags);
-                if flags != "" {
-                    flags = format!("(?{})", flags.as_str());
-                }
-                match name.as_str() {
-                    "exclude" => {
-                        pattern = format!("{}{}", flags, pattern);
-                        let re = Regex::new(pattern.as_str())?;
-                        Ok(CompiledCondition {
-                            value_type: ValueType::Single,
-                            original: condition.to_string(),
-                            parsed: *parsed_condition.clone(),
-                            compiled: Arc::new(move |x| !re.is_match(x)),
-                        })
-                    }
-                    "match" => {
-                        pattern = format!("^({}{})$", flags, pattern);
-                        let re = Regex::new(pattern.as_str())?;
-                        Ok(CompiledCondition {
-                            value_type: ValueType::Single,
-                            original: condition.to_string(),
-                            parsed: *parsed_condition.clone(),
-                            compiled: Arc::new(move |x| re.is_match(x)),
-                        })
-                    }
-                    "search" => {
-                        pattern = format!("{}{}", flags, pattern);
-                        let re = Regex::new(pattern.as_str())?;
-                        Ok(CompiledCondition {
-                            value_type: ValueType::Single,
-                            original: condition.to_string(),
-                            parsed: *parsed_condition.clone(),
-                            compiled: Arc::new(move |x| re.is_match(x)),
-                        })
-                    }
-                    _ => Err(ValveError::InputError(format!(
-                        "Unrecognized function name: {}",
-                        name
-                    ))
-                    .into()),
-                }
-            } else {
-                Err(ValveError::InputError(format!(
-                    "Argument to condition: {} is not a regular expression",
-                    condition
-                ))
-                .into())
-            }
-        }
-        Expression::Function(name, args) if name == "in" => {
-            let mut alternatives: Vec<String> = vec![];
-            for arg in args {
-                if let Expression::Label(value) = &**arg {
-                    let value = unquoted_re.replace(value, "$unquoted");
-                    alternatives.push(value.to_string());
-                } else {
-                    return Err(ValveError::InputError(format!(
-                        "Argument: {:?} to function 'in' is not a label",
-                        arg
-                    ))
-                    .into());
-                }
-            }
-            Ok(CompiledCondition {
-                value_type: ValueType::Single,
-                original: condition.to_string(),
-                parsed: *parsed_condition.clone(),
-                compiled: Arc::new(move |x| alternatives.contains(&x.to_string())),
-            })
-        }
-        Expression::Function(name, args) if name == "list" => {
-            let syntax_error =
-                ValveError::InputError(format!("Invalid arguments for 'list': {:?}", args));
-            match &*args[0] {
-                Expression::Label(datatype) => match &*args[1] {
-                    Expression::Label(separator) => {
-                        let datatype_not_found_error = ValveError::InputError(format!(
-                            "Datatype not found: '{}' in arguments for 'list': {:?}",
-                            datatype, args
-                        ));
-                        let compiled = match datatype_conditions.get(datatype) {
-                            Some(condition) => condition.compiled.clone(),
-                            _ => return Err(datatype_not_found_error.into()),
-                        };
-                        let separator = String::from(unquoted_re.replace(separator, "$unquoted"));
-                        Ok(CompiledCondition {
-                            value_type: ValueType::List(separator.to_string()),
-                            original: condition.to_string(),
-                            parsed: *parsed_condition.clone(),
-                            compiled: compiled,
-                        })
-                    }
-                    _ => Err(syntax_error.into()),
-                },
-                _ => Err(syntax_error.into()),
-            }
-        }
-        Expression::Label(value) if datatype_conditions.contains_key(&value.to_string()) => {
-            let condition = datatype_conditions.get(&value.to_string()).unwrap();
-            Ok(CompiledCondition {
-                value_type: ValueType::Single,
-                original: value.to_string(),
-                parsed: condition.parsed.clone(),
-                compiled: condition.compiled.clone(),
-            })
-        }
-        _ => Err(ValveError::InputError(format!("Unrecognized condition: {}", condition)).into()),
+    let level = summary
+        .get("level")
+        .and_then(|l| l.as_str())
+        .ok_or(ValveError::DataError(format!(
+            "No property 'level' found in summary for history_id == {}",
+            history_id,
+        )))?;
+    if level != "move" {
+        return Err(ValveError::DataError(format!(
+            "Unexpected level '{}' in summary record for history_id == {}. \
+             Expected 'move'",
+            level, history_id
+        ))
+        .into());
     }
-}
-
-/// Given a [SerdeValue] of the type [SerdeValue::String], as well as the SQL type that it will
-/// be converted to when it is inserted to the database (which can be a non-string), return a
-/// [QueryParam] corresponding to the value.
-pub fn get_query_param(value: &SerdeValue, sql_type: &str) -> QueryParam {
-    let param_value = value
-        .as_str()
-        .expect(&format!("'{}' is not a string", value));
-    match sql_type {
-        "numeric" => {
-            let numeric_value: f64 = param_value
-                .parse()
-                .expect(&format!("{param_value} is not numeric"));
-            QueryParam::Numeric(numeric_value)
+    let update_value = {
+        if undo {
+            summary
+                .get("old_value")
+                .and_then(|l| l.as_str())
+                .ok_or(ValveError::DataError(format!(
+                    "No property 'old_value' found in summary for history_id == {}",
+                    history_id,
+                )))?
+                .parse::<u32>()?
+        } else {
+            summary
+                .get("value")
+                .and_then(|l| l.as_str())
+                .ok_or(ValveError::DataError(format!(
+                    "No property 'old_value' found in summary for history_id == {}",
+                    history_id,
+                )))?
+                .parse::<u32>()?
         }
-        "integer" => {
-            let integer_value: i32 = param_value
-                .parse()
-                .expect(&format!("{param_value} is not an integer"));
-            QueryParam::Integer(integer_value)
-        }
-        "real" => {
-            let real_value: f64 = param_value
-                .parse()
-                .expect(&format!("{param_value} is not a real"));
-            QueryParam::Real(real_value)
-        }
-        _ => QueryParam::String(param_value.to_string()),
-    }
-}
-
-/// Given the config map, the name of a datatype, and a database connection pool used to determine
-/// the database type, climb the datatype tree (as required), and return the first 'SQL type' found.
-/// If there is no SQL type defined for the given datatype, return TEXT.
-pub fn get_sql_type(
-    dt_config: &HashMap<String, ValveDatatypeConfig>,
-    datatype: &String,
-    pool: &AnyPool,
-) -> String {
-    match dt_config.get(datatype) {
-        None => return "TEXT".to_string(),
-        Some(datatype) if datatype.sql_type != "" => {
-            return datatype.sql_type.to_string();
-        }
-        _ => (),
     };
-
-    let parent_datatype = dt_config
-        .get(datatype)
-        .and_then(|d| Some(d.parent.to_string()))
-        .expect(&format!("Undefined datatype '{}'", datatype));
-
-    return get_sql_type(dt_config, &parent_datatype, pool);
+    move_row_tx(tx, table, &row_number, &update_value).await?;
+    Ok(())
 }
 
-/// Given the global config map, a table name, a column name, and a database connection pool,
-/// return the column's SQL type.
-pub fn get_sql_type_from_global_config(
-    config: &ValveConfig,
+/// Given a user, a history_id, a database transaction, and an undone_state indicating whether to
+/// set the associated history record as undone (if undone_state == true) or as not undone
+/// (otherwise), do the following: When setting the record to undone, `user` is used for the
+/// 'undone_by' field of the history table, otherwise undone_by is set to NULL and the user is
+/// indicated as the one responsible for the change (instead of whoever made the change originally).
+pub async fn switch_undone_state(
+    user: &str,
+    history_id: u16,
+    undone_state: bool,
+    tx: &mut Transaction<'_, sqlx::Any>,
+    pool: &AnyPool,
+) -> Result<()> {
+    // Set the history record to undone:
+    let timestamp = {
+        if pool.any_kind() == AnyKind::Sqlite {
+            "STRFTIME('%Y-%m-%d %H:%M:%f', 'NOW')"
+        } else {
+            "CURRENT_TIMESTAMP"
+        }
+    };
+    let undone_by = if undone_state == true {
+        format!(
+            r#""undone_by" = {}, "timestamp" = {}"#,
+            SQL_PARAM, timestamp
+        )
+    } else {
+        format!(
+            r#""undone_by" = NULL, "user" = {}, "timestamp" = {}"#,
+            SQL_PARAM, timestamp
+        )
+    };
+    let sql = local_sql_syntax(
+        pool,
+        &format!(
+            r#"UPDATE "history" SET {} WHERE "history_id" = {}"#,
+            undone_by, history_id
+        ),
+    );
+    let query = sqlx_query(&sql).bind(user);
+    query.execute(tx.acquire().await?).await?;
+    Ok(())
+}
+
+/// Given a global config map, a database connection pool, a database transaction, a table name, a
+/// column name, and a value for that column: get the rows, other than the one indicated by
+/// `except`, that would need to be revalidated if the given value were to replace the actual
+/// value of the column in that row.
+pub async fn get_affected_rows(
     table: &str,
     column: &str,
-    pool: &AnyPool,
-) -> String {
-    let dt_config = &config.datatype;
-    let dt = &config
-        .table
-        .get(table)
-        .and_then(|t| t.column.get(column))
-        .and_then(|c| Some(c.datatype.to_string()))
-        .expect(&format!(
-            "Could not determine datatype for '{}.{}'",
-            table, column
-        ));
-    get_sql_type(dt_config, &dt, pool)
-}
-
-/// Given a SQL type, return the appropriate CAST(...) statement for casting the SQL_PARAM
-/// from a TEXT column.
-pub fn cast_sql_param_from_text(sql_type: &str) -> String {
-    let s = sql_type.to_lowercase();
-    if s == "numeric" {
-        format!("CAST(NULLIF({}, '') AS NUMERIC)", SQL_PARAM)
-    } else if s == "integer" {
-        format!("CAST(NULLIF({}, '') AS INTEGER)", SQL_PARAM)
-    } else if s == "real" {
-        format!("CAST(NULLIF({}, '') AS REAL)", SQL_PARAM)
-    } else {
-        String::from(SQL_PARAM)
-    }
-}
-
-/// Given a SQL type, return the appropriate CAST(...) statement for casting the SQL_PARAM
-/// to a TEXT column.
-pub fn cast_column_sql_to_text(column: &str, sql_type: &str) -> String {
-    if sql_type.to_lowercase() == "text" {
-        format!(r#""{}""#, column)
-    } else {
-        format!(r#"CAST("{}" AS TEXT)"#, column)
-    }
-}
-
-/// Given a database row, the name of a column, and it's SQL type, return the value of that column
-/// from the given row as a String.
-pub fn get_column_value_as_string(row: &AnyRow, column: &str, sql_type: &str) -> String {
-    let s = sql_type.to_lowercase();
-    if s == "numeric" {
-        let value: f64 = row
-            .try_get(format!(r#"{}"#, column).as_str())
-            .unwrap_or_default();
-        value.to_string()
-    } else if s == "integer" {
-        let value: i32 = row
-            .try_get(format!(r#"{}"#, column).as_str())
-            .unwrap_or_default();
-        value.to_string()
-    } else if s == "real" {
-        let value: f64 = row
-            .try_get(format!(r#"{}"#, column).as_str())
-            .unwrap_or_default();
-        value.to_string()
-    } else {
-        let value: &str = row
-            .try_get(format!(r#"{}"#, column).as_str())
-            .unwrap_or_default();
-        value.to_string()
-    }
-}
-
-/// Given a database row, the name of a column, and it's SQL type, return the value of that column
-/// from the given row as a [SerdeValue].
-pub fn get_column_value(row: &AnyRow, column: &str, sql_type: &str) -> SerdeValue {
-    let s = sql_type.to_lowercase();
-    if s == "numeric" {
-        let value: f64 = row
-            .try_get(format!(r#"{}"#, column).as_str())
-            .unwrap_or_default();
-        json!(value)
-    } else if s == "integer" {
-        let value: i32 = row
-            .try_get(format!(r#"{}"#, column).as_str())
-            .unwrap_or_default();
-        json!(value)
-    } else if s == "real" {
-        let value: f64 = row
-            .try_get(format!(r#"{}"#, column).as_str())
-            .unwrap_or_default();
-        json!(value)
-    } else {
-        let value: &str = row
-            .try_get(format!(r#"{}"#, column).as_str())
-            .unwrap_or_default();
-        json!(value)
-    }
-}
-
-/// Given a global config map, a map of compiled datatype conditions, a table name and a column
-/// name, get the value type of the column.
-pub fn get_value_type(
+    value: &str,
+    except: Option<&u32>,
     config: &ValveConfig,
-    datatype_conditions: &HashMap<String, CompiledCondition>,
-    table_name: &str,
-    column_name: &str,
-) -> ValueType {
-    let datatype = &config
-        .table
-        .get(table_name)
-        .expect(&format!("No config found for table '{}'", table_name))
-        .column
-        .get(column_name)
-        .expect(&format!(
-            "No config found for column '{}' of table '{}'",
-            column_name, table_name
-        ))
-        .datatype;
-    match datatype_conditions.get(datatype) {
-        None => ValueType::Single,
-        Some(condition) => condition.value_type.clone(),
-    }
-}
-
-/// Given a SQL string, possibly with unbound parameters represented by the placeholder string
-/// SQL_PARAM, and given a database pool, if the pool is of type Sqlite, then change the syntax used
-/// for unbound parameters to Sqlite syntax, which uses "?", otherwise use Postgres syntax, which
-/// uses numbered parameters, i.e., $1, $2, ...
-pub fn local_sql_syntax(pool: &AnyPool, sql: &String) -> String {
-    // Do not replace instances of SQL_PARAM if they are within quotation marks.
-    let rx = Regex::new(&format!(
-        r#"('[^'\\]*(?:\\.[^'\\]*)*'|"[^"\\]*(?:\\.[^"\\]*)*")|\b{}\b"#,
-        SQL_PARAM
-    ))
-    .unwrap();
-
-    let mut final_sql = String::from("");
-    let mut pg_param_idx = 1;
-    let mut saved_start = 0;
-    for m in rx.find_iter(sql) {
-        let this_match = &sql[m.start()..m.end()];
-        final_sql.push_str(&sql[saved_start..m.start()]);
-        if this_match == SQL_PARAM {
-            if pool.any_kind() == AnyKind::Postgres {
-                final_sql.push_str(&format!("${}", pg_param_idx));
-                pg_param_idx += 1;
-            } else {
-                final_sql.push_str(&format!("?"));
-            }
-        } else {
-            final_sql.push_str(&format!("{}", this_match));
-        }
-        saved_start = m.start() + this_match.len();
-    }
-    final_sql.push_str(&sql[saved_start..]);
-    final_sql
-}
-
-/// Takes as arguments a list of tables and a configuration struct describing all of the constraints
-/// between tables. After validating that there are no cycles amongst the foreign, and tree
-/// dependencies, returns (i) the list of tables sorted according to their foreign key
-/// dependencies, such that if table_a depends on table_b, then table_b comes before table_a in the
-/// list; (ii) A map from table names to the lists of tables that depend on a given table; (iii) a
-/// map from table names to the lists of tables that a given table depends on.
-pub fn verify_table_deps_and_sort(
-    table_list: &Vec<String>,
-    constraints: &ValveConstraintConfig,
-) -> (
-    Vec<String>,
-    HashMap<String, Vec<String>>,
-    HashMap<String, Vec<String>>,
-) {
-    fn get_cycles(g: &DiGraphMap<&str, ()>) -> Result<Vec<String>, Vec<Vec<String>>> {
-        let mut cycles = vec![];
-        match toposort(&g, None) {
-            Err(cycle) => {
-                let problem_node = cycle.node_id();
-                let neighbours = g.neighbors_directed(problem_node, Direction::Outgoing);
-                for neighbour in neighbours {
-                    let ways_to_problem_node =
-                        all_simple_paths::<Vec<_>, _>(&g, neighbour, problem_node, 0, None);
-                    for mut way in ways_to_problem_node {
-                        let mut cycle = vec![problem_node];
-                        cycle.append(&mut way);
-                        let cycle = cycle
-                            .iter()
-                            .map(|&item| item.to_string())
-                            .collect::<Vec<_>>();
-                        cycles.push(cycle);
-                    }
+    pool: &AnyPool,
+    tx: &mut Transaction<'_, sqlx::Any>,
+) -> Result<Vec<ValveRow>> {
+    // Since the consequence of an update could involve currently invalid rows
+    // (in the conflict table) becoming valid or vice versa, we need to check rows for
+    // which the value of the column is the same as `value`
+    let (sql, mut sql_params) = generic_select_with_message_values(table, config, pool);
+    let sql = local_sql_syntax(
+        pool,
+        &format!(
+            r#"{sql} WHERE "{column}" = {SQL_PARAM}{except}"#,
+            except = match except {
+                None => "".to_string(),
+                Some(row_number) => {
+                    format!(" AND row_number != {}", row_number)
                 }
-                Err(cycles)
-            }
-            Ok(sorted) => {
-                let mut sorted = sorted
-                    .iter()
-                    .map(|&item| item.to_string())
-                    .collect::<Vec<_>>();
-                sorted.reverse();
-                Ok(sorted)
+            },
+        ),
+    );
+    sql_params.push(value.to_string());
+
+    let mut query = sqlx_query(&sql);
+    for param in &sql_params {
+        query = query.bind(param);
+    }
+    let mut valve_rows = vec![];
+    for row in query.fetch_all(tx.acquire().await?).await? {
+        let mut contents = IndexMap::new();
+        let mut row_number: Option<u32> = None;
+        for column in row.columns() {
+            let cname = column.name();
+            if cname == "row_number" {
+                row_number = Some(row.get::<i64, _>("row_number") as u32);
+            } else if cname != "message" {
+                let raw_value = row.try_get_raw(format!(r#"{}"#, cname).as_str()).unwrap();
+                let value;
+                if !raw_value.is_null() {
+                    value = get_column_value_as_string(&row, &cname, "text");
+                } else {
+                    value = String::from("");
+                }
+                contents.insert(cname.to_string(), ValveCell::new(&json!(value)));
             }
         }
+        let row_number =
+            row_number.ok_or(ValveError::DataError("Row: has no row number".to_string()))?;
+        valve_rows.push(ValveRow {
+            row_number: Some(row_number),
+            contents: contents,
+        });
     }
 
-    // Check for intra-table cycles:
-    let trees = &constraints.tree;
-    for table_name in table_list {
-        let mut dependency_graph = DiGraphMap::<&str, ()>::new();
-        let table_trees = trees
-            .get(table_name)
-            .expect(&format!("Undefined table '{}'", table_name));
-        for tree in table_trees {
-            let child = &tree.child;
-            let parent = &tree.parent;
-            let c_index = dependency_graph.add_node(&child);
-            let p_index = dependency_graph.add_node(&parent);
-            dependency_graph.add_edge(c_index, p_index, ());
+    Ok(valve_rows)
+}
+
+/// Given a global config map, a database connection pool, a database transaction, a table name,
+/// and a [QueryAsIf] struct representing a custom modification to the query of the table, get
+/// the rows that will potentially be affected by the database change to the row indicated in
+/// query_as_if. These are divided into three: The rows that must be updated before the current
+/// update, the rows that must be updated after the current update, and the rows from the same
+/// table as the current update that need to be updated.
+pub async fn get_rows_to_update(
+    config: &ValveConfig,
+    pool: &AnyPool,
+    tx: &mut Transaction<'_, sqlx::Any>,
+    table: &str,
+    query_as_if: &QueryAsIf,
+) -> Result<(
+    IndexMap<String, Vec<ValveRow>>,
+    IndexMap<String, Vec<ValveRow>>,
+    IndexMap<String, Vec<ValveRow>>,
+    IndexMap<String, Vec<ValveRow>>,
+)> {
+    fn get_cell_value(row: &ValveRow, column: &str) -> Result<String> {
+        row.contents
+            .get(column)
+            .and_then(|cell| Some(cell.strvalue()))
+            .ok_or(
+                ValveError::InputError(format!(
+                    "Value missing or of unknown type in column {} of row to update: {:?}",
+                    column, row
+                ))
+                .into(),
+            )
+    }
+
+    // Collect foreign key dependencies:
+    let foreign_dependencies = {
+        let mut foreign_dependencies = vec![];
+        let global_fconstraints = &config.constraint.foreign;
+        for (_, fconstraints) in global_fconstraints {
+            for entry in fconstraints {
+                if entry.ftable == *table {
+                    foreign_dependencies.push(entry);
+                }
+            }
         }
-        match get_cycles(&dependency_graph) {
-            Ok(_) => (),
-            Err(cycles) => {
-                let mut message = String::new();
-                for cycle in cycles {
-                    message.push_str(
-                        format!("Cyclic dependency in table '{}': ", table_name).as_str(),
+        foreign_dependencies
+    };
+
+    let mut rows_to_update_before = IndexMap::new();
+    let mut rows_to_update_after = IndexMap::new();
+    let mut rows_to_update_unique = IndexMap::new();
+    let mut rows_to_update_tree = IndexMap::new();
+    for fdep in &foreign_dependencies {
+        let dependent_table = &fdep.table;
+        let dependent_column = &fdep.column;
+        let target_column = &fdep.fcolumn;
+        let target_table = &fdep.ftable;
+
+        // Query the database using `row_number` to get the current value of the column for
+        // the row.
+        let updates_before = match query_as_if.kind {
+            QueryAsIfKind::Add => {
+                if let None = query_as_if.row {
+                    log::warn!(
+                        "No row in query_as_if: {:?} for {:?}",
+                        query_as_if,
+                        query_as_if.kind
                     );
-                    let end_index = cycle.len() - 1;
-                    for (i, child) in cycle.iter().enumerate() {
-                        if i < end_index {
-                            let dep = table_trees.iter().find(|d| d.child == *child).unwrap();
-                            let parent = &dep.parent;
-                            message.push_str(
-                                format!("tree({}) references {}", child, parent).as_str(),
-                            );
-                        }
-                        if i < (end_index - 1) {
-                            message.push_str(" and ");
-                        }
-                    }
-                    message.push_str(". ");
                 }
-                panic!("{}", message);
+                vec![]
+            }
+            _ => {
+                let current_value = get_db_value(
+                    target_table,
+                    target_column,
+                    &query_as_if.row_number,
+                    pool,
+                    tx,
+                )
+                .await?;
+
+                // Query dependent_table.dependent_column for the rows that will be affected by the
+                // change from the current value:
+                get_affected_rows(
+                    dependent_table,
+                    dependent_column,
+                    &current_value,
+                    None,
+                    config,
+                    pool,
+                    tx,
+                )
+                .await?
             }
         };
-    }
 
-    // Check for inter-table cycles:
-    let foreign_keys = &constraints.foreign;
-    let mut dependency_graph = DiGraphMap::<&str, ()>::new();
-    for table_name in table_list {
-        let t_index = dependency_graph.add_node(table_name);
-        let fkeys = foreign_keys
-            .get(table_name)
-            .expect(&format!("Undefined table '{}'", table_name));
-        for fkey in fkeys {
-            let ftable = &fkey.ftable;
-            let f_index = dependency_graph.add_node(&ftable);
-            dependency_graph.add_edge(t_index, f_index, ());
-        }
-    }
-
-    match get_cycles(&dependency_graph) {
-        Ok(sorted_table_list) => {
-            let mut table_dependencies_in = HashMap::new();
-            for node in dependency_graph.nodes() {
-                let neighbors = dependency_graph
-                    .neighbors_directed(node, petgraph::Direction::Incoming)
-                    .map(|n| n.to_string())
-                    .collect::<Vec<_>>();
-                table_dependencies_in.insert(node.to_string(), neighbors);
-            }
-            let mut table_dependencies_out = HashMap::new();
-            for node in dependency_graph.nodes() {
-                let neighbors = dependency_graph
-                    .neighbors_directed(node, petgraph::Direction::Outgoing)
-                    .map(|n| n.to_string())
-                    .collect::<Vec<_>>();
-                table_dependencies_out.insert(node.to_string(), neighbors);
-            }
-            let mut sorted_table_list = sorted_table_list.clone();
-            let mut with_internals = INTERNAL_TABLES
-                .iter()
-                .map(|t| t.to_string())
-                .collect::<Vec<_>>();
-            with_internals.append(&mut sorted_table_list);
-            return (
-                with_internals,
-                table_dependencies_in,
-                table_dependencies_out,
-            );
-        }
-        Err(cycles) => {
-            let mut message = String::new();
-            for cycle in cycles {
-                message.push_str(
-                    format!("Cyclic dependency between tables {}: ", cycle.join(", ")).as_str(),
-                );
-                let end_index = cycle.len() - 1;
-                for (i, table) in cycle.iter().enumerate() {
-                    if i < end_index {
-                        let dep_name = cycle.get(i + 1).unwrap().as_str();
-                        let fkeys = foreign_keys.get(table).unwrap();
-                        let column;
-                        let ref_table;
-                        let ref_column;
-                        if let Some(dep) = fkeys.iter().find(|d| d.ftable == *dep_name) {
-                            column = &dep.column;
-                            ref_table = &dep.ftable;
-                            ref_column = &dep.fcolumn;
-                        } else {
-                            panic!("{}. Unable to retrieve the details.", message);
-                        }
-
-                        message.push_str(
-                            format!(
-                                "{}.{} depends on {}.{}",
-                                table, column, ref_table, ref_column,
-                            )
-                            .as_str(),
-                        );
-                    }
-                    if i < (end_index - 1) {
-                        message.push_str(" and ");
-                    }
+        let updates_after = match &query_as_if.row {
+            None => {
+                if query_as_if.kind != QueryAsIfKind::Remove {
+                    log::warn!(
+                        "No row in query_as_if: {:?} for {:?}",
+                        query_as_if,
+                        query_as_if.kind
+                    );
                 }
-                message.push_str(". ");
+                vec![]
             }
-            panic!("{}", message);
-        }
-    };
-}
+            Some(row) => {
+                // Fetch the cell corresponding to `column` from `row`, and the value of that cell,
+                // which is the new value for the row.
+                let new_value = get_cell_value(&row, target_column)?;
+                get_affected_rows(
+                    dependent_table,
+                    dependent_column,
+                    &new_value,
+                    None,
+                    config,
+                    pool,
+                    tx,
+                )
+                .await?
+            }
+        };
+        rows_to_update_before.insert(dependent_table.to_string(), updates_before);
+        rows_to_update_after.insert(dependent_table.to_string(), updates_after);
+    }
 
-/// Given a global configuration struct and a table name, returns the options for the table.
-pub fn get_table_options_from_config(config: &ValveConfig, table: &str) -> Result<HashSet<String>> {
-    Ok(config
+    let primaries = config
+        .constraint
+        .primary
+        .get(table)
+        .expect(&format!("Undefined table '{}'", table));
+    let uniques = config
+        .constraint
+        .unique
+        .get(table)
+        .expect(&format!("Undefined table '{}'", table));
+    let columns = config
         .table
         .get(table)
-        .ok_or::<ValveError>(
-            ValveError::InputError(format!("'{}' is not in table config", table)).into(),
-        )?
-        .options
-        .clone())
+        .expect(&format!("Undefined table '{}'", table))
+        .column
+        .keys()
+        .map(|k| k.to_string())
+        .collect::<Vec<_>>();
+
+    for column in &columns {
+        if !uniques.contains(column) && !primaries.contains(column) {
+            continue;
+        }
+
+        // Query the database using `row_number` to get the current value of the column for
+        // the row. We only look for rows to update that match the current value of the column.
+        // Rows matching the column's new value don't also need to be updated. Those will result
+        // in a validation error for the new/modified row but that is fine.
+        let updates = match query_as_if.kind {
+            QueryAsIfKind::Add => {
+                if let None = query_as_if.row {
+                    log::warn!(
+                        "No row in query_as_if: {:?} for {:?}",
+                        query_as_if,
+                        query_as_if.kind
+                    );
+                }
+                vec![]
+            }
+            _ => {
+                let current_value =
+                    get_db_value(table, column, &query_as_if.row_number, pool, tx).await?;
+
+                // Query table.column for the rows that will be affected by the change from the
+                // current to the new value:
+                get_affected_rows(
+                    table,
+                    column,
+                    &current_value,
+                    Some(&query_as_if.row_number),
+                    config,
+                    pool,
+                    tx,
+                )
+                .await?
+            }
+        };
+        rows_to_update_unique.insert(table.to_string(), updates);
+    }
+
+    // Collect tree-foreign dependencies:
+    let trees = config
+        .constraint
+        .tree
+        .get(table)
+        .expect(&format!("Undefined table '{}'", table));
+
+    for tree in trees {
+        let dependent_column = &tree.parent;
+        let target_column = &tree.child;
+        // Query the database using `row_number` to get the current value of the column for
+        // the row.
+        let updates_tree = match &query_as_if.row {
+            None => {
+                if query_as_if.kind != QueryAsIfKind::Remove {
+                    log::warn!(
+                        "No row in query_as_if: {:?} for {:?}",
+                        query_as_if,
+                        query_as_if.kind
+                    );
+                }
+                vec![]
+            }
+            Some(row) => {
+                // Fetch the cell corresponding to `column` from `row`, and the value of that cell,
+                // which is the new value for the row.
+                let new_value = get_cell_value(&row, target_column)?;
+                let rows = get_affected_rows(
+                    table,
+                    dependent_column,
+                    &new_value,
+                    Some(&query_as_if.row_number),
+                    config,
+                    pool,
+                    tx,
+                )
+                .await?;
+                rows
+            }
+        };
+        rows_to_update_tree.insert(table.to_string(), updates_tree);
+    }
+
+    Ok((
+        rows_to_update_before,
+        rows_to_update_tree,
+        rows_to_update_unique,
+        rows_to_update_after,
+    ))
 }
 
-/// Given a table configuration map and a datatype configuration map, a parser, a table name, and a
-/// database connection pool, return lists of: primary keys, unique constraints, foreign keys,
-/// and trees.
-pub fn get_table_constraints(
-    tables_config: &HashMap<String, ValveTableConfig>,
-    datatypes_config: &HashMap<String, ValveDatatypeConfig>,
-    parser: &StartParser,
-    table_name: &str,
+/// Given a global config map, maps of datatype and rule conditions, a database connection pool,
+/// a database transaction, some updates to process, a [QueryAsIf] struct indicating how
+/// we should counterfactually modify the current state of the database, and a flag indicating
+/// whether we should allow recursive updates, validate and then update each row indicated in
+/// `updates`.
+pub async fn process_updates(
+    config: &ValveConfig,
+    datatype_conditions: &HashMap<String, CompiledCondition>,
+    rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,
     pool: &AnyPool,
-) -> (
-    Vec<String>,
-    Vec<String>,
-    Vec<ValveForeignConstraint>,
-    Vec<ValveTreeConstraint>,
-) {
-    let mut primaries = vec![];
-    let mut uniques = vec![];
-    let mut foreigns = vec![];
-    let mut trees = vec![];
+    tx: &mut Transaction<'_, sqlx::Any>,
+    updates: &IndexMap<String, Vec<ValveRow>>,
+    query_as_if: &QueryAsIf,
+    do_not_recurse: bool,
+) -> Result<()> {
+    for (update_table, rows_to_update) in updates {
+        for row in rows_to_update {
+            // Validate each row 'counterfactually':
+            let vrow = validate_row_tx(
+                config,
+                datatype_conditions,
+                rule_conditions,
+                pool,
+                Some(tx),
+                update_table,
+                row,
+                Some(&query_as_if),
+            )
+            .await?;
 
-    let columns = tables_config
-        .get(table_name)
-        .and_then(|t| Some(t.column.clone()))
-        .expect(&format!("Undefined table '{}'", table_name));
-    let mut colvals = vec![];
-    for (_, column) in columns.iter() {
-        colvals.push(column.clone());
-    }
-
-    for row in colvals {
-        let datatype = &row.datatype;
-        let sql_type = get_sql_type(datatypes_config, datatype, pool);
-        let column_name = &row.column;
-        let structure = &row.structure;
-        if structure != "" {
-            let parsed_structure = parser
-                .parse(&structure)
-                .expect(&format!("Could not parse structure '{}'", structure));
-            for expression in parsed_structure {
-                match *expression {
-                    Expression::Label(value) if value == "primary" => {
-                        primaries.push(column_name.to_string());
-                    }
-                    Expression::Label(value) if value == "unique" => {
-                        uniques.push(column_name.to_string());
-                    }
-                    Expression::Function(name, args) if name == "from" => {
-                        if args.len() != 1 {
-                            panic!("Invalid foreign key: {} for: {}", structure, table_name);
-                        }
-                        match &*args[0] {
-                            Expression::Field(ftable, fcolumn) => {
-                                foreigns.push(ValveForeignConstraint {
-                                    table: table_name.to_string(),
-                                    column: column_name.to_string(),
-                                    ftable: ftable.to_string(),
-                                    fcolumn: fcolumn.to_string(),
-                                });
-                            }
-                            _ => {
-                                panic!("Invalid foreign key: {} for: {}", structure, table_name)
-                            }
-                        };
-                    }
-                    Expression::Function(name, args) if name == "tree" => {
-                        if args.len() != 1 {
-                            panic!(
-                                "Invalid 'tree' constraint: {} for: {}",
-                                structure, table_name
-                            );
-                        }
-                        match &*args[0] {
-                            Expression::Label(child) => {
-                                let child_datatype = columns
-                                    .get(child)
-                                    .and_then(|c| Some(c.datatype.to_string()));
-                                if let None = child_datatype {
-                                    panic!(
-                                        "Could not determine datatype for {} of tree({})",
-                                        child, child
-                                    );
-                                }
-                                let child_datatype = child_datatype.unwrap();
-                                let parent = column_name;
-                                let child_sql_type = get_sql_type(
-                                    datatypes_config,
-                                    &child_datatype.to_string(),
-                                    pool,
-                                );
-                                if sql_type != child_sql_type {
-                                    panic!(
-                                        "SQL type '{}' of '{}' in 'tree({})' for table \
-                                         '{}' doe snot match SQL type: '{}' of parent: '{}'.",
-                                        child_sql_type, child, child, table_name, sql_type, parent
-                                    );
-                                }
-                                trees.push(ValveTreeConstraint {
-                                    child: child.to_string(),
-                                    parent: column_name.to_string(),
-                                });
-                            }
-                            _ => {
-                                panic!(
-                                    "Invalid 'tree' constraint: {} for: {}",
-                                    structure, table_name
-                                );
-                            }
-                        };
-                    }
-                    _ => panic!(
-                        "Unrecognized structure: {} for {}.{}",
-                        structure, table_name, column_name
-                    ),
-                };
-            }
+            // Update the row in the database:
+            update_row_tx(
+                config,
+                datatype_conditions,
+                rule_conditions,
+                pool,
+                tx,
+                update_table,
+                &vrow,
+                false,
+                do_not_recurse,
+            )
+            .await?;
         }
     }
-
-    return (primaries, uniques, foreigns, trees);
+    Ok(())
 }
 
 /// Given a list of messages and a HashMap, messages_stats, with which to collect counts of
@@ -4280,108 +4382,6 @@ pub fn add_message_counts(
             messages_stats.insert("info".to_string(), current_infos + 1);
         } else {
             log::warn!("Unknown message type: {}", message.level);
-        }
-    }
-}
-
-/// Given a global configuration struct, a map of compiled datatype conditions, and the name of a
-/// datatype, returns the configuration information for all of the datatype's ancestors if
-/// only_conditioned is set to false, otherwise returns the configuration information only for
-/// those ancestors that define a datatype condition. Note that this function will panic if
-/// the datatype name is not defined in the given config.
-pub fn get_datatype_ancestors(
-    config: &ValveConfig,
-    datatype_conditions: &HashMap<String, CompiledCondition>,
-    dt_name: &str,
-    only_conditioned: bool,
-) -> Vec<ValveDatatypeConfig> {
-    fn build_hierarchy(
-        config: &ValveConfig,
-        datatype_conditions: &HashMap<String, CompiledCondition>,
-        start_dt_name: &str,
-        dt_name: &str,
-        only_conditioned: bool,
-    ) -> Vec<ValveDatatypeConfig> {
-        let mut datatypes = vec![];
-        if dt_name != "" {
-            let datatype = config
-                .datatype
-                .get(dt_name)
-                .expect(&format!("Undefined datatype '{}'", dt_name));
-            let dt_name = datatype.datatype.as_str();
-            let dt_condition = datatype_conditions.get(dt_name);
-            let dt_parent = datatype.parent.as_str();
-            if dt_name != start_dt_name {
-                if !only_conditioned {
-                    datatypes.push(datatype.clone());
-                } else {
-                    if let Some(_) = dt_condition {
-                        datatypes.push(datatype.clone());
-                    }
-                }
-            }
-            let mut more_datatypes = build_hierarchy(
-                config,
-                datatype_conditions,
-                start_dt_name,
-                dt_parent,
-                only_conditioned,
-            );
-            datatypes.append(&mut more_datatypes);
-        }
-        datatypes
-    }
-    build_hierarchy(
-        config,
-        datatype_conditions,
-        dt_name,
-        dt_name,
-        only_conditioned,
-    )
-}
-
-/// Given a global config struct, return a list of defined datatype names such that:
-/// - if datatype_1 is an ancestor of datatype_2, datatype_1 appears before datatype_2 in the list
-/// - if datatype_1 is not an ancestor of datatype_2, then their relative order in the list is
-///   arbitrary (unless otherwise constrained by their relations to other datatypes in the lsit).
-/// Note that this function will panic if circular dependencies are encountered.
-pub fn get_sorted_datatypes(config: &ValveConfig) -> Vec<&str> {
-    let mut graph = DiGraphMap::<&str, ()>::new();
-    let dt_config = &config.datatype;
-    for (dt_name, dt_obj) in dt_config.iter() {
-        let d_index = graph.add_node(dt_name);
-        if dt_obj.parent != "" {
-            let p_index = graph.add_node(&dt_obj.parent);
-            graph.add_edge(d_index, p_index, ());
-        }
-    }
-
-    let mut cycles = vec![];
-    match toposort(&graph, None) {
-        Err(cycle) => {
-            let problem_node = cycle.node_id();
-            let neighbours = graph.neighbors_directed(problem_node, Direction::Outgoing);
-            for neighbour in neighbours {
-                let ways_to_problem_node =
-                    all_simple_paths::<Vec<_>, _>(&graph, neighbour, problem_node, 0, None);
-                for mut way in ways_to_problem_node {
-                    let mut cycle = vec![problem_node];
-                    cycle.append(&mut way);
-                    let cycle = cycle
-                        .iter()
-                        .map(|&item| item.to_string())
-                        .collect::<Vec<_>>();
-                    cycles.push(cycle);
-                }
-            }
-            panic!(
-                "Defined datatypes contain circular dependencies: {:?}",
-                cycles
-            );
-        }
-        Ok(mut sorted) => {
-            sorted.reverse();
-            sorted
         }
     }
 }
