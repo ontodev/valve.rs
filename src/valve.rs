@@ -2326,8 +2326,10 @@ impl Valve {
     }
 
     /// Given a table name and a row number, return a [ValveRow] representing that row.
-    pub async fn get_row(&self, table: &str, row: &u32) -> Result<ValveRow> {
-        todo!()
+    pub async fn get_row(&self, table: &str, row_number: &u32) -> Result<ValveRow> {
+        let mut tx = self.pool.begin().await?;
+        let row = get_row_from_db(&self.config, &self.pool, &mut tx, table, row_number).await?;
+        ValveRow::from_rich_json(Some(*row_number), &row)
     }
 
     /// Given a table name and a row number, search for and return the row number of the row that
