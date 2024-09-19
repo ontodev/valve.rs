@@ -2325,8 +2325,13 @@ impl Valve {
         }
     }
 
-    /// Given a table name, a row number, and a transaction through which to access the database,
-    /// search for and return the row number of the row that is marked as previous to the given row.
+    /// Given a table name and a row number, return a [ValveRow] representing that row.
+    pub async fn get_row(&self, table: &str, row: &u32) -> Result<ValveRow> {
+        todo!()
+    }
+
+    /// Given a table name and a row number, search for and return the row number of the row that
+    /// is marked as previous to the given row.
     pub async fn get_previous_row(&self, table: &str, row: &u32) -> Result<u32> {
         let mut tx = self.pool.begin().await?;
         get_previous_row_tx(table, row, &mut tx).await
