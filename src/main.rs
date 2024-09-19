@@ -28,7 +28,7 @@ struct Cli {
     #[arg(long, action = ArgAction::SetTrue)]
     assume_yes: bool,
 
-    /// Write more progress information to the terminal.
+    /// Print more information about progress and results to the terminal
     #[arg(long, action = ArgAction::SetTrue)]
     verbose: bool,
 
@@ -38,8 +38,27 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+enum AddSubcommands {
+    /// Read a JSON-formatted string representing a row (of the form: { "column_1": value1,
+    /// "column_2": value2, ...}) from STDIN and add it to a given table, optionally printing
+    /// (when the --verbose flag has been set) a JSON representation of the row, including
+    /// validation information and its assigned row_number, to the terminal before exiting.
+    Row {
+        #[arg(value_name = "TABLE", action = ArgAction::Set, help = "A table name")]
+        table: String,
+    },
+
+    /// Add a table located at a given path.
+    Table {
+        #[arg(value_name = "PATH", action = ArgAction::Set,
+              help = "The filesystem path of the table")]
+        path: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum Commands {
-    /// Loads all of the tables in a given database.
+    /// Load all of the Valve-managed tables in a given database with data
     Load {
         #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
         source: String,
@@ -58,7 +77,7 @@ enum Commands {
         // TODO: Add a --dry-run flag.
     },
 
-    /// Creates a database in a given location but does not load any of the tables.
+    /// Create all of the Valve-managed tables in a given database without loading any data.
     Create {
         #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
         source: String,
@@ -67,7 +86,7 @@ enum Commands {
         database: String,
     },
 
-    /// Drops all of the configured tables in the given database.
+    /// Drop all of the Valve-managed tables in a given database.
     DropAll {
         #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
         source: String,
@@ -76,7 +95,7 @@ enum Commands {
         database: String,
     },
 
-    /// Saves all saveable tables as TSV files.
+    /// Save all saveable tables as TSV files.
     SaveAll {
         #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
         source: String,
@@ -88,7 +107,7 @@ enum Commands {
         save_dir: Option<String>,
     },
 
-    /// Saves the tables from the given list as TSV files.
+    /// Save the tables from a given list as TSV files.
     Save {
         #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
         source: String,
@@ -107,7 +126,7 @@ enum Commands {
         save_dir: Option<String>,
     },
 
-    /// Add a given row to a given table.
+    /// Valve: A lightweight validation engine -- Add tables and rows to a given database
     Add {
         #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
         source: String,
@@ -115,39 +134,36 @@ enum Commands {
         #[arg(value_name = "DATABASE", action = ArgAction::Set, help = DATABASE_HELP)]
         database: String,
 
-        #[arg(value_name = "ADD_TYPE", action = ArgAction::Set, help = "The type of thing to add")]
-        add_type: String,
-
-        #[arg(value_name = "TABLE", action = ArgAction::Set, help = "A table name")]
-        table: String,
+        #[command(subcommand)]
+        add_subcommand: AddSubcommands,
     },
 
-    /// Prints the Valve configuration as a JSON-formatted string to the terminal.
+    /// Print the Valve configuration as a JSON-formatted string.
     DumpConfig {
         #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
         source: String,
     },
 
-    /// Prints the order in which the configured tables will be created, as determined by their
-    /// dependency relations, to the terminal.
+    /// Print the order in which Valve-managed tables will be created, as determined by their
+    /// dependency relations.
     ShowTableOrder {
         #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
         source: String,
     },
 
-    /// Prints the incoming dependencies for each configured table to the terminal.
+    /// Print the incoming dependencies for each Valve-managed table.
     ShowIncomingDeps {
         #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
         source: String,
     },
 
-    /// Prints the outgoing dependencies for each configured table to the terminal.
+    /// Print the outgoing dependencies for each Valve-managed table.
     ShowOutgoingDeps {
         #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
         source: String,
     },
 
-    /// Prints the SQL that will be used to create the database tables to the terminal.
+    /// Print the SQL that is used to instantiate Valve-managed tables in a given database.
     DumpSchema {
         #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
         source: String,
@@ -182,7 +198,7 @@ enum Commands {
         table_tsv: String,
     },
 
-    /// Runs a set of predefined tests, on a specified pre-loaded database, that will test Valve's
+    /// Run a set of predefined tests, on a specified pre-loaded database, that will test Valve's
     /// Application Programmer Interface.
     TestApi {
         #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
@@ -192,7 +208,7 @@ enum Commands {
         database: String,
     },
 
-    /// Runs a set of predefined tests, on a specified pre-loaded database, that will test the
+    /// Run a set of predefined tests, on a specified pre-loaded database, that will test the
     /// validity of the configured datatype hierarchy.
     TestDtHierarchy {
         #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
@@ -255,11 +271,10 @@ async fn main() -> Result<()> {
         Commands::Add {
             source,
             database,
-            table,
-            add_type,
+            add_subcommand,
         } => {
-            match add_type.as_str() {
-                "row" => {
+            match add_subcommand {
+                AddSubcommands::Row { table } => {
                     let mut row = String::new();
                     io::stdin()
                         .read_line(&mut row)
@@ -281,7 +296,7 @@ async fn main() -> Result<()> {
                         );
                     }
                 }
-                _ => panic!("I don't know how to add a '{add_type}'"),
+                _ => todo!(),
             };
         }
         Commands::Load {
