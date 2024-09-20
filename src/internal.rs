@@ -1,9 +1,11 @@
 //! Valve internal table definitions
 
-use crate::valve::{ValveColumnConfig, ValveTableConfig};
+use crate::{
+    toolkit::DbKind,
+    valve::{ValveColumnConfig, ValveTableConfig},
+};
 use indoc::indoc;
 use lazy_static::lazy_static;
-use sqlx::any::AnyKind;
 use std::collections::{HashMap, HashSet};
 
 lazy_static! {
@@ -220,7 +222,7 @@ pub fn generate_internal_table_config(table_name: &str) -> ValveTableConfig {
 
 pub fn generate_internal_table_ddl(
     table_name: &str,
-    db_kind: &AnyKind,
+    db_kind: &DbKind,
     text_type: &str,
 ) -> Vec<String> {
     if !INTERNAL_TABLES.contains(&table_name) {
@@ -245,7 +247,7 @@ pub fn generate_internal_table_ddl(
                     );
                   "#},
                 history_id = {
-                    if *db_kind == AnyKind::Sqlite {
+                    if *db_kind == DbKind::Sqlite {
                         "\"history_id\" INTEGER PRIMARY KEY,"
                     } else {
                         "\"history_id\" SERIAL PRIMARY KEY,"
@@ -253,7 +255,7 @@ pub fn generate_internal_table_ddl(
                 },
                 text_type = text_type,
                 timestamp = {
-                    if *db_kind == AnyKind::Sqlite {
+                    if *db_kind == DbKind::Sqlite {
                         "\"timestamp\" TIMESTAMP DEFAULT(STRFTIME('%Y-%m-%d %H:%M:%f', 'NOW'))"
                     } else {
                         "\"timestamp\" TIMESTAMP DEFAULT CURRENT_TIMESTAMP"
@@ -279,7 +281,7 @@ pub fn generate_internal_table_ddl(
                     );
                   "#},
                 message_id = {
-                    if *db_kind == AnyKind::Sqlite {
+                    if *db_kind == DbKind::Sqlite {
                         "\"message_id\" INTEGER PRIMARY KEY,"
                     } else {
                         "\"message_id\" SERIAL PRIMARY KEY,"

@@ -61,6 +61,27 @@ lazy_static! {
     ]);
 }
 
+/// Represents the kind of database being managed
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DbKind {
+    Postgres,
+    Sqlite,
+}
+
+impl DbKind {
+    /// Given a database connection pool, return the corresponding DbKind.
+    pub fn from_pool(pool: &AnyPool) -> Result<DbKind> {
+        let any_kind = pool.any_kind();
+        if any_kind == AnyKind::Postgres {
+            Ok(Self::Postgres)
+        } else if any_kind == AnyKind::Sqlite {
+            Ok(Self::Sqlite)
+        } else {
+            Err(ValveError::InputError(format!("Unsupported database type: {:?}", any_kind)).into())
+        }
+    }
+}
+
 /// Alias for [Map](serde_json::map)<[String], [Value](serde_json::value)>.
 pub type SerdeMap = serde_json::Map<String, SerdeValue>;
 
@@ -848,7 +869,7 @@ pub fn read_config_files(
             &datatypes_config,
             parser,
             &table_name,
-            &pool.any_kind(),
+            &DbKind::from_pool(pool)?,
         );
 
         constraints_config
@@ -1515,14 +1536,15 @@ pub fn get_table_options_from_config(config: &ValveConfig, table: &str) -> Resul
         .clone())
 }
 
-/// Given a table configuration map and a datatype configuration map, a parser, a table name, and a
-/// database kind, return lists of: primary keys, unique constraints, foreign keys, and trees.
+/// Given maps representing the table and datatype configurations, a parser, a table name, and a
+/// database kind representing the type of database being used, return lists of: primary keys,
+/// unique constraints, foreign keys, and trees.
 pub fn get_table_constraints(
     tables_config: &HashMap<String, ValveTableConfig>,
     datatypes_config: &HashMap<String, ValveDatatypeConfig>,
     parser: &StartParser,
     table_name: &str,
-    kind: &AnyKind,
+    kind: &DbKind,
 ) -> (
     Vec<String>,
     Vec<String>,
@@ -2191,13 +2213,13 @@ pub fn get_conflict_columns(config: &ValveConfig, table_name: &str) -> Vec<Strin
     conflict_columns
 }
 
-/// Given the name of a table and a database kind, generate SQL for creating a view
-/// based on the table that provides a unified representation of the normal and conflict versions
-/// of the table, plus columns summarising the information associated with the given table that is
-/// contained in the message and history tables.
-pub fn get_sql_for_standard_view(table: &str, kind: &AnyKind) -> String {
+/// Given the name of a table and a database kind (PostgreSQL or SQLite), generate SQL for
+/// creating a view based on the table that provides a unified representation of the normal
+/// and conflict versions of the table, plus columns summarising the information associated
+/// with the given table that is contained in the message and history tables.
+pub fn get_sql_for_standard_view(table: &str, kind: &DbKind) -> String {
     let message_t;
-    if *kind == AnyKind::Postgres {
+    if *kind == DbKind::Postgres {
         message_t = format!(
             indoc! {r#"
                 (
@@ -2239,7 +2261,7 @@ pub fn get_sql_for_standard_view(table: &str, kind: &AnyKind) -> String {
     }
 
     let history_t;
-    if *kind == AnyKind::Postgres {
+    if *kind == DbKind::Postgres {
         history_t = format!(
             indoc! {r#"
                 (
@@ -2307,9 +2329,9 @@ pub fn get_sql_for_standard_view(table: &str, kind: &AnyKind) -> String {
 pub fn get_sql_for_text_view(
     tables_config: &HashMap<String, ValveTableConfig>,
     table: &str,
-    kind: &AnyKind,
+    kind: &DbKind,
 ) -> String {
-    let is_clause = if *kind == AnyKind::Sqlite {
+    let is_clause = if *kind == DbKind::Sqlite {
         "IS"
     } else {
         "IS NOT DISTINCT FROM"
@@ -2339,7 +2361,7 @@ pub fn get_sql_for_text_view(
                      )
                      ELSE {casted_column}
                    END AS "{column}""#,
-                casted_column = if *kind == AnyKind::Sqlite {
+                casted_column = if *kind == DbKind::Sqlite {
                     cast_column_sql_to_text(c, "non-text")
                 } else {
                     format!("\"{}\"::TEXT", c)
@@ -2399,8 +2421,8 @@ pub fn get_sql_for_text_view(
 /// reformatted (for instance using the function [local_sql_syntax()]) in accordance with the syntax
 /// accepted by the underlying database, and then bound before being executed by sqlx.
 /// These placeholders represent: (1) the column name and (2) the table name.
-pub fn generic_select_with_message_value(column: &str, kind: &AnyKind) -> String {
-    let is_clause = if *kind == AnyKind::Sqlite {
+pub fn generic_select_with_message_value(column: &str, kind: &DbKind) -> String {
+    let is_clause = if *kind == DbKind::Sqlite {
         "IS"
     } else {
         "IS NOT DISTINCT FROM"
@@ -2419,7 +2441,7 @@ pub fn generic_select_with_message_value(column: &str, kind: &AnyKind) -> String
              )
              ELSE {casted_column}
            END AS "{column}""#,
-        casted_column = if *kind == AnyKind::Sqlite {
+        casted_column = if *kind == DbKind::Sqlite {
             cast_column_sql_to_text(column, "non-text")
         } else {
             format!("\"{}\"::TEXT", column)
@@ -2438,7 +2460,7 @@ pub fn generic_select_with_message_value(column: &str, kind: &AnyKind) -> String
 pub fn generic_select_with_message_values(
     table: &str,
     config: &ValveConfig,
-    kind: &AnyKind,
+    kind: &DbKind,
 ) -> (String, Vec<String>) {
     let real_columns = config
         .table
@@ -2550,7 +2572,7 @@ pub fn cast_column_sql_to_text(column: &str, sql_type: &str) -> String {
 pub fn get_sql_type(
     dt_config: &HashMap<String, ValveDatatypeConfig>,
     datatype: &String,
-    kind: &AnyKind,
+    kind: &DbKind,
 ) -> String {
     match dt_config.get(datatype) {
         None => return "TEXT".to_string(),
@@ -2574,7 +2596,7 @@ pub fn get_sql_type_from_global_config(
     config: &ValveConfig,
     table: &str,
     column: &str,
-    kind: &AnyKind,
+    kind: &DbKind,
 ) -> String {
     let dt_config = &config.datatype;
     let dt = &config
@@ -2622,7 +2644,7 @@ pub fn is_sql_type_error(sql_type: &str, value: &str) -> bool {
 /// SQL_PARAM, and given a database kind, if the kind is Sqlite, then change the syntax used
 /// for unbound parameters to Sqlite syntax, which uses "?", otherwise use Postgres syntax, which
 /// uses numbered parameters, i.e., $1, $2, ...
-pub fn local_sql_syntax(kind: &AnyKind, sql: &String) -> String {
+pub fn local_sql_syntax(kind: &DbKind, sql: &String) -> String {
     // Do not replace instances of SQL_PARAM if they are within quotation marks.
     let rx = Regex::new(&format!(
         r#"('[^'\\]*(?:\\.[^'\\]*)*'|"[^"\\]*(?:\\.[^"\\]*)*")|\b{}\b"#,
@@ -2637,7 +2659,7 @@ pub fn local_sql_syntax(kind: &AnyKind, sql: &String) -> String {
         let this_match = &sql[m.start()..m.end()];
         final_sql.push_str(&sql[saved_start..m.start()]);
         if this_match == SQL_PARAM {
-            if *kind == AnyKind::Postgres {
+            if *kind == DbKind::Postgres {
                 final_sql.push_str(&format!("${}", pg_param_idx));
                 pg_param_idx += 1;
             } else {
@@ -2657,7 +2679,7 @@ pub fn local_sql_syntax(kind: &AnyKind, sql: &String) -> String {
 /// including any messages, from the database.
 pub async fn get_row_from_db_tx(
     config: &ValveConfig,
-    kind: &AnyKind,
+    kind: &DbKind,
     tx: &mut Transaction<'_, sqlx::Any>,
     table: &str,
     row_number: &u32,
@@ -2790,10 +2812,10 @@ pub async fn get_db_value_tx(
     table: &str,
     column: &str,
     row_number: &u32,
-    kind: &AnyKind,
+    kind: &DbKind,
     tx: &mut Transaction<'_, sqlx::Any>,
 ) -> Result<String> {
-    let is_clause = if *kind == AnyKind::Sqlite {
+    let is_clause = if *kind == DbKind::Sqlite {
         "IS"
     } else {
         "IS NOT DISTINCT FROM"
@@ -2816,7 +2838,7 @@ pub async fn get_db_value_tx(
                  END AS "{column}"
                FROM "{table}_view" WHERE "row_number" = {row_number}
             "#,
-            casted_column = if *kind == AnyKind::Sqlite {
+            casted_column = if *kind == DbKind::Sqlite {
                 cast_column_sql_to_text(column, "non-text")
             } else {
                 format!("\"{}\"::TEXT", column)
@@ -3116,7 +3138,7 @@ pub async fn insert_new_row_tx(
         Some(n) => n,
         None => {
             let sql = local_sql_syntax(
-                &pool.any_kind(),
+                &DbKind::from_pool(pool)?,
                 &format!(
                     r#"SELECT MAX("row_number") AS "row_number" FROM (
                          SELECT MAX("row_number") AS "row_number"
@@ -3167,7 +3189,8 @@ pub async fn insert_new_row_tx(
             }));
         }
 
-        let sql_type = get_sql_type_from_global_config(config, table, column, &pool.any_kind());
+        let sql_type =
+            get_sql_type_from_global_config(config, table, column, &DbKind::from_pool(pool)?);
         if is_sql_type_error(&sql_type, &cell.strvalue()) {
             insert_values.push(String::from("NULL"));
         } else {
@@ -3201,7 +3224,7 @@ pub async fn insert_new_row_tx(
                 IndexMap::new(),
             )
         } else {
-            get_rows_to_update(config, &pool.any_kind(), tx, table, &query_as_if).await?
+            get_rows_to_update(config, &DbKind::from_pool(pool)?, tx, table, &query_as_if).await?
         }
     };
 
@@ -3216,7 +3239,7 @@ pub async fn insert_new_row_tx(
 
     // Add the new row to the table:
     let insert_stmt = local_sql_syntax(
-        &pool.any_kind(),
+        &DbKind::from_pool(pool)?,
         &format!(
             r#"INSERT INTO "{table}" ("row_number", "row_order", {data_columns})
                VALUES ({row_number}, {row_order}, {data_values})"#,
@@ -3245,7 +3268,7 @@ pub async fn insert_new_row_tx(
         let rule = m.get("rule").and_then(|c| c.as_str()).unwrap();
         let message = m.get("message").and_then(|c| c.as_str()).unwrap();
         let message_sql = local_sql_syntax(
-            &pool.any_kind(),
+            &DbKind::from_pool(pool)?,
             &format!(
                 r#"INSERT INTO "message"
                    ("table", "row", "column", "value", "level", "rule", "message")
@@ -3316,7 +3339,7 @@ pub async fn delete_row_tx(
     // rows that need to be updated. Since this is a delete there will only be rows to update
     // before and none after the delete:
     let (updates_before, updates_tree, updates_unique, _) =
-        get_rows_to_update(config, &pool.any_kind(), tx, table, &query_as_if).await?;
+        get_rows_to_update(config, &DbKind::from_pool(pool)?, tx, table, &query_as_if).await?;
 
     // Process the updates that need to be performed before the update of the target row:
     process_updates(
@@ -3346,7 +3369,7 @@ pub async fn delete_row_tx(
     }
 
     let sql = local_sql_syntax(
-        &pool.any_kind(),
+        &DbKind::from_pool(pool)?,
         &format!(r#"DELETE FROM "message" WHERE "table" = {SQL_PARAM} AND "row" = {row_number}"#,),
     );
     let query = sqlx_query(&sql).bind(table);
@@ -3423,7 +3446,7 @@ pub async fn update_row_tx(
                 IndexMap::new(),
             )
         } else {
-            get_rows_to_update(config, &pool.any_kind(), tx, table, &query_as_if).await?
+            get_rows_to_update(config, &DbKind::from_pool(pool)?, tx, table, &query_as_if).await?
         }
     };
 
@@ -3541,7 +3564,7 @@ pub async fn update_row_tx(
 /// move in the history table in the database.
 pub async fn record_row_move(
     config: &ValveConfig,
-    kind: &AnyKind,
+    kind: &DbKind,
     tx: &mut Transaction<'_, sqlx::Any>,
     table: &str,
     row_num: &u32,
@@ -3590,7 +3613,7 @@ pub async fn record_row_move(
 /// },
 /// ```
 pub async fn record_row_change(
-    kind: &AnyKind,
+    kind: &DbKind,
     tx: &mut Transaction<'_, sqlx::Any>,
     table: &str,
     row_number: &u32,
@@ -3862,7 +3885,7 @@ pub fn convert_undo_or_redo_record_to_change(record: &AnyRow) -> Result<Option<V
 pub async fn get_record_to_redo(pool: &AnyPool) -> Result<Option<AnyRow>> {
     // Look in the history table, get the row with the greatest ID, get the row number,
     // from, and to, and determine whether the last operation was a delete, insert, or update.
-    let is_not_clause = if pool.any_kind() == AnyKind::Sqlite {
+    let is_not_clause = if DbKind::from_pool(pool)? == DbKind::Sqlite {
         "IS NOT"
     } else {
         "IS DISTINCT FROM"
@@ -3882,7 +3905,7 @@ pub async fn get_record_to_redo(pool: &AnyPool) -> Result<Option<AnyRow>> {
 pub async fn get_record_to_undo(pool: &AnyPool) -> Result<Option<AnyRow>> {
     // Look in the history table, get the row with the greatest ID, get the row number,
     // from, and to, and determine whether the last operation was a delete, insert, or update.
-    let is_clause = if pool.any_kind() == AnyKind::Sqlite {
+    let is_clause = if DbKind::from_pool(pool)? == DbKind::Sqlite {
         "IS"
     } else {
         "IS NOT DISTINCT FROM"
@@ -3981,11 +4004,11 @@ pub async fn switch_undone_state(
     history_id: u16,
     undone_state: bool,
     tx: &mut Transaction<'_, sqlx::Any>,
-    kind: &AnyKind,
+    kind: &DbKind,
 ) -> Result<()> {
     // Set the history record to undone:
     let timestamp = {
-        if *kind == AnyKind::Sqlite {
+        if *kind == DbKind::Sqlite {
             "STRFTIME('%Y-%m-%d %H:%M:%f', 'NOW')"
         } else {
             "CURRENT_TIMESTAMP"
@@ -4024,7 +4047,7 @@ pub async fn get_affected_rows(
     value: &str,
     except: Option<&u32>,
     config: &ValveConfig,
-    kind: &AnyKind,
+    kind: &DbKind,
     tx: &mut Transaction<'_, sqlx::Any>,
 ) -> Result<Vec<ValveRow>> {
     // Since the consequence of an update could involve currently invalid rows
@@ -4087,7 +4110,7 @@ pub async fn get_affected_rows(
 /// table as the current update that need to be updated.
 pub async fn get_rows_to_update(
     config: &ValveConfig,
-    kind: &AnyKind,
+    kind: &DbKind,
     tx: &mut Transaction<'_, sqlx::Any>,
     table: &str,
     query_as_if: &QueryAsIf,
@@ -4444,7 +4467,7 @@ pub async fn make_inserts(
     chunk_number: usize,
     messages_stats: &mut HashMap<String, usize>,
     verbose: bool,
-    kind: &AnyKind,
+    kind: &DbKind,
 ) -> Result<(
     String,
     Vec<String>,
@@ -4470,7 +4493,7 @@ pub async fn make_inserts(
         chunk_number: usize,
         messages_stats: &mut HashMap<String, usize>,
         verbose: bool,
-        kind: &AnyKind,
+        kind: &DbKind,
     ) -> (
         String,
         Vec<String>,
@@ -4668,12 +4691,12 @@ pub async fn insert_chunk(
                 chunk_number,
                 messages_stats,
                 verbose,
-                &pool.any_kind(),
+                &DbKind::from_pool(pool)?,
             )
             .await?;
 
         // Add data to the main table:
-        let main_sql = local_sql_syntax(&pool.any_kind(), &main_sql);
+        let main_sql = local_sql_syntax(&DbKind::from_pool(pool)?, &main_sql);
         let mut main_query = sqlx_query(&main_sql);
         for param in &main_params {
             main_query = main_query.bind(param);
@@ -4681,7 +4704,7 @@ pub async fn insert_chunk(
         main_query.execute(pool).await?;
 
         // Add data to the conflict table:
-        let conflict_sql = local_sql_syntax(&pool.any_kind(), &conflict_sql);
+        let conflict_sql = local_sql_syntax(&DbKind::from_pool(pool)?, &conflict_sql);
         let mut conflict_query = sqlx_query(&conflict_sql);
         for param in &conflict_params {
             conflict_query = conflict_query.bind(param);
@@ -4689,7 +4712,7 @@ pub async fn insert_chunk(
         conflict_query.execute(pool).await?;
 
         // Add data to the message table:
-        let message_sql = local_sql_syntax(&pool.any_kind(), &message_sql);
+        let message_sql = local_sql_syntax(&DbKind::from_pool(pool)?, &message_sql);
         let mut message_query = sqlx_query(&message_sql);
         for param in &message_params {
             message_query = message_query.bind(param);
@@ -4771,11 +4794,11 @@ pub async fn insert_chunk(
                 chunk_number,
                 &mut tmp_messages_stats,
                 verbose,
-                &pool.any_kind(),
+                &DbKind::from_pool(pool)?,
             )
             .await?;
 
-        let main_sql = local_sql_syntax(&pool.any_kind(), &main_sql);
+        let main_sql = local_sql_syntax(&DbKind::from_pool(pool)?, &main_sql);
         let mut main_query = sqlx_query(&main_sql);
         for param in &main_params {
             main_query = main_query.bind(param);
@@ -4783,14 +4806,14 @@ pub async fn insert_chunk(
         let main_result = main_query.execute(pool).await;
         match main_result {
             Ok(_) => {
-                let conflict_sql = local_sql_syntax(&pool.any_kind(), &conflict_sql);
+                let conflict_sql = local_sql_syntax(&DbKind::from_pool(pool)?, &conflict_sql);
                 let mut conflict_query = sqlx_query(&conflict_sql);
                 for param in &conflict_params {
                     conflict_query = conflict_query.bind(param);
                 }
                 conflict_query.execute(pool).await?;
 
-                let message_sql = local_sql_syntax(&pool.any_kind(), &message_sql);
+                let message_sql = local_sql_syntax(&DbKind::from_pool(pool)?, &message_sql);
                 let mut message_query = sqlx_query(&message_sql);
                 for param in &message_params {
                     message_query = message_query.bind(param);

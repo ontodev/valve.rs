@@ -224,7 +224,7 @@ pub fn guess(
             .collect::<Vec<_>>()
             .join(", ");
         local_sql_syntax(
-            &valve.pool.any_kind(),
+            &valve.db_kind,
             &format!(
                 r#"INSERT INTO "table" ("row_number", {column_names}) VALUES
                    ({row_number}, {SQL_PARAM}, {SQL_PARAM}, NULL, NULL)"#,
@@ -307,7 +307,7 @@ pub fn guess(
         .join(", ");
 
         let sql = local_sql_syntax(
-            &valve.pool.any_kind(),
+            &valve.db_kind,
             &format!(
                 r#"INSERT INTO "column" ("row_number", {}) VALUES ({})"#,
                 column_names, values
@@ -662,7 +662,7 @@ pub fn annotate(
                     continue;
                 }
                 let sql = local_sql_syntax(
-                    &valve.pool.any_kind(),
+                    &valve.db_kind,
                     &format!(
                         r#"SELECT 1 FROM "{}" WHERE "{}" = {} LIMIT 1"#,
                         foreign.table, foreign.column, SQL_PARAM

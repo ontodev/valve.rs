@@ -6,7 +6,7 @@ use crate::{
         cast_sql_param_from_text, get_column_value, get_column_value_as_string,
         get_datatype_ancestors, get_query_param, get_sql_type_from_global_config,
         get_table_options_from_config, get_value_type, is_sql_type_error, local_sql_syntax,
-        ColumnRule, CompiledCondition, QueryAsIf, QueryAsIfKind, QueryParam, ValueType,
+        ColumnRule, CompiledCondition, DbKind, QueryAsIf, QueryAsIfKind, QueryParam, ValueType,
     },
     valve::{
         ValveCell, ValveCellMessage, ValveConfig, ValveRow, ValveRuleConfig, ValveTreeConstraint,
@@ -17,10 +17,7 @@ use anyhow::Result;
 use indexmap::IndexMap;
 use lfu_cache::LfuCache;
 use serde_json::{json, Value as SerdeValue};
-use sqlx::{
-    any::{AnyKind, AnyPool},
-    query as sqlx_query, Acquire, Row, Transaction, ValueRef,
-};
+use sqlx::{any::AnyPool, query as sqlx_query, Acquire, Row, Transaction, ValueRef};
 use std::collections::HashMap;
 
 /// Given a config struct, maps of compiled datatype and rule conditions, a database connection
@@ -93,7 +90,7 @@ pub async fn validate_row_tx(
                 &config,
                 table_name,
                 &column_name,
-                &pool.any_kind(),
+                &DbKind::from_pool(pool)?,
             );
             if !is_sql_type_error(&sql_type, &cell.strvalue()) {
                 validate_cell_foreign_constraints(
@@ -185,8 +182,12 @@ pub async fn validate_tree_foreign_keys(
     for tkey in tkeys {
         let child_col = &tkey.child;
         let parent_col = &tkey.parent;
-        let parent_sql_type =
-            get_sql_type_from_global_config(&config, &table_name, &parent_col, &pool.any_kind());
+        let parent_sql_type = get_sql_type_from_global_config(
+            &config,
+            &table_name,
+            &parent_col,
+            &DbKind::from_pool(pool)?,
+        );
         let with_clause;
         let params;
         if let Some(ref extra_row) = extra_row {
@@ -195,7 +196,7 @@ pub async fn validate_tree_foreign_keys(
                 extra_row,
                 table_name,
                 &query_table,
-                &pool.any_kind(),
+                &DbKind::from_pool(pool)?,
             );
         } else {
             with_clause = String::new();
@@ -210,7 +211,7 @@ pub async fn validate_tree_foreign_keys(
         }
 
         let sql = local_sql_syntax(
-            &pool.any_kind(),
+            &DbKind::from_pool(pool)?,
             &format!(
                 r#"{with_clause}
                    SELECT
@@ -323,7 +324,7 @@ pub async fn validate_rows_constraints(
                     config,
                     &fkey.ftable,
                     &fkey.fcolumn,
-                    &pool.any_kind(),
+                    &DbKind::from_pool(pool)?,
                 )
                 .to_lowercase();
                 let values = received_values
@@ -353,7 +354,7 @@ pub async fn validate_rows_constraints(
                 // Foreign keys always correspond to columns with unique constraints so we do not
                 // need to use the keyword 'DISTINCT' when querying the normal version of the table:
                 let sql = local_sql_syntax(
-                    &pool.any_kind(),
+                    &DbKind::from_pool(pool)?,
                     &format!(
                         r#"SELECT "{}" FROM "{}" WHERE "{}" IN ({})"#,
                         fkey.fcolumn, fkey.ftable, fkey.fcolumn, lookup_sql
@@ -387,7 +388,7 @@ pub async fn validate_rows_constraints(
                         // it could have duplicate values of the foreign constraint, therefore we
                         // add the DISTINCT keyword here:
                         let sql = local_sql_syntax(
-                            &pool.any_kind(),
+                            &DbKind::from_pool(pool)?,
                             &format!(
                                 r#"SELECT DISTINCT "{}" FROM "{}_conflict" WHERE "{}" IN ({})"#,
                                 fkey.fcolumn, fkey.ftable, fkey.fcolumn, lookup_sql
@@ -457,7 +458,7 @@ pub async fn validate_rows_constraints(
             };
 
             let sql_type =
-                get_sql_type_from_global_config(config, &table, &column, &pool.any_kind())
+                get_sql_type_from_global_config(config, &table, &column, &DbKind::from_pool(pool)?)
                     .to_lowercase();
             let values = received_values
                 .get(&*column)
@@ -484,7 +485,7 @@ pub async fn validate_rows_constraints(
                 .collect::<Vec<_>>();
 
             let sql = local_sql_syntax(
-                &pool.any_kind(),
+                &DbKind::from_pool(pool)?,
                 &format!(
                     r#"SELECT {} "{}" FROM "{}" WHERE "{}" IN ({})"#,
                     query_modifier, column, query_table, column, lookup_sql
@@ -594,7 +595,7 @@ pub async fn validate_rows_constraints(
             // that have SQL type violations. We exclude the latter because they can result in
             // database errors when, for instance, we compare a numeric with a non-numeric type.
             let sql_type =
-                get_sql_type_from_global_config(config, table, &column, &pool.any_kind());
+                get_sql_type_from_global_config(config, table, &column, &DbKind::from_pool(pool)?);
             if cell.nulltype == None && !is_sql_type_error(&sql_type, &cell.strvalue()) {
                 let (allowed_values, forbidden_values) = {
                     let error_msg = format!("Could not retrieve values for column '{}'", column);
@@ -826,7 +827,7 @@ pub fn select_with_extra_row(
     extra_row: &ValveRow,
     table: &str,
     effective_table: &str,
-    kind: &AnyKind,
+    kind: &DbKind,
 ) -> (String, Vec<String>) {
     let extra_row_len = extra_row.contents.keys().len();
     let mut params = vec![];
@@ -1124,7 +1125,7 @@ pub fn validate_cell_rules(
 /// counterfactual validation.
 pub fn as_if_to_sql(
     config: &ValveConfig,
-    kind: &AnyKind,
+    kind: &DbKind,
     as_if: &QueryAsIf,
     conflict_table: bool,
 ) -> String {
@@ -1262,7 +1263,7 @@ pub async fn validate_cell_foreign_constraints(
         Some(query_as_if) => {
             format!(
                 "WITH {} ",
-                as_if_to_sql(config, &pool.any_kind(), &query_as_if, false)
+                as_if_to_sql(config, &DbKind::from_pool(pool)?, &query_as_if, false)
             )
         }
         None => "".to_string(),
@@ -1271,7 +1272,7 @@ pub async fn validate_cell_foreign_constraints(
         Some(query_as_if) => {
             format!(
                 "WITH {} ",
-                as_if_to_sql(config, &pool.any_kind(), &query_as_if, true)
+                as_if_to_sql(config, &DbKind::from_pool(pool)?, &query_as_if, true)
             )
         }
         None => "".to_string(),
@@ -1309,7 +1310,7 @@ pub async fn validate_cell_foreign_constraints(
             }
             None => {
                 let fsql = local_sql_syntax(
-                    &pool.any_kind(),
+                    &DbKind::from_pool(pool)?,
                     &format!(
                         r#"{}SELECT 1 FROM "{}" WHERE "{}" = {} LIMIT 1"#,
                         as_if_clause, table, column, SQL_PARAM,
@@ -1356,9 +1357,13 @@ pub async fn validate_cell_foreign_constraints(
                 _ => ("".to_string(), ftable.to_string()),
             };
             let fcolumn = &fkey.fcolumn;
-            let sql_type =
-                get_sql_type_from_global_config(&config, ftable, fcolumn, &pool.any_kind())
-                    .to_lowercase();
+            let sql_type = get_sql_type_from_global_config(
+                &config,
+                ftable,
+                fcolumn,
+                &DbKind::from_pool(pool)?,
+            )
+            .to_lowercase();
             if !fkey_in_db(
                 pool,
                 &mut tx,
@@ -1514,11 +1519,11 @@ pub async fn validate_cell_unique_constraints(
                     &config,
                     &table_name,
                     &column_name,
-                    &pool.any_kind(),
+                    &DbKind::from_pool(pool)?,
                 );
                 let sql_param = cast_sql_param_from_text(&sql_type);
                 let sql = local_sql_syntax(
-                    &pool.any_kind(),
+                    &DbKind::from_pool(pool)?,
                     &format!(
                         r#"{} SELECT 1 FROM "{}" WHERE "{}" = {} LIMIT 1"#,
                         with_sql, query_table, column_name, sql_param

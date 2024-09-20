@@ -14,7 +14,7 @@ use crate::{
         get_sql_type_from_global_config, insert_chunks, insert_new_row_tx, local_sql_syntax,
         move_row_tx, normalize_options, read_config_files, record_row_change, record_row_move,
         switch_undone_state, undo_or_redo_move, update_row_tx, verify_table_deps_and_sort,
-        ColumnRule, CompiledCondition, ParsedStructure, ValueType,
+        ColumnRule, CompiledCondition, DbKind, ParsedStructure, ValueType,
     },
     validate::{validate_row_tx, validate_tree_foreign_keys, with_tree_sql},
     valve_grammar::StartParser,
@@ -30,10 +30,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as SerdeValue};
 use sprintf::sprintf;
-use sqlx::{
-    any::{AnyKind, AnyPool},
-    query as sqlx_query, Row, ValueRef,
-};
+use sqlx::{any::AnyPool, query as sqlx_query, Row, ValueRef};
 use std::{
     collections::{HashMap, HashSet},
     error::Error,
@@ -494,6 +491,8 @@ pub struct Valve {
     /// A map from string representations of structure conditions to the parsed versions
     /// associated with them.
     pub structure_conditions: HashMap<String, ParsedStructure>,
+    /// The kind of database being managed.
+    pub db_kind: DbKind,
     /// The string used to connect to the database:
     pub db_path: String,
     /// The database connection pool.
@@ -523,7 +522,8 @@ impl Valve {
     pub async fn build(table_path: &str, database: &str) -> Result<Self> {
         let _ = env_logger::try_init();
         let pool = get_pool_from_connection_string(database).await?;
-        if pool.any_kind() == AnyKind::Sqlite {
+        let db_kind = DbKind::from_pool(&pool)?;
+        if db_kind == DbKind::Sqlite {
             sqlx_query("PRAGMA foreign_keys = ON")
                 .execute(&pool)
                 .await?;
@@ -564,6 +564,7 @@ impl Valve {
             datatype_conditions: datatype_conditions,
             rule_conditions: rule_conditions,
             structure_conditions: structure_conditions,
+            db_kind: db_kind,
             db_path: database.to_string(),
             pool: pool,
             user: String::from("VALVE"),
@@ -583,7 +584,7 @@ impl Valve {
             Ok(self)
         } else {
             self.initial_load = true;
-            if self.pool.any_kind() == AnyKind::Sqlite {
+            if self.db_kind == DbKind::Sqlite {
                 // These pragmas are unsafe but they are used during initial loading since data
                 // integrity is not a priority in this case.
                 self.execute_sql("PRAGMA journal_mode = OFF").await?;
@@ -871,7 +872,7 @@ impl Valve {
             // A clojure to determine whether the given column has the given constraint type, which
             // can be one of 'UNIQUE', 'PRIMARY KEY', 'FOREIGN KEY':
             let column_has_constraint_type = |constraint_type: &str| -> Result<bool> {
-                if self.pool.any_kind() == AnyKind::Postgres {
+                if self.db_kind == DbKind::Postgres {
                     let sql = format!(
                         r#"SELECT 1
                        FROM information_schema.table_constraints tco
@@ -971,7 +972,7 @@ impl Valve {
                 Expression::Function(name, args) if name == "from" => {
                     match &*args[0] {
                         Expression::Field(cfg_ftable, cfg_fcolumn) => {
-                            if self.pool.any_kind() == AnyKind::Sqlite {
+                            if self.db_kind == DbKind::Sqlite {
                                 let sql = format!(r#"PRAGMA FOREIGN_KEY_LIST("{}")"#, table);
                                 for row in block_on(sqlx_query(&sql).fetch_all(&self.pool))? {
                                     let from = row.get::<String, _>("from");
@@ -1052,7 +1053,7 @@ impl Valve {
         };
 
         let db_columns_in_order = {
-            if self.pool.any_kind() == AnyKind::Sqlite {
+            if self.db_kind == DbKind::Sqlite {
                 let sql = format!(
                     r#"SELECT 1 FROM sqlite_master WHERE "type" = 'table' AND "name" = ?"#,
                 );
@@ -1164,7 +1165,7 @@ impl Valve {
                         cname
                     )))?;
             let sql_type =
-                get_sql_type_from_global_config(&self.config, table, &cname, &self.pool.any_kind());
+                get_sql_type_from_global_config(&self.config, table, &cname, &self.db_kind);
 
             // Check the column's SQL type:
             if sql_type.to_lowercase() != ctype.to_lowercase() {
@@ -1246,7 +1247,7 @@ impl Valve {
     /// Given a table configuration struct, a datatype configuration struct, a parser, a table name,
     /// and a database connection pool, return a list of DDL statements that can be used to create
     /// the database tables.
-    pub fn get_table_ddl(&self, table_name: &String, kind: &AnyKind) -> Result<Vec<String>> {
+    pub fn get_table_ddl(&self, table_name: &String, kind: &DbKind) -> Result<Vec<String>> {
         let tables_config = &self.config.table;
         let datatypes_config = &self.config.datatype;
 
@@ -1422,30 +1423,28 @@ impl Valve {
         for (table, table_config) in tables_config.iter() {
             // Generate DDL for the table and its corresponding conflict table:
             let mut table_statements = vec![];
-            let mut statements = self.get_table_ddl(&table, &self.pool.any_kind())?;
+            let mut statements = self.get_table_ddl(&table, &self.db_kind)?;
             table_statements.append(&mut statements);
             if table_config.options.contains("conflict") {
                 let cable = format!("{}_conflict", table);
-                let mut statements = self.get_table_ddl(&cable, &self.pool.any_kind())?;
+                let mut statements = self.get_table_ddl(&cable, &self.db_kind)?;
                 table_statements.append(&mut statements);
 
-                let create_view_sql = get_sql_for_standard_view(&table, &self.pool.any_kind());
+                let create_view_sql = get_sql_for_standard_view(&table, &self.db_kind);
                 let create_text_view_sql =
-                    get_sql_for_text_view(tables_config, &table, &self.pool.any_kind());
+                    get_sql_for_text_view(tables_config, &table, &self.db_kind);
                 table_statements.push(create_view_sql);
                 table_statements.push(create_text_view_sql);
             }
             setup_statements.insert(table.to_string(), table_statements);
         }
 
-        let text_type = get_sql_type(datatypes_config, &"text".to_string(), &self.pool.any_kind());
+        let text_type = get_sql_type(datatypes_config, &"text".to_string(), &self.db_kind);
 
         // Generate DDL for the history and message tables:
-        let history_statements =
-            generate_internal_table_ddl("history", &self.pool.any_kind(), &text_type);
+        let history_statements = generate_internal_table_ddl("history", &self.db_kind, &text_type);
         setup_statements.insert("history".to_string(), history_statements);
-        let message_statements =
-            generate_internal_table_ddl("message", &self.pool.any_kind(), &text_type);
+        let message_statements = generate_internal_table_ddl("message", &self.db_kind, &text_type);
         setup_statements.insert("message".to_string(), message_statements);
 
         return Ok(setup_statements);
@@ -1517,7 +1516,7 @@ impl Valve {
     /// Checks whether the given table exists in the database.
     pub async fn table_exists(&self, table: &str) -> Result<bool> {
         let sql = {
-            if self.pool.any_kind() == AnyKind::Sqlite {
+            if self.db_kind == DbKind::Sqlite {
                 format!(
                     r#"SELECT 1
                        FROM "sqlite_master"
@@ -1542,7 +1541,7 @@ impl Valve {
     /// Checks whether the given view exists in the database.
     pub async fn view_exists(&self, view: &str) -> Result<bool> {
         let sql = {
-            if self.pool.any_kind() == AnyKind::Sqlite {
+            if self.db_kind == DbKind::Sqlite {
                 format!(
                     r#"SELECT 1
                        FROM "sqlite_master"
@@ -1621,7 +1620,7 @@ impl Valve {
         // SQLite does not need this. However SQLite does require that the tables be truncated in
         // deletion order (which means that it must be checking that T' is empty).
         let truncate_sql = |table: &str| -> String {
-            if self.pool.any_kind() == AnyKind::Postgres {
+            if self.db_kind == DbKind::Postgres {
                 format!(r#"TRUNCATE TABLE "{}" RESTART IDENTITY CASCADE"#, table)
             } else {
                 format!(r#"DELETE FROM "{}""#, table)
@@ -1790,7 +1789,7 @@ impl Valve {
                     let message = record.get("message").and_then(|s| s.as_str()).unwrap();
 
                     let sql = local_sql_syntax(
-                        &self.pool.any_kind(),
+                        &self.db_kind,
                         &format!(
                             r#"INSERT INTO "message"
                        ("table", "row", "column", "value", "level", "rule", "message")
@@ -1875,7 +1874,7 @@ impl Valve {
     /// Returns true if the Valve instance has the given optional column enabled,
     /// according to the database.
     pub async fn column_enabled_in_db(&self, table: &str, column: &str) -> Result<bool> {
-        if self.pool.any_kind() == AnyKind::Postgres {
+        if self.db_kind == DbKind::Postgres {
             let sql = format!(
                 r#"SELECT 1
                      FROM "information_schema"."columns"
@@ -1911,7 +1910,7 @@ impl Valve {
                     r#"SELECT "table", "options" FROM "table""#
                 }
             });
-            if self.pool.any_kind() == AnyKind::Postgres {
+            if self.db_kind == DbKind::Postgres {
                 format!(r#"{select_from_table} WHERE "path" ILIKE '%.tsv'"#)
             } else {
                 format!(r#"{select_from_table} WHERE LOWER("path") LIKE '%.tsv'"#)
@@ -1982,7 +1981,7 @@ impl Valve {
                 )
             }
         };
-        let sql = local_sql_syntax(&self.pool.any_kind(), &sql);
+        let sql = local_sql_syntax(&self.db_kind, &sql);
         let mut query = sqlx_query(&sql);
         for param in &params {
             query = query.bind(param);
@@ -2122,7 +2121,7 @@ impl Valve {
             .into());
         } else if self.column_enabled_in_db("table", "options").await? {
             let sql = local_sql_syntax(
-                &self.pool.any_kind(),
+                &self.db_kind,
                 &format!(
                     r#"SELECT "path", "options" FROM "table" WHERE "table" = {}"#,
                     SQL_PARAM
@@ -2156,7 +2155,7 @@ impl Valve {
                 sql_columns.push_str(r#", d."format""#);
             }
             local_sql_syntax(
-                &self.pool.any_kind(),
+                &self.db_kind,
                 &format!(
                     r#"SELECT {sql_columns}
                          FROM "column" c
@@ -2262,7 +2261,7 @@ impl Valve {
             Ok("".to_string())
         } else {
             let sql = local_sql_syntax(
-                &self.pool.any_kind(),
+                &self.db_kind,
                 &format!(r#"SELECT "format" FROM "datatype" WHERE "datatype" = {SQL_PARAM}"#,),
             );
             let rows = sqlx_query(&sql)
@@ -2299,7 +2298,7 @@ impl Valve {
             Ok("".to_string())
         } else {
             let sql = local_sql_syntax(
-                &self.pool.any_kind(),
+                &self.db_kind,
                 &format!(
                     r#"SELECT d."format"
                          FROM "column" c, "datatype" d
@@ -2330,14 +2329,8 @@ impl Valve {
     /// Given a table name and a row number, return a [ValveRow] representing that row.
     pub async fn get_row_from_db(&self, table: &str, row_number: &u32) -> Result<ValveRow> {
         let mut tx = self.pool.begin().await?;
-        let row = get_row_from_db_tx(
-            &self.config,
-            &self.pool.any_kind(),
-            &mut tx,
-            table,
-            row_number,
-        )
-        .await?;
+        let row =
+            get_row_from_db_tx(&self.config, &self.db_kind, &mut tx, table, row_number).await?;
         ValveRow::from_rich_json(Some(*row_number), &row)
     }
 
@@ -2429,7 +2422,7 @@ impl Valve {
         row.row_number = Some(rn);
         let serde_row = row.contents_to_rich_json()?;
         record_row_change(
-            &self.pool.any_kind(),
+            &self.db_kind,
             &mut tx,
             table_name,
             &rn,
@@ -2474,7 +2467,7 @@ impl Valve {
         // history table:
         let old_row = get_row_from_db_tx(
             &self.config,
-            &self.pool.any_kind(),
+            &self.db_kind,
             &mut tx,
             table_name,
             &row_number,
@@ -2510,7 +2503,7 @@ impl Valve {
         // Record the row update in the history table:
         let serde_row = row.contents_to_rich_json()?;
         record_row_change(
-            &self.pool.any_kind(),
+            &self.db_kind,
             &mut tx,
             table_name,
             row_number,
@@ -2539,7 +2532,7 @@ impl Valve {
 
         let mut row = get_row_from_db_tx(
             &self.config,
-            &self.pool.any_kind(),
+            &self.db_kind,
             &mut tx,
             &table_name,
             row_number,
@@ -2549,7 +2542,7 @@ impl Valve {
         let previous_row = get_previous_row_tx(table_name, row_number, &mut tx).await?;
         row.insert("previous_row".into(), json!(previous_row));
         record_row_change(
-            &self.pool.any_kind(),
+            &self.db_kind,
             &mut tx,
             &table_name,
             row_number,
@@ -2589,7 +2582,7 @@ impl Valve {
         // Record the move in the history table unless we have been explicitly told not to:
         record_row_move(
             &self.config,
-            &self.pool.any_kind(),
+            &self.db_kind,
             &mut tx,
             table,
             row,
@@ -2651,8 +2644,7 @@ impl Valve {
 
                 undo_or_redo_move(table, &last_change, history_id, &row_number, &mut tx, true)
                     .await?;
-                switch_undone_state(&self.user, history_id, true, &mut tx, &self.pool.any_kind())
-                    .await?;
+                switch_undone_state(&self.user, history_id, true, &mut tx, &self.db_kind).await?;
 
                 tx.commit().await?;
                 return Ok(None);
@@ -2685,8 +2677,7 @@ impl Valve {
                 )
                 .await?;
 
-                switch_undone_state(&self.user, history_id, true, &mut tx, &self.pool.any_kind())
-                    .await?;
+                switch_undone_state(&self.user, history_id, true, &mut tx, &self.db_kind).await?;
                 tx.commit().await?;
                 Ok(None)
             }
@@ -2735,8 +2726,7 @@ impl Valve {
                 // it was in before it was deleted:
                 move_row_tx(&mut tx, table, &rn, &previous_row).await?;
 
-                switch_undone_state(&self.user, history_id, true, &mut tx, &self.pool.any_kind())
-                    .await?;
+                switch_undone_state(&self.user, history_id, true, &mut tx, &self.db_kind).await?;
                 tx.commit().await?;
                 Ok(Some(from))
             }
@@ -2761,8 +2751,7 @@ impl Valve {
                 )
                 .await?;
 
-                switch_undone_state(&self.user, history_id, true, &mut tx, &self.pool.any_kind())
-                    .await?;
+                switch_undone_state(&self.user, history_id, true, &mut tx, &self.db_kind).await?;
                 tx.commit().await?;
                 Ok(Some(from))
             }
@@ -2808,14 +2797,7 @@ impl Valve {
 
                 undo_or_redo_move(table, &last_undo, history_id, &row_number, &mut tx, false)
                     .await?;
-                switch_undone_state(
-                    &self.user,
-                    history_id,
-                    false,
-                    &mut tx,
-                    &self.pool.any_kind(),
-                )
-                .await?;
+                switch_undone_state(&self.user, history_id, false, &mut tx, &self.db_kind).await?;
 
                 tx.commit().await?;
                 return Ok(None);
@@ -2856,14 +2838,7 @@ impl Valve {
                 )
                 .await?;
 
-                switch_undone_state(
-                    &self.user,
-                    history_id,
-                    false,
-                    &mut tx,
-                    &self.pool.any_kind(),
-                )
-                .await?;
+                switch_undone_state(&self.user, history_id, false, &mut tx, &self.db_kind).await?;
                 tx.commit().await?;
                 Ok(Some(to))
             }
@@ -2882,14 +2857,7 @@ impl Valve {
                 )
                 .await?;
 
-                switch_undone_state(
-                    &self.user,
-                    history_id,
-                    false,
-                    &mut tx,
-                    &self.pool.any_kind(),
-                )
-                .await?;
+                switch_undone_state(&self.user, history_id, false, &mut tx, &self.db_kind).await?;
                 tx.commit().await?;
                 Ok(None)
             }
@@ -2914,14 +2882,7 @@ impl Valve {
                 )
                 .await?;
 
-                switch_undone_state(
-                    &self.user,
-                    history_id,
-                    false,
-                    &mut tx,
-                    &self.pool.any_kind(),
-                )
-                .await?;
+                switch_undone_state(&self.user, history_id, false, &mut tx, &self.db_kind).await?;
                 tx.commit().await?;
                 Ok(Some(to))
             }
@@ -2957,6 +2918,7 @@ impl Valve {
         let datatype_conditions = &self.datatype_conditions;
         let structure_conditions = &self.structure_conditions;
         let pool = &self.pool;
+        let db_kind = &self.db_kind;
         let dt_name = &config
             .table
             .get(table_name)
@@ -3029,12 +2991,8 @@ impl Valve {
                         .structure,
                 );
 
-                let sql_type = get_sql_type_from_global_config(
-                    &config,
-                    table_name,
-                    &column_name,
-                    &pool.any_kind(),
-                );
+                let sql_type =
+                    get_sql_type_from_global_config(&config, table_name, &column_name, db_kind);
 
                 match structure {
                     Some(ParsedStructure { original, parsed }) => {
@@ -3051,7 +3009,7 @@ impl Valve {
                                 if let Expression::Field(ftable, fcolumn) = &**foreign_key {
                                     let fcolumn_text = cast_column_sql_to_text(&fcolumn, &sql_type);
                                     let sql = local_sql_syntax(
-                                        &pool.any_kind(),
+                                        db_kind,
                                         &format!(
                                             r#"SELECT "{}" FROM "{}" WHERE {} LIKE {}"#,
                                             fcolumn, ftable, fcolumn_text, SQL_PARAM
@@ -3095,7 +3053,7 @@ impl Valve {
                                 let child_column_text =
                                     cast_column_sql_to_text(&child_column, &sql_type);
                                 let sql = local_sql_syntax(
-                                    &pool.any_kind(),
+                                    db_kind,
                                     &format!(
                                         r#"{} SELECT "{}" FROM "tree" WHERE {} LIKE {}"#,
                                         tree_sql, child_column, child_column_text, SQL_PARAM
