@@ -9,7 +9,7 @@ use crate::{
         delete_row_tx, generate_datatype_conditions, generate_rule_conditions,
         get_column_for_label, get_column_value_as_string, get_json_array_from_row,
         get_json_object_from_row, get_parsed_structure_conditions, get_pool_from_connection_string,
-        get_previous_row_tx, get_record_to_redo, get_record_to_undo, get_row_from_db_tx,
+        get_previous_row_tx, get_record_to_redo, get_record_to_undo, get_row_from_db_str_tx,
         get_sql_for_standard_view, get_sql_for_text_view, get_sql_type,
         get_sql_type_from_global_config, insert_chunks, insert_new_row_tx, local_sql_syntax,
         move_row_tx, normalize_options, read_config_files, record_row_change_tx,
@@ -2347,8 +2347,57 @@ impl Valve {
     pub async fn get_row_from_db(&self, table: &str, row_number: &u32) -> Result<ValveRow> {
         let mut tx = self.pool.begin().await?;
         let row =
-            get_row_from_db_tx(&self.config, &self.db_kind, &mut tx, table, row_number).await?;
-        ValveRow::from_rich_json(Some(*row_number), &row)
+            get_row_from_db_str_tx(&self.config, &self.db_kind, &mut tx, table, row_number).await?;
+
+        // The get_row_from_db_str_tx() function returns the row with all values as strings. The
+        // reason is that that function uses the text view to retrieve all of the values even when
+        // values have the wrong sql type. That means that in this function we need to correct
+        // the incorrect SerdeValues in the row before we return it:
+        let mut corrected_row = JsonRow::new();
+        for (cname, cell) in &row {
+            let numeric_re = Regex::new(r"^[0-9]*\.?[0-9]+$").expect("Programmer error");
+            let sql_type =
+                get_sql_type_from_global_config(&self.config, table, cname, &self.db_kind)
+                    .to_lowercase();
+
+            let cell = {
+                let cell_err = |cell: &SerdeValue| -> ValveError {
+                    ValveError::DataError(format!("{:?} is not a valid cell", cell))
+                };
+                let value_err = ValveError::DataError("Cannot parse value".to_string());
+                let mut corrected_cell = cell.as_object().ok_or(cell_err(cell))?.clone();
+                let value = {
+                    let value = cell.get("value").ok_or(cell_err(cell))?;
+                    let strvalue: &str = value.as_str().ok_or(cell_err(cell))?;
+                    if sql_type == "text"
+                        || sql_type.starts_with("varchar")
+                        || !numeric_re.is_match(&strvalue)
+                    {
+                        value.clone()
+                    } else if sql_type == "numeric" {
+                        let value: f64 = strvalue.parse()?;
+                        json!(value)
+                    } else if sql_type == "integer" {
+                        let value: i32 = strvalue.parse()?;
+                        json!(value)
+                    } else if sql_type == "real" {
+                        let value: f64 = strvalue.parse()?;
+                        json!(value)
+                    } else {
+                        return Err(ValveError::DataError(format!(
+                            "Unrecognized SQL type: {}",
+                            sql_type
+                        ))
+                        .into());
+                    }
+                };
+                corrected_cell.insert("value".to_string(), value);
+                corrected_cell
+            };
+            corrected_row.insert(cname.to_string(), json!(cell));
+        }
+
+        ValveRow::from_rich_json(Some(*row_number), &corrected_row)
     }
 
     /// Given a table name, a row number, and a column name, return a [ValveCell] representing
@@ -2359,10 +2408,7 @@ impl Valve {
         row_number: &u32,
         column: &str,
     ) -> Result<ValveCell> {
-        let mut tx = self.pool.begin().await?;
-        let row =
-            get_row_from_db_tx(&self.config, &self.db_kind, &mut tx, table, row_number).await?;
-        let row = ValveRow::from_rich_json(Some(*row_number), &row)?;
+        let row = self.get_row_from_db(table, row_number).await?;
         row.contents
             .get(column)
             .and_then(|c| Some(c.clone()))
@@ -2500,7 +2546,7 @@ impl Valve {
 
         // Get the old version of the row from the database so that we can later record it to the
         // history table:
-        let old_row = get_row_from_db_tx(
+        let old_row = get_row_from_db_str_tx(
             &self.config,
             &self.db_kind,
             &mut tx,
@@ -2565,7 +2611,7 @@ impl Valve {
 
         let mut tx = self.pool.begin().await?;
 
-        let mut row = get_row_from_db_tx(
+        let mut row = get_row_from_db_str_tx(
             &self.config,
             &self.db_kind,
             &mut tx,

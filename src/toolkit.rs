@@ -2736,8 +2736,8 @@ pub async fn get_db_value_tx(
 
 /// Given a global configuration map, a database connection kind, a database transaction, a table
 /// name and a row number, get the logical contents of that row (whether or not it is valid),
-/// including any messages, from the database.
-pub async fn get_row_from_db_tx(
+/// including any messages, from the database, such that all values are cast as strings.
+pub async fn get_row_from_db_str_tx(
     config: &ValveConfig,
     kind: &DbKind,
     tx: &mut Transaction<'_, sqlx::Any>,
@@ -2759,7 +2759,7 @@ pub async fn get_row_from_db_tx(
     if rows.len() == 0 {
         return Err(ValveError::DataError(
             format!(
-                "In get_row_from_db_tx(). No rows found for row_number: {}",
+                "In get_row_from_db_str_tx(). No rows found for row_number: {}",
                 row_number
             )
             .into(),
@@ -2800,6 +2800,7 @@ pub async fn get_row_from_db_tx(
             } else {
                 value = String::from("");
             }
+
             let column_messages = messages
                 .iter()
                 .filter(|m| m.get("column").unwrap().as_str() == Some(cname))
@@ -3574,7 +3575,7 @@ pub async fn record_row_move_tx(
     new_previous_row: &u32,
     user: &str,
 ) -> Result<()> {
-    let row = get_row_from_db_tx(config, kind, tx, table, row_num).await?;
+    let row = get_row_from_db_str_tx(config, kind, tx, table, row_num).await?;
     let mut from_row = row.clone();
     let mut to_row = row.clone();
     from_row.insert("previous_row".to_string(), json!(old_previous_row));
