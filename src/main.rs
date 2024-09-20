@@ -253,7 +253,7 @@ enum GetSubcommands {
         table: String,
     },
 
-    /// TODO: Add a docstring.
+    /// Get a row having a given row number from a given table.
     Row {
         #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
         source: String,
@@ -268,7 +268,7 @@ enum GetSubcommands {
         row: u32,
     },
 
-    /// TODO: Add a docstring.
+    /// Get a cell representing the value of a given column of a given row from a given table.
     Cell {
         #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
         source: String,
@@ -286,7 +286,7 @@ enum GetSubcommands {
         column: String,
     },
 
-    /// TODO: Add a docstring.
+    /// Get the value of a given column of a given row from a given table.
     Value {
         #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
         source: String,
@@ -453,8 +453,39 @@ async fn main() -> Result<()> {
                             .expect("Error converting row to rich JSON"))
                     );
                 }
-                GetSubcommands::Cell { .. } => todo!(),
-                GetSubcommands::Value { .. } => todo!(),
+                GetSubcommands::Cell {
+                    source,
+                    database,
+                    table,
+                    row,
+                    column,
+                } => {
+                    let valve = build_valve(source, database).expect("Error building Valve");
+                    let cell = valve
+                        .get_cell_from_db(table, row, column)
+                        .await
+                        .expect("Error getting cell");
+                    println!(
+                        "{}",
+                        json!(cell
+                            .to_rich_json()
+                            .expect("Error converting cell to rich JSON"))
+                    );
+                }
+                GetSubcommands::Value {
+                    source,
+                    database,
+                    table,
+                    row,
+                    column,
+                } => {
+                    let valve = build_valve(source, database).expect("Error building Valve");
+                    let cell = valve
+                        .get_cell_from_db(table, row, column)
+                        .await
+                        .expect("Error getting cell");
+                    println!("{}", cell.strvalue());
+                }
                 GetSubcommands::Messages { .. } => todo!(),
             };
         }

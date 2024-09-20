@@ -213,6 +213,22 @@ impl ValveCell {
         }
     }
 
+    /// Given a [ValveCell], convert it to a JSON object using [serde_json::to_value()]
+    /// and return it.
+    pub fn to_rich_json(&self) -> Result<serde_json::Map<String, SerdeValue>> {
+        let value = serde_json::to_value(self)?;
+        value
+            .as_object()
+            .ok_or(
+                ValveError::InputError(format!(
+                    "Could not convert {:?} to a rich JSON object",
+                    value
+                ))
+                .into(),
+            )
+            .cloned()
+    }
+
     /// Returns the value of the cell as a String.
     pub fn strvalue(&self) -> String {
         match &self.value {
@@ -2333,6 +2349,24 @@ impl Valve {
         let row =
             get_row_from_db_tx(&self.config, &self.db_kind, &mut tx, table, row_number).await?;
         ValveRow::from_rich_json(Some(*row_number), &row)
+    }
+
+    /// Given a table name, a row number, and a column name, return a [ValveCell] representing
+    /// the value of that column in that row.
+    pub async fn get_cell_from_db(
+        &self,
+        table: &str,
+        row_number: &u32,
+        column: &str,
+    ) -> Result<ValveCell> {
+        let mut tx = self.pool.begin().await?;
+        let row =
+            get_row_from_db_tx(&self.config, &self.db_kind, &mut tx, table, row_number).await?;
+        let row = ValveRow::from_rich_json(Some(*row_number), &row)?;
+        row.contents
+            .get(column)
+            .and_then(|c| Some(c.clone()))
+            .ok_or(ValveError::InputError(format!("No column named '{column}' in row")).into())
     }
 
     /// Given a table name and a row number, search for and return the row number of the row that
