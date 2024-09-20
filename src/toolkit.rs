@@ -2674,6 +2674,66 @@ pub fn local_sql_syntax(kind: &DbKind, sql: &String) -> String {
     final_sql
 }
 
+/// Given a database connection kind, a database transaction, a table name, a column name, and a row
+/// number, get the current value of the given column in the database.
+pub async fn get_db_value_tx(
+    table: &str,
+    column: &str,
+    row_number: &u32,
+    kind: &DbKind,
+    tx: &mut Transaction<'_, sqlx::Any>,
+) -> Result<String> {
+    let is_clause = if *kind == DbKind::Sqlite {
+        "IS"
+    } else {
+        "IS NOT DISTINCT FROM"
+    };
+    let sql = local_sql_syntax(
+        kind,
+        &format!(
+            r#"SELECT
+                 CASE
+                   WHEN "{column}" {is_clause} NULL THEN (
+                     SELECT value
+                     FROM "message"
+                     WHERE "row" = "row_number"
+                       AND "column" = {SQL_PARAM}
+                       AND "table" = {SQL_PARAM}
+                     ORDER BY "message_id" DESC
+                     LIMIT 1
+                   )
+                   ELSE {casted_column}
+                 END AS "{column}"
+               FROM "{table}_view" WHERE "row_number" = {row_number}
+            "#,
+            casted_column = if *kind == DbKind::Sqlite {
+                cast_column_sql_to_text(column, "non-text")
+            } else {
+                format!("\"{}\"::TEXT", column)
+            },
+        ),
+    );
+
+    let mut query = sqlx_query(&sql);
+    for param in vec![column, table] {
+        query = query.bind(param);
+    }
+    let rows = query.fetch_all(tx.acquire().await?).await?;
+    if rows.len() == 0 {
+        return Err(ValveError::DataError(
+            format!(
+                "In get_db_value_tx(). No rows found for row_number: {}",
+                row_number
+            )
+            .into(),
+        )
+        .into());
+    }
+    let result_row = &rows[0];
+    let value: &str = result_row.try_get(column).unwrap();
+    Ok(value.to_string())
+}
+
 /// Given a global configuration map, a database connection kind, a database transaction, a table
 /// name and a row number, get the logical contents of that row (whether or not it is valid),
 /// including any messages, from the database.
@@ -2806,66 +2866,6 @@ pub fn get_json_object_from_row(row: &AnyRow, column: &str) -> Option<SerdeMap> 
     }
 }
 
-/// Given a database connection kind, a database transaction, a table name, a column name, and a row
-/// number, get the current value of the given column in the database.
-pub async fn get_db_value_tx(
-    table: &str,
-    column: &str,
-    row_number: &u32,
-    kind: &DbKind,
-    tx: &mut Transaction<'_, sqlx::Any>,
-) -> Result<String> {
-    let is_clause = if *kind == DbKind::Sqlite {
-        "IS"
-    } else {
-        "IS NOT DISTINCT FROM"
-    };
-    let sql = local_sql_syntax(
-        kind,
-        &format!(
-            r#"SELECT
-                 CASE
-                   WHEN "{column}" {is_clause} NULL THEN (
-                     SELECT value
-                     FROM "message"
-                     WHERE "row" = "row_number"
-                       AND "column" = {SQL_PARAM}
-                       AND "table" = {SQL_PARAM}
-                     ORDER BY "message_id" DESC
-                     LIMIT 1
-                   )
-                   ELSE {casted_column}
-                 END AS "{column}"
-               FROM "{table}_view" WHERE "row_number" = {row_number}
-            "#,
-            casted_column = if *kind == DbKind::Sqlite {
-                cast_column_sql_to_text(column, "non-text")
-            } else {
-                format!("\"{}\"::TEXT", column)
-            },
-        ),
-    );
-
-    let mut query = sqlx_query(&sql);
-    for param in vec![column, table] {
-        query = query.bind(param);
-    }
-    let rows = query.fetch_all(tx.acquire().await?).await?;
-    if rows.len() == 0 {
-        return Err(ValveError::DataError(
-            format!(
-                "In get_db_value_tx(). No rows found for row_number: {}",
-                row_number
-            )
-            .into(),
-        )
-        .into());
-    }
-    let result_row = &rows[0];
-    let value: &str = result_row.try_get(column).unwrap();
-    Ok(value.to_string())
-}
-
 /// Given a database row, the name of a column, and it's SQL type, return the value of that column
 /// from the given row as a String.
 pub fn get_column_value_as_string(row: &AnyRow, column: &str, sql_type: &str) -> String {
@@ -2975,7 +2975,7 @@ pub async fn get_previous_row_tx(
 /// transaction, update the row order for the row in the database. Note that the row_order is
 /// represented using the signed i64 type but it can never actually be negative. This function
 /// will return an error when a negative row_order is provided.
-pub async fn update_row_order(
+pub async fn update_row_order_tx(
     table: &str,
     row: &u32,
     row_order: &i64,
@@ -3092,7 +3092,7 @@ pub async fn move_row_tx(
         }
     };
 
-    update_row_order(table, row, &new_row_order, tx).await?;
+    update_row_order_tx(table, row, &new_row_order, tx).await?;
     Ok(())
 }
 
@@ -3224,7 +3224,8 @@ pub async fn insert_new_row_tx(
                 IndexMap::new(),
             )
         } else {
-            get_rows_to_update(config, &DbKind::from_pool(pool)?, tx, table, &query_as_if).await?
+            get_rows_to_update_tx(config, &DbKind::from_pool(pool)?, tx, table, &query_as_if)
+                .await?
         }
     };
 
@@ -3285,7 +3286,7 @@ pub async fn insert_new_row_tx(
 
     // Now process the updates that need to be performed because of an insertion to a tree
     // column:
-    process_updates(
+    process_updates_tx(
         config,
         datatype_conditions,
         rule_conditions,
@@ -3298,7 +3299,7 @@ pub async fn insert_new_row_tx(
     .await?;
 
     // Now process the updates that need to be performed after the update of the target row:
-    process_updates(
+    process_updates_tx(
         config,
         datatype_conditions,
         rule_conditions,
@@ -3339,10 +3340,10 @@ pub async fn delete_row_tx(
     // rows that need to be updated. Since this is a delete there will only be rows to update
     // before and none after the delete:
     let (updates_before, updates_tree, updates_unique, _) =
-        get_rows_to_update(config, &DbKind::from_pool(pool)?, tx, table, &query_as_if).await?;
+        get_rows_to_update_tx(config, &DbKind::from_pool(pool)?, tx, table, &query_as_if).await?;
 
     // Process the updates that need to be performed before the update of the target row:
-    process_updates(
+    process_updates_tx(
         config,
         datatype_conditions,
         rule_conditions,
@@ -3377,7 +3378,7 @@ pub async fn delete_row_tx(
 
     // Now process the updates that need to be performed because of an insertion to a tree
     // column:
-    process_updates(
+    process_updates_tx(
         config,
         datatype_conditions,
         rule_conditions,
@@ -3391,7 +3392,7 @@ pub async fn delete_row_tx(
 
     // Finally process the rows from the same table as the target table that need to be re-validated
     // because of unique or primary constraints:
-    process_updates(
+    process_updates_tx(
         config,
         datatype_conditions,
         rule_conditions,
@@ -3446,12 +3447,13 @@ pub async fn update_row_tx(
                 IndexMap::new(),
             )
         } else {
-            get_rows_to_update(config, &DbKind::from_pool(pool)?, tx, table, &query_as_if).await?
+            get_rows_to_update_tx(config, &DbKind::from_pool(pool)?, tx, table, &query_as_if)
+                .await?
         }
     };
 
     // Process the updates that need to be performed before the update of the target row:
-    process_updates(
+    process_updates_tx(
         config,
         datatype_conditions,
         rule_conditions,
@@ -3515,7 +3517,7 @@ pub async fn update_row_tx(
 
     // Now process the updates that need to be performed because of an insertion to a tree
     // column:
-    process_updates(
+    process_updates_tx(
         config,
         datatype_conditions,
         rule_conditions,
@@ -3529,7 +3531,7 @@ pub async fn update_row_tx(
 
     // Now process the rows from the same table as the target table that need to be re-validated
     // because of unique or primary constraints:
-    process_updates(
+    process_updates_tx(
         config,
         datatype_conditions,
         rule_conditions,
@@ -3543,7 +3545,7 @@ pub async fn update_row_tx(
 
     // Finally process the updates from other tables that need to be performed after the update of
     // the target row:
-    process_updates(
+    process_updates_tx(
         config,
         datatype_conditions,
         rule_conditions,
@@ -3562,7 +3564,7 @@ pub async fn update_row_tx(
 /// to use, a database transaction through which to execute queries over the database, a table name,
 /// a row number, the old previous row for the row, and the new previous row for the row, record the
 /// move in the history table in the database.
-pub async fn record_row_move(
+pub async fn record_row_move_tx(
     config: &ValveConfig,
     kind: &DbKind,
     tx: &mut Transaction<'_, sqlx::Any>,
@@ -3577,7 +3579,7 @@ pub async fn record_row_move(
     let mut to_row = row.clone();
     from_row.insert("previous_row".to_string(), json!(old_previous_row));
     to_row.insert("previous_row".to_string(), json!(new_previous_row));
-    record_row_change(
+    record_row_change_tx(
         kind,
         tx,
         table,
@@ -3612,7 +3614,7 @@ pub async fn record_row_move(
 ///     ...
 /// },
 /// ```
-pub async fn record_row_change(
+pub async fn record_row_change_tx(
     kind: &DbKind,
     tx: &mut Transaction<'_, sqlx::Any>,
     table: &str,
@@ -3921,7 +3923,7 @@ pub async fn get_record_to_undo(pool: &AnyPool) -> Result<Option<AnyRow>> {
     Ok(result_row)
 }
 
-pub async fn undo_or_redo_move(
+pub async fn undo_or_redo_move_tx(
     table: &str,
     last_change: &AnyRow,
     history_id: u16,
@@ -3999,7 +4001,7 @@ pub async fn undo_or_redo_move(
 /// (otherwise), do the following: When setting the record to undone, `user` is used for the
 /// 'undone_by' field of the history table, otherwise undone_by is set to NULL and the user is
 /// indicated as the one responsible for the change (instead of whoever made the change originally).
-pub async fn switch_undone_state(
+pub async fn switch_undone_state_tx(
     user: &str,
     history_id: u16,
     undone_state: bool,
@@ -4041,7 +4043,7 @@ pub async fn switch_undone_state(
 /// column name, and a value for that column: get the rows, other than the one indicated by
 /// `except`, that would need to be revalidated if the given value were to replace the actual
 /// value of the column in that row.
-pub async fn get_affected_rows(
+pub async fn get_affected_rows_tx(
     table: &str,
     column: &str,
     value: &str,
@@ -4108,7 +4110,7 @@ pub async fn get_affected_rows(
 /// query_as_if. These are divided into three: The rows that must be updated before the current
 /// update, the rows that must be updated after the current update, and the rows from the same
 /// table as the current update that need to be updated.
-pub async fn get_rows_to_update(
+pub async fn get_rows_to_update_tx(
     config: &ValveConfig,
     kind: &DbKind,
     tx: &mut Transaction<'_, sqlx::Any>,
@@ -4182,7 +4184,7 @@ pub async fn get_rows_to_update(
 
                 // Query dependent_table.dependent_column for the rows that will be affected by the
                 // change from the current value:
-                get_affected_rows(
+                get_affected_rows_tx(
                     dependent_table,
                     dependent_column,
                     &current_value,
@@ -4210,7 +4212,7 @@ pub async fn get_rows_to_update(
                 // Fetch the cell corresponding to `column` from `row`, and the value of that cell,
                 // which is the new value for the row.
                 let new_value = get_cell_value(&row, target_column)?;
-                get_affected_rows(
+                get_affected_rows_tx(
                     dependent_table,
                     dependent_column,
                     &new_value,
@@ -4271,7 +4273,7 @@ pub async fn get_rows_to_update(
 
                 // Query table.column for the rows that will be affected by the change from the
                 // current to the new value:
-                get_affected_rows(
+                get_affected_rows_tx(
                     table,
                     column,
                     &current_value,
@@ -4313,7 +4315,7 @@ pub async fn get_rows_to_update(
                 // Fetch the cell corresponding to `column` from `row`, and the value of that cell,
                 // which is the new value for the row.
                 let new_value = get_cell_value(&row, target_column)?;
-                let rows = get_affected_rows(
+                let rows = get_affected_rows_tx(
                     table,
                     dependent_column,
                     &new_value,
@@ -4342,7 +4344,7 @@ pub async fn get_rows_to_update(
 /// we should counterfactually modify the current state of the database, and a flag indicating
 /// whether we should allow recursive updates, validate and then update each row indicated in
 /// `updates`.
-pub async fn process_updates(
+pub async fn process_updates_tx(
     config: &ValveConfig,
     datatype_conditions: &HashMap<String, CompiledCondition>,
     rule_conditions: &HashMap<String, HashMap<String, Vec<ColumnRule>>>,

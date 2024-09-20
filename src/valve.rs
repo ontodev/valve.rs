@@ -12,9 +12,10 @@ use crate::{
         get_previous_row_tx, get_record_to_redo, get_record_to_undo, get_row_from_db_tx,
         get_sql_for_standard_view, get_sql_for_text_view, get_sql_type,
         get_sql_type_from_global_config, insert_chunks, insert_new_row_tx, local_sql_syntax,
-        move_row_tx, normalize_options, read_config_files, record_row_change, record_row_move,
-        switch_undone_state, undo_or_redo_move, update_row_tx, verify_table_deps_and_sort,
-        ColumnRule, CompiledCondition, DbKind, ParsedStructure, ValueType,
+        move_row_tx, normalize_options, read_config_files, record_row_change_tx,
+        record_row_move_tx, switch_undone_state_tx, undo_or_redo_move_tx, update_row_tx,
+        verify_table_deps_and_sort, ColumnRule, CompiledCondition, DbKind, ParsedStructure,
+        ValueType,
     },
     validate::{validate_row_tx, validate_tree_foreign_keys, with_tree_sql},
     valve_grammar::StartParser,
@@ -2421,7 +2422,7 @@ impl Valve {
 
         row.row_number = Some(rn);
         let serde_row = row.contents_to_rich_json()?;
-        record_row_change(
+        record_row_change_tx(
             &self.db_kind,
             &mut tx,
             table_name,
@@ -2502,7 +2503,7 @@ impl Valve {
 
         // Record the row update in the history table:
         let serde_row = row.contents_to_rich_json()?;
-        record_row_change(
+        record_row_change_tx(
             &self.db_kind,
             &mut tx,
             table_name,
@@ -2541,7 +2542,7 @@ impl Valve {
 
         let previous_row = get_previous_row_tx(table_name, row_number, &mut tx).await?;
         row.insert("previous_row".into(), json!(previous_row));
-        record_row_change(
+        record_row_change_tx(
             &self.db_kind,
             &mut tx,
             &table_name,
@@ -2580,7 +2581,7 @@ impl Valve {
         move_row_tx(&mut tx, table, row, previous_row).await?;
 
         // Record the move in the history table unless we have been explicitly told not to:
-        record_row_move(
+        record_row_move_tx(
             &self.config,
             &self.db_kind,
             &mut tx,
@@ -2642,9 +2643,10 @@ impl Valve {
                 // Undo a move:
                 let mut tx = self.pool.begin().await?;
 
-                undo_or_redo_move(table, &last_change, history_id, &row_number, &mut tx, true)
+                undo_or_redo_move_tx(table, &last_change, history_id, &row_number, &mut tx, true)
                     .await?;
-                switch_undone_state(&self.user, history_id, true, &mut tx, &self.db_kind).await?;
+                switch_undone_state_tx(&self.user, history_id, true, &mut tx, &self.db_kind)
+                    .await?;
 
                 tx.commit().await?;
                 return Ok(None);
@@ -2677,7 +2679,8 @@ impl Valve {
                 )
                 .await?;
 
-                switch_undone_state(&self.user, history_id, true, &mut tx, &self.db_kind).await?;
+                switch_undone_state_tx(&self.user, history_id, true, &mut tx, &self.db_kind)
+                    .await?;
                 tx.commit().await?;
                 Ok(None)
             }
@@ -2726,7 +2729,8 @@ impl Valve {
                 // it was in before it was deleted:
                 move_row_tx(&mut tx, table, &rn, &previous_row).await?;
 
-                switch_undone_state(&self.user, history_id, true, &mut tx, &self.db_kind).await?;
+                switch_undone_state_tx(&self.user, history_id, true, &mut tx, &self.db_kind)
+                    .await?;
                 tx.commit().await?;
                 Ok(Some(from))
             }
@@ -2751,7 +2755,8 @@ impl Valve {
                 )
                 .await?;
 
-                switch_undone_state(&self.user, history_id, true, &mut tx, &self.db_kind).await?;
+                switch_undone_state_tx(&self.user, history_id, true, &mut tx, &self.db_kind)
+                    .await?;
                 tx.commit().await?;
                 Ok(Some(from))
             }
@@ -2795,9 +2800,10 @@ impl Valve {
                 // Redo a move:
                 let mut tx = self.pool.begin().await?;
 
-                undo_or_redo_move(table, &last_undo, history_id, &row_number, &mut tx, false)
+                undo_or_redo_move_tx(table, &last_undo, history_id, &row_number, &mut tx, false)
                     .await?;
-                switch_undone_state(&self.user, history_id, false, &mut tx, &self.db_kind).await?;
+                switch_undone_state_tx(&self.user, history_id, false, &mut tx, &self.db_kind)
+                    .await?;
 
                 tx.commit().await?;
                 return Ok(None);
@@ -2838,7 +2844,8 @@ impl Valve {
                 )
                 .await?;
 
-                switch_undone_state(&self.user, history_id, false, &mut tx, &self.db_kind).await?;
+                switch_undone_state_tx(&self.user, history_id, false, &mut tx, &self.db_kind)
+                    .await?;
                 tx.commit().await?;
                 Ok(Some(to))
             }
@@ -2857,7 +2864,8 @@ impl Valve {
                 )
                 .await?;
 
-                switch_undone_state(&self.user, history_id, false, &mut tx, &self.db_kind).await?;
+                switch_undone_state_tx(&self.user, history_id, false, &mut tx, &self.db_kind)
+                    .await?;
                 tx.commit().await?;
                 Ok(None)
             }
@@ -2882,7 +2890,8 @@ impl Valve {
                 )
                 .await?;
 
-                switch_undone_state(&self.user, history_id, false, &mut tx, &self.db_kind).await?;
+                switch_undone_state_tx(&self.user, history_id, false, &mut tx, &self.db_kind)
+                    .await?;
                 tx.commit().await?;
                 Ok(Some(to))
             }
