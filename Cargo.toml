@@ -14,7 +14,7 @@ lalrpop = { version = "0.19.9", features = ["lexer"] }
 anyhow = "1.0"
 async-std = { version = "1", features = [ "attributes" ] }
 async-recursion = "1.0"
-clap = { version = "4.5", features = ["derive", "wrap_help"] }
+clap = { version = "4.5", features = ["derive", "env", "wrap_help"] }
 crossbeam = "0.8"
 csv = "1.1"
 enquote = "1.1"

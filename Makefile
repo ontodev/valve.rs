@@ -57,7 +57,7 @@ pg_connect_string := postgresql:///valve_postgres
 .PHONY: sqlite_test
 sqlite_test: build/valve.db test/src/table.tsv | test/output
 	@echo "Testing valve on sqlite ..."
-	./valve --assume-yes load test/src/table.tsv build/valve.db
+	./valve --source test/src/table.tsv --database build/valve.db --assume-yes load
 	test/round_trip.sh $^
 	scripts/export_messages.py $< $| $(tables_to_test)
 	diff --strip-trailing-cr -q test/expected/messages.tsv test/output/messages.tsv
@@ -78,7 +78,7 @@ pg_test: valve test/src/table.tsv | test/output
 	cp -f test/src/ontology/readonly3_postgresql_load.sql test/output/readonly3.sql
 	chmod u+x test/output/readonly1.sh
 	psql $(pg_connect_string) < test/src/ontology/view3_postgresql.sql
-	./$< --assume-yes load $(word 2,$^) $(pg_connect_string)
+	./$< --source $(word 2,$^) --database $(pg_connect_string) --assume-yes load
 	test/round_trip.sh $(pg_connect_string) $(word 2,$^)
 	scripts/export_messages.py $(pg_connect_string) $| $(tables_to_test)
 	diff --strip-trailing-cr -q test/expected/messages.tsv test/output/messages.tsv
@@ -95,7 +95,7 @@ api_test: sqlite_api_test pg_api_test
 .PHONY: sqlite_api_test
 sqlite_api_test: valve test/src/table.tsv build/valve.db test/insert_update.sh | test/output
 	@echo "Testing API functions on sqlite ..."
-	./$< --assume-yes test-api $(word 2,$^) $(word 3,$^)
+	./$< --source $(word 2,$^) --database $(word 3,$^) --assume-yes test-api
 	$(word 4,$^) $(word 3,$^) $(word 2,$^)
 	scripts/export_messages.py $(word 3,$^) $| $(tables_to_test)
 	diff --strip-trailing-cr -q test/expected/messages_after_api_test.tsv test/output/messages.tsv
@@ -103,14 +103,14 @@ sqlite_api_test: valve test/src/table.tsv build/valve.db test/insert_update.sh |
 	diff --strip-trailing-cr -q test/expected/history.tsv test/output/history.tsv
 	# We drop all of the db tables because the schema for the next test (random test) is different
 	# from the schema used for this test.
-	./$< --assume-yes drop-all $(word 2,$^) $(word 3,$^)
+	./$<  --source $(word 2,$^) --database $(word 3,$^) --assume-yes drop-all
 	@echo "Test succeeded!"
 
 .PHONY: pg_api_test
 pg_api_test: valve test/src/table.tsv test/insert_update.sh | test/output
 	@echo "Testing API functions on postgresql ..."
-	./$< --assume-yes load $(word 2,$^) $(pg_connect_string)
-	./$< --assume-yes test-api $(word 2,$^) $(pg_connect_string)
+	./$< --source $(word 2,$^) --database $(pg_connect_string) --assume-yes load
+	./$< --source $(word 2,$^) --database $(pg_connect_string) --assume-yes test-api
 	$(word 3,$^) $(pg_connect_string) $(word 2,$^)
 	scripts/export_messages.py $(pg_connect_string) $| $(tables_to_test)
 	diff --strip-trailing-cr -q test/expected/messages_after_api_test.tsv test/output/messages.tsv
@@ -118,7 +118,7 @@ pg_api_test: valve test/src/table.tsv test/insert_update.sh | test/output
 	tail -n +2 test/expected/history.tsv | diff --strip-trailing-cr -q test/output/history.tsv -
 	# We drop all of the db tables because the schema for the next test (random test) is different
 	# from the schema used for this test.
-	./$< --assume-yes drop-all $(word 2,$^) $(pg_connect_string)
+	./$< --source $(word 2,$^) --database $(pg_connect_string) --assume-yes drop-all
 	@echo "Test succeeded!"
 
 sqlite_random_db = build/valve_random.db
@@ -137,14 +137,14 @@ random_test_data: test/generate_random_test_data.py valve valve test/random_test
 .PHONY: sqlite_random_test
 sqlite_random_test: valve clean_random_data random_test_data | build test/output
 	@echo "Testing with random data on sqlite ..."
-	./$< --assume-yes load $(random_test_dir)/table.tsv $(sqlite_random_db)
+	./$< --source $(random_test_dir)/table.tsv --database $(sqlite_random_db) --assume-yes load
 	test/round_trip.sh $(sqlite_random_db) $(random_test_dir)/table.tsv
 	@echo "Test succeeded!"
 
 .PHONY: pg_random_test
 pg_random_test: valve clean_random_data random_test_data | build test/output
 	@echo "Testing with random data on postgresql ..."
-	./$< --assume-yes load $(random_test_dir)/table.tsv $(pg_connect_string)
+	./$< --source $(random_test_dir)/table.tsv --database $(pg_connect_string) --assume-yes load
 	test/round_trip.sh $(pg_connect_string) $(random_test_dir)/table.tsv
 	@echo "Test succeeded!"
 
@@ -158,9 +158,9 @@ test/penguins/src/data:
 # it takes on my laptop (while plugged).
 penguin_test_threshold = 50
 num_penguin_rows = 100000
-penguin_command_sqlite = ./valve --assume-yes load src/schema/table.tsv --initial-load penguins.db
-penguin_command_pg = ./valve --assume-yes load src/schema/table.tsv $(pg_connect_string)
-penguin_command_pg_drop = ./valve --assume-yes drop-all src/schema/table.tsv $(pg_connect_string)
+penguin_command_sqlite = ./valve --source src/schema/table.tsv --database penguins.db --assume-yes load --initial-load
+penguin_command_pg = ./valve --source src/schema/table.tsv --database $(pg_connect_string) --assume-yes load
+penguin_command_pg_drop = ./valve --source src/schema/table.tsv --database $(pg_connect_string)  --assume-yes drop-all
 
 .PHONY: penguin_test
 penguin_test: valve | test/penguins/src/data
@@ -204,7 +204,7 @@ guess_test_data: test/generate_random_test_data.py $(guess_test_dir)/table1.tsv 
 
 $(guess_test_db): valve guess_test_data $(guess_test_dir)/*.tsv | build $(guess_test_dir)/ontology
 	rm -f $@
-	./$< --assume-yes load $(guess_test_dir)/table.tsv $@
+	./$< --source $(guess_test_dir)/table.tsv --database $@ --assume-yes load
 
 # At last check, the performance test was running on GitHub's runner
 # (Ubuntu 22.04.4 LTS, runner version 2.317.0) in just over 20s. GitHub
@@ -229,7 +229,7 @@ perf_test_data: test/generate_random_test_data.py valve confirm_overwrite.sh $(p
 
 $(perf_test_db): valve perf_test_data $(perf_test_dir)/*.tsv | build $(perf_test_dir)/ontology
 	rm -f $@
-	timeout $(perf_test_threshold) time -p ./$< --assume-yes --verbose load $(perf_test_dir)/table.tsv --initial-load $@ || \
+	timeout $(perf_test_threshold) time -p ./$< --source $(perf_test_dir)/table.tsv --database $@ --assume-yes --verbose load --initial-load || \
 		(echo "Performance test (SQLite) took longer than $(perf_test_threshold) seconds." && false)
 
 
@@ -239,7 +239,7 @@ sqlite_perf_test: $(perf_test_db) | test/output
 
 .PHONY: pg_perf_test
 pg_perf_test: valve $(perf_test_dir)/ontology | test/output
-	timeout $(perf_test_threshold) time -p ./$< --assume-yes --verbose load $(perf_test_dir)/table.tsv $(pg_connect_string) || \
+	timeout $(perf_test_threshold) time -p ./$< --source $(perf_test_dir)/table.tsv --database $(pg_connect_string) --assume-yes --verbose load || \
         (echo "Performance test (PostgreSQL) took longer than $(perf_test_threshold) seconds." && false)
 	time -p scripts/export_messages.py $(pg_connect_string) $| $(tables_to_test)
 

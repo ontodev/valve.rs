@@ -15,11 +15,13 @@ use std::io;
 
 // Help strings that are used in more than one subcommand:
 static SOURCE_HELP: &str = "The location of a TSV file, representing the 'table' table, \
-                            from which to read the Valve configuration.";
+                            from which to read the Valve configuration. If not specified, \
+                            will be read from the environment variable VALVE_SOURCE.";
 
 static DATABASE_HELP: &str = "Can be one of (A) A URL of the form `postgresql://...` \
                               or `sqlite://...` (B) The filename (including path) of \
-                              a sqlite database.";
+                              a sqlite database. If not specified, will be read from the \
+                              environment variable VALVE_DATABASE";
 
 static SAVE_DIR_HELP: &str = "Save tables to DIR instead of to their configured paths";
 
@@ -36,6 +38,14 @@ static BUILD_ERROR: &str = "Error building Valve";
           about = "Valve: A lightweight validation engine -- command line interface",
           long_about = None)]
 struct Cli {
+    /// TODO: Add docstring
+    #[arg(long, action = ArgAction::Set, env = "VALVE_SOURCE", help = SOURCE_HELP)]
+    source: String,
+
+    /// TODO: Add docstring
+    #[arg(long, action = ArgAction::Set, env = "VALVE_DATABASE", help = DATABASE_HELP)]
+    database: String,
+
     /// Use this option with caution. When set, Valve will not not ask the user for confirmation
     /// before executing potentially destructive operations on the database and/or table files.
     #[arg(long, action = ArgAction::SetTrue)]
@@ -56,12 +66,6 @@ enum Commands {
     // in the usage statement when valve is run with the option --help.
     /// Load all of the Valve-managed tables in a given database with data
     Load {
-        #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
-        source: String,
-
-        #[arg(value_name = "DATABASE", action = ArgAction::Set, help = DATABASE_HELP)]
-        database: String,
-
         #[arg(long,
               action = ArgAction::SetTrue,
               help = "(SQLite only) When this flag is set, the database \
@@ -74,43 +78,19 @@ enum Commands {
     },
 
     /// Create all of the Valve-managed tables in a given database without loading any data.
-    Create {
-        #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
-        source: String,
-
-        #[arg(value_name = "DATABASE", action = ArgAction::Set, help = DATABASE_HELP)]
-        database: String,
-    },
+    Create {},
 
     /// Drop all of the Valve-managed tables in a given database.
-    DropAll {
-        #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
-        source: String,
-
-        #[arg(value_name = "DATABASE", action = ArgAction::Set, help = DATABASE_HELP)]
-        database: String,
-    },
+    DropAll {},
 
     /// Save all saveable tables as TSV files.
     SaveAll {
-        #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
-        source: String,
-
-        #[arg(value_name = "DATABASE", action = ArgAction::Set, help = DATABASE_HELP)]
-        database: String,
-
         #[arg(long, value_name = "DIR", action = ArgAction::Set, help = SAVE_DIR_HELP)]
         save_dir: Option<String>,
     },
 
     /// Save the tables from a given list as TSV files.
     Save {
-        #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
-        source: String,
-
-        #[arg(value_name = "DATABASE", action = ArgAction::Set, help = DATABASE_HELP)]
-        database: String,
-
         #[arg(value_name = "LIST",
               action = ArgAction::Set,
               value_delimiter = ',',
@@ -135,35 +115,20 @@ enum Commands {
     },
 
     /// Print the Valve configuration as a JSON-formatted string.
-    DumpConfig {
-        #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
-        source: String,
-    },
+    DumpConfig {},
 
     /// Print the order in which Valve-managed tables will be created, as determined by their
     /// dependency relations.
-    ShowTableOrder {
-        #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
-        source: String,
-    },
+    ShowTableOrder {},
 
     /// Print the incoming dependencies for each Valve-managed table.
-    ShowIncomingDeps {
-        #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
-        source: String,
-    },
+    ShowIncomingDeps {},
 
     /// Print the outgoing dependencies for each Valve-managed table.
-    ShowOutgoingDeps {
-        #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
-        source: String,
-    },
+    ShowOutgoingDeps {},
 
     /// Print the SQL that is used to instantiate Valve-managed tables in a given database.
-    DumpSchema {
-        #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
-        source: String,
-    },
+    DumpSchema {},
 
     /// Guess the Valve column configuration for the data table represented by a given TSV file.
     Guess {
@@ -182,12 +147,6 @@ enum Commands {
               help = "Use SEED for random sampling")]
         seed: Option<u64>,
 
-        #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
-        source: String,
-
-        #[arg(value_name = "DATABASE", action = ArgAction::Set, help = DATABASE_HELP)]
-        database: String,
-
         #[arg(value_name = "TABLE_TSV", action = ArgAction::Set,
               help = "The TSV file representing the table whose column configuration will be \
                       guessed.")]
@@ -196,23 +155,11 @@ enum Commands {
 
     /// Run a set of predefined tests, on a specified pre-loaded database, that will test Valve's
     /// Application Programmer Interface.
-    TestApi {
-        #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
-        source: String,
-
-        #[arg(value_name = "DATABASE", action = ArgAction::Set, help = DATABASE_HELP)]
-        database: String,
-    },
+    TestApi {},
 
     /// Run a set of predefined tests, on a specified pre-loaded database, that will test the
     /// validity of the configured datatype hierarchy.
-    TestDtHierarchy {
-        #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
-        source: String,
-
-        #[arg(value_name = "DATABASE", action = ArgAction::Set, help = DATABASE_HELP)]
-        database: String,
-    },
+    TestDtHierarchy {},
 }
 
 #[derive(Subcommand)]
@@ -222,24 +169,12 @@ enum AddSubcommands {
     /// (when the global --verbose flag has been set) a JSON representation of the row, including
     /// validation information and its assigned row_number, to the terminal before exiting.
     Row {
-        #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
-        source: String,
-
-        #[arg(value_name = "DATABASE", action = ArgAction::Set, help = DATABASE_HELP)]
-        database: String,
-
         #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
         table: String,
     },
 
     /// Add a table located at a given path.
     Table {
-        #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
-        source: String,
-
-        #[arg(value_name = "DATABASE", action = ArgAction::Set, help = DATABASE_HELP)]
-        database: String,
-
         #[arg(value_name = "PATH", action = ArgAction::Set,
               help = "The filesystem path of the table")]
         path: String,
@@ -250,24 +185,12 @@ enum AddSubcommands {
 enum GetSubcommands {
     /// TODO: Add a docstring.
     Table {
-        #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
-        source: String,
-
-        #[arg(value_name = "DATABASE", action = ArgAction::Set, help = DATABASE_HELP)]
-        database: String,
-
         #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
         table: String,
     },
 
     /// Get a row having a given row number from a given table.
     Row {
-        #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
-        source: String,
-
-        #[arg(value_name = "DATABASE", action = ArgAction::Set, help = DATABASE_HELP)]
-        database: String,
-
         #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
         table: String,
 
@@ -277,12 +200,6 @@ enum GetSubcommands {
 
     /// Get a cell representing the value of a given column of a given row from a given table.
     Cell {
-        #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
-        source: String,
-
-        #[arg(value_name = "DATABASE", action = ArgAction::Set, help = DATABASE_HELP)]
-        database: String,
-
         #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
         table: String,
 
@@ -295,12 +212,6 @@ enum GetSubcommands {
 
     /// Get the value of a given column of a given row from a given table.
     Value {
-        #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
-        source: String,
-
-        #[arg(value_name = "DATABASE", action = ArgAction::Set, help = DATABASE_HELP)]
-        database: String,
-
         #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
         table: String,
 
@@ -313,12 +224,6 @@ enum GetSubcommands {
 
     /// TODO: Add a docstring.
     Messages {
-        #[arg(value_name = "SOURCE", action = ArgAction::Set, help = SOURCE_HELP)]
-        source: String,
-
-        #[arg(value_name = "DATABASE", action = ArgAction::Set, help = DATABASE_HELP)]
-        database: String,
-
         #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
         table: String,
 
@@ -381,11 +286,7 @@ async fn main() -> Result<()> {
     match &cli.command {
         Commands::Add { add_subcommand } => {
             match add_subcommand {
-                AddSubcommands::Row {
-                    source,
-                    database,
-                    table,
-                } => {
+                AddSubcommands::Row { table } => {
                     let mut row = String::new();
                     io::stdin()
                         .read_line(&mut row)
@@ -395,7 +296,7 @@ async fn main() -> Result<()> {
                     let row = row
                         .as_object()
                         .expect(&format!("{row} is not a JSON object"));
-                    let valve = build_valve(source, database).expect(BUILD_ERROR);
+                    let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
                     let (_, row) = valve
                         .insert_row(table, row)
                         .await
@@ -412,41 +313,37 @@ async fn main() -> Result<()> {
                 _ => todo!(),
             };
         }
-        Commands::Create { source, database } => {
-            exit_unless_tsv(source);
-            let valve = build_valve(source, database).expect(BUILD_ERROR);
+        Commands::Create {} => {
+            exit_unless_tsv(&cli.source);
+            let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
             valve
                 .create_all_tables()
                 .await
                 .expect("Error creating tables");
         }
-        Commands::DropAll { source, database } => {
-            exit_unless_tsv(source);
-            let valve = build_valve(source, database).expect(BUILD_ERROR);
+        Commands::DropAll {} => {
+            exit_unless_tsv(&cli.source);
+            let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
             valve
                 .drop_all_tables()
                 .await
                 .expect("Error dropping tables");
         }
-        Commands::DumpConfig { source } => {
-            exit_unless_tsv(source);
-            let valve = build_valve(source, "").expect(BUILD_ERROR);
+        Commands::DumpConfig {} => {
+            exit_unless_tsv(&cli.source);
+            let valve = build_valve(&cli.source, "").expect(BUILD_ERROR);
             println!("{}", valve.config);
         }
-        Commands::DumpSchema { source } => {
-            exit_unless_tsv(source);
-            let valve = build_valve(source, "").expect(BUILD_ERROR);
+        Commands::DumpSchema {} => {
+            exit_unless_tsv(&cli.source);
+            let valve = build_valve(&cli.source, "").expect(BUILD_ERROR);
             let schema = valve.dump_schema().await.expect("Error dumping schema");
             println!("{}", schema);
         }
         Commands::Get { get_subcommand } => {
             match get_subcommand {
-                GetSubcommands::Table {
-                    source,
-                    database,
-                    table,
-                } => {
-                    let valve = build_valve(source, database).expect(BUILD_ERROR);
+                GetSubcommands::Table { table } => {
+                    let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
                     let (sql, sql_params) =
                         generic_select_with_message_values(table, &valve.config, &valve.db_kind);
                     let sql = local_sql_syntax(&valve.db_kind, &sql);
@@ -477,13 +374,8 @@ async fn main() -> Result<()> {
                     }
                     println!("]");
                 }
-                GetSubcommands::Row {
-                    source,
-                    database,
-                    table,
-                    row,
-                } => {
-                    let valve = build_valve(source, database).expect(BUILD_ERROR);
+                GetSubcommands::Row { table, row } => {
+                    let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
                     let row = valve
                         .get_row_from_db(table, row)
                         .await
@@ -495,14 +387,8 @@ async fn main() -> Result<()> {
                             .expect("Error converting row to rich JSON"))
                     );
                 }
-                GetSubcommands::Cell {
-                    source,
-                    database,
-                    table,
-                    row,
-                    column,
-                } => {
-                    let valve = build_valve(source, database).expect(BUILD_ERROR);
+                GetSubcommands::Cell { table, row, column } => {
+                    let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
                     let cell = valve
                         .get_cell_from_db(table, row, column)
                         .await
@@ -514,14 +400,8 @@ async fn main() -> Result<()> {
                             .expect("Error converting cell to rich JSON"))
                     );
                 }
-                GetSubcommands::Value {
-                    source,
-                    database,
-                    table,
-                    row,
-                    column,
-                } => {
-                    let valve = build_valve(source, database).expect(BUILD_ERROR);
+                GetSubcommands::Value { table, row, column } => {
+                    let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
                     let cell = valve
                         .get_cell_from_db(table, row, column)
                         .await
@@ -535,12 +415,10 @@ async fn main() -> Result<()> {
             sample_size,
             error_rate,
             seed,
-            source,
-            database,
             table_tsv,
         } => {
-            exit_unless_tsv(source);
-            let valve = build_valve(source, database).expect(BUILD_ERROR);
+            exit_unless_tsv(&cli.source);
+            let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
             guess(
                 &valve,
                 cli.verbose,
@@ -551,13 +429,9 @@ async fn main() -> Result<()> {
                 cli.assume_yes,
             );
         }
-        Commands::Load {
-            initial_load,
-            source,
-            database,
-        } => {
-            exit_unless_tsv(source);
-            let mut valve = build_valve(source, database).expect(BUILD_ERROR);
+        Commands::Load { initial_load } => {
+            exit_unless_tsv(&cli.source);
+            let mut valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
             if *initial_load {
                 block_on(valve.configure_for_initial_load())
                     .expect("Could not configure for initial load");
@@ -567,14 +441,9 @@ async fn main() -> Result<()> {
                 .await
                 .expect("Error loading tables");
         }
-        Commands::Save {
-            save_dir,
-            source,
-            database,
-            tables,
-        } => {
-            exit_unless_tsv(source);
-            let valve = build_valve(source, database).expect(BUILD_ERROR);
+        Commands::Save { save_dir, tables } => {
+            exit_unless_tsv(&cli.source);
+            let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
             let tables = tables
                 .iter()
                 .filter(|s| *s != "")
@@ -585,44 +454,40 @@ async fn main() -> Result<()> {
                 .await
                 .expect("Error saving tables");
         }
-        Commands::SaveAll {
-            save_dir,
-            source,
-            database,
-        } => {
-            exit_unless_tsv(source);
-            let valve = build_valve(source, database).expect(BUILD_ERROR);
+        Commands::SaveAll { save_dir } => {
+            exit_unless_tsv(&cli.source);
+            let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
             valve
                 .save_all_tables(&save_dir)
                 .await
                 .expect("Error saving tables");
         }
-        Commands::ShowIncomingDeps { source } => {
-            exit_unless_tsv(source);
-            let valve = build_valve(source, "").expect(BUILD_ERROR);
+        Commands::ShowIncomingDeps {} => {
+            exit_unless_tsv(&cli.source);
+            let valve = build_valve(&cli.source, "").expect(BUILD_ERROR);
             print_dependencies(&valve, true);
         }
-        Commands::ShowOutgoingDeps { source } => {
-            exit_unless_tsv(source);
-            let valve = build_valve(source, "").expect(BUILD_ERROR);
+        Commands::ShowOutgoingDeps {} => {
+            exit_unless_tsv(&cli.source);
+            let valve = build_valve(&cli.source, "").expect(BUILD_ERROR);
             print_dependencies(&valve, false);
         }
-        Commands::ShowTableOrder { source } => {
-            exit_unless_tsv(source);
-            let valve = build_valve(source, "").expect(BUILD_ERROR);
+        Commands::ShowTableOrder {} => {
+            exit_unless_tsv(&cli.source);
+            let valve = build_valve(&cli.source, "").expect(BUILD_ERROR);
             let sorted_table_list = valve.get_sorted_table_list(false);
             println!("{}", sorted_table_list.join(", "));
         }
-        Commands::TestApi { source, database } => {
-            exit_unless_tsv(source);
-            let valve = build_valve(source, database).expect(BUILD_ERROR);
+        Commands::TestApi {} => {
+            exit_unless_tsv(&cli.source);
+            let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
             run_api_tests(&valve)
                 .await
                 .expect("Error running API tests");
         }
-        Commands::TestDtHierarchy { source, database } => {
-            exit_unless_tsv(source);
-            let valve = build_valve(source, database).expect(BUILD_ERROR);
+        Commands::TestDtHierarchy {} => {
+            exit_unless_tsv(&cli.source);
+            let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
             run_dt_hierarchy_tests(&valve).expect("Error running datatype hierarchy tests");
         }
     }
