@@ -222,7 +222,8 @@ enum GetSubcommands {
         column: String,
     },
 
-    /// TODO: Add a docstring.
+    /// Get the validation messages associated with the value of a given column of a given row
+    /// from a given table.
     Messages {
         #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
         table: String,
@@ -408,7 +409,14 @@ async fn main() -> Result<()> {
                         .expect("Error getting cell");
                     println!("{}", cell.strvalue());
                 }
-                GetSubcommands::Messages { .. } => todo!(),
+                GetSubcommands::Messages { table, row, column } => {
+                    let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
+                    let cell = valve
+                        .get_cell_from_db(table, row, column)
+                        .await
+                        .expect("Error getting cell");
+                    println!("{}", json!(cell.messages));
+                }
             };
         }
         Commands::Guess {
