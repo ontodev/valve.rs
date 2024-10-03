@@ -3,9 +3,14 @@ mod tests;
 use crate::tests::{run_api_tests, run_dt_hierarchy_tests};
 use anyhow::Result;
 use clap::{ArgAction, Parser, Subcommand};
-use futures::executor::block_on;
-use ontodev_valve::{guess::guess, valve::Valve};
+use futures::{executor::block_on, TryStreamExt};
+use ontodev_valve::{
+    guess::guess,
+    toolkit::{any_row_to_json_row, generic_select_with_message_values, local_sql_syntax},
+    valve::{Valve, ValveRow},
+};
 use serde_json::{json, Value as SerdeValue};
+use sqlx::{query as sqlx_query, Row};
 use std::io;
 
 // Help strings that are used in more than one subcommand:
@@ -23,6 +28,8 @@ static TABLE_HELP: &str = "A table name";
 static ROW_HELP: &str = "The number used to identify the row in the database";
 
 static COLUMN_HELP: &str = "A column name or label";
+
+static BUILD_ERROR: &str = "Error building Valve";
 
 #[derive(Parser)]
 #[command(version,
@@ -330,7 +337,7 @@ async fn main() -> Result<()> {
     // This has to be done multiple times so we declare a closure. We use a closure instead of a
     // function so that the cli.verbose and cli.assume_yes fields are in scope:
     let build_valve = |source: &str, database: &str| -> Result<Valve> {
-        let mut valve = block_on(Valve::build(&source, &database)).expect("Error building Valve");
+        let mut valve = block_on(Valve::build(&source, &database)).expect(BUILD_ERROR);
         valve.set_verbose(cli.verbose);
         valve.set_interactive(!cli.assume_yes);
         Ok(valve)
@@ -388,7 +395,7 @@ async fn main() -> Result<()> {
                     let row = row
                         .as_object()
                         .expect(&format!("{row} is not a JSON object"));
-                    let valve = build_valve(source, database).expect("Error building Valve");
+                    let valve = build_valve(source, database).expect(BUILD_ERROR);
                     let (_, row) = valve
                         .insert_row(table, row)
                         .await
@@ -407,7 +414,7 @@ async fn main() -> Result<()> {
         }
         Commands::Create { source, database } => {
             exit_unless_tsv(source);
-            let valve = build_valve(source, database).expect("Error building Valve");
+            let valve = build_valve(source, database).expect(BUILD_ERROR);
             valve
                 .create_all_tables()
                 .await
@@ -415,7 +422,7 @@ async fn main() -> Result<()> {
         }
         Commands::DropAll { source, database } => {
             exit_unless_tsv(source);
-            let valve = build_valve(source, database).expect("Error building Valve");
+            let valve = build_valve(source, database).expect(BUILD_ERROR);
             valve
                 .drop_all_tables()
                 .await
@@ -423,25 +430,60 @@ async fn main() -> Result<()> {
         }
         Commands::DumpConfig { source } => {
             exit_unless_tsv(source);
-            let valve = build_valve(source, "").expect("Error building Valve");
+            let valve = build_valve(source, "").expect(BUILD_ERROR);
             println!("{}", valve.config);
         }
         Commands::DumpSchema { source } => {
             exit_unless_tsv(source);
-            let valve = build_valve(source, "").expect("Error building Valve");
+            let valve = build_valve(source, "").expect(BUILD_ERROR);
             let schema = valve.dump_schema().await.expect("Error dumping schema");
             println!("{}", schema);
         }
         Commands::Get { get_subcommand } => {
             match get_subcommand {
-                GetSubcommands::Table { .. } => todo!(),
+                GetSubcommands::Table {
+                    source,
+                    database,
+                    table,
+                } => {
+                    let valve = build_valve(source, database).expect(BUILD_ERROR);
+                    let (sql, sql_params) =
+                        generic_select_with_message_values(table, &valve.config, &valve.db_kind);
+                    let sql = local_sql_syntax(&valve.db_kind, &sql);
+                    let mut query = sqlx_query(&sql);
+                    for param in &sql_params {
+                        query = query.bind(param);
+                    }
+
+                    let mut row_stream = query.fetch(&valve.pool);
+                    let mut is_first = true;
+                    print!("[");
+                    while let Some(row) = row_stream.try_next().await? {
+                        if !is_first {
+                            print!(",");
+                        } else {
+                            is_first = false;
+                        }
+                        let row_number: i64 = row.get::<i64, _>("row_number");
+                        let row_number = row_number as u32;
+                        let row = any_row_to_json_row(&row).unwrap();
+                        let row = ValveRow::from_rich_json(Some(row_number), &row).unwrap();
+                        print!(
+                            "{}",
+                            json!(row
+                                .to_rich_json()
+                                .expect("Error converting row to rich JSON"))
+                        );
+                    }
+                    println!("]");
+                }
                 GetSubcommands::Row {
                     source,
                     database,
                     table,
                     row,
                 } => {
-                    let valve = build_valve(source, database).expect("Error building Valve");
+                    let valve = build_valve(source, database).expect(BUILD_ERROR);
                     let row = valve
                         .get_row_from_db(table, row)
                         .await
@@ -460,7 +502,7 @@ async fn main() -> Result<()> {
                     row,
                     column,
                 } => {
-                    let valve = build_valve(source, database).expect("Error building Valve");
+                    let valve = build_valve(source, database).expect(BUILD_ERROR);
                     let cell = valve
                         .get_cell_from_db(table, row, column)
                         .await
@@ -479,7 +521,7 @@ async fn main() -> Result<()> {
                     row,
                     column,
                 } => {
-                    let valve = build_valve(source, database).expect("Error building Valve");
+                    let valve = build_valve(source, database).expect(BUILD_ERROR);
                     let cell = valve
                         .get_cell_from_db(table, row, column)
                         .await
@@ -498,7 +540,7 @@ async fn main() -> Result<()> {
             table_tsv,
         } => {
             exit_unless_tsv(source);
-            let valve = build_valve(source, database).expect("Error building Valve");
+            let valve = build_valve(source, database).expect(BUILD_ERROR);
             guess(
                 &valve,
                 cli.verbose,
@@ -515,7 +557,7 @@ async fn main() -> Result<()> {
             database,
         } => {
             exit_unless_tsv(source);
-            let mut valve = build_valve(source, database).expect("Error building Valve");
+            let mut valve = build_valve(source, database).expect(BUILD_ERROR);
             if *initial_load {
                 block_on(valve.configure_for_initial_load())
                     .expect("Could not configure for initial load");
@@ -532,7 +574,7 @@ async fn main() -> Result<()> {
             tables,
         } => {
             exit_unless_tsv(source);
-            let valve = build_valve(source, database).expect("Error building Valve");
+            let valve = build_valve(source, database).expect(BUILD_ERROR);
             let tables = tables
                 .iter()
                 .filter(|s| *s != "")
@@ -549,7 +591,7 @@ async fn main() -> Result<()> {
             database,
         } => {
             exit_unless_tsv(source);
-            let valve = build_valve(source, database).expect("Error building Valve");
+            let valve = build_valve(source, database).expect(BUILD_ERROR);
             valve
                 .save_all_tables(&save_dir)
                 .await
@@ -557,30 +599,30 @@ async fn main() -> Result<()> {
         }
         Commands::ShowIncomingDeps { source } => {
             exit_unless_tsv(source);
-            let valve = build_valve(source, "").expect("Error building Valve");
+            let valve = build_valve(source, "").expect(BUILD_ERROR);
             print_dependencies(&valve, true);
         }
         Commands::ShowOutgoingDeps { source } => {
             exit_unless_tsv(source);
-            let valve = build_valve(source, "").expect("Error building Valve");
+            let valve = build_valve(source, "").expect(BUILD_ERROR);
             print_dependencies(&valve, false);
         }
         Commands::ShowTableOrder { source } => {
             exit_unless_tsv(source);
-            let valve = build_valve(source, "").expect("Error building Valve");
+            let valve = build_valve(source, "").expect(BUILD_ERROR);
             let sorted_table_list = valve.get_sorted_table_list(false);
             println!("{}", sorted_table_list.join(", "));
         }
         Commands::TestApi { source, database } => {
             exit_unless_tsv(source);
-            let valve = build_valve(source, database).expect("Error building Valve");
+            let valve = build_valve(source, database).expect(BUILD_ERROR);
             run_api_tests(&valve)
                 .await
                 .expect("Error running API tests");
         }
         Commands::TestDtHierarchy { source, database } => {
             exit_unless_tsv(source);
-            let valve = build_valve(source, database).expect("Error building Valve");
+            let valve = build_valve(source, database).expect(BUILD_ERROR);
             run_dt_hierarchy_tests(&valve).expect("Error running datatype hierarchy tests");
         }
     }

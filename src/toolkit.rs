@@ -2737,7 +2737,7 @@ pub async fn get_db_value_tx(
 /// Given a global configuration map, a database connection kind, a database transaction, a table
 /// name and a row number, get the logical contents of that row (whether or not it is valid),
 /// including any messages, from the database, such that all values are cast as strings.
-pub async fn get_row_from_db_str_tx(
+pub async fn get_text_row_from_db_tx(
     config: &ValveConfig,
     kind: &DbKind,
     tx: &mut Transaction<'_, sqlx::Any>,
@@ -2759,21 +2759,25 @@ pub async fn get_row_from_db_str_tx(
     if rows.len() == 0 {
         return Err(ValveError::DataError(
             format!(
-                "In get_row_from_db_str_tx(). No rows found for row_number: {}",
+                "In get_text_row_from_db_tx(). No rows found for row_number: {}",
                 row_number
             )
             .into(),
         )
         .into());
     }
-    let sql_row = &rows[0];
+    let any_row = &rows[0];
+    Ok(any_row_to_json_row(any_row)?)
+}
 
+/// TODO: Add a docstring
+pub fn any_row_to_json_row(any_row: &AnyRow) -> Result<SerdeMap> {
     let messages = {
-        let raw_messages = sql_row.try_get_raw("message")?;
+        let raw_messages = any_row.try_get_raw("message")?;
         if raw_messages.is_null() {
             vec![]
         } else {
-            let messages: &str = sql_row.get("message");
+            let messages: &str = any_row.get("message");
             match serde_json::from_str::<SerdeValue>(messages) {
                 Err(e) => return Err(e.into()),
                 Ok(SerdeValue::Array(m)) => m,
@@ -2788,15 +2792,15 @@ pub async fn get_row_from_db_str_tx(
     };
 
     let mut row = SerdeMap::new();
-    for column in sql_row.columns() {
+    for column in any_row.columns() {
         let cname = column.name();
         if !vec!["row_number", "message"].contains(&cname) {
-            let raw_value = sql_row.try_get_raw(format!(r#"{}"#, cname).as_str())?;
+            let raw_value = any_row.try_get_raw(format!(r#"{}"#, cname).as_str())?;
             let value;
             if !raw_value.is_null() {
                 // The extended query returned by generic_select_with_message_values() casts all
                 // column values to text, so we pass "text" to get_column_value() for every column:
-                value = get_column_value_as_string(&sql_row, &cname, "text");
+                value = get_column_value_as_string(&any_row, &cname, "text");
             } else {
                 value = String::from("");
             }
@@ -2819,6 +2823,57 @@ pub async fn get_row_from_db_str_tx(
         }
     }
     Ok(row)
+}
+
+/// TODO: Add a docstring
+pub fn correct_row_datatypes(
+    config: &ValveConfig,
+    db_kind: &DbKind,
+    table: &str,
+    row: &SerdeMap,
+) -> Result<SerdeMap> {
+    let mut corrected_row = SerdeMap::new();
+    for (cname, cell) in row {
+        let numeric_re = Regex::new(r"^[0-9]*\.?[0-9]+$").expect("Programmer error");
+        let sql_type =
+            get_sql_type_from_global_config(&config, table, cname, &db_kind).to_lowercase();
+
+        let cell = {
+            let cell_err = |cell: &SerdeValue| -> ValveError {
+                ValveError::DataError(format!("{:?} is not a valid cell", cell))
+            };
+            let mut corrected_cell = cell.as_object().ok_or(cell_err(cell))?.clone();
+            let value = {
+                let value = cell.get("value").ok_or(cell_err(cell))?;
+                let strvalue: &str = value.as_str().ok_or(cell_err(cell))?;
+                if sql_type == "text"
+                    || sql_type.starts_with("varchar")
+                    || !numeric_re.is_match(&strvalue)
+                {
+                    value.clone()
+                } else if sql_type == "numeric" {
+                    let value: f64 = strvalue.parse()?;
+                    json!(value)
+                } else if sql_type == "integer" {
+                    let value: i32 = strvalue.parse()?;
+                    json!(value)
+                } else if sql_type == "real" {
+                    let value: f64 = strvalue.parse()?;
+                    json!(value)
+                } else {
+                    return Err(ValveError::DataError(format!(
+                        "Unrecognized SQL type: {}",
+                        sql_type
+                    ))
+                    .into());
+                }
+            };
+            corrected_cell.insert("value".to_string(), value);
+            corrected_cell
+        };
+        corrected_row.insert(cname.to_string(), json!(cell));
+    }
+    Ok(corrected_row)
 }
 
 /// Given a row and a column name, extract the contents of the row as a JSON array and return it.
@@ -3575,7 +3630,7 @@ pub async fn record_row_move_tx(
     new_previous_row: &u32,
     user: &str,
 ) -> Result<()> {
-    let row = get_row_from_db_str_tx(config, kind, tx, table, row_num).await?;
+    let row = get_text_row_from_db_tx(config, kind, tx, table, row_num).await?;
     let mut from_row = row.clone();
     let mut to_row = row.clone();
     from_row.insert("previous_row".to_string(), json!(old_previous_row));
