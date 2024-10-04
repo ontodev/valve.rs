@@ -7,22 +7,14 @@ use futures::{executor::block_on, TryStreamExt};
 use ontodev_valve::{
     guess::guess,
     toolkit::{any_row_to_json_row, generic_select_with_message_values, local_sql_syntax},
-    valve::{Valve, ValveRow},
+    validate::validate_row_tx,
+    valve::{Valve, ValveCell, ValveRow},
 };
 use serde_json::{json, Value as SerdeValue};
 use sqlx::{query as sqlx_query, Row};
 use std::io;
 
 // Help strings that are used in more than one subcommand:
-static SOURCE_HELP: &str = "The location of a TSV file, representing the 'table' table, \
-                            from which to read the Valve configuration. If not specified, \
-                            will be read from the environment variable VALVE_SOURCE.";
-
-static DATABASE_HELP: &str = "Can be one of (A) A URL of the form `postgresql://...` \
-                              or `sqlite://...` (B) The filename (including path) of \
-                              a sqlite database. If not specified, will be read from the \
-                              environment variable VALVE_DATABASE";
-
 static SAVE_DIR_HELP: &str = "Save tables to DIR instead of to their configured paths";
 
 static TABLE_HELP: &str = "A table name";
@@ -38,12 +30,17 @@ static BUILD_ERROR: &str = "Error building Valve";
           about = "Valve: A lightweight validation engine -- command line interface",
           long_about = None)]
 struct Cli {
-    /// TODO: Add docstring
-    #[arg(long, action = ArgAction::Set, env = "VALVE_SOURCE", help = SOURCE_HELP)]
+    /// Read the contents of the table table from the given TSV file. If unspecified, Valve
+    /// will read the table table location from the environment variable VALVE_SOURCE or exit
+    /// with an error if it is undefined.
+    #[arg(long, action = ArgAction::Set, env = "VALVE_SOURCE")]
     source: String,
 
-    /// TODO: Add docstring
-    #[arg(long, action = ArgAction::Set, env = "VALVE_DATABASE", help = DATABASE_HELP)]
+    /// Can be one of (A) A URL of the form `postgresql://...` or `sqlite://...` (B) The filename
+    /// (including path) of a sqlite database. If not specified, Valve will read the database
+    /// location from the environment variable VALVE_DATABASE, or exit with an error if it is
+    /// undefined.
+    #[arg(long, action = ArgAction::Set, env = "VALVE_DATABASE")]
     database: String,
 
     /// Use this option with caution. When set, Valve will not not ask the user for confirmation
@@ -102,16 +99,33 @@ enum Commands {
         save_dir: Option<String>,
     },
 
-    /// Add tables and rows to a given database
-    Add {
-        #[command(subcommand)]
-        add_subcommand: AddSubcommands,
-    },
-
     /// Get data from the database
     Get {
         #[command(subcommand)]
         get_subcommand: GetSubcommands,
+    },
+
+    /// Validate rows
+    Validate {
+        #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
+        table: String,
+
+        #[arg(value_name = "ROW", action = ArgAction::Set, help = ROW_HELP)]
+        row: Option<u32>,
+
+        #[arg(value_name = "COLUMN", action = ArgAction::Set, requires = "value",
+              help = COLUMN_HELP)]
+        column: Option<String>,
+
+        #[arg(value_name = "VALUE", action = ArgAction::Set,
+              help = "The value, of the given column, to validate")]
+        value: Option<String>,
+    },
+
+    /// Add tables and rows to a given database
+    Add {
+        #[command(subcommand)]
+        add_subcommand: AddSubcommands,
     },
 
     /// Print the Valve configuration as a JSON-formatted string.
@@ -160,25 +174,6 @@ enum Commands {
     /// Run a set of predefined tests, on a specified pre-loaded database, that will test the
     /// validity of the configured datatype hierarchy.
     TestDtHierarchy {},
-}
-
-#[derive(Subcommand)]
-enum AddSubcommands {
-    /// Read a JSON-formatted string representing a row (of the form: { "column_1": value1,
-    /// "column_2": value2, ...}) from STDIN and add it to a given table, optionally printing
-    /// (when the global --verbose flag has been set) a JSON representation of the row, including
-    /// validation information and its assigned row_number, to the terminal before exiting.
-    Row {
-        #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
-        table: String,
-    },
-
-    /// Add a table located at a given path.
-    Table {
-        #[arg(value_name = "PATH", action = ArgAction::Set,
-              help = "The filesystem path of the table")]
-        path: String,
-    },
 }
 
 #[derive(Subcommand)]
@@ -236,9 +231,35 @@ enum GetSubcommands {
     },
 }
 
+#[derive(Subcommand)]
+enum AddSubcommands {
+    /// Read a JSON-formatted string representing a row (of the form: { "column_1": value1,
+    /// "column_2": value2, ...}) from STDIN and add it to a given table, optionally printing
+    /// (when the global --verbose flag has been set) a JSON representation of the row, including
+    /// validation information and its assigned row_number, to the terminal before exiting.
+    Row {
+        #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
+        table: String,
+    },
+
+    /// Add a table located at a given path.
+    Table {
+        #[arg(value_name = "PATH", action = ArgAction::Set,
+              help = "The filesystem path of the table")]
+        path: String,
+    },
+}
+
 #[async_std::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    // Although Valve::build() will accept a non-TSV argument (in which case that argument is
+    // ignored and a table called 'table' is looked up in the given database instead), we do not
+    // allow non-TSV arguments on the command line:
+    if !cli.source.to_lowercase().ends_with(".tsv") {
+        println!("SOURCE must be a file ending (case-insensitively) with .tsv");
+        std::process::exit(1);
+    }
 
     // This has to be done multiple times so we declare a closure. We use a closure instead of a
     // function so that the cli.verbose and cli.assume_yes fields are in scope:
@@ -248,16 +269,6 @@ async fn main() -> Result<()> {
         valve.set_interactive(!cli.assume_yes);
         Ok(valve)
     };
-
-    // Although Valve::build() will accept a non-TSV argument (in which case that argument is
-    // ignored and a table called 'table' is looked up in the given database instead), we do not
-    // allow non-TSV arguments on the command line:
-    fn exit_unless_tsv(source: &str) {
-        if !source.to_lowercase().ends_with(".tsv") {
-            println!("SOURCE must be a file ending (case-insensitively) with .tsv");
-            std::process::exit(1);
-        }
-    }
 
     // Prints the table dependencies in either incoming or outgoing order.
     fn print_dependencies(valve: &Valve, incoming: bool) {
@@ -315,7 +326,6 @@ async fn main() -> Result<()> {
             };
         }
         Commands::Create {} => {
-            exit_unless_tsv(&cli.source);
             let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
             valve
                 .create_all_tables()
@@ -323,7 +333,6 @@ async fn main() -> Result<()> {
                 .expect("Error creating tables");
         }
         Commands::DropAll {} => {
-            exit_unless_tsv(&cli.source);
             let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
             valve
                 .drop_all_tables()
@@ -331,20 +340,18 @@ async fn main() -> Result<()> {
                 .expect("Error dropping tables");
         }
         Commands::DumpConfig {} => {
-            exit_unless_tsv(&cli.source);
             let valve = build_valve(&cli.source, "").expect(BUILD_ERROR);
             println!("{}", valve.config);
         }
         Commands::DumpSchema {} => {
-            exit_unless_tsv(&cli.source);
             let valve = build_valve(&cli.source, "").expect(BUILD_ERROR);
             let schema = valve.dump_schema().await.expect("Error dumping schema");
             println!("{}", schema);
         }
         Commands::Get { get_subcommand } => {
+            let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
             match get_subcommand {
                 GetSubcommands::Table { table } => {
-                    let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
                     let (sql, sql_params) =
                         generic_select_with_message_values(table, &valve.config, &valve.db_kind);
                     let sql = local_sql_syntax(&valve.db_kind, &sql);
@@ -376,7 +383,6 @@ async fn main() -> Result<()> {
                     println!("]");
                 }
                 GetSubcommands::Row { table, row } => {
-                    let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
                     let row = valve
                         .get_row_from_db(table, row)
                         .await
@@ -389,7 +395,6 @@ async fn main() -> Result<()> {
                     );
                 }
                 GetSubcommands::Cell { table, row, column } => {
-                    let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
                     let cell = valve
                         .get_cell_from_db(table, row, column)
                         .await
@@ -402,7 +407,6 @@ async fn main() -> Result<()> {
                     );
                 }
                 GetSubcommands::Value { table, row, column } => {
-                    let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
                     let cell = valve
                         .get_cell_from_db(table, row, column)
                         .await
@@ -410,7 +414,6 @@ async fn main() -> Result<()> {
                     println!("{}", cell.strvalue());
                 }
                 GetSubcommands::Messages { table, row, column } => {
-                    let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
                     let cell = valve
                         .get_cell_from_db(table, row, column)
                         .await
@@ -425,7 +428,6 @@ async fn main() -> Result<()> {
             seed,
             table_tsv,
         } => {
-            exit_unless_tsv(&cli.source);
             let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
             guess(
                 &valve,
@@ -438,7 +440,6 @@ async fn main() -> Result<()> {
             );
         }
         Commands::Load { initial_load } => {
-            exit_unless_tsv(&cli.source);
             let mut valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
             if *initial_load {
                 block_on(valve.configure_for_initial_load())
@@ -450,7 +451,6 @@ async fn main() -> Result<()> {
                 .expect("Error loading tables");
         }
         Commands::Save { save_dir, tables } => {
-            exit_unless_tsv(&cli.source);
             let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
             let tables = tables
                 .iter()
@@ -463,7 +463,6 @@ async fn main() -> Result<()> {
                 .expect("Error saving tables");
         }
         Commands::SaveAll { save_dir } => {
-            exit_unless_tsv(&cli.source);
             let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
             valve
                 .save_all_tables(&save_dir)
@@ -471,32 +470,118 @@ async fn main() -> Result<()> {
                 .expect("Error saving tables");
         }
         Commands::ShowIncomingDeps {} => {
-            exit_unless_tsv(&cli.source);
             let valve = build_valve(&cli.source, "").expect(BUILD_ERROR);
             print_dependencies(&valve, true);
         }
         Commands::ShowOutgoingDeps {} => {
-            exit_unless_tsv(&cli.source);
             let valve = build_valve(&cli.source, "").expect(BUILD_ERROR);
             print_dependencies(&valve, false);
         }
         Commands::ShowTableOrder {} => {
-            exit_unless_tsv(&cli.source);
             let valve = build_valve(&cli.source, "").expect(BUILD_ERROR);
             let sorted_table_list = valve.get_sorted_table_list(false);
             println!("{}", sorted_table_list.join(", "));
         }
         Commands::TestApi {} => {
-            exit_unless_tsv(&cli.source);
             let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
             run_api_tests(&valve)
                 .await
                 .expect("Error running API tests");
         }
         Commands::TestDtHierarchy {} => {
-            exit_unless_tsv(&cli.source);
             let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
             run_dt_hierarchy_tests(&valve).expect("Error running datatype hierarchy tests");
+        }
+        Commands::Validate {
+            table,
+            row,
+            column,
+            value,
+        } => {
+            let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
+            let mut input_row = match value {
+                None => {
+                    // If no value has been given then we expect the whole row to be input
+                    // via STDIN as a (simple) JSON-formatted string, after which we convert it
+                    // to a ValveRow:
+                    let mut json_row = String::new();
+                    io::stdin()
+                        .read_line(&mut json_row)
+                        .expect("Error reading from STDIN");
+                    let json_row = serde_json::from_str::<SerdeValue>(&json_row)
+                        .expect(&format!("Invalid JSON: {json_row}"))
+                        .as_object()
+                        .expect(&format!("{json_row} is not a JSON object"))
+                        .clone();
+                    let vrow = ValveRow::from_simple_json(&json_row, *row)
+                        .expect("Error converting input row to a ValveRow");
+                    vrow
+                }
+                Some(value) => {
+                    // If a value has been given, then a column and row number must also have been
+                    // given. We then retrieve the row with that number from the database as a
+                    // ValveRow, replacing the ValveCell corresponding to the given column with a
+                    // new ValveCell whose value is `value`.
+                    let mut row = valve
+                        .get_row_from_db(table, &row.expect("No row given"))
+                        .await
+                        .expect("Error getting row");
+                    let value = match serde_json::from_str::<SerdeValue>(&value) {
+                        Ok(value) => value,
+                        Err(_) => json!(value),
+                    };
+                    let column = column.clone().expect("No column given");
+                    let cell = ValveCell {
+                        value: value,
+                        valid: true,
+                        ..Default::default()
+                    };
+                    *row.contents
+                        .get_mut(&column)
+                        .expect(&format!("No column '{column}' in row")) = cell;
+                    row
+                }
+            };
+
+            // If the input row contains a row number as one of its cells, remove that cell and
+            // add the value of the row number to the row_number field of the row instead:
+            match input_row.contents.get_mut("row_number") {
+                None => (),
+                Some(ValveCell {
+                    nulltype: _,
+                    value,
+                    valid: _,
+                    messages: _,
+                }) => {
+                    let value = value.as_i64().expect("Not a number");
+                    input_row.row_number = Some(value as u32);
+                    input_row
+                        .contents
+                        .shift_remove("row_number")
+                        .expect("No row_number in row");
+                }
+            };
+
+            // Validate the input row:
+            let output_row = validate_row_tx(
+                &valve.config,
+                &valve.datatype_conditions,
+                &valve.rule_conditions,
+                &valve.pool,
+                None,
+                table,
+                &input_row,
+                None,
+            )
+            .await?;
+
+            // Print the results to STDOUT:
+            println!(
+                "{}",
+                json!(output_row
+                    .to_rich_json()
+                    .expect("Error converting validated row to rich JSON"))
+            );
         }
     }
 
