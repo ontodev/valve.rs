@@ -179,6 +179,22 @@ impl ValveRow {
             )
             .cloned()
     }
+
+    /// Given a [ValveRow], convert its contents to a [JsonRow] in simple format and return it.
+    pub fn contents_to_simple_json(&self) -> Result<JsonRow> {
+        let row_contents = serde_json::to_value(self.contents.clone())?;
+        let row_contents = row_contents
+            .as_object()
+            .ok_or(ValveError::InputError(format!(
+                "Could not convert {:?} to a rich JSON object",
+                row_contents
+            )))?;
+        let row_contents = row_contents
+            .iter()
+            .map(|(key, cell)| (key.clone(), cell.get("value").expect("No value").clone()))
+            .collect::<JsonRow>();
+        Ok(row_contents)
+    }
 }
 
 /// Represents a particular cell in a particular row of data with vaildation results.

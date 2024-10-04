@@ -7,8 +7,7 @@ use futures::{executor::block_on, TryStreamExt};
 use ontodev_valve::{
     guess::guess,
     toolkit::{any_row_to_json_row, generic_select_with_message_values, local_sql_syntax},
-    validate::validate_row_tx,
-    valve::{Valve, ValveCell, ValveRow},
+    valve::{JsonRow, Valve, ValveCell, ValveRow},
 };
 use serde_json::{json, Value as SerdeValue};
 use sqlx::{query as sqlx_query, Row};
@@ -126,6 +125,23 @@ enum Commands {
     Add {
         #[command(subcommand)]
         add_subcommand: AddSubcommands,
+    },
+
+    /// Update rows and values in the database
+    Update {
+        #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
+        table: String,
+
+        #[arg(value_name = "ROW", action = ArgAction::Set, help = ROW_HELP)]
+        row: Option<u32>,
+
+        #[arg(value_name = "COLUMN", action = ArgAction::Set, requires = "value",
+              help = COLUMN_HELP)]
+        column: Option<String>,
+
+        #[arg(value_name = "VALUE", action = ArgAction::Set,
+              help = "The value, of the given column, to update")]
+        value: Option<String>,
     },
 
     /// Print the Valve configuration as a JSON-formatted string.
@@ -293,6 +309,77 @@ async fn main() -> Result<()> {
             };
             println!("{}: {}", preamble, deps);
         }
+    }
+
+    // TODO: Add a comment about this function.
+    async fn get_input_row_or_row_from_input_value(
+        valve: &Valve,
+        table: &str,
+        row: &Option<u32>,
+        column: &Option<String>,
+        value: &Option<String>,
+    ) -> (Option<u32>, JsonRow) {
+        let mut input_row = match value {
+            None => {
+                // If no value has been given then we expect the whole row to be input
+                // via STDIN as a (simple) JSON-formatted string, after which we convert it
+                // to a ValveRow:
+                let mut json_row = String::new();
+                io::stdin()
+                    .read_line(&mut json_row)
+                    .expect("Error reading from STDIN");
+                let json_row = serde_json::from_str::<SerdeValue>(&json_row)
+                    .expect(&format!("Invalid JSON: {json_row}"))
+                    .as_object()
+                    .expect(&format!("{json_row} is not a JSON object"))
+                    .clone();
+                json_row
+            }
+            Some(value) => {
+                // If a value has been given, then a column and row number must also have been
+                // given. We then retrieve the row with that number from the database as a
+                // ValveRow, replacing the ValveCell corresponding to the given column with a
+                // new ValveCell whose value is `value`.
+                let mut row = valve
+                    .get_row_from_db(table, &row.expect("No row given"))
+                    .await
+                    .expect("Error getting row");
+                let value = match serde_json::from_str::<SerdeValue>(&value) {
+                    Ok(value) => value,
+                    Err(_) => json!(value),
+                };
+                let column = column.clone().expect("No column given");
+                let cell = ValveCell {
+                    value: value,
+                    valid: true,
+                    ..Default::default()
+                };
+                *row.contents
+                    .get_mut(&column)
+                    .expect(&format!("No column '{column}' in row")) = cell;
+                row.contents_to_simple_json()
+                    .expect("Can't convert to simple JSON")
+            }
+        };
+
+        // If the input row contains a row number as one of its cells, remove that cell and
+        // add the value of the row number to the row_number field of the row instead:
+        let row_number = match input_row.get("row_number") {
+            None => match row {
+                None => None,
+                Some(row) => Some(row.clone()),
+            },
+            Some(value) => {
+                let row_number = value.as_i64().expect("Not a number");
+                let row_number = Some(row_number as u32);
+                input_row
+                    .remove("row_number")
+                    .expect("No row_number in row");
+                row_number
+            }
+        };
+
+        (row_number, input_row)
     }
 
     match &cli.command {
@@ -492,6 +579,16 @@ async fn main() -> Result<()> {
             let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
             run_dt_hierarchy_tests(&valve).expect("Error running datatype hierarchy tests");
         }
+        Commands::Update {
+            table,
+            row,
+            column,
+            value,
+        } => {
+            let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
+            let (row_number, input_row) =
+                get_input_row_or_row_from_input_value(&valve, table, row, column, value).await;
+        }
         Commands::Validate {
             table,
             row,
@@ -499,81 +596,11 @@ async fn main() -> Result<()> {
             value,
         } => {
             let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
-            let mut input_row = match value {
-                None => {
-                    // If no value has been given then we expect the whole row to be input
-                    // via STDIN as a (simple) JSON-formatted string, after which we convert it
-                    // to a ValveRow:
-                    let mut json_row = String::new();
-                    io::stdin()
-                        .read_line(&mut json_row)
-                        .expect("Error reading from STDIN");
-                    let json_row = serde_json::from_str::<SerdeValue>(&json_row)
-                        .expect(&format!("Invalid JSON: {json_row}"))
-                        .as_object()
-                        .expect(&format!("{json_row} is not a JSON object"))
-                        .clone();
-                    let vrow = ValveRow::from_simple_json(&json_row, *row)
-                        .expect("Error converting input row to a ValveRow");
-                    vrow
-                }
-                Some(value) => {
-                    // If a value has been given, then a column and row number must also have been
-                    // given. We then retrieve the row with that number from the database as a
-                    // ValveRow, replacing the ValveCell corresponding to the given column with a
-                    // new ValveCell whose value is `value`.
-                    let mut row = valve
-                        .get_row_from_db(table, &row.expect("No row given"))
-                        .await
-                        .expect("Error getting row");
-                    let value = match serde_json::from_str::<SerdeValue>(&value) {
-                        Ok(value) => value,
-                        Err(_) => json!(value),
-                    };
-                    let column = column.clone().expect("No column given");
-                    let cell = ValveCell {
-                        value: value,
-                        valid: true,
-                        ..Default::default()
-                    };
-                    *row.contents
-                        .get_mut(&column)
-                        .expect(&format!("No column '{column}' in row")) = cell;
-                    row
-                }
-            };
-
-            // If the input row contains a row number as one of its cells, remove that cell and
-            // add the value of the row number to the row_number field of the row instead:
-            match input_row.contents.get_mut("row_number") {
-                None => (),
-                Some(ValveCell {
-                    nulltype: _,
-                    value,
-                    valid: _,
-                    messages: _,
-                }) => {
-                    let value = value.as_i64().expect("Not a number");
-                    input_row.row_number = Some(value as u32);
-                    input_row
-                        .contents
-                        .shift_remove("row_number")
-                        .expect("No row_number in row");
-                }
-            };
+            let (row_number, input_row) =
+                get_input_row_or_row_from_input_value(&valve, table, row, column, value).await;
 
             // Validate the input row:
-            let output_row = validate_row_tx(
-                &valve.config,
-                &valve.datatype_conditions,
-                &valve.rule_conditions,
-                &valve.pool,
-                None,
-                table,
-                &input_row,
-                None,
-            )
-            .await?;
+            let output_row = valve.validate_row(table, &input_row, row_number).await?;
 
             // Print the results to STDOUT:
             println!(
@@ -582,6 +609,7 @@ async fn main() -> Result<()> {
                     .to_rich_json()
                     .expect("Error converting validated row to rich JSON"))
             );
+            // TODO: Exit with the appropriate exit status.
         }
     }
 
