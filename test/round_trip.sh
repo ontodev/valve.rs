@@ -18,8 +18,8 @@ pwd=$(dirname $(readlink -f $0))
 output_dir=$pwd/output
 valve="./valve"
 
-VALVE_SOURCE=${table_defs}
-VALVE_DATABASE=${db}
+export VALVE_SOURCE=${table_defs}
+export VALVE_DATABASE=${db}
 
 # Use valve to save all of th configured tables:
 ${valve} save-all --save-dir ${output_dir}

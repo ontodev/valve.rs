@@ -14,8 +14,8 @@ then
     echo "Warning: Extra arguments: '$*' will be ignored"
 fi
 
-VALVE_SOURCE=${table_defs}
-VALVE_DATABASE=${db}
+export VALVE_SOURCE=${table_defs}
+export VALVE_DATABASE=${db}
 
 pwd=$(dirname $(readlink -f $0))
 output_dir=$pwd/output
