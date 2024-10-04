@@ -18,7 +18,7 @@ static SAVE_DIR_HELP: &str = "Save tables to DIR instead of to their configured 
 
 static TABLE_HELP: &str = "A table name";
 
-static ROW_HELP: &str = "The number used to identify the row in the database";
+static ROW_HELP: &str = "A row number";
 
 static COLUMN_HELP: &str = "A column name or label";
 
@@ -142,6 +142,16 @@ enum Commands {
         #[arg(value_name = "VALUE", action = ArgAction::Set,
               help = "The value, of the given column, to update")]
         value: Option<String>,
+    },
+
+    /// Delete rows from the database
+    Delete {
+        #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
+        table: String,
+
+        #[arg(value_name = "ROW", action = ArgAction::Set, value_delimiter = ' ', num_args = 1..,
+              help = ROW_HELP)]
+        rows: Vec<u32>,
     },
 
     /// Print the Valve configuration as a JSON-formatted string.
@@ -419,6 +429,15 @@ async fn main() -> Result<()> {
                 .await
                 .expect("Error creating tables");
         }
+        Commands::Delete { table, rows } => {
+            let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
+            for row in rows {
+                valve
+                    .delete_row(table, row)
+                    .await
+                    .expect("Could not delete row");
+            }
+        }
         Commands::DropAll {} => {
             let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
             valve
@@ -588,6 +607,18 @@ async fn main() -> Result<()> {
             let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
             let (row_number, input_row) =
                 get_input_row_or_row_from_input_value(&valve, table, row, column, value).await;
+            let output_row = match row_number {
+                None => panic!("A row number must be specified."),
+                Some(rn) => valve.update_row(table, &rn, &input_row).await?,
+            };
+            // Print the results to STDOUT:
+            println!(
+                "{}",
+                json!(output_row
+                    .to_rich_json()
+                    .expect("Error converting updated row to rich JSON"))
+            );
+            // TODO: Exit with the appropriate exit status.
         }
         Commands::Validate {
             table,
