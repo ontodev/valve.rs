@@ -177,7 +177,7 @@ def main():
 
     # Get the VALVE configuration:
     result = subprocess.run(
-        ["./valve", "--source", input_table, "dump-config"], capture_output=True
+        ["./valve", "--source", input_table, "--database", "", "dump-config"], capture_output=True
     )
     if result.returncode != 0:
         error = result.stderr.decode()
@@ -190,7 +190,8 @@ def main():
 
     # Get the sorted list of tables to generate:
     result = subprocess.run(
-        ["./valve", "--source", input_table, "show-table-order"], capture_output=True
+        ["./valve", "--source", input_table, "--database", "", "show-table-order"],
+        capture_output=True,
     )
     if result.returncode != 0:
         error = result.stderr.decode()
