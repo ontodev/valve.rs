@@ -245,6 +245,13 @@ enum GetSubcommands {
 
 #[derive(Subcommand)]
 enum AddSubcommands {
+    /// Add a table located at a given path.
+    Table {
+        #[arg(value_name = "PATH", action = ArgAction::Set,
+              help = "The filesystem path of the table")]
+        path: String,
+    },
+
     /// Read a JSON-formatted string representing a row (of the form: { "column_1": value1,
     /// "column_2": value2, ...}) from STDIN and add it to a given table, optionally printing
     /// (when the global --verbose flag has been set) a JSON representation of the row, including
@@ -254,11 +261,20 @@ enum AddSubcommands {
         table: String,
     },
 
-    /// Add a table located at a given path.
-    Table {
-        #[arg(value_name = "PATH", action = ArgAction::Set,
-              help = "The filesystem path of the table")]
-        path: String,
+    /// Read a JSON-formatted string representing a row (of the form: { "table": TABLE_NAME,
+    /// "row": ROW_NUMBER, "column": COLUMN_NAME, "value": VALUE, "level": LEVEL,
+    /// "rule": RULE, "message": MESSAGE}) from STDIN and add it to the message table. Note
+    /// that if any of the "table", "row", or "column" fields are ommitted from the input JSON
+    /// then they must be specified as positional parameters.
+    Message {
+        #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
+        table: Option<String>,
+
+        #[arg(value_name = "ROW", action = ArgAction::Set, help = ROW_HELP)]
+        row: Option<u32>,
+
+        #[arg(value_name = "COLUMN", action = ArgAction::Set, help = COLUMN_HELP)]
+        column: Option<String>,
     },
 }
 
@@ -347,6 +363,7 @@ async fn main() -> Result<()> {
         }
     }
 
+    // TODO: The match arms in this function should probably be split into separate functions.
     // TODO: Add a comment about this function.
     async fn get_input_row_or_row_from_input_value(
         valve: &Valve,
@@ -418,6 +435,65 @@ async fn main() -> Result<()> {
         (row_number, input_row)
     }
 
+    // TODO: Add docstring here:
+    fn parse_message_input(
+        table: &Option<String>,
+        row: &Option<u32>,
+        column: &Option<String>,
+    ) -> (String, u32, String, String, String, String, String) {
+        let mut json_row = String::new();
+        io::stdin()
+            .read_line(&mut json_row)
+            .expect("Error reading from STDIN");
+        let json_row = serde_json::from_str::<SerdeValue>(&json_row)
+            .expect(&format!("Invalid JSON: {json_row}"))
+            .as_object()
+            .expect(&format!("{json_row} is not a JSON object"))
+            .clone();
+        let table = match json_row.get("table") {
+            Some(table) => table.as_str().expect("Not a string").to_string(),
+            None => match table {
+                Some(table) => table.to_string(),
+                None => panic!("No table given"),
+            },
+        };
+        let row = match json_row.get("row") {
+            Some(rn) => {
+                let rn = rn.as_i64().expect("Not a number");
+                rn as u32
+            }
+            None => match row {
+                Some(rn) => rn.clone(),
+                None => panic!("No row given"),
+            },
+        };
+        let column = match json_row.get("column") {
+            Some(column) => column.as_str().expect("Not a string").to_string(),
+            None => match column {
+                Some(column) => column.to_string(),
+                None => panic!("No column given"),
+            },
+        };
+        let value = match json_row.get("value") {
+            Some(value) => value.as_str().expect("Not a string").to_string(),
+            None => panic!("No value given"),
+        };
+        let level = match json_row.get("level") {
+            Some(level) => level.as_str().expect("Not a string").to_string(),
+            None => panic!("No level given"),
+        };
+        let rule = match json_row.get("rule") {
+            Some(rule) => rule.as_str().expect("Not a string").to_string(),
+            None => panic!("No rule given"),
+        };
+        let message = match json_row.get("message") {
+            Some(message) => message.as_str().expect("Not a string").to_string(),
+            None => panic!("No message given"),
+        };
+
+        (table, row, column, value, level, rule, message)
+    }
+
     match &cli.command {
         Commands::Add { add_subcommand } => {
             match add_subcommand {
@@ -445,7 +521,16 @@ async fn main() -> Result<()> {
                         );
                     }
                 }
-                _ => todo!(),
+                AddSubcommands::Message { table, row, column } => {
+                    let (table, row, column, value, level, rule, message) =
+                        parse_message_input(table, row, column);
+                    let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
+                    let message_id = valve
+                        .insert_message(&table, row, &column, &value, &level, &rule, &message)
+                        .await?;
+                    println!("{message_id}");
+                }
+                AddSubcommands::Table { .. } => todo!(),
             };
         }
         Commands::Create {} => {

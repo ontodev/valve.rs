@@ -2649,6 +2649,74 @@ impl Valve {
         Ok(())
     }
 
+    /// TODO: Add docstring here
+    pub async fn insert_message(
+        &self,
+        table: &str,
+        row: u32,
+        column: &str,
+        value: &str,
+        level: &str,
+        rule: &str,
+        message: &str,
+    ) -> Result<u16> {
+        let sql = format!(
+            r#"
+            INSERT INTO "message"
+              ("table", "row", "column", "value", "level", "rule", "message")
+            VALUES
+              ({SQL_PARAM}, {row}, {SQL_PARAM}, {SQL_PARAM}, {SQL_PARAM}, {SQL_PARAM}, {SQL_PARAM})
+            RETURNING "message_id" AS "message_id""#
+        );
+        let sql = local_sql_syntax(&self.db_kind, &sql);
+        let mut query = sqlx_query(&sql);
+        for param in vec![table, column, value, level, rule, message] {
+            query = query.bind(param);
+        }
+        let row = query.fetch_one(&self.pool).await?;
+        let mid: i32 = row.try_get::<i32, &str>("message_id")?;
+        Ok(mid as u16)
+    }
+
+    /// TODO: Add docstring here
+    pub async fn update_message(
+        &self,
+        message_id: u16,
+        table: &str,
+        row: u32,
+        column: &str,
+        value: &str,
+        level: &str,
+        rule: &str,
+        message: &str,
+    ) -> Result<()> {
+        let sql = format!(
+            r#"
+            UPDATE "message"
+               SET "table" = {SQL_PARAM},
+                     "row" = {row},
+                     "column" = {SQL_PARAM},
+                      "value" = {SQL_PARAM},
+                      "level" = {SQL_PARAM},
+                       "rule" = {SQL_PARAM},
+                    "message" = {SQL_PARAM}
+             WHERE "message_id" = {message_id}"#
+        );
+        let sql = local_sql_syntax(&self.db_kind, &sql);
+        let mut query = sqlx_query(&sql);
+        for param in vec![table, column, value, level, rule, message] {
+            query = query.bind(param);
+        }
+        query.execute(&self.pool).await?;
+        Ok(())
+    }
+
+    /// TODO: Add docstring here
+    pub async fn delete_message(&self, message_id: u16) -> Result<()> {
+        let sql = format!(r#"DELETE FROM "message" WHERE "message_id" = {message_id}"#);
+        self.execute_sql(&sql).await
+    }
+
     /// Return the next recorded change to the data that can be undone, or None if there isn't any.
     pub async fn get_change_to_undo(&self) -> Result<Option<ValveRowChange>> {
         match get_record_to_undo(&self.pool).await? {
