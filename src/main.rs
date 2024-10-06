@@ -304,6 +304,26 @@ enum UpdateSubcommands {
               help = "The value, of the given column, to update")]
         value: String,
     },
+
+    /// Read a JSON-formatted string representing a row (of the form: { "table": TABLE_NAME,
+    /// "row": ROW_NUMBER, "column": COLUMN_NAME, "value": VALUE, "level": LEVEL,
+    /// "rule": RULE, "message": MESSAGE}) from STDIN and update the row given identified by
+    /// JSON_ID with the given values. Note that if any of the "table", "row", or "column" fields
+    /// are ommitted from the input JSON then they must be specified as positional parameters.
+    Message {
+        #[arg(value_name = "MESSAGE_ID", action = ArgAction::Set,
+              help = "The ID of the message to update")]
+        message_id: u16,
+
+        #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
+        table: Option<String>,
+
+        #[arg(value_name = "ROW", action = ArgAction::Set, help = ROW_HELP)]
+        row: Option<u32>,
+
+        #[arg(value_name = "COLUMN", action = ArgAction::Set, help = COLUMN_HELP)]
+        column: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -756,42 +776,67 @@ async fn main() -> Result<()> {
         }
         Commands::Update { update_subcommand } => {
             let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
-            let (table, row_number, input_row) = match update_subcommand {
-                UpdateSubcommands::Row { table, row } => {
-                    let (row_number, row) =
-                        get_input_row_or_row_from_input_value(&valve, table, row, &None, &None)
-                            .await;
-                    (table, row_number, row)
-                }
-                UpdateSubcommands::Value {
-                    table,
-                    row,
-                    column,
-                    value,
-                } => {
-                    let (row_number, row) = get_input_row_or_row_from_input_value(
-                        &valve,
-                        table,
-                        &Some(*row),
-                        &Some(column.to_string()),
-                        &Some(value.to_string()),
+            if let UpdateSubcommands::Message {
+                message_id,
+                table,
+                row,
+                column,
+            } = update_subcommand
+            {
+                let (table, row, column, value, level, rule, message) =
+                    parse_message_input(table, row, column);
+                let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
+                valve
+                    .update_message(
+                        *message_id,
+                        &table,
+                        row,
+                        &column,
+                        &value,
+                        &level,
+                        &rule,
+                        &message,
                     )
-                    .await;
-                    (table, row_number, row)
-                }
-            };
-            let output_row = match row_number {
-                None => panic!("A row number must be specified."),
-                Some(rn) => valve.update_row(table, &rn, &input_row).await?,
-            };
-            // Print the results to STDOUT:
-            println!(
-                "{}",
-                json!(output_row
-                    .to_rich_json()
-                    .expect("Error converting updated row to rich JSON"))
-            );
-            // TODO: Exit with the appropriate exit status.
+                    .await?;
+            } else {
+                let (table, row_number, input_row) = match update_subcommand {
+                    UpdateSubcommands::Row { table, row } => {
+                        let (row_number, row) =
+                            get_input_row_or_row_from_input_value(&valve, table, row, &None, &None)
+                                .await;
+                        (table, row_number, row)
+                    }
+                    UpdateSubcommands::Value {
+                        table,
+                        row,
+                        column,
+                        value,
+                    } => {
+                        let (row_number, row) = get_input_row_or_row_from_input_value(
+                            &valve,
+                            table,
+                            &Some(*row),
+                            &Some(column.to_string()),
+                            &Some(value.to_string()),
+                        )
+                        .await;
+                        (table, row_number, row)
+                    }
+                    UpdateSubcommands::Message { .. } => unreachable!(),
+                };
+                let output_row = match row_number {
+                    None => panic!("A row number must be specified."),
+                    Some(rn) => valve.update_row(table, &rn, &input_row).await?,
+                };
+                // Print the results to STDOUT:
+                println!(
+                    "{}",
+                    json!(output_row
+                        .to_rich_json()
+                        .expect("Error converting updated row to rich JSON"))
+                );
+                // TODO: Exit with the appropriate exit status.
+            }
         }
         Commands::Validate {
             table,
