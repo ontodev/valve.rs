@@ -336,6 +336,13 @@ enum DeleteSubcommands {
               help = ROW_HELP)]
         rows: Vec<u32>,
     },
+
+    /// TODO: Add docstring
+    Message {
+        #[arg(value_name = "MESSAGE_ID", action = ArgAction::Set,
+              help = "The ID of the message to update")]
+        message_id: u16,
+    },
 }
 
 #[async_std::main]
@@ -570,6 +577,12 @@ async fn main() -> Result<()> {
                             .await
                             .expect("Could not delete row");
                     }
+                }
+                DeleteSubcommands::Message { message_id } => {
+                    valve
+                        .delete_message(*message_id)
+                        .await
+                        .expect("Could not delete message");
                 }
             };
         }
