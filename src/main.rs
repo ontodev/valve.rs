@@ -129,29 +129,14 @@ enum Commands {
 
     /// Update rows and values in the database
     Update {
-        #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
-        table: String,
-
-        #[arg(value_name = "ROW", action = ArgAction::Set, help = ROW_HELP)]
-        row: Option<u32>,
-
-        #[arg(value_name = "COLUMN", action = ArgAction::Set, requires = "value",
-              help = COLUMN_HELP)]
-        column: Option<String>,
-
-        #[arg(value_name = "VALUE", action = ArgAction::Set,
-              help = "The value, of the given column, to update")]
-        value: Option<String>,
+        #[command(subcommand)]
+        update_subcommand: UpdateSubcommands,
     },
 
     /// Delete rows from the database
     Delete {
-        #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
-        table: String,
-
-        #[arg(value_name = "ROW", action = ArgAction::Set, value_delimiter = ' ', num_args = 1..,
-              help = ROW_HELP)]
-        rows: Vec<u32>,
+        #[command(subcommand)]
+        delete_subcommand: DeleteSubcommands,
     },
 
     /// Print the Valve configuration as a JSON-formatted string.
@@ -273,6 +258,46 @@ enum AddSubcommands {
         #[arg(value_name = "PATH", action = ArgAction::Set,
               help = "The filesystem path of the table")]
         path: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum UpdateSubcommands {
+    /// TODO: Add docstring
+    Row {
+        #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
+        table: String,
+
+        #[arg(value_name = "ROW", action = ArgAction::Set, help = ROW_HELP)]
+        row: Option<u32>,
+    },
+
+    /// TODO: Add docstring
+    Value {
+        #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
+        table: String,
+
+        #[arg(value_name = "ROW", action = ArgAction::Set, help = ROW_HELP)]
+        row: u32,
+
+        #[arg(value_name = "COLUMN", action = ArgAction::Set, help = COLUMN_HELP)]
+        column: String,
+
+        #[arg(value_name = "VALUE", action = ArgAction::Set,
+              help = "The value, of the given column, to update")]
+        value: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum DeleteSubcommands {
+    Row {
+        #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
+        table: String,
+
+        #[arg(value_name = "ROW", action = ArgAction::Set, value_delimiter = ' ', num_args = 1..,
+              help = ROW_HELP)]
+        rows: Vec<u32>,
     },
 }
 
@@ -429,14 +454,18 @@ async fn main() -> Result<()> {
                 .await
                 .expect("Error creating tables");
         }
-        Commands::Delete { table, rows } => {
+        Commands::Delete { delete_subcommand } => {
             let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
-            for row in rows {
-                valve
-                    .delete_row(table, row)
-                    .await
-                    .expect("Could not delete row");
-            }
+            match delete_subcommand {
+                DeleteSubcommands::Row { table, rows } => {
+                    for row in rows {
+                        valve
+                            .delete_row(table, row)
+                            .await
+                            .expect("Could not delete row");
+                    }
+                }
+            };
         }
         Commands::DropAll {} => {
             let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
@@ -598,15 +627,32 @@ async fn main() -> Result<()> {
             let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
             run_dt_hierarchy_tests(&valve).expect("Error running datatype hierarchy tests");
         }
-        Commands::Update {
-            table,
-            row,
-            column,
-            value,
-        } => {
+        Commands::Update { update_subcommand } => {
             let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
-            let (row_number, input_row) =
-                get_input_row_or_row_from_input_value(&valve, table, row, column, value).await;
+            let (table, row_number, input_row) = match update_subcommand {
+                UpdateSubcommands::Row { table, row } => {
+                    let (row_number, row) =
+                        get_input_row_or_row_from_input_value(&valve, table, row, &None, &None)
+                            .await;
+                    (table, row_number, row)
+                }
+                UpdateSubcommands::Value {
+                    table,
+                    row,
+                    column,
+                    value,
+                } => {
+                    let (row_number, row) = get_input_row_or_row_from_input_value(
+                        &valve,
+                        table,
+                        &Some(*row),
+                        &Some(column.to_string()),
+                        &Some(value.to_string()),
+                    )
+                    .await;
+                    (table, row_number, row)
+                }
+            };
             let output_row = match row_number {
                 None => panic!("A row number must be specified."),
                 Some(rn) => valve.update_row(table, &rn, &input_row).await?,
