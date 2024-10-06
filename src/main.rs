@@ -8,6 +8,7 @@ use ontodev_valve::{
     guess::guess,
     toolkit::{any_row_to_json_row, generic_select_with_message_values, local_sql_syntax},
     valve::{JsonRow, Valve, ValveCell, ValveRow},
+    SQL_PARAM,
 };
 use serde_json::{json, Value as SerdeValue};
 use sqlx::{query as sqlx_query, Row};
@@ -235,10 +236,10 @@ enum GetSubcommands {
         table: String,
 
         #[arg(value_name = "ROW", action = ArgAction::Set, help = ROW_HELP)]
-        row: u32,
+        row: Option<u32>,
 
         #[arg(value_name = "COLUMN", action = ArgAction::Set, help = COLUMN_HELP)]
-        column: String,
+        column: Option<String>,
     },
 }
 
@@ -549,11 +550,52 @@ async fn main() -> Result<()> {
                     println!("{}", cell.strvalue());
                 }
                 GetSubcommands::Messages { table, row, column } => {
-                    let cell = valve
-                        .get_cell_from_db(table, row, column)
-                        .await
-                        .expect("Error getting cell");
-                    println!("{}", json!(cell.messages));
+                    let mut sql = format!(
+                        r#"SELECT "row", "column", "value", "level", "rule", "message"
+                             FROM "message"
+                            WHERE "table" = {SQL_PARAM}"#
+                    );
+                    let mut params = vec![table];
+                    match row {
+                        Some(row) => {
+                            sql.push_str(&format!(r#" AND "row" = {row}"#));
+                            match column {
+                                Some(column) => {
+                                    sql.push_str(&format!(r#" AND "column" = {SQL_PARAM}"#));
+                                    params.push(column);
+                                }
+                                None => (),
+                            }
+                        }
+                        None => (),
+                    };
+                    let sql = local_sql_syntax(
+                        &valve.db_kind,
+                        &format!(r#"{sql} ORDER BY "row", "column", "message_id""#,),
+                    );
+                    let mut query = sqlx_query(&sql);
+                    for param in &params {
+                        query = query.bind(param);
+                    }
+                    let rows = query.fetch_all(&valve.pool).await?;
+                    let messages = rows
+                        .iter()
+                        .map(|row| {
+                            let rn: i64 = row.get::<i64, _>("row");
+                            let rn = rn as u32;
+                            format!(
+                                "{{\"row\":\"{}\",\"column\":\"{}\",\"value\":\"{}\",\
+                             \"level\":\"{}\",\"rule\":\"{}\",\"message\":\"{}\"}}",
+                                rn,
+                                row.get::<&str, _>("column"),
+                                row.get::<&str, _>("value"),
+                                row.get::<&str, _>("level"),
+                                row.get::<&str, _>("rule"),
+                                row.get::<&str, _>("message"),
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    println!("[{}]", messages.join(","));
                 }
             };
         }
