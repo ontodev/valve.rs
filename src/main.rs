@@ -341,7 +341,7 @@ enum DeleteSubcommands {
     Message {
         #[arg(value_name = "MESSAGE_ID", action = ArgAction::Set,
               help = "The ID of the message to update")]
-        message_id: u16,
+        message_ids: Vec<u16>,
     },
 }
 
@@ -578,11 +578,13 @@ async fn main() -> Result<()> {
                             .expect("Could not delete row");
                     }
                 }
-                DeleteSubcommands::Message { message_id } => {
-                    valve
-                        .delete_message(*message_id)
-                        .await
-                        .expect("Could not delete message");
+                DeleteSubcommands::Message { message_ids } => {
+                    for message_id in message_ids {
+                        valve
+                            .delete_message(*message_id)
+                            .await
+                            .expect("Could not delete message");
+                    }
                 }
             };
         }
