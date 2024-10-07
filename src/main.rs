@@ -122,23 +122,29 @@ enum Commands {
         value: Option<String>,
     },
 
-    /// Add tables and rows to a given database
+    /// Add tables, rows, and messages to a given database
     Add {
         #[command(subcommand)]
         add_subcommand: AddSubcommands,
     },
 
-    /// Update rows and values in the database
+    /// Update rows, messages, and values in the database
     Update {
         #[command(subcommand)]
         update_subcommand: UpdateSubcommands,
     },
 
-    /// Delete rows from the database
+    /// Delete rows and messages from the database
     Delete {
         #[command(subcommand)]
         delete_subcommand: DeleteSubcommands,
     },
+
+    /// Undo the last row change
+    Undo {},
+
+    /// Redo the last row change
+    Redo {},
 
     /// Print the Valve configuration as a JSON-formatted string.
     DumpConfig {},
@@ -587,6 +593,22 @@ async fn main() -> Result<()> {
                     }
                 }
             };
+        }
+        Commands::Undo {} | Commands::Redo {} => {
+            let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
+            let updated_row = match &cli.command {
+                Commands::Undo {} => valve.undo().await?,
+                Commands::Redo {} => valve.redo().await?,
+                _ => unreachable!(),
+            };
+            if let Some(valve_row) = updated_row {
+                print!(
+                    "{}",
+                    json!(valve_row
+                        .to_rich_json()
+                        .expect("Error converting row to rich JSON"))
+                );
+            }
         }
         Commands::DropAll {} => {
             let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
