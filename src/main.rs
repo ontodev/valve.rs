@@ -872,7 +872,6 @@ async fn main() -> Result<()> {
                         .to_rich_json()
                         .expect("Error converting updated row to rich JSON"))
                 );
-                // TODO: Exit with the appropriate exit status.
             }
         }
         Commands::Validate {
@@ -895,7 +894,13 @@ async fn main() -> Result<()> {
                     .to_rich_json()
                     .expect("Error converting validated row to rich JSON"))
             );
-            // TODO: Exit with the appropriate exit status.
+
+            // Set the exit status:
+            let exit_code = output_row.contents.iter().all(|(_, vcell)| vcell.valid);
+            std::process::exit(match exit_code {
+                true => 0,
+                false => 1,
+            });
         }
     }
 
