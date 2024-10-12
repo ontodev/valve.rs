@@ -8,14 +8,14 @@ use crate::{
         add_message_counts, cast_column_sql_to_text, convert_undo_or_redo_record_to_change,
         correct_row_datatypes, delete_row_tx, generate_datatype_conditions,
         generate_rule_conditions, get_column_for_label, get_column_value_as_string,
-        get_json_array_from_row, get_json_object_from_row, get_parsed_structure_conditions,
-        get_pool_from_connection_string, get_previous_row_tx, get_record_to_redo,
-        get_record_to_undo, get_sql_for_standard_view, get_sql_for_text_view, get_sql_type,
-        get_sql_type_from_global_config, get_text_row_from_db_tx, insert_chunks, insert_new_row_tx,
-        local_sql_syntax, move_row_tx, normalize_options, read_config_files, record_row_change_tx,
-        record_row_move_tx, switch_undone_state_tx, undo_or_redo_move_tx, update_row_tx,
-        verify_table_deps_and_sort, ColumnRule, CompiledCondition, DbKind, ParsedStructure,
-        ValueType,
+        get_db_records_to_redo, get_db_records_to_undo, get_json_array_from_column,
+        get_json_object_from_column, get_parsed_structure_conditions,
+        get_pool_from_connection_string, get_previous_row_tx, get_sql_for_standard_view,
+        get_sql_for_text_view, get_sql_type, get_sql_type_from_global_config,
+        get_text_row_from_db_tx, insert_chunks, insert_new_row_tx, local_sql_syntax, move_row_tx,
+        normalize_options, read_config_files, record_row_change_tx, record_row_move_tx,
+        switch_undone_state_tx, undo_or_redo_move_tx, update_row_tx, verify_table_deps_and_sort,
+        ColumnRule, CompiledCondition, DbKind, ParsedStructure, ValueType,
     },
     validate::{validate_row_tx, validate_tree_foreign_keys, with_tree_sql},
     valve_grammar::StartParser,
@@ -31,7 +31,10 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as SerdeValue};
 use sprintf::sprintf;
-use sqlx::{any::AnyPool, query as sqlx_query, Row, ValueRef};
+use sqlx::{
+    any::{AnyPool, AnyRow},
+    query as sqlx_query, Column, Row, ValueRef,
+};
 use std::{
     collections::{HashMap, HashSet},
     error::Error,
@@ -121,6 +124,22 @@ impl ValveRow {
         })
     }
 
+    /// Given a [ValveRow], convert its contents to a [JsonRow] in simple format and return it.
+    pub fn contents_to_simple_json(&self) -> Result<JsonRow> {
+        let row_contents = serde_json::to_value(self.contents.clone())?;
+        let row_contents = row_contents
+            .as_object()
+            .ok_or(ValveError::InputError(format!(
+                "Could not convert {:?} to a rich JSON object",
+                row_contents
+            )))?;
+        let row_contents = row_contents
+            .iter()
+            .map(|(key, cell)| (key.clone(), cell.get("value").expect("No value").clone()))
+            .collect::<JsonRow>();
+        Ok(row_contents)
+    }
+
     /// Given a row, with the given row number, represented as a JSON object in the following
     /// ('rich') format:
     /// ```
@@ -180,20 +199,86 @@ impl ValveRow {
             .cloned()
     }
 
-    /// Given a [ValveRow], convert its contents to a [JsonRow] in simple format and return it.
-    pub fn contents_to_simple_json(&self) -> Result<JsonRow> {
-        let row_contents = serde_json::to_value(self.contents.clone())?;
-        let row_contents = row_contents
-            .as_object()
-            .ok_or(ValveError::InputError(format!(
-                "Could not convert {:?} to a rich JSON object",
-                row_contents
-            )))?;
-        let row_contents = row_contents
-            .iter()
-            .map(|(key, cell)| (key.clone(), cell.get("value").expect("No value").clone()))
-            .collect::<JsonRow>();
-        Ok(row_contents)
+    /// TODO: Add a docstring
+    pub fn from_any_row(
+        config: &ValveConfig,
+        kind: &DbKind,
+        table: &str,
+        any_row: &AnyRow,
+        global_sql_type: &Option<&str>,
+    ) -> Result<Self> {
+        let messages = {
+            let raw_messages = any_row.try_get_raw("message")?;
+            if raw_messages.is_null() {
+                vec![]
+            } else {
+                let messages: &str = any_row.get("message");
+                match serde_json::from_str::<SerdeValue>(messages) {
+                    Err(e) => return Err(e.into()),
+                    Ok(SerdeValue::Array(m)) => m,
+                    _ => {
+                        return Err(ValveError::DataError(
+                            format!("{} is not an array.", messages).into(),
+                        )
+                        .into())
+                    }
+                }
+            }
+        };
+        let row_number: i64 = any_row.get::<i64, _>("row_number");
+        let row_number = row_number as u32;
+        let mut row = ValveRow {
+            row_number: Some(row_number),
+            ..Default::default()
+        };
+        for column in any_row.columns() {
+            let cname = column.name();
+            if !vec!["row_number", "message"].contains(&cname) {
+                let raw_value = any_row.try_get_raw(format!(r#"{}"#, cname).as_str())?;
+                let value;
+                if !raw_value.is_null() {
+                    let sql_type = match global_sql_type {
+                        Some(sql_type) => sql_type.to_string(),
+                        None => get_sql_type_from_global_config(config, table, cname, kind),
+                    };
+                    value = get_column_value_as_string(&any_row, &cname, &sql_type);
+                } else {
+                    value = String::from("");
+                }
+                let column_messages = messages
+                    .iter()
+                    .filter(|m| m.get("column").unwrap_or(&json!("")).as_str() == Some(cname))
+                    .map(|message| {
+                        let level = message
+                            .get("level")
+                            .and_then(|l| l.as_str())
+                            .unwrap_or("No 'level' found");
+                        let rule = message
+                            .get("rule")
+                            .and_then(|l| l.as_str())
+                            .unwrap_or("No 'rule' found");
+                        let message = message
+                            .get("message")
+                            .and_then(|l| l.as_str())
+                            .unwrap_or("No 'message' found");
+                        ValveCellMessage {
+                            level: level.to_string(),
+                            rule: rule.to_string(),
+                            message: message.to_string(),
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let valid = column_messages.iter().all(|m| m.level != "error");
+                let cell = ValveCell {
+                    value: json!(value),
+                    valid: valid,
+                    messages: column_messages,
+                    ..Default::default()
+                };
+                row.contents.insert(cname.to_string(), cell);
+            }
+        }
+        Ok(row)
     }
 }
 
@@ -314,6 +399,8 @@ pub struct ValveMessage {
 /// Represents a change to a row in a database table.
 #[derive(Debug, Default, Deserialize, Serialize)]
 pub struct ValveRowChange {
+    /// An identifier for this particular change
+    pub history_id: u16,
     /// The name of the table that the change is from
     pub table: String,
     /// The row number of the changed row
@@ -324,6 +411,7 @@ pub struct ValveRowChange {
     pub changes: Vec<ValveChange>,
 }
 
+// TODO: We should probably change the type of old_value and value to SerdeValue.
 /// Represents a change to a value in a row of a database table.
 #[derive(Debug, Default, Deserialize, Serialize)]
 pub struct ValveChange {
@@ -2717,39 +2805,60 @@ impl Valve {
         self.execute_sql(&sql).await
     }
 
-    /// Return the next recorded change to the data that can be undone, or None if there isn't any.
-    pub async fn get_change_to_undo(&self) -> Result<Option<ValveRowChange>> {
-        match get_record_to_undo(&self.pool).await? {
-            None => Ok(None),
-            Some(record) => convert_undo_or_redo_record_to_change(&record),
+    /// Return an ordered list of the changes that can be undone. If `limit` is nonzero, return no
+    /// more than that many change records.
+    pub async fn get_changes_to_undo(&self, limit: usize) -> Result<Vec<ValveRowChange>> {
+        let records = get_db_records_to_undo(&self.pool, limit).await?;
+        let mut changes = vec![];
+        for record in &records {
+            match convert_undo_or_redo_record_to_change(record) {
+                Err(e) => return Err(e.into()),
+                Ok(change) => changes.push(change),
+            };
         }
+        Ok(changes)
     }
 
-    /// Return the next recorded change to the data that can be redone, or None if there isn't any.
-    pub async fn get_change_to_redo(&self) -> Result<Option<ValveRowChange>> {
-        match get_record_to_redo(&self.pool).await? {
-            None => Ok(None),
-            Some(record) => convert_undo_or_redo_record_to_change(&record),
+    /// Return an ordered list of the changes that can be undone. If `limit` is nonzero, return no
+    /// more than that many change records.
+    pub async fn get_changes_to_redo(&self, limit: usize) -> Result<Vec<ValveRowChange>> {
+        let records = get_db_records_to_redo(&self.pool, limit).await?;
+        let mut changes = vec![];
+        for record in &records {
+            match convert_undo_or_redo_record_to_change(record) {
+                Err(e) => return Err(e.into()),
+                Ok(change) => changes.push(change),
+            };
         }
+        Ok(changes)
     }
 
     /// Undo one change and return the change record or None if there was no change to undo.
     pub async fn undo(&self) -> Result<Option<ValveRow>> {
-        let last_change = match get_record_to_undo(&self.pool).await? {
-            None => {
+        let records = get_db_records_to_undo(&self.pool, 1).await?;
+        let last_change = match records.len() {
+            0 => {
                 log::warn!("Nothing to undo.");
                 return Ok(None);
             }
-            Some(r) => r,
+            1 => &records[0],
+            _ => {
+                return Err(ValveError::DataError(format!(
+                    "Too many records to undo: {}",
+                    records.len()
+                ))
+                .into())
+            }
         };
+
         let history_id: i32 = last_change.get("history_id");
         let history_id = history_id as u16;
         let table: &str = last_change.get("table");
         let row_number: i64 = last_change.get("row");
         let row_number = row_number as u32;
-        let from = get_json_object_from_row(&last_change, "from");
-        let to = get_json_object_from_row(&last_change, "to");
-        let summary = get_json_array_from_row(&last_change, "summary");
+        let from = get_json_object_from_column(&last_change, "from");
+        let to = get_json_object_from_column(&last_change, "to");
+        let summary = get_json_array_from_column(&last_change, "summary");
         if let Some(summary) = summary {
             let num_moves = summary
                 .iter()
@@ -2885,12 +2994,14 @@ impl Valve {
 
     /// Redo one change and return the change record or None if there was no change to redo.
     pub async fn redo(&self) -> Result<Option<ValveRow>> {
-        let last_undo = match get_record_to_redo(&self.pool).await? {
-            None => {
+        let records = get_db_records_to_redo(&self.pool, 1).await?;
+        let last_undo = match records.len() {
+            0 => {
                 log::warn!("Nothing to redo.");
                 return Ok(None);
             }
-            Some(last_undo) => {
+            1 => {
+                let last_undo = &records[0];
                 let undone_by = last_undo.try_get_raw("undone_by")?;
                 if undone_by.is_null() {
                     log::warn!("Nothing to redo.");
@@ -2898,15 +3009,22 @@ impl Valve {
                 }
                 last_undo
             }
+            _ => {
+                return Err(ValveError::DataError(format!(
+                    "Too many records to redo: {}",
+                    records.len()
+                ))
+                .into())
+            }
         };
         let history_id: i32 = last_undo.get("history_id");
         let history_id = history_id as u16;
         let table: &str = last_undo.get("table");
         let row_number: i64 = last_undo.get("row");
         let row_number = row_number as u32;
-        let from = get_json_object_from_row(&last_undo, "from");
-        let to = get_json_object_from_row(&last_undo, "to");
-        let summary = get_json_array_from_row(&last_undo, "summary");
+        let from = get_json_object_from_column(&last_undo, "from");
+        let to = get_json_object_from_column(&last_undo, "to");
+        let summary = get_json_array_from_column(&last_undo, "summary");
         if let Some(summary) = summary {
             let num_moves = summary
                 .iter()

@@ -6,7 +6,10 @@ use clap::{ArgAction, Parser, Subcommand};
 use futures::{executor::block_on, TryStreamExt};
 use ontodev_valve::{
     guess::guess,
-    toolkit::{any_row_to_json_row, generic_select_with_message_values, local_sql_syntax},
+    toolkit::{
+        convert_undo_or_redo_record_to_change, generic_select_with_message_values,
+        get_db_records_to_redo, local_sql_syntax,
+    },
     valve::{JsonRow, Valve, ValveCell, ValveRow},
     SQL_PARAM,
 };
@@ -145,6 +148,9 @@ enum Commands {
 
     /// Redo the last row change
     Redo {},
+
+    /// TODO: Add docstring
+    History {},
 
     /// Print the Valve configuration as a JSON-formatted string.
     DumpConfig {},
@@ -343,6 +349,7 @@ enum DeleteSubcommands {
         rows: Vec<u32>,
     },
 
+    // TODO: Allow for syntax: ./valve delete messages SQL_LIKE_STRING
     /// TODO: Add docstring
     Message {
         #[arg(value_name = "MESSAGE_ID", action = ArgAction::Set,
@@ -629,37 +636,6 @@ async fn main() -> Result<()> {
         Commands::Get { get_subcommand } => {
             let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
             match get_subcommand {
-                GetSubcommands::Table { table } => {
-                    let (sql, sql_params) =
-                        generic_select_with_message_values(table, &valve.config, &valve.db_kind);
-                    let sql = local_sql_syntax(&valve.db_kind, &sql);
-                    let mut query = sqlx_query(&sql);
-                    for param in &sql_params {
-                        query = query.bind(param);
-                    }
-
-                    let mut row_stream = query.fetch(&valve.pool);
-                    let mut is_first = true;
-                    print!("[");
-                    while let Some(row) = row_stream.try_next().await? {
-                        if !is_first {
-                            print!(",");
-                        } else {
-                            is_first = false;
-                        }
-                        let row_number: i64 = row.get::<i64, _>("row_number");
-                        let row_number = row_number as u32;
-                        let row = any_row_to_json_row(&row).unwrap();
-                        let row = ValveRow::from_rich_json(Some(row_number), &row).unwrap();
-                        print!(
-                            "{}",
-                            json!(row
-                                .to_rich_json()
-                                .expect("Error converting row to rich JSON"))
-                        );
-                    }
-                    println!("]");
-                }
                 GetSubcommands::Row { table, row } => {
                     let row = valve
                         .get_row_from_db(table, row)
@@ -691,20 +667,55 @@ async fn main() -> Result<()> {
                         .expect("Error getting cell");
                     println!("{}", cell.strvalue());
                 }
+                GetSubcommands::Table { table } => {
+                    let (sql, sql_params) =
+                        generic_select_with_message_values(table, &valve.config, &valve.db_kind);
+                    let sql = local_sql_syntax(&valve.db_kind, &sql);
+                    let mut query = sqlx_query(&sql);
+                    for param in &sql_params {
+                        query = query.bind(param);
+                    }
+
+                    let mut row_stream = query.fetch(&valve.pool);
+                    let mut is_first = true;
+                    print!("[");
+                    while let Some(row) = row_stream.try_next().await? {
+                        if !is_first {
+                            print!(",");
+                        } else {
+                            is_first = false;
+                        }
+                        let row = ValveRow::from_any_row(
+                            &valve.config,
+                            &valve.db_kind,
+                            table,
+                            &row,
+                            &None,
+                        )
+                        .expect("Error converting to ValveRow");
+                        println!(
+                            "{}",
+                            json!(row
+                                .to_rich_json()
+                                .expect("Error converting row to rich JSON"))
+                        );
+                    }
+                    println!("]");
+                }
                 GetSubcommands::Messages { table, row, column } => {
                     let mut sql = format!(
                         r#"SELECT "row", "column", "value", "level", "rule", "message"
                              FROM "message"
                             WHERE "table" = {SQL_PARAM}"#
                     );
-                    let mut params = vec![table];
+                    let mut sql_params = vec![table];
                     match row {
                         Some(row) => {
                             sql.push_str(&format!(r#" AND "row" = {row}"#));
                             match column {
                                 Some(column) => {
                                     sql.push_str(&format!(r#" AND "column" = {SQL_PARAM}"#));
-                                    params.push(column);
+                                    sql_params.push(column);
                                 }
                                 None => (),
                             }
@@ -716,28 +727,33 @@ async fn main() -> Result<()> {
                         &format!(r#"{sql} ORDER BY "row", "column", "message_id""#,),
                     );
                     let mut query = sqlx_query(&sql);
-                    for param in &params {
+                    for param in &sql_params {
                         query = query.bind(param);
                     }
-                    let rows = query.fetch_all(&valve.pool).await?;
-                    let messages = rows
-                        .iter()
-                        .map(|row| {
-                            let rn: i64 = row.get::<i64, _>("row");
-                            let rn = rn as u32;
-                            format!(
-                                "{{\"row\":\"{}\",\"column\":\"{}\",\"value\":\"{}\",\
-                             \"level\":\"{}\",\"rule\":\"{}\",\"message\":\"{}\"}}",
-                                rn,
-                                row.get::<&str, _>("column"),
-                                row.get::<&str, _>("value"),
-                                row.get::<&str, _>("level"),
-                                row.get::<&str, _>("rule"),
-                                row.get::<&str, _>("message"),
-                            )
-                        })
-                        .collect::<Vec<_>>();
-                    println!("[{}]", messages.join(","));
+
+                    let mut row_stream = query.fetch(&valve.pool);
+                    let mut is_first = true;
+                    print!("[");
+                    while let Some(row) = row_stream.try_next().await? {
+                        if !is_first {
+                            print!(",");
+                        } else {
+                            is_first = false;
+                        }
+                        let rn: i64 = row.get::<i64, _>("row");
+                        let rn = rn as u32;
+                        println!(
+                            "{{\"row\":{},\"column\":{},\"value\":{},\
+                             \"level\":{},\"rule\":{},\"message\":{}}}",
+                            rn,
+                            json!(row.get::<&str, _>("column")),
+                            json!(row.get::<&str, _>("value")),
+                            json!(row.get::<&str, _>("level")),
+                            json!(row.get::<&str, _>("rule")),
+                            json!(row.get::<&str, _>("message")),
+                        );
+                    }
+                    println!("]");
                 }
             };
         }
@@ -757,6 +773,39 @@ async fn main() -> Result<()> {
                 error_rate,
                 cli.assume_yes,
             );
+        }
+        Commands::History {} => {
+            let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
+            let redo_history = get_db_records_to_redo(&valve.pool, 1).await?;
+            let next_redo = match redo_history.len() {
+                0 => 0,
+                1 => {
+                    let history_id = redo_history[0]
+                        .try_get::<i32, _>("history_id")
+                        .expect("No 'history_id' in row");
+                    history_id as u16
+                }
+                _ => panic!("Too many redos"),
+            };
+            if next_redo != 0 {
+                let last_undo = convert_undo_or_redo_record_to_change(&redo_history[0])?;
+                println!("+ {}", last_undo.message);
+            };
+
+            let undo_history = valve.get_changes_to_undo(0).await?;
+            let next_undo = match undo_history.len() {
+                0 => 0,
+                _ => undo_history[0].history_id,
+            };
+
+            for undo in &undo_history {
+                let marker = if undo.history_id == next_undo {
+                    "* "
+                } else {
+                    "  "
+                };
+                println!("{}{} {}", marker, undo.history_id, undo.message);
+            }
         }
         Commands::Load { initial_load } => {
             let mut valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);

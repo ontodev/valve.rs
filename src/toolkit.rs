@@ -2767,62 +2767,10 @@ pub async fn get_text_row_from_db_tx(
         .into());
     }
     let any_row = &rows[0];
-    Ok(any_row_to_json_row(any_row)?)
-}
-
-/// TODO: Add a docstring
-pub fn any_row_to_json_row(any_row: &AnyRow) -> Result<SerdeMap> {
-    let messages = {
-        let raw_messages = any_row.try_get_raw("message")?;
-        if raw_messages.is_null() {
-            vec![]
-        } else {
-            let messages: &str = any_row.get("message");
-            match serde_json::from_str::<SerdeValue>(messages) {
-                Err(e) => return Err(e.into()),
-                Ok(SerdeValue::Array(m)) => m,
-                _ => {
-                    return Err(ValveError::DataError(
-                        format!("{} is not an array.", messages).into(),
-                    )
-                    .into())
-                }
-            }
-        }
-    };
-
-    let mut row = SerdeMap::new();
-    for column in any_row.columns() {
-        let cname = column.name();
-        if !vec!["row_number", "message"].contains(&cname) {
-            let raw_value = any_row.try_get_raw(format!(r#"{}"#, cname).as_str())?;
-            let value;
-            if !raw_value.is_null() {
-                // The extended query returned by generic_select_with_message_values() casts all
-                // column values to text, so we pass "text" to get_column_value() for every column:
-                value = get_column_value_as_string(&any_row, &cname, "text");
-            } else {
-                value = String::from("");
-            }
-
-            let column_messages = messages
-                .iter()
-                .filter(|m| m.get("column").unwrap().as_str() == Some(cname))
-                .collect::<Vec<_>>();
-            let valid = column_messages
-                .iter()
-                .filter(|m| m.get("level").unwrap().as_str() == Some("error"))
-                .collect::<Vec<_>>()
-                .is_empty();
-            let cell = json!({
-                "value": value,
-                "valid": valid,
-                "messages": column_messages,
-            });
-            row.insert(cname.to_string(), json!(cell));
-        }
-    }
-    Ok(row)
+    // The extended query returned by generic_select_with_message_values() casts all
+    // column values to text, so we use "text" as the global sql type for the row's columns:
+    let valve_row = ValveRow::from_any_row(config, kind, table, any_row, &Some("text"))?;
+    valve_row.contents_to_rich_json()
 }
 
 /// TODO: Add a docstring
@@ -2876,8 +2824,8 @@ pub fn correct_row_datatypes(
     Ok(corrected_row)
 }
 
-/// Given a row and a column name, extract the contents of the row as a JSON array and return it.
-pub fn get_json_array_from_row(row: &AnyRow, column: &str) -> Option<Vec<SerdeValue>> {
+/// Given a row and a column name, return the contents of the row as a JSON array.
+pub fn get_json_array_from_column(row: &AnyRow, column: &str) -> Option<Vec<SerdeValue>> {
     let raw_value = row
         .try_get_raw(column)
         .expect("Unable to get raw value from row");
@@ -2899,8 +2847,8 @@ pub fn get_json_array_from_row(row: &AnyRow, column: &str) -> Option<Vec<SerdeVa
     }
 }
 
-/// Given a row and a column name, extract the contents of the row as a JSON object and return it.
-pub fn get_json_object_from_row(row: &AnyRow, column: &str) -> Option<SerdeMap> {
+/// Given a row and a column name, return the contents of the column as a JSON object.
+pub fn get_json_object_from_column(row: &AnyRow, column: &str) -> Option<SerdeMap> {
     let raw_value = row
         .try_get_raw(column)
         .expect("Unable to get raw value from row");
@@ -3686,10 +3634,17 @@ pub async fn record_row_change_tx(
         .into());
     }
 
-    fn to_text(row: Option<&SerdeMap>) -> String {
+    fn to_text(row: Option<&SerdeMap>, omit_redundant_fields: bool) -> String {
         match row {
             None => "NULL".to_string(),
-            Some(r) => format!("{}", json!(r)),
+            Some(row) => {
+                let mut row = row.clone();
+                if omit_redundant_fields {
+                    row.remove("column");
+                    row.remove("value");
+                }
+                format!("{}", json!(row))
+            }
         }
     }
 
@@ -3786,7 +3741,7 @@ pub async fn record_row_change_tx(
                                 format_value(&new_value.to_string(), &numeric_re),
                             )),
                         );
-                        let column_summary = to_text(Some(&column_summary));
+                        let column_summary = to_text(Some(&column_summary), false);
                         summary.push(column_summary);
                     }
                 }
@@ -3796,7 +3751,7 @@ pub async fn record_row_change_tx(
     }
 
     let summary = summarize(from, to)?;
-    let (from, to) = (to_text(from), to_text(to));
+    let (from, to) = (to_text(from, true), to_text(to, true));
     let mut params = vec![table];
     let from_param = {
         if from == "NULL" {
@@ -3840,21 +3795,28 @@ pub async fn record_row_change_tx(
     Ok(())
 }
 
+// TODO: Remove the unwraps in this function:
 /// Given a database record representing either an undo or a redo from the history table,
 /// convert it to a vector of [ValveChange] structs.
-pub fn convert_undo_or_redo_record_to_change(record: &AnyRow) -> Result<Option<ValveRowChange>> {
+pub fn convert_undo_or_redo_record_to_change(record: &AnyRow) -> Result<ValveRowChange> {
     let table: &str = record.get("table");
     let row_number: i64 = record.get("row");
     let row_number = row_number as u32;
-    let from = get_json_object_from_row(&record, "from");
-    let to = get_json_object_from_row(&record, "to");
+    let history_id: i32 = record.get("history_id");
+    let history_id = history_id as u16;
+    let from = get_json_object_from_column(&record, "from");
+    let to = get_json_object_from_column(&record, "to");
     let summary = {
         let summary = record.try_get_raw("summary")?;
         if !summary.is_null() {
             let summary: &str = record.get("summary");
             match serde_json::from_str::<SerdeValue>(summary) {
                 Ok(SerdeValue::Array(v)) => Some(v),
-                _ => panic!("{} is not an array.", summary),
+                _ => {
+                    return Err(
+                        ValveError::InputError(format!("{summary} is not an array.")).into(),
+                    )
+                }
             }
         } else {
             None
@@ -3866,11 +3828,26 @@ pub fn convert_undo_or_redo_record_to_change(record: &AnyRow) -> Result<Option<V
     if let Some(summary) = summary {
         let mut column_changes = vec![];
         for entry in summary {
-            let column = entry.get("column").and_then(|s| s.as_str()).unwrap();
-            let level = entry.get("level").and_then(|s| s.as_str()).unwrap();
-            let old_value = entry.get("old_value").and_then(|s| s.as_str()).unwrap();
-            let value = entry.get("value").and_then(|s| s.as_str()).unwrap();
-            let message = entry.get("message").and_then(|s| s.as_str()).unwrap();
+            let column = entry
+                .get("column")
+                .and_then(|s| Some(s.to_string()))
+                .unwrap();
+            let level = entry
+                .get("level")
+                .and_then(|s| Some(s.to_string()))
+                .unwrap();
+            let old_value = entry
+                .get("old_value")
+                .and_then(|s| Some(s.to_string()))
+                .unwrap();
+            let value = entry
+                .get("value")
+                .and_then(|s| Some(s.to_string()))
+                .unwrap();
+            let message = entry
+                .get("message")
+                .and_then(|s| Some(s.to_string()))
+                .unwrap();
             column_changes.push(ValveChange {
                 column: column.to_string(),
                 level: level.to_string(),
@@ -3879,104 +3856,140 @@ pub fn convert_undo_or_redo_record_to_change(record: &AnyRow) -> Result<Option<V
                 message: message.to_string(),
             });
         }
-        return Ok(Some(ValveRowChange {
+        return Ok(ValveRowChange {
+            history_id: history_id,
             table: table.to_string(),
             row: row_number,
             message: format!("Update row {row_number} of '{table}'"),
             changes: column_changes,
-        }));
+        });
     }
 
-    // If the `summary` part of the record is not present, then either the `from` or the `to`
-    // parts of the record will be null. If `from` is not null then this is a delete (i.e.,
-    // the row has changed from something to nothing).
-    if let Some(from) = from {
-        let mut column_changes = vec![];
-        for (column, change) in from {
-            let old_value = change.get("value").and_then(|s| s.as_str()).unwrap();
-            column_changes.push(ValveChange {
-                column: column.to_string(),
-                level: "delete".to_string(),
-                old_value: old_value.to_string(),
-                value: "".to_string(),
-                message: "".to_string(),
-            });
+    // If the `summary` part of the record is not present, then there are two possibilities.
+    // (1) If `from` is not null and `to` is null then this is a delete (i.e., the row has changed
+    // from something to nothing). (2) If `from` is null and `to` is not null then this is a
+    // create.
+    match (from, to) {
+        (Some(from), None) => {
+            let mut column_changes = vec![];
+            for (column, change) in &from {
+                match change {
+                    SerdeValue::Number(rn) if column == "previous_row" => {
+                        column_changes.push(ValveChange {
+                            column: column.to_string(),
+                            level: "delete".to_string(),
+                            old_value: rn.to_string(),
+                            value: "".to_string(),
+                            message: "".to_string(),
+                        })
+                    }
+                    SerdeValue::Object(details) => {
+                        let old_value = details
+                            .get("value")
+                            .and_then(|s| Some(s.to_string()))
+                            .unwrap();
+                        column_changes.push(ValveChange {
+                            column: column.to_string(),
+                            level: "delete".to_string(),
+                            old_value: old_value.to_string(),
+                            value: "".to_string(),
+                            message: "".to_string(),
+                        });
+                    }
+                    _ => panic!("Invalid change: {change}"),
+                };
+            }
+            Ok(ValveRowChange {
+                history_id: history_id,
+                table: table.to_string(),
+                row: row_number,
+                message: format!("Delete row {} from '{}'", row_number, table),
+                changes: column_changes,
+            })
         }
-        return Ok(Some(ValveRowChange {
-            table: table.to_string(),
-            row: row_number,
-            message: format!("Delete row {} from '{}'", row_number, table),
-            changes: column_changes,
-        }));
-    }
-
-    // If `to` is not null then this is an insert (i.e., the row has changed from nothing to
-    // something).
-    if let Some(to) = to {
-        let mut column_changes = vec![];
-        for (column, change) in to {
-            let value = change.get("value").and_then(|s| s.as_str()).unwrap();
-            column_changes.push(ValveChange {
-                column: column.to_string(),
-                level: "insert".to_string(),
-                old_value: "".to_string(),
-                value: value.to_string(),
-                message: "".to_string(),
-            });
+        (None, Some(to)) => {
+            let mut column_changes = vec![];
+            for (column, change) in &to {
+                match change {
+                    SerdeValue::Number(rn) if column == "previous_row" => {
+                        column_changes.push(ValveChange {
+                            column: column.to_string(),
+                            level: "insert".to_string(),
+                            old_value: rn.to_string(),
+                            value: "".to_string(),
+                            message: "".to_string(),
+                        })
+                    }
+                    SerdeValue::Object(details) => {
+                        let value = details
+                            .get("value")
+                            .and_then(|s| Some(s.to_string()))
+                            .unwrap();
+                        column_changes.push(ValveChange {
+                            column: column.to_string(),
+                            level: "insert".to_string(),
+                            old_value: "".to_string(),
+                            value: value.to_string(),
+                            message: "".to_string(),
+                        });
+                    }
+                    _ => panic!("Invalid change: {change}"),
+                };
+            }
+            Ok(ValveRowChange {
+                history_id: history_id,
+                table: table.to_string(),
+                row: row_number,
+                message: format!("Add row {} to '{}'", row_number, table),
+                changes: column_changes,
+            })
         }
-        return Ok(Some(ValveRowChange {
-            table: table.to_string(),
-            row: row_number,
-            message: format!("Add row {} to '{}'", row_number, table),
-            changes: column_changes,
-        }));
+        _ => Err(ValveError::InputError("Invalid undo/redo record".to_string()).into()),
     }
-
-    // If we get to here, then `summary`, `from`, and `to` are all null so we return an error.
-    Err(ValveError::InputError(
-        "All of summary, from, and to are NULL in undo/redo record".to_string(),
-    )
-    .into())
 }
 
-/// Return the next recorded change to the data that can be redone, or None if there isn't any.
-pub async fn get_record_to_redo(pool: &AnyPool) -> Result<Option<AnyRow>> {
-    // Look in the history table, get the row with the greatest ID, get the row number,
-    // from, and to, and determine whether the last operation was a delete, insert, or update.
-    let is_not_clause = if DbKind::from_pool(pool)? == DbKind::Sqlite {
+/// Return an ordered list of the undone changes that can be redone. If `limit` is nonzero, return
+/// no more than that many database records.
+pub async fn get_db_records_to_redo(pool: &AnyPool, limit: usize) -> Result<Vec<AnyRow>> {
+    let is_not = if DbKind::from_pool(pool)? == DbKind::Sqlite {
         "IS NOT"
     } else {
         "IS DISTINCT FROM"
     };
+    let limit_clause = if limit > 0 {
+        format!(" LIMIT {limit}")
+    } else {
+        "".to_string()
+    };
     let sql = format!(
         r#"SELECT * FROM "history"
-           WHERE "undone_by" {} NULL
-           ORDER BY "timestamp" DESC LIMIT 1"#,
-        is_not_clause
+           WHERE "undone_by" {is_not} NULL
+           ORDER BY "timestamp" DESC{limit_clause}"#
     );
     let query = sqlx_query(&sql);
-    let result_row = query.fetch_optional(pool).await?;
-    Ok(result_row)
+    Ok(query.fetch_all(pool).await?)
 }
 
-/// Return the next recorded change to the data that can be undone, or None if there isn't any.
-pub async fn get_record_to_undo(pool: &AnyPool) -> Result<Option<AnyRow>> {
-    // Look in the history table, get the row with the greatest ID, get the row number,
-    // from, and to, and determine whether the last operation was a delete, insert, or update.
-    let is_clause = if DbKind::from_pool(pool)? == DbKind::Sqlite {
+/// Return an ordered list of the changes that can be undone. If `limit` is nonzero, return no
+/// more than that many database records.
+pub async fn get_db_records_to_undo(pool: &AnyPool, limit: usize) -> Result<Vec<AnyRow>> {
+    let is = if DbKind::from_pool(pool)? == DbKind::Sqlite {
         "IS"
     } else {
         "IS NOT DISTINCT FROM"
     };
+    let limit_clause = if limit > 0 {
+        format!(" LIMIT {limit}")
+    } else {
+        "".to_string()
+    };
     let sql = format!(
         r#"SELECT * FROM "history"
-               WHERE "undone_by" {} NULL
-               ORDER BY "history_id" DESC LIMIT 1"#,
-        is_clause
+            WHERE "undone_by" {is} NULL
+           ORDER BY "history_id" DESC{limit_clause}"#
     );
     let query = sqlx_query(&sql);
-    let result_row = query.fetch_optional(pool).await?;
-    Ok(result_row)
+    Ok(query.fetch_all(pool).await?)
 }
 
 pub async fn undo_or_redo_move_tx(
@@ -3987,7 +4000,7 @@ pub async fn undo_or_redo_move_tx(
     tx: &mut Transaction<'_, sqlx::Any>,
     undo: bool,
 ) -> Result<()> {
-    let summary = match get_json_array_from_row(&last_change, "summary") {
+    let summary = match get_json_array_from_column(&last_change, "summary") {
         None => {
             return Err(ValveError::DataError(format!(
                 "No summary found in undo record for history_id == {}",
