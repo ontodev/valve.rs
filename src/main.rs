@@ -1,6 +1,7 @@
 mod tests;
 
 use crate::tests::{run_api_tests, run_dt_hierarchy_tests};
+use ansi_term::Style;
 use anyhow::Result;
 use clap::{ArgAction, Parser, Subcommand};
 use futures::{executor::block_on, TryStreamExt};
@@ -789,7 +790,7 @@ async fn main() -> Result<()> {
             };
             if next_redo != 0 {
                 let last_undo = convert_undo_or_redo_record_to_change(&redo_history[0])?;
-                println!("+ {}", last_undo.message);
+                println!("▲ {} {}", last_undo.history_id, last_undo.message);
             };
 
             let undo_history = valve.get_changes_to_undo(0).await?;
@@ -799,12 +800,12 @@ async fn main() -> Result<()> {
             };
 
             for undo in &undo_history {
-                let marker = if undo.history_id == next_undo {
-                    "* "
+                if undo.history_id == next_undo {
+                    let line = format!("▼ {} {}", undo.history_id, undo.message);
+                    println!("{}", Style::new().bold().paint(line));
                 } else {
-                    "  "
-                };
-                println!("{}{} {}", marker, undo.history_id, undo.message);
+                    println!("  {} {}", undo.history_id, undo.message);
+                }
             }
         }
         Commands::Load { initial_load } => {
