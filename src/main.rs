@@ -777,28 +777,25 @@ async fn main() -> Result<()> {
         }
         Commands::History {} => {
             let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
-            let redo_history = get_db_records_to_redo(&valve.pool, 1).await?;
+            let mut redo_history = valve.get_changes_to_redo(0).await?;
             let next_redo = match redo_history.len() {
                 0 => 0,
-                1 => {
-                    let history_id = redo_history[0]
-                        .try_get::<i32, _>("history_id")
-                        .expect("No 'history_id' in row");
-                    history_id as u16
+                _ => redo_history[0].history_id,
+            };
+            redo_history.reverse();
+            for redo in &redo_history {
+                if redo.history_id == next_redo {
+                    println!("▲ {} {}", redo.history_id, redo.message);
+                } else {
+                    println!("  {} {}", redo.history_id, redo.message);
                 }
-                _ => panic!("Too many redos"),
-            };
-            if next_redo != 0 {
-                let last_undo = convert_undo_or_redo_record_to_change(&redo_history[0])?;
-                println!("▲ {} {}", last_undo.history_id, last_undo.message);
-            };
+            }
 
             let undo_history = valve.get_changes_to_undo(0).await?;
             let next_undo = match undo_history.len() {
                 0 => 0,
                 _ => undo_history[0].history_id,
             };
-
             for undo in &undo_history {
                 if undo.history_id == next_undo {
                     let line = format!("▼ {} {}", undo.history_id, undo.message);
