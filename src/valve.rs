@@ -9,7 +9,7 @@ use crate::{
         correct_row_datatypes, delete_row_tx, generate_datatype_conditions,
         generate_rule_conditions, get_column_for_label, get_column_value_as_string,
         get_db_records_to_redo, get_db_records_to_undo, get_json_array_from_column,
-        get_json_object_from_column, get_parsed_structure_conditions,
+        get_json_object_from_column, get_next_undo_id, get_parsed_structure_conditions,
         get_pool_from_connection_string, get_previous_row_tx, get_sql_for_standard_view,
         get_sql_for_text_view, get_sql_type, get_sql_type_from_global_config,
         get_text_row_from_db_tx, insert_chunks, insert_new_row_tx, local_sql_syntax, move_row_tx,
@@ -199,7 +199,9 @@ impl ValveRow {
             .cloned()
     }
 
-    /// TODO: Add a docstring
+    /// Given a configuration map, a database kind, a table name, and a database row, construct
+    /// a [ValveRow] and return it. If the global_sql_type flag is set, then all of the columns
+    /// of the given row are interpreted as being of that type.
     pub fn from_any_row(
         config: &ValveConfig,
         kind: &DbKind,
@@ -2737,7 +2739,7 @@ impl Valve {
         Ok(())
     }
 
-    /// TODO: Add docstring here
+    /// Add the message with the given fields to the message table.
     pub async fn insert_message(
         &self,
         table: &str,
@@ -2766,7 +2768,8 @@ impl Valve {
         Ok(mid as u16)
     }
 
-    /// TODO: Add docstring here
+    /// Update the message represented by the given message_id in the message table with the given
+    /// fields.
     pub async fn update_message(
         &self,
         message_id: u16,
@@ -2799,10 +2802,20 @@ impl Valve {
         Ok(())
     }
 
-    /// TODO: Add docstring here
+    /// Delete the given message in the message table.
     pub async fn delete_message(&self, message_id: u16) -> Result<()> {
         let sql = format!(r#"DELETE FROM "message" WHERE "message_id" = {message_id}"#);
         self.execute_sql(&sql).await
+    }
+
+    /// Given a string representing a literal argument to a SQL "LIKE" clause, delete any
+    /// messages in the message table whose rule matches the LIKE clause.
+    pub async fn delete_messages_like(&self, like: &str) -> Result<()> {
+        let sql = format!(r#"DELETE FROM "message" WHERE "rule" LIKE {SQL_PARAM}"#);
+        let sql = local_sql_syntax(&self.db_kind, &sql);
+        let query = sqlx_query(&sql).bind(like);
+        query.execute(&self.pool).await?;
+        Ok(())
     }
 
     /// Return an ordered list of the changes that can be undone. If `limit` is nonzero, return no
@@ -2995,19 +3008,20 @@ impl Valve {
     /// Redo one change and return the change record or None if there was no change to redo.
     pub async fn redo(&self) -> Result<Option<ValveRow>> {
         let records = get_db_records_to_redo(&self.pool, 1).await?;
-        let last_undo = match records.len() {
+        let next_undo_id = get_next_undo_id(&self.pool).await?;
+        let next_redo = match records.len() {
             0 => {
                 log::warn!("Nothing to redo.");
                 return Ok(None);
             }
             1 => {
-                let last_undo = &records[0];
-                let undone_by = last_undo.try_get_raw("undone_by")?;
+                let next_redo = &records[0];
+                let undone_by = next_redo.try_get_raw("undone_by")?;
                 if undone_by.is_null() {
                     log::warn!("Nothing to redo.");
                     return Ok(None);
                 }
-                last_undo
+                next_redo
             }
             _ => {
                 return Err(ValveError::DataError(format!(
@@ -3017,14 +3031,21 @@ impl Valve {
                 .into())
             }
         };
-        let history_id: i32 = last_undo.get("history_id");
+
+        let history_id: i32 = next_redo.get("history_id");
         let history_id = history_id as u16;
-        let table: &str = last_undo.get("table");
-        let row_number: i64 = last_undo.get("row");
+        if history_id < next_undo_id {
+            // We do not redo orphaned changes:
+            log::warn!("Nothing to redo.");
+            return Ok(None);
+        }
+
+        let table: &str = next_redo.get("table");
+        let row_number: i64 = next_redo.get("row");
         let row_number = row_number as u32;
-        let from = get_json_object_from_column(&last_undo, "from");
-        let to = get_json_object_from_column(&last_undo, "to");
-        let summary = get_json_array_from_column(&last_undo, "summary");
+        let from = get_json_object_from_column(&next_redo, "from");
+        let to = get_json_object_from_column(&next_redo, "to");
+        let summary = get_json_array_from_column(&next_redo, "summary");
         if let Some(summary) = summary {
             let num_moves = summary
                 .iter()
@@ -3038,7 +3059,7 @@ impl Valve {
                 // Redo a move:
                 let mut tx = self.pool.begin().await?;
 
-                undo_or_redo_move_tx(table, &last_undo, history_id, &row_number, &mut tx, false)
+                undo_or_redo_move_tx(table, &next_redo, history_id, &row_number, &mut tx, false)
                     .await?;
                 switch_undone_state_tx(&self.user, history_id, false, &mut tx, &self.db_kind)
                     .await?;

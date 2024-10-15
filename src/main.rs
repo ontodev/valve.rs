@@ -7,10 +7,7 @@ use clap::{ArgAction, Parser, Subcommand};
 use futures::{executor::block_on, TryStreamExt};
 use ontodev_valve::{
     guess::guess,
-    toolkit::{
-        convert_undo_or_redo_record_to_change, generic_select_with_message_values,
-        get_db_records_to_redo, local_sql_syntax,
-    },
+    toolkit::{generic_select_with_message_values, local_sql_syntax},
     valve::{JsonRow, Valve, ValveCell, ValveRow},
     SQL_PARAM,
 };
@@ -150,8 +147,13 @@ enum Commands {
     /// Redo the last row change
     Redo {},
 
-    /// TODO: Add docstring
-    History {},
+    /// Show recent changes to the database
+    History {
+        #[arg(long, value_name = "CONTEXT", action = ArgAction::Set,
+              help = "Number of lines of redo / undo context",
+              default_value_t = 5)]
+        context: usize,
+    },
 
     /// Print the Valve configuration as a JSON-formatted string.
     DumpConfig {},
@@ -203,7 +205,7 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum GetSubcommands {
-    /// TODO: Add a docstring.
+    /// Get all rows from the given table.
     Table {
         #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
         table: String,
@@ -242,16 +244,26 @@ enum GetSubcommands {
         column: String,
     },
 
-    /// Get the validation messages associated with the value of a given column of a given row
-    /// from a given table.
+    /// Get validation messages from the message table.
     Messages {
-        #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
-        table: String,
+        #[arg(long, action = ArgAction::Set, help = "Get the message with this specific ID",
+              required = false)]
+        message_id: Option<u16>,
 
-        #[arg(value_name = "ROW", action = ArgAction::Set, help = ROW_HELP)]
+        #[arg(long, action = ArgAction::Set, required = false,
+              help = "Only get messages whose rule matches the SQL LIKE-clause given by RULE")]
+        rule: Option<String>,
+
+        #[arg(value_name = "TABLE", action = ArgAction::Set,
+              help = "Only get messages for TABLE")]
+        table: Option<String>,
+
+        #[arg(value_name = "ROW", action = ArgAction::Set,
+              help = "Only get messages for row ROW of table TABLE")]
         row: Option<u32>,
 
-        #[arg(value_name = "COLUMN", action = ArgAction::Set, help = COLUMN_HELP)]
+        #[arg(value_name = "COLUMN", action = ArgAction::Set,
+              help = "Only get messages for column COLUMN of row ROW of table TABLE")]
         column: Option<String>,
     },
 }
@@ -293,7 +305,11 @@ enum AddSubcommands {
 
 #[derive(Subcommand)]
 enum UpdateSubcommands {
-    /// TODO: Add docstring
+    /// Read a JSON-formatted string representing a row (of the form: { "column_1": value1,
+    /// "column_2": value2, ...}) from STDIN and use it as a replacement for the row
+    /// currently assigned the row number ROW in the given database table. If ROW is not given,
+    /// then Valve expects there to be a field called "row_number" with an integer value in the
+    /// input JSON.
     Row {
         #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
         table: String,
@@ -302,7 +318,8 @@ enum UpdateSubcommands {
         row: Option<u32>,
     },
 
-    /// TODO: Add docstring
+    /// Update the current value of the given column of the given row of the given table with
+    /// VALUE.
     Value {
         #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
         table: String,
@@ -341,6 +358,7 @@ enum UpdateSubcommands {
 
 #[derive(Subcommand)]
 enum DeleteSubcommands {
+    /// Delete rows from a given table.
     Row {
         #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
         table: String,
@@ -350,12 +368,15 @@ enum DeleteSubcommands {
         rows: Vec<u32>,
     },
 
-    // TODO: Allow for syntax: ./valve delete messages SQL_LIKE_STRING
-    /// TODO: Add docstring
-    Message {
-        #[arg(value_name = "MESSAGE_ID", action = ArgAction::Set,
-              help = "The ID of the message to update")]
-        message_ids: Vec<u16>,
+    /// Delete messages from the message table.
+    Messages {
+        #[arg(long, action = ArgAction::Set, help = "The specific ID of the message to delete",
+              required = false)]
+        message_id: Option<u16>,
+
+        #[arg(long, action = ArgAction::Set, required = false,
+              help = "Delete all messages whose rule matches the SQL LIKE-clause given by RULE")]
+        rule: Option<String>,
     },
 }
 
@@ -592,12 +613,19 @@ async fn main() -> Result<()> {
                             .expect("Could not delete row");
                     }
                 }
-                DeleteSubcommands::Message { message_ids } => {
-                    for message_id in message_ids {
+                DeleteSubcommands::Messages { message_id, rule } => {
+                    if let Some(message_id) = message_id {
                         valve
                             .delete_message(*message_id)
                             .await
                             .expect("Could not delete message");
+                    } else {
+                        if let Some(rule) = rule {
+                            valve
+                                .delete_messages_like(rule)
+                                .await
+                                .expect("Could not delete message");
+                        }
                     }
                 }
             };
@@ -703,29 +731,54 @@ async fn main() -> Result<()> {
                     }
                     println!("]");
                 }
-                GetSubcommands::Messages { table, row, column } => {
+                GetSubcommands::Messages {
+                    table,
+                    row,
+                    column,
+                    rule,
+                    message_id,
+                } => {
                     let mut sql = format!(
-                        r#"SELECT "row", "column", "value", "level", "rule", "message"
-                             FROM "message"
-                            WHERE "table" = {SQL_PARAM}"#
+                        r#"SELECT "message_id",
+                                  "table", "row", "column", "value", "level", "rule", "message"
+                             FROM "message""#
                     );
-                    let mut sql_params = vec![table];
-                    match row {
-                        Some(row) => {
-                            sql.push_str(&format!(r#" AND "row" = {row}"#));
-                            match column {
-                                Some(column) => {
-                                    sql.push_str(&format!(r#" AND "column" = {SQL_PARAM}"#));
-                                    sql_params.push(column);
-                                }
-                                None => (),
+                    let mut sql_params = vec![];
+                    match message_id {
+                        Some(message_id) => {
+                            sql.push_str(&format!(r#" WHERE "message_id" = {message_id}"#));
+                        }
+                        None => {
+                            if let Some(table) = table {
+                                sql.push_str(&format!(r#"WHERE "table" = {SQL_PARAM}"#));
+                                sql_params.push(table);
+                            }
+                            // The command-line parser will ensure that TABLE has been given
+                            // whenever ROW is given, and that TABLE and ROW have both been given
+                            // whenever COLUMN is given. The case of RULE is different since it is
+                            // a long parameter that is parsed independently.
+                            if let Some(row) = row {
+                                sql.push_str(&format!(r#" AND "row" = {row}"#));
+                            }
+                            if let Some(column) = column {
+                                sql.push_str(&format!(r#" AND "column" = {SQL_PARAM}"#));
+                                sql_params.push(column);
+                            }
+                            if let Some(rule) = rule {
+                                sql.push_str(&format!(
+                                    r#" {connective} "rule" LIKE {SQL_PARAM}"#,
+                                    connective = match table {
+                                        None => "WHERE",
+                                        Some(_) => "AND",
+                                    }
+                                ));
+                                sql_params.push(rule);
                             }
                         }
-                        None => (),
                     };
                     let sql = local_sql_syntax(
                         &valve.db_kind,
-                        &format!(r#"{sql} ORDER BY "row", "column", "message_id""#,),
+                        &format!(r#"{sql} ORDER BY "table", "row", "column", "message_id""#,),
                     );
                     let mut query = sqlx_query(&sql);
                     for param in &sql_params {
@@ -743,9 +796,13 @@ async fn main() -> Result<()> {
                         }
                         let rn: i64 = row.get::<i64, _>("row");
                         let rn = rn as u32;
+                        let mid: i32 = row.get::<i32, _>("message_id");
+                        let mid = mid as u16;
                         println!(
-                            "{{\"row\":{},\"column\":{},\"value\":{},\
-                             \"level\":{},\"rule\":{},\"message\":{}}}",
+                            "{{\"message_id\":{},\"table\":{},\"row\":{},\"column\":{},\
+                             \"value\":{},\"level\":{},\"rule\":{},\"message\":{}}}",
+                            mid,
+                            json!(row.get::<&str, _>("table")),
                             rn,
                             json!(row.get::<&str, _>("column")),
                             json!(row.get::<&str, _>("value")),
@@ -775,33 +832,48 @@ async fn main() -> Result<()> {
                 cli.assume_yes,
             );
         }
-        Commands::History {} => {
+        Commands::History { context } => {
             let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
-            let mut redo_history = valve.get_changes_to_redo(0).await?;
-            let next_redo = match redo_history.len() {
-                0 => 0,
-                _ => redo_history[0].history_id,
-            };
-            redo_history.reverse();
-            for redo in &redo_history {
-                if redo.history_id == next_redo {
-                    println!("▲ {} {}", redo.history_id, redo.message);
-                } else {
-                    println!("  {} {}", redo.history_id, redo.message);
-                }
-            }
-
-            let undo_history = valve.get_changes_to_undo(0).await?;
+            let mut undo_history = valve.get_changes_to_undo(*context).await?;
             let next_undo = match undo_history.len() {
                 0 => 0,
                 _ => undo_history[0].history_id,
             };
+            undo_history.reverse();
             for undo in &undo_history {
                 if undo.history_id == next_undo {
-                    let line = format!("▼ {} {}", undo.history_id, undo.message);
+                    let line = format!("▲ {} {}", undo.history_id, undo.message);
                     println!("{}", Style::new().bold().paint(line));
                 } else {
                     println!("  {} {}", undo.history_id, undo.message);
+                }
+            }
+
+            let redo_history = valve.get_changes_to_redo(*context).await?;
+            let next_redo = match redo_history.len() {
+                0 => 0,
+                _ => redo_history[0].history_id,
+            };
+            let mut highest_encountered_id = 0;
+            for redo in &redo_history {
+                if redo.history_id > highest_encountered_id {
+                    highest_encountered_id = redo.history_id;
+                }
+                // We do not allow redoing changes that are older than the next record to undo.
+                // If there are no such changes in the redo stack, then there will be no triangle,
+                // which indicates that nothing can be redone even though there are entries in the
+                // redo stack.
+                if redo.history_id == next_redo && redo.history_id > next_undo {
+                    println!("▼ {} {}", redo.history_id, redo.message);
+                } else {
+                    let line = format!("  {} {}", redo.history_id, redo.message);
+                    // If the history_id under consideration is lower than the next undo, or if
+                    // there is a redo operation appearing before this one in the returned results
+                    // that has a greater history_id, then this is an orphaned operation that cannot
+                    // be redone. We choose not to include orphaned ops in the history output:
+                    if redo.history_id >= next_undo && redo.history_id >= highest_encountered_id {
+                        println!("{line}");
+                    }
                 }
             }
         }

@@ -3970,6 +3970,28 @@ pub async fn get_db_records_to_redo(pool: &AnyPool, limit: usize) -> Result<Vec<
     Ok(query.fetch_all(pool).await?)
 }
 
+/// TODO: Add docstring
+pub async fn get_next_redo_id(pool: &AnyPool) -> Result<u16> {
+    let records = get_db_records_to_redo(pool, 1).await?;
+    match records.len() {
+        0 => Ok(0),
+        1 => {
+            let next_redo = &records[0];
+            let undone_by = next_redo.try_get_raw("undone_by")?;
+            if undone_by.is_null() {
+                Ok(0)
+            } else {
+                let history_id: i32 = next_redo.get("history_id");
+                let history_id = history_id as u16;
+                Ok(history_id)
+            }
+        }
+        _ => Err(
+            ValveError::DataError(format!("Too many records to redo: {}", records.len())).into(),
+        ),
+    }
+}
+
 /// Return an ordered list of the changes that can be undone. If `limit` is nonzero, return no
 /// more than that many database records.
 pub async fn get_db_records_to_undo(pool: &AnyPool, limit: usize) -> Result<Vec<AnyRow>> {
@@ -3990,6 +4012,27 @@ pub async fn get_db_records_to_undo(pool: &AnyPool, limit: usize) -> Result<Vec<
     );
     let query = sqlx_query(&sql);
     Ok(query.fetch_all(pool).await?)
+}
+
+/// TODO: Add docstring
+pub async fn get_next_undo_id(pool: &AnyPool) -> Result<u16> {
+    let records = get_db_records_to_undo(pool, 1).await?;
+    match records.len() {
+        0 => Ok(0),
+        1 => {
+            let next_undo = &records[0];
+            let history_id: i32 = next_undo.get("history_id");
+            let history_id = history_id as u16;
+            Ok(history_id)
+        }
+        _ => {
+            return Err(ValveError::DataError(format!(
+                "Too many records to undo: {}",
+                records.len()
+            ))
+            .into())
+        }
+    }
 }
 
 pub async fn undo_or_redo_move_tx(
