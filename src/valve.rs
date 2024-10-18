@@ -5,17 +5,17 @@ use crate::{
     internal::{generate_internal_table_ddl, INTERNAL_TABLES},
     toolkit,
     toolkit::{
-        add_message_counts, cast_column_sql_to_text, convert_undo_or_redo_record_to_change,
-        correct_row_datatypes, delete_row_tx, generate_datatype_conditions,
-        generate_rule_conditions, get_column_for_label, get_column_value_as_string,
-        get_db_records_to_redo, get_db_records_to_undo, get_json_array_from_column,
-        get_json_object_from_column, get_next_undo_id, get_parsed_structure_conditions,
-        get_pool_from_connection_string, get_previous_row_tx, get_sql_for_standard_view,
-        get_sql_for_text_view, get_sql_type, get_sql_type_from_global_config,
-        get_text_row_from_db_tx, insert_chunks, insert_new_row_tx, local_sql_syntax, move_row_tx,
-        normalize_options, read_config_files, record_row_change_tx, record_row_move_tx,
-        switch_undone_state_tx, undo_or_redo_move_tx, update_row_tx, verify_table_deps_and_sort,
-        ColumnRule, CompiledCondition, DbKind, ParsedStructure, ValueType,
+        add_message_counts, cast_column_sql_to_text, correct_row_datatypes, delete_row_tx,
+        generate_datatype_conditions, generate_rule_conditions, get_column_for_label,
+        get_column_value_as_string, get_db_records_to_redo, get_db_records_to_undo,
+        get_json_array_from_column, get_json_object_from_column, get_next_undo_id,
+        get_parsed_structure_conditions, get_pool_from_connection_string, get_previous_row_tx,
+        get_sql_for_standard_view, get_sql_for_text_view, get_sql_type,
+        get_sql_type_from_global_config, get_text_row_from_db_tx, insert_chunks, insert_new_row_tx,
+        local_sql_syntax, move_row_tx, normalize_options, read_config_files, record_row_change_tx,
+        record_row_move_tx, switch_undone_state_tx, undo_or_redo_move_tx, update_row_tx,
+        verify_table_deps_and_sort, ColumnRule, CompiledCondition, DbKind, ParsedStructure,
+        ValueType,
     },
     validate::{validate_row_tx, validate_tree_foreign_keys, with_tree_sql},
     valve_grammar::StartParser,
@@ -411,6 +411,168 @@ pub struct ValveRowChange {
     pub message: String,
     /// The changes to each cell
     pub changes: Vec<ValveChange>,
+}
+
+impl ValveRowChange {
+    /// Given a database record representing either an undo or a redo from the history table,
+    /// return a [ValveRowChange] struct.
+    pub fn from_undo_or_redo_record(record: &AnyRow) -> Result<Self> {
+        let table: &str = record.get("table");
+        let row_number: i64 = record.get("row");
+        let row_number = row_number as u32;
+        let history_id: i32 = record.get("history_id");
+        let history_id = history_id as u16;
+        let from = get_json_object_from_column(&record, "from");
+        let to = get_json_object_from_column(&record, "to");
+        let summary = {
+            let summary = record.try_get_raw("summary")?;
+            if !summary.is_null() {
+                let summary: &str = record.get("summary");
+                match serde_json::from_str::<SerdeValue>(summary) {
+                    Ok(SerdeValue::Array(v)) => Some(v),
+                    _ => {
+                        return Err(
+                            ValveError::InputError(format!("{summary} is not an array.")).into(),
+                        )
+                    }
+                }
+            } else {
+                None
+            }
+        };
+
+        // If the `summary` part of the record is present, then just use it to populate the fields
+        // of the ValveChange structs representing the changes to each column in the table row.
+        if let Some(summary) = summary {
+            let mut column_changes = vec![];
+            for entry in summary {
+                let column = entry
+                    .get("column")
+                    .and_then(|s| Some(s.to_string()))
+                    .ok_or(ValveError::InputError("No 'column' found".to_string()))?;
+                let level = entry
+                    .get("level")
+                    .and_then(|s| Some(s.to_string()))
+                    .ok_or(ValveError::InputError("No 'level' found".to_string()))?;
+                let old_value = entry
+                    .get("old_value")
+                    .and_then(|s| Some(s.to_string()))
+                    .ok_or(ValveError::InputError("No 'old_value' found".to_string()))?;
+                let value = entry
+                    .get("value")
+                    .and_then(|s| Some(s.to_string()))
+                    .ok_or(ValveError::InputError("No 'value' found".to_string()))?;
+                let message = entry
+                    .get("message")
+                    .and_then(|s| Some(s.to_string()))
+                    .ok_or(ValveError::InputError("No 'message' found".to_string()))?;
+                column_changes.push(ValveChange {
+                    column: column.to_string(),
+                    level: level.to_string(),
+                    old_value: old_value.to_string(),
+                    value: value.to_string(),
+                    message: message.to_string(),
+                });
+            }
+            return Ok(ValveRowChange {
+                history_id: history_id,
+                table: table.to_string(),
+                row: row_number,
+                message: format!("Update row {row_number} of '{table}'"),
+                changes: column_changes,
+            });
+        }
+
+        // If the `summary` part of the record is not present, then there are two possibilities.
+        // (1) If `from` is not null and `to` is null then this is a delete (i.e., the row has changed
+        // from something to nothing). (2) If `from` is null and `to` is not null then this is a
+        // create.
+        match (from, to) {
+            (Some(from), None) => {
+                let mut column_changes = vec![];
+                for (column, change) in &from {
+                    match change {
+                        SerdeValue::Number(rn) if column == "previous_row" => {
+                            column_changes.push(ValveChange {
+                                column: column.to_string(),
+                                level: "delete".to_string(),
+                                old_value: rn.to_string(),
+                                value: "".to_string(),
+                                message: "".to_string(),
+                            })
+                        }
+                        SerdeValue::Object(details) => {
+                            let old_value = details
+                                .get("value")
+                                .and_then(|s| Some(s.to_string()))
+                                .ok_or(ValveError::InputError("No 'value' found".to_string()))?;
+                            column_changes.push(ValveChange {
+                                column: column.to_string(),
+                                level: "delete".to_string(),
+                                old_value: old_value.to_string(),
+                                value: "".to_string(),
+                                message: "".to_string(),
+                            });
+                        }
+                        _ => {
+                            return Err(
+                                ValveError::InputError(format!("Invalid change: {change}")).into()
+                            )
+                        }
+                    };
+                }
+                Ok(ValveRowChange {
+                    history_id: history_id,
+                    table: table.to_string(),
+                    row: row_number,
+                    message: format!("Delete row {} from '{}'", row_number, table),
+                    changes: column_changes,
+                })
+            }
+            (None, Some(to)) => {
+                let mut column_changes = vec![];
+                for (column, change) in &to {
+                    match change {
+                        SerdeValue::Number(rn) if column == "previous_row" => {
+                            column_changes.push(ValveChange {
+                                column: column.to_string(),
+                                level: "insert".to_string(),
+                                old_value: rn.to_string(),
+                                value: "".to_string(),
+                                message: "".to_string(),
+                            })
+                        }
+                        SerdeValue::Object(details) => {
+                            let value = details
+                                .get("value")
+                                .and_then(|s| Some(s.to_string()))
+                                .ok_or(ValveError::InputError("No 'value' found".to_string()))?;
+                            column_changes.push(ValveChange {
+                                column: column.to_string(),
+                                level: "insert".to_string(),
+                                old_value: "".to_string(),
+                                value: value.to_string(),
+                                message: "".to_string(),
+                            });
+                        }
+                        _ => {
+                            return Err(
+                                ValveError::InputError(format!("Invalid change: {change}")).into()
+                            )
+                        }
+                    };
+                }
+                Ok(ValveRowChange {
+                    history_id: history_id,
+                    table: table.to_string(),
+                    row: row_number,
+                    message: format!("Add row {} to '{}'", row_number, table),
+                    changes: column_changes,
+                })
+            }
+            _ => Err(ValveError::InputError("Invalid undo/redo record".to_string()).into()),
+        }
+    }
 }
 
 // TODO: We should probably change the type of old_value and value to SerdeValue.
@@ -2824,7 +2986,7 @@ impl Valve {
         let records = get_db_records_to_undo(&self.pool, limit).await?;
         let mut changes = vec![];
         for record in &records {
-            match convert_undo_or_redo_record_to_change(record) {
+            match ValveRowChange::from_undo_or_redo_record(record) {
                 Err(e) => return Err(e.into()),
                 Ok(change) => changes.push(change),
             };
@@ -2838,7 +3000,7 @@ impl Valve {
         let records = get_db_records_to_redo(&self.pool, limit).await?;
         let mut changes = vec![];
         for record in &records {
-            match convert_undo_or_redo_record_to_change(record) {
+            match ValveRowChange::from_undo_or_redo_record(record) {
                 Err(e) => return Err(e.into()),
                 Ok(change) => changes.push(change),
             };

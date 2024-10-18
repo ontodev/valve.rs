@@ -425,80 +425,73 @@ async fn main() -> Result<()> {
         }
     }
 
-    // TODO: The match arms in this function should probably be split into separate functions.
-    // TODO: Add a comment about this function.
-    async fn get_input_row_or_row_from_input_value(
+    // Given a Valve instance, a table name, a row number, a column name, and an input value,
+    // fetch the row from the given table with the given row number, such that the value of the
+    // given column has been replaced with the given input_value.
+    async fn fetch_row_with_input_value(
         valve: &Valve,
         table: &str,
-        row: &Option<u32>,
-        column: &Option<String>,
-        value: &Option<String>,
-    ) -> (Option<u32>, JsonRow) {
-        let mut input_row = match value {
-            None => {
-                // If no value has been given then we expect the whole row to be input
-                // via STDIN as a (simple) JSON-formatted string, after which we convert it
-                // to a ValveRow:
-                let mut json_row = String::new();
-                io::stdin()
-                    .read_line(&mut json_row)
-                    .expect("Error reading from STDIN");
-                let json_row = serde_json::from_str::<SerdeValue>(&json_row)
-                    .expect(&format!("Invalid JSON: {json_row}"))
-                    .as_object()
-                    .expect(&format!("{json_row} is not a JSON object"))
-                    .clone();
-                json_row
-            }
-            Some(value) => {
-                // If a value has been given, then a column and row number must also have been
-                // given. We then retrieve the row with that number from the database as a
-                // ValveRow, replacing the ValveCell corresponding to the given column with a
-                // new ValveCell whose value is `value`.
-                let mut row = valve
-                    .get_row_from_db(table, &row.expect("No row given"))
-                    .await
-                    .expect("Error getting row");
-                let value = match serde_json::from_str::<SerdeValue>(&value) {
-                    Ok(value) => value,
-                    Err(_) => json!(value),
-                };
-                let column = column.clone().expect("No column given");
-                let cell = ValveCell {
-                    value: value,
-                    valid: true,
-                    ..Default::default()
-                };
-                *row.contents
-                    .get_mut(&column)
-                    .expect(&format!("No column '{column}' in row")) = cell;
-                row.contents_to_simple_json()
-                    .expect("Can't convert to simple JSON")
-            }
+        row: u32,
+        column: &str,
+        input_value: &str,
+    ) -> JsonRow {
+        let mut row = valve
+            .get_row_from_db(table, &row)
+            .await
+            .expect("Error getting row");
+        let value = match serde_json::from_str::<SerdeValue>(&input_value) {
+            Ok(value) => value,
+            Err(_) => json!(input_value),
+        };
+        let cell = ValveCell {
+            value: value,
+            valid: true,
+            ..Default::default()
+        };
+        *row.contents
+            .get_mut(column)
+            .expect(&format!("No column '{column}' in row")) = cell;
+        row.contents_to_simple_json()
+            .expect("Can't convert to simple JSON")
+    }
+
+    // Reads an intput row from STDIN. This should be formatted as a simple JSON, optionally with
+    // a "row_number" field included. Returns the row number (if any) that was included in the
+    // JSON, as well as a JSON representation of the row without the row_number field included.
+    async fn input_row() -> (Option<u32>, JsonRow) {
+        let mut json_row = {
+            let mut json_row = String::new();
+            io::stdin()
+                .read_line(&mut json_row)
+                .expect("Error reading from STDIN");
+            let json_row = serde_json::from_str::<SerdeValue>(&json_row)
+                .expect(&format!("Invalid JSON: {json_row}"))
+                .as_object()
+                .expect(&format!("{json_row} is not a JSON object"))
+                .clone();
+            json_row
         };
 
-        // If the input row contains a row number as one of its cells, remove that cell and
-        // add the value of the row number to the row_number field of the row instead:
-        let row_number = match input_row.get("row_number") {
-            None => match row {
-                None => None,
-                Some(row) => Some(row.clone()),
-            },
+        // If the input row contains a row number as one of its cells, remove it from the JSON
+        // and return it separately as the first position of the returned tuple. Otherwise the
+        // first position in the tuple will be None.
+        let row_number = match json_row.get("row_number") {
+            None => None,
             Some(value) => {
                 let row_number = value.as_i64().expect("Not a number");
                 let row_number = Some(row_number as u32);
-                input_row
-                    .remove("row_number")
-                    .expect("No row_number in row");
+                json_row.remove("row_number").expect("No row_number in row");
                 row_number
             }
         };
 
-        (row_number, input_row)
+        (row_number, json_row)
     }
 
-    // TODO: Add docstring here:
-    fn parse_message_input(
+    // Reads and parses a JSON-formatted string representing a validation message (for the expected
+    // format see, e.g., AddSubcommands::Message above), and returns the tuple:
+    // (table, row, column, value, level, rule, message)
+    fn read_input_message(
         table: &Option<String>,
         row: &Option<u32>,
         column: &Option<String>,
@@ -585,7 +578,7 @@ async fn main() -> Result<()> {
                 }
                 AddSubcommands::Message { table, row, column } => {
                     let (table, row, column, value, level, rule, message) =
-                        parse_message_input(table, row, column);
+                        read_input_message(table, row, column);
                     let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
                     let message_id = valve
                         .insert_message(&table, row, &column, &value, &level, &rule, &message)
@@ -940,7 +933,7 @@ async fn main() -> Result<()> {
             } = update_subcommand
             {
                 let (table, row, column, value, level, rule, message) =
-                    parse_message_input(table, row, column);
+                    read_input_message(table, row, column);
                 let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
                 valve
                     .update_message(
@@ -957,10 +950,12 @@ async fn main() -> Result<()> {
             } else {
                 let (table, row_number, input_row) = match update_subcommand {
                     UpdateSubcommands::Row { table, row } => {
-                        let (row_number, row) =
-                            get_input_row_or_row_from_input_value(&valve, table, row, &None, &None)
-                                .await;
-                        (table, row_number, row)
+                        let (json_row_number, json_row) = input_row().await;
+                        let row = match json_row_number {
+                            None => row.clone(),
+                            Some(value) => Some(value),
+                        };
+                        (table, row, json_row)
                     }
                     UpdateSubcommands::Value {
                         table,
@@ -968,15 +963,9 @@ async fn main() -> Result<()> {
                         column,
                         value,
                     } => {
-                        let (row_number, row) = get_input_row_or_row_from_input_value(
-                            &valve,
-                            table,
-                            &Some(*row),
-                            &Some(column.to_string()),
-                            &Some(value.to_string()),
-                        )
-                        .await;
-                        (table, row_number, row)
+                        let json_row =
+                            fetch_row_with_input_value(&valve, table, *row, column, value).await;
+                        (table, Some(*row), json_row)
                     }
                     UpdateSubcommands::Message { .. } => unreachable!(),
                 };
@@ -1000,11 +989,34 @@ async fn main() -> Result<()> {
             value,
         } => {
             let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
-            let (row_number, input_row) =
-                get_input_row_or_row_from_input_value(&valve, table, row, column, value).await;
-
+            let (rn, input_row) = match value {
+                Some(value) => {
+                    let rn = row.expect("No row given");
+                    let input_row = fetch_row_with_input_value(
+                        &valve,
+                        table,
+                        rn,
+                        match column {
+                            Some(column) => column,
+                            None => panic!("No column given"),
+                        },
+                        value,
+                    )
+                    .await;
+                    (Some(rn), input_row)
+                }
+                None => {
+                    let (rn, input_row) = input_row().await;
+                    // If now row was input, default to `row` (which could still be None)
+                    let rn = match rn {
+                        Some(rn) => Some(rn),
+                        None => *row,
+                    };
+                    (rn, input_row)
+                }
+            };
             // Validate the input row:
-            let output_row = valve.validate_row(table, &input_row, row_number).await?;
+            let output_row = valve.validate_row(table, &input_row, rn).await?;
 
             // Print the results to STDOUT:
             println!(
