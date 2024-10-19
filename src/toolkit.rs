@@ -2772,10 +2772,10 @@ pub async fn get_text_row_from_db_tx(
     valve_row.contents_to_rich_json()
 }
 
-/// Given a configuration struct, the database kind, a table name, and a [SerdeMap] representing
-/// a row in the table, such that all of the column values are represented as strings, use the
-/// configuration to find the actual SQL types of each column in the row, and then convert the
-/// values of each column from TEXT to the appropriate type, before returning the modified map.
+/// Given a Valve configuration, the database kind, a table name, and a [SerdeMap] representing
+/// a row in the table, such that all of the column values are represented as strings, uses the
+/// configuration to find the actual SQL types of each column in the row, and then converts the
+/// value of each column from a string to the appropriate type, before returning the modified map.
 pub fn correct_row_datatypes(
     config: &ValveConfig,
     db_kind: &DbKind,
@@ -3884,9 +3884,10 @@ pub async fn get_next_undo_id(pool: &AnyPool) -> Result<u16> {
     }
 }
 
-/// Given a table name, an [AnyRow] representing the last change to the database, a history id,
-/// a row number, a database transaction, and a flag indicating whether the given move should be
-/// undone (true) or redone (false), undo or redo the move.
+/// Given a table name, an [AnyRow] representing the last change to the database (which is
+/// expected to be a move operation), a history id, a row number, a database transaction, and a
+/// flag indicating whether the given move should be undone (true) or redone (false), undoes or
+/// redoes the move.
 pub async fn undo_or_redo_move_tx(
     table: &str,
     last_change: &AnyRow,

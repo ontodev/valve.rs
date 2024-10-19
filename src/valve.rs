@@ -414,20 +414,20 @@ pub struct ValveRowChange {
 }
 
 impl ValveRowChange {
-    /// Given a database record representing either an undo or a redo from the history table,
-    /// return a [ValveRowChange] struct.
-    pub fn from_undo_or_redo_record(record: &AnyRow) -> Result<Self> {
-        let table: &str = record.get("table");
-        let row_number: i64 = record.get("row");
+    /// Given a database row representing either an undo or a redo record from the history table,
+    /// returns a [ValveRowChange] struct containing the same information.
+    pub fn from_undo_or_redo_record(db_rec: &AnyRow) -> Result<Self> {
+        let table: &str = db_rec.try_get("table")?;
+        let row_number: i64 = db_rec.try_get("row")?;
         let row_number = row_number as u32;
-        let history_id: i32 = record.get("history_id");
+        let history_id: i32 = db_rec.try_get("history_id")?;
         let history_id = history_id as u16;
-        let from = get_json_object_from_column(&record, "from");
-        let to = get_json_object_from_column(&record, "to");
+        let from = get_json_object_from_column(&db_rec, "from");
+        let to = get_json_object_from_column(&db_rec, "to");
         let summary = {
-            let summary = record.try_get_raw("summary")?;
+            let summary = db_rec.try_get_raw("summary")?;
             if !summary.is_null() {
-                let summary: &str = record.get("summary");
+                let summary: &str = db_rec.try_get("summary")?;
                 match serde_json::from_str::<SerdeValue>(summary) {
                     Ok(SerdeValue::Array(v)) => Some(v),
                     _ => {
@@ -448,37 +448,75 @@ impl ValveRowChange {
             for entry in summary {
                 let column = entry
                     .get("column")
+                    .and_then(|s| s.as_str())
                     .and_then(|s| Some(s.to_string()))
                     .ok_or(ValveError::InputError("No 'column' found".to_string()))?;
                 let level = entry
                     .get("level")
+                    .and_then(|s| s.as_str())
                     .and_then(|s| Some(s.to_string()))
                     .ok_or(ValveError::InputError("No 'level' found".to_string()))?;
                 let old_value = entry
                     .get("old_value")
+                    .and_then(|s| s.as_str())
                     .and_then(|s| Some(s.to_string()))
                     .ok_or(ValveError::InputError("No 'old_value' found".to_string()))?;
                 let value = entry
                     .get("value")
+                    .and_then(|s| s.as_str())
                     .and_then(|s| Some(s.to_string()))
                     .ok_or(ValveError::InputError("No 'value' found".to_string()))?;
                 let message = entry
                     .get("message")
+                    .and_then(|s| s.as_str())
                     .and_then(|s| Some(s.to_string()))
                     .ok_or(ValveError::InputError("No 'message' found".to_string()))?;
                 column_changes.push(ValveChange {
-                    column: column.to_string(),
-                    level: level.to_string(),
-                    old_value: old_value.to_string(),
-                    value: value.to_string(),
-                    message: message.to_string(),
+                    column: column,
+                    level: level,
+                    old_value: old_value,
+                    value: value,
+                    message: message,
                 });
             }
+            let message = {
+                let moves = column_changes
+                    .iter()
+                    .filter(|cc| cc.level.to_lowercase() == "move")
+                    .collect::<Vec<_>>();
+                if moves.len() == 0 {
+                    format!("Update row {row_number} of '{table}'")
+                } else if moves.len() == 1 {
+                    format!(
+                        "Move row {row_number} of '{table}' from {before} to {after}",
+                        before = {
+                            if moves[0].old_value == "0" {
+                                "first".to_string()
+                            } else {
+                                format!("after row {}", moves[0].old_value)
+                            }
+                        },
+                        after = {
+                            if moves[0].value == "0" {
+                                "first".to_string()
+                            } else {
+                                format!("after row {}", moves[0].value)
+                            }
+                        },
+                    )
+                } else {
+                    return Err(ValveError::InputError(
+                        "Summary for move (history ID: {history_id}) contains too many records"
+                            .to_string(),
+                    )
+                    .into());
+                }
+            };
             return Ok(ValveRowChange {
                 history_id: history_id,
                 table: table.to_string(),
                 row: row_number,
-                message: format!("Update row {row_number} of '{table}'"),
+                message: message,
                 changes: column_changes,
             });
         }

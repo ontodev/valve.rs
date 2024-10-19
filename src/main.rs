@@ -150,7 +150,7 @@ enum Commands {
     /// Show recent changes to the database
     History {
         #[arg(long, value_name = "CONTEXT", action = ArgAction::Set,
-              help = "Number of lines of redo / undo context",
+              help = "Number of lines of redo / undo context (0 = infinite)",
               default_value_t = 5)]
         context: usize,
     },
@@ -426,8 +426,8 @@ async fn main() -> Result<()> {
     }
 
     // Given a Valve instance, a table name, a row number, a column name, and an input value,
-    // fetch the row from the given table with the given row number, such that the value of the
-    // given column has been replaced with the given input_value.
+    // fetches the row from the given table with the given row number, such that the value of the
+    // given column is replaced with the given input_value.
     async fn fetch_row_with_input_value(
         valve: &Valve,
         table: &str,
@@ -833,12 +833,13 @@ async fn main() -> Result<()> {
                 _ => undo_history[0].history_id,
             };
             undo_history.reverse();
+            let id_width = next_undo.to_string().len();
             for undo in &undo_history {
                 if undo.history_id == next_undo {
-                    let line = format!("▲ {} {}", undo.history_id, undo.message);
+                    let line = format!("▲ {:>id_width$} {}", undo.history_id, undo.message);
                     println!("{}", Style::new().bold().paint(line));
                 } else {
-                    println!("  {} {}", undo.history_id, undo.message);
+                    println!("  {:>id_width$} {}", undo.history_id, undo.message);
                 }
             }
 
@@ -857,9 +858,9 @@ async fn main() -> Result<()> {
                 // which indicates that nothing can be redone even though there are entries in the
                 // redo stack.
                 if redo.history_id == next_redo && redo.history_id > next_undo {
-                    println!("▼ {} {}", redo.history_id, redo.message);
+                    println!("▼ {:>id_width$} {}", redo.history_id, redo.message);
                 } else {
-                    let line = format!("  {} {}", redo.history_id, redo.message);
+                    let line = format!("  {:>id_width$} {}", redo.history_id, redo.message);
                     // If the history_id under consideration is lower than the next undo, or if
                     // there is a redo operation appearing before this one in the returned results
                     // that has a greater history_id, then this is an orphaned operation that cannot
