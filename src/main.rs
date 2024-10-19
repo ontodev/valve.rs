@@ -141,10 +141,25 @@ enum Commands {
         delete_subcommand: DeleteSubcommands,
     },
 
-    /// Undo the last row change
+    /// Reorder rows in database tables
+    Move {
+        #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
+        table: String,
+
+        #[arg(value_name = "ROW", action = ArgAction::Set,
+              help = "The number of the row from TABLE to be moved")]
+        row: u32,
+
+        #[arg(value_name = "AFTER", action = ArgAction::Set,
+              help = "The number of the row coming immediately before ROW in TABLE in the new row \
+                      order. If this is 0, the row will be moved to the first position.")]
+        after: u32,
+    },
+
+    /// Undo changes to the database
     Undo {},
 
-    /// Redo the last row change
+    /// Redo changes to the database that have been undone
     Redo {},
 
     /// Show recent changes to the database
@@ -623,22 +638,6 @@ async fn main() -> Result<()> {
                 }
             };
         }
-        Commands::Undo {} | Commands::Redo {} => {
-            let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
-            let updated_row = match &cli.command {
-                Commands::Undo {} => valve.undo().await?,
-                Commands::Redo {} => valve.redo().await?,
-                _ => unreachable!(),
-            };
-            if let Some(valve_row) = updated_row {
-                print!(
-                    "{}",
-                    json!(valve_row
-                        .to_rich_json()
-                        .expect("Error converting row to rich JSON"))
-                );
-            }
-        }
         Commands::DropAll {} => {
             let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
             valve
@@ -881,6 +880,26 @@ async fn main() -> Result<()> {
                 .load_all_tables(true)
                 .await
                 .expect("Error loading tables");
+        }
+        Commands::Move { table, row, after } => {
+            let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
+            valve.move_row(table, row, after).await?;
+        }
+        Commands::Redo {} | Commands::Undo {} => {
+            let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
+            let updated_row = match &cli.command {
+                Commands::Undo {} => valve.undo().await?,
+                Commands::Redo {} => valve.redo().await?,
+                _ => unreachable!(),
+            };
+            if let Some(valve_row) = updated_row {
+                print!(
+                    "{}",
+                    json!(valve_row
+                        .to_rich_json()
+                        .expect("Error converting row to rich JSON"))
+                );
+            }
         }
         Commands::Save { save_dir, tables } => {
             let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
