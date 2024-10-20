@@ -13,7 +13,7 @@ use ontodev_valve::{
 };
 use serde_json::{json, Value as SerdeValue};
 use sqlx::{query as sqlx_query, Row};
-use std::io;
+use std::{collections::HashMap, io};
 
 // Help strings that are used in more than one subcommand:
 static SAVE_DIR_HELP: &str = "Save tables to DIR instead of to their configured paths";
@@ -170,21 +170,14 @@ enum Commands {
         context: usize,
     },
 
-    /// Print the Valve configuration as a JSON-formatted string.
-    DumpConfig {},
-
-    /// Print the order in which Valve-managed tables will be created, as determined by their
-    /// dependency relations.
-    ShowTableOrder {},
-
-    /// Print the incoming dependencies for each Valve-managed table.
-    ShowIncomingDeps {},
-
-    /// Print the outgoing dependencies for each Valve-managed table.
-    ShowOutgoingDeps {},
-
     /// Print the SQL that is used to instantiate Valve-managed tables in a given database.
-    DumpSchema {},
+    GetSchema {},
+
+    /// Print the Valve configuration as a JSON-formatted string.
+    GetConfig {
+        #[command(subcommand)]
+        getconfig_subcommand: GetConfigSubcommands,
+    },
 
     /// Guess the Valve column configuration for the data table represented by a given TSV file.
     Guess {
@@ -281,6 +274,70 @@ enum GetSubcommands {
               help = "Only get messages for column COLUMN of row ROW of table TABLE")]
         column: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+enum GetConfigSubcommands {
+    /// View the full Valve configuration
+    Valve {},
+
+    /// View a table configuration
+    Table {
+        #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
+        table: String,
+    },
+
+    /// View a column configuration
+    Column {
+        #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
+        table: String,
+
+        #[arg(value_name = "COLUMN", action = ArgAction::Set, help = COLUMN_HELP)]
+        column: String,
+    },
+
+    /// View a datatype configuration
+    Datatype {
+        #[arg(value_name = "DATATYPE", action = ArgAction::Set, help = "A datatype name")]
+        datatype: String,
+    },
+
+    /// View the ancestors of a given datatype
+    Ancestors {
+        #[arg(value_name = "DATATYPE", action = ArgAction::Set, help = "A datatype name")]
+        datatype: String,
+    },
+
+    /// View the configured constraints for a given table
+    Constraints {
+        #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
+        table: String,
+    },
+
+    /// View the rules for a given table
+    Rules {
+        #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
+        table: String,
+
+        #[arg(value_name = "COLUMN", action = ArgAction::Set, help = COLUMN_HELP)]
+        column: Option<String>,
+    },
+
+    /// View special configuration table names
+    Special {
+        #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
+        table: Option<String>,
+    },
+
+    /// View the order in which Valve-managed tables will be created, as determined by their
+    /// dependency relations.
+    TableOrder {},
+
+    /// View the incoming dependencies for each Valve-managed table.
+    IncomingDeps {},
+
+    /// View the outgoing dependencies for each Valve-managed table.
+    OutgoingDeps {},
 }
 
 #[derive(Subcommand)]
@@ -645,15 +702,6 @@ async fn main() -> Result<()> {
                 .await
                 .expect("Error dropping tables");
         }
-        Commands::DumpConfig {} => {
-            let valve = build_valve(&cli.source, "").expect(BUILD_ERROR);
-            println!("{}", valve.config);
-        }
-        Commands::DumpSchema {} => {
-            let valve = build_valve(&cli.source, "").expect(BUILD_ERROR);
-            let schema = valve.dump_schema().await.expect("Error dumping schema");
-            println!("{}", schema);
-        }
         Commands::Get { get_subcommand } => {
             let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
             match get_subcommand {
@@ -807,6 +855,150 @@ async fn main() -> Result<()> {
                 }
             };
         }
+        Commands::GetConfig {
+            getconfig_subcommand,
+        } => {
+            let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
+            match getconfig_subcommand {
+                GetConfigSubcommands::Ancestors { datatype } => {
+                    println!(
+                        "{}",
+                        valve
+                            .get_datatype_ancestor_names(datatype)
+                            .iter()
+                            .map(|name| {
+                                if name.contains(" ") {
+                                    format!("'{name}'")
+                                } else {
+                                    name.to_string()
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    );
+                }
+                GetConfigSubcommands::Column { table, column } => {
+                    let column_config = valve
+                        .config
+                        .table
+                        .get(table)
+                        .expect(&format!("Table '{table}' not found"))
+                        .column
+                        .get(column)
+                        .expect(&format!("Column '{column}' not found"));
+                    println!("{}", json!(column_config));
+                }
+                GetConfigSubcommands::Constraints { table } => {
+                    let mut table_constraints = HashMap::new();
+                    table_constraints.insert(
+                        "primary",
+                        json!(valve
+                            .config
+                            .constraint
+                            .primary
+                            .get(table)
+                            .expect(&format!("No table '{table}'"))),
+                    );
+                    table_constraints.insert(
+                        "unique",
+                        json!(valve
+                            .config
+                            .constraint
+                            .unique
+                            .get(table)
+                            .expect(&format!("No table '{table}'"))),
+                    );
+                    table_constraints.insert(
+                        "foreign",
+                        json!(valve
+                            .config
+                            .constraint
+                            .foreign
+                            .get(table)
+                            .expect(&format!("No table '{table}'"))),
+                    );
+                    table_constraints.insert(
+                        "tree",
+                        json!(valve
+                            .config
+                            .constraint
+                            .tree
+                            .get(table)
+                            .expect(&format!("No table '{table}'"))),
+                    );
+                    println!("{}", json!(table_constraints));
+                }
+                GetConfigSubcommands::Datatype { datatype } => {
+                    let dt_config = valve
+                        .config
+                        .datatype
+                        .get(datatype)
+                        .expect(&format!("Datatype '{datatype}' not found"));
+                    println!("{}", json!(dt_config));
+                }
+                GetConfigSubcommands::IncomingDeps {} => {
+                    print_dependencies(&valve, true);
+                }
+                GetConfigSubcommands::OutgoingDeps {} => {
+                    print_dependencies(&valve, false);
+                }
+                GetConfigSubcommands::Rules { table, column } => {
+                    if !valve.config.table.contains_key(table) {
+                        panic!("No table '{table}'");
+                    }
+                    if let Some(table_rules) = valve.config.rule.get(table) {
+                        match column {
+                            Some(column) => {
+                                if let Some(column_rules) = table_rules.get(column) {
+                                    println!("{}", json!(column_rules));
+                                }
+                            }
+                            None => println!("{}", json!(table_rules)),
+                        };
+                    }
+                }
+                GetConfigSubcommands::Special { table } => {
+                    match table {
+                        None => {
+                            println!("Table table name: '{}'", valve.config.special.table);
+                            println!("Column table name: '{}'", valve.config.special.column);
+                            println!("Datatype table name: '{}'", valve.config.special.datatype);
+                            println!("Rule table name: '{}'", valve.config.special.rule);
+                        }
+                        Some(table) => {
+                            let table = table.to_string();
+                            match table.as_str() {
+                                "table" => println!("{}", valve.config.special.table),
+                                "column" => println!("{}", valve.config.special.column),
+                                "datatype" => println!("{}", valve.config.special.datatype),
+                                "rule" => println!("{}", valve.config.special.rule),
+                                _ => panic!("Not a special table type: '{table}'"),
+                            };
+                        }
+                    };
+                }
+                GetConfigSubcommands::Table { table } => {
+                    let table_config = valve
+                        .config
+                        .table
+                        .get(table)
+                        .expect(&format!("{table} not found"));
+                    println!("{}", json!(table_config));
+                }
+                GetConfigSubcommands::TableOrder {} => {
+                    let sorted_table_list = valve.get_sorted_table_list(false);
+                    println!("{}", sorted_table_list.join(", "));
+                }
+                GetConfigSubcommands::Valve {} => {
+                    println!("{}", valve.config)
+                }
+            }
+        }
+        Commands::GetSchema {} => {
+            let valve = build_valve(&cli.source, "").expect(BUILD_ERROR);
+            let schema = valve.dump_schema().await.expect("Error dumping schema");
+            println!("{}", schema);
+        }
         Commands::Guess {
             sample_size,
             error_rate,
@@ -919,19 +1111,6 @@ async fn main() -> Result<()> {
                 .save_all_tables(&save_dir)
                 .await
                 .expect("Error saving tables");
-        }
-        Commands::ShowIncomingDeps {} => {
-            let valve = build_valve(&cli.source, "").expect(BUILD_ERROR);
-            print_dependencies(&valve, true);
-        }
-        Commands::ShowOutgoingDeps {} => {
-            let valve = build_valve(&cli.source, "").expect(BUILD_ERROR);
-            print_dependencies(&valve, false);
-        }
-        Commands::ShowTableOrder {} => {
-            let valve = build_valve(&cli.source, "").expect(BUILD_ERROR);
-            let sorted_table_list = valve.get_sorted_table_list(false);
-            println!("{}", sorted_table_list.join(", "));
         }
         Commands::TestApi {} => {
             let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
