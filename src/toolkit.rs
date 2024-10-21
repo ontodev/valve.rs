@@ -832,7 +832,7 @@ pub fn read_config_files(
                     }
                     // The defined_labels are what will be used to create the table's columns. In
                     // the case where a defined_label is not also an actual_label.
-                    for label_name in &defined_labels {
+                    for label_name in &actual_labels {
                         let column_name =
                             get_column_for_label(&this_column_config, label_name, &table_name)?;
                         column_order.push(column_name);

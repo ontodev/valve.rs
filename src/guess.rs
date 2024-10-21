@@ -48,7 +48,8 @@ pub struct FCMatch {
 /// them, while considering the given error rate that should be tolerated, to try and guess the
 /// table and column configuration for the given table. If `verbose` is set to true progress
 /// messages will be written to STDOUT. if `assume_yes` is set to true the guessed configuration
-/// will be written to the database immediately without prompting the user.
+/// will be written to the database immediately without prompting the user. Returns true if the
+/// changes have been written to the database, and false otherwise.
 pub fn guess(
     valve: &Valve,
     verbose: bool,
@@ -57,7 +58,7 @@ pub fn guess(
     sample_size: &usize,
     error_rate: &f32,
     assume_yes: bool,
-) {
+) -> bool {
     // If a seed was provided, use it to create the random number generator instead of
     // creating it using fresh entropy:
     let mut rng = match seed {
@@ -188,7 +189,7 @@ pub fn guess(
         print!("Do you want to write this updated configuration to the database? [y/N] ");
         if !proceed::proceed() {
             println!("Not writing updated configuration to the database.");
-            std::process::exit(1);
+            return false;
         }
     }
 
@@ -326,6 +327,7 @@ pub fn guess(
     if verbose {
         println!("Done!");
     }
+    return true;
 }
 
 /// Add annotations to the data sample indicating best guesses as to the datatype, nulltype,

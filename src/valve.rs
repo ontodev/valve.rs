@@ -898,6 +898,51 @@ impl Valve {
         })
     }
 
+    /// TODO: Add docstring here
+    pub fn reconfigure(&mut self) -> Result<()> {
+        let table_path = self.get_path()?;
+        let parser = StartParser::new();
+        let (
+            specials_config,
+            tables_config,
+            table_order,
+            datatypes_config,
+            rules_config,
+            constraints_config,
+            sorted_table_list,
+            table_dependencies_in,
+            table_dependencies_out,
+            startup_table_messages,
+        ) = read_config_files(&table_path, &parser, &self.pool)?;
+
+        let config = ValveConfig {
+            special: specials_config,
+            table: tables_config,
+            table_order: table_order,
+            datatype: datatypes_config,
+            rule: rules_config,
+            constraint: constraints_config,
+        };
+
+        let datatype_conditions = generate_datatype_conditions(&config, &parser)?;
+        let rule_conditions = generate_rule_conditions(&config, &datatype_conditions, &parser)?;
+        let structure_conditions = get_parsed_structure_conditions(&config, &parser)?;
+
+        self.config = config;
+        self.sorted_table_list = sorted_table_list.clone();
+        self.table_dependencies_in = table_dependencies_in;
+        self.table_dependencies_out = table_dependencies_out;
+        self.datatype_conditions = datatype_conditions;
+        self.rule_conditions = rule_conditions;
+        self.structure_conditions = structure_conditions;
+        self.user = String::from("VALVE");
+        self.verbose = false;
+        self.interactive = false;
+        self.initial_load = false;
+        self.startup_table_messages = startup_table_messages;
+        Ok(())
+    }
+
     /// Configures a SQLite database for initial loading by setting a number of unsafe PRAGMAs
     /// that are unsafe in general but suitable when setting up a Valve database for the first
     /// time. Note that if Valve's managed database is not a SQLite database, calling this function
@@ -1723,6 +1768,14 @@ impl Valve {
 
         // Finally, create further unique indexes on row_number and row_order:
         statements.push(format!(
+            r#"DROP INDEX IF EXISTS "{}_row_number_idx";"#,
+            table_name,
+        ));
+        statements.push(format!(
+            r#"DROP INDEX IF EXISTS "{}_row_order_idx";"#,
+            table_name,
+        ));
+        statements.push(format!(
             r#"CREATE UNIQUE INDEX "{}_row_number_idx" ON "{}"("row_number");"#,
             table_name, table_name
         ));
@@ -1792,8 +1845,49 @@ impl Valve {
         Ok(output)
     }
 
+    /// Drop and recreate the tables in the given list
+    pub async fn recreate_tables(&self, tables: &Vec<&str>) -> Result<&Self> {
+        println!("Entering recreate_tables()");
+        let setup_statements = self.get_setup_statements().await?;
+        for table in tables {
+            let table_config = self.get_table_config(table)?;
+            if table_config.options.contains("db_view") {
+                // See the comment at a similar point in ensure_all_tables_created() for an
+                // explanation of this logic.
+                if table_config.path.to_lowercase().ends_with(".sql") {
+                    self.execute_sql_file(&table_config.path).await?;
+                } else if table_config.path != "" {
+                    self.execute_script(&table_config.path, &vec![&self.db_path, table])?;
+                } else {
+                    log::warn!("View '{table}' has an empty path. Doing nothing.");
+                }
+                // Check to make sure that the view now exists:
+                if !self.view_exists(table).await? {
+                    return Err(ValveError::DataError(format!(
+                        "No view named '{}' exists in the database",
+                        table
+                    ))
+                    .into());
+                }
+            } else {
+                self.drop_tables(&vec![table]).await?;
+                let table_statements =
+                    setup_statements
+                        .get(*table)
+                        .ok_or(ValveError::ConfigError(format!(
+                            "Could not find setup statements for {}",
+                            table
+                        )))?;
+                for stmt in table_statements {
+                    self.execute_sql(stmt).await?;
+                }
+            }
+        }
+        Ok(self)
+    }
+
     /// Create all configured database tables and views if they do not already exist as configured.
-    pub async fn create_all_tables(&self) -> Result<&Self> {
+    pub async fn ensure_all_tables_created(&self) -> Result<&Self> {
         let setup_statements = self.get_setup_statements().await?;
         let sorted_table_list = self.get_sorted_table_list(false);
         for table in &sorted_table_list {
@@ -1935,7 +2029,7 @@ impl Valve {
     /// Given a vector of table names, truncate those tables, in the given order, including any
     /// tables that must be truncated implicitly because of a dependency relationship.
     pub async fn truncate_tables(&self, tables: &Vec<&str>) -> Result<&Self> {
-        self.create_all_tables().await?;
+        self.ensure_all_tables_created().await?;
         let truncate_list = self.add_dependencies(tables, true)?;
 
         // We must use CASCADE in the case of PostgreSQL since we cannot truncate a table, T, that
@@ -1972,6 +2066,7 @@ impl Valve {
         if self.verbose {
             println!("Processing {} tables.", table_list.len());
         }
+
         self.load_tables(&table_list, validate).await
     }
 
