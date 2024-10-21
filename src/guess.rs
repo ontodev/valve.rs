@@ -53,6 +53,7 @@ pub struct FCMatch {
 pub fn guess(
     valve: &Valve,
     verbose: bool,
+    table: Option<&str>,
     table_tsv: &str,
     seed: &Option<u64>,
     sample_size: &usize,
@@ -66,18 +67,21 @@ pub fn guess(
         Some(seed) => StdRng::seed_from_u64(*seed),
     };
 
-    // Use the name of the TSV file to determine the table name:
-    let table = std::path::Path::new(table_tsv)
-        .file_stem()
-        .expect(&format!(
-            "Error geting file stem for {}: Not a filename",
-            table_tsv
-        ))
-        .to_str()
-        .expect(&format!(
-            "Error getting file stem for {}: Not a valid UTF-8 string",
-            table_tsv
-        ));
+    // Use the name of the TSV file to determine the table name if it has not been given:
+    let table = match table {
+        None => std::path::Path::new(table_tsv)
+            .file_stem()
+            .expect(&format!(
+                "Error geting file stem for {}: Not a filename",
+                table_tsv
+            ))
+            .to_str()
+            .expect(&format!(
+                "Error getting file stem for {}: Not a valid UTF-8 string",
+                table_tsv
+            )),
+        Some(table) => table,
+    };
 
     // Collect the random data samples from the tsv file:
     if verbose {

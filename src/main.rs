@@ -26,6 +26,8 @@ static COLUMN_HELP: &str = "A column name or label";
 
 static BUILD_ERROR: &str = "Error building Valve";
 
+static RECONFIGURE_ERROR: &str = "Could not reconfigure Valve";
+
 #[derive(Parser)]
 #[command(version,
           about = "Valve: A lightweight validation engine -- command line interface",
@@ -759,9 +761,11 @@ async fn main() -> Result<()> {
         Commands::Config { subcommand } => {
             let mut valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
             match subcommand {
+                // TODO: Although the table table must be named "table", the column
+                // table could in principle have a different name. We need to take this into account
+                // when updating the column table in the match arms below.
                 ConfigSubcommands::Add { subcommand } => match subcommand {
                     ConfigAddSubcommands::Table {
-                        // TODO: Make use of the table name in the guess function.
                         table,
                         path,
                         sample_size,
@@ -771,6 +775,7 @@ async fn main() -> Result<()> {
                         let table_added = guess(
                             &valve,
                             cli.verbose,
+                            Some(table),
                             path,
                             seed,
                             sample_size,
@@ -779,7 +784,7 @@ async fn main() -> Result<()> {
                         );
                         if table_added {
                             valve.save_tables(&vec!["table", "column"], &None).await?;
-                            valve.reconfigure().expect("Could not reconfigure Valve");
+                            valve.reconfigure().expect(RECONFIGURE_ERROR);
                             valve
                                 .load_tables(&vec!["table", "column"], cli.assume_yes)
                                 .await?;
@@ -789,6 +794,9 @@ async fn main() -> Result<()> {
                     ConfigAddSubcommands::Column { .. } => todo!(),
                     ConfigAddSubcommands::Datatype { .. } => todo!(),
                 },
+                // TODO: Note that in the below match arms, in addition to updating the column
+                // name in the column table, we also need to update any structures that refer to
+                // that column in other tables.
                 ConfigSubcommands::Rename { .. } => todo!(),
                 ConfigSubcommands::Move { .. } => todo!(),
                 ConfigSubcommands::Delete { subcommand } => match subcommand {
@@ -1231,7 +1239,22 @@ async fn main() -> Result<()> {
                 .await
                 .expect("Error saving tables");
         }
-        Commands::SaveAs { .. } => todo!(),
+        Commands::SaveAs { table, path } => {
+            let mut valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
+            let sql = local_sql_syntax(
+                &valve.db_kind,
+                &format!(r#"UPDATE "table" SET "path" = {SQL_PARAM} WHERE "table" = {SQL_PARAM}"#),
+            );
+            let mut query = sqlx_query(&sql);
+            query = query.bind(path);
+            query = query.bind(table);
+            query.execute(&valve.pool).await?;
+            valve.save_tables(&vec!["table"], &None).await?;
+            valve.save_tables(&vec![table], &None).await?;
+            valve.reconfigure().expect(RECONFIGURE_ERROR);
+            valve.load_tables(&vec!["table"], true).await?;
+            valve.ensure_all_tables_created().await?;
+        }
         Commands::TestApi {} => {
             let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
             run_api_tests(&valve)
