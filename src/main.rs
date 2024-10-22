@@ -24,6 +24,8 @@ static ROW_HELP: &str = "A row number";
 
 static COLUMN_HELP: &str = "A column name or label";
 
+static DATATYPE_HELP: &str = "A datatype name";
+
 static BUILD_ERROR: &str = "Error building Valve";
 
 static RECONFIGURE_ERROR: &str = "Could not reconfigure Valve";
@@ -104,7 +106,7 @@ enum Commands {
         save_dir: Option<String>,
     },
 
-    /// Move the configured path for a given table to a different location
+    /// Save a table under a different filename.
     SaveAs {
         #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
         table: String,
@@ -155,19 +157,10 @@ enum Commands {
         subcommand: DeleteSubcommands,
     },
 
-    /// Reorder rows in database tables
+    /// Reorder rows in database tables and move columns between tables
     Move {
-        #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
-        table: String,
-
-        #[arg(value_name = "ROW", action = ArgAction::Set,
-              help = "The number of the row from TABLE to be moved")]
-        row: u32,
-
-        #[arg(value_name = "AFTER", action = ArgAction::Set,
-              help = "The number of the row coming immediately before ROW in TABLE in the new row \
-                      order. If this is 0, the row will be moved to the first position.")]
-        after: u32,
+        #[command(subcommand)]
+        subcommand: MoveSubcommands,
     },
 
     /// Undo changes to the database
@@ -184,19 +177,10 @@ enum Commands {
         context: usize,
     },
 
-    /// Print the SQL that is used to instantiate Valve-managed tables in a given database.
-    GetSchema {},
-
-    /// Print the Valve configuration as a JSON-formatted string.
-    GetConfig {
+    /// TODO: Add docstring
+    Rename {
         #[command(subcommand)]
-        subcommand: GetConfigSubcommands,
-    },
-
-    /// Edit the Valve configuration tables
-    Config {
-        #[command(subcommand)]
-        subcommand: ConfigSubcommands,
+        subcommand: RenameSubcommands,
     },
 
     /// Run a set of predefined tests, on a specified pre-loaded database, that will test Valve's
@@ -271,21 +255,15 @@ enum GetSubcommands {
               help = "Only get messages for column COLUMN of row ROW of table TABLE")]
         column: Option<String>,
     },
-}
-
-#[derive(Subcommand)]
-enum GetConfigSubcommands {
-    /// View the full Valve configuration
-    Valve {},
 
     /// View a table configuration
-    Table {
+    TableConfig {
         #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
         table: String,
     },
 
     /// View a column configuration
-    Column {
+    ColumnConfig {
         #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
         table: String,
 
@@ -294,16 +272,19 @@ enum GetConfigSubcommands {
     },
 
     /// View a datatype configuration
-    Datatype {
-        #[arg(value_name = "DATATYPE", action = ArgAction::Set, help = "A datatype name")]
+    DatatypeConfig {
+        #[arg(value_name = "DATATYPE", action = ArgAction::Set, help = DATATYPE_HELP)]
         datatype: String,
     },
 
     /// View the ancestors of a given datatype
     Ancestors {
-        #[arg(value_name = "DATATYPE", action = ArgAction::Set, help = "A datatype name")]
+        #[arg(value_name = "DATATYPE", action = ArgAction::Set, help = DATATYPE_HELP)]
         datatype: String,
     },
+
+    /// View the full Valve configuration
+    ValveConfig {},
 
     /// View the configured constraints for a given table
     Constraints {
@@ -325,6 +306,9 @@ enum GetConfigSubcommands {
         #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
         table: Option<String>,
     },
+
+    /// Print the SQL that is used to instantiate Valve-managed tables in a given database.
+    Schema {},
 
     /// View the order in which Valve-managed tables will be created, as determined by their
     /// dependency relations.
@@ -362,6 +346,47 @@ enum AddSubcommands {
 
         #[arg(value_name = "COLUMN", action = ArgAction::Set, help = COLUMN_HELP)]
         column: Option<String>,
+    },
+
+    /// Add a table to the database
+    Table {
+        #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
+        table: String,
+
+        #[arg(value_name = "PATH", action = ArgAction::Set,
+              help = "The TSV file representing the table whose column configuration will be \
+                      guessed.")]
+        path: String,
+
+        #[arg(long, value_name = "SIZE", action = ArgAction::Set,
+              help = "Sample size to use when guessing",
+              default_value_t = 10000)]
+        sample_size: usize,
+
+        #[arg(long, value_name = "RATE", action = ArgAction::Set,
+              help = "A number between 0 and 1 (inclusive) representing the proportion of errors \
+                      expected",
+              default_value_t = 0.1)]
+        error_rate: f32,
+
+        #[arg(long, value_name = "SEED", action = ArgAction::Set,
+              help = "Use SEED for random sampling")]
+        seed: Option<u64>,
+    },
+
+    /// TODO: Add docstring
+    Column {
+        #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
+        table: String,
+
+        #[arg(value_name = "COLUMN", action = ArgAction::Set, help = COLUMN_HELP)]
+        column: String,
+    },
+
+    /// TODO: Add docstring
+    Datatype {
+        #[arg(value_name = "DATATYPE", action = ArgAction::Set, help = DATATYPE_HELP)]
+        datatype: String,
     },
 }
 
@@ -419,6 +444,36 @@ enum UpdateSubcommands {
 }
 
 #[derive(Subcommand)]
+enum MoveSubcommands {
+    /// TODO: Add docstring.
+    Row {
+        #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
+        table: String,
+
+        #[arg(value_name = "ROW", action = ArgAction::Set,
+              help = "The number of the row from TABLE to be moved")]
+        row: u32,
+
+        #[arg(value_name = "AFTER", action = ArgAction::Set,
+              help = "The number of the row coming immediately before ROW in TABLE in the new row \
+                      order. If this is 0, the row will be moved to the first position.")]
+        after: u32,
+    },
+    /// Move a column to a new table
+    Column {
+        #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
+        table: String,
+
+        #[arg(value_name = "COLUMN", action = ArgAction::Set, help = COLUMN_HELP)]
+        column: String,
+
+        #[arg(value_name = "NEW_TABLE", action = ArgAction::Set,
+              help = "The name of the table to move the column to")]
+        new_table: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum DeleteSubcommands {
     /// Delete rows from a given table.
     Row {
@@ -440,18 +495,53 @@ enum DeleteSubcommands {
               help = "Delete all messages whose rule matches the SQL LIKE-clause given by RULE")]
         rule: Option<String>,
     },
+
+    /// TODO: Add docstring
+    Table {
+        #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
+        table: String,
+    },
+
+    /// TODO: Add docstring
+    Column {
+        #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
+        table: String,
+
+        #[arg(value_name = "COLUMN", action = ArgAction::Set, help = COLUMN_HELP)]
+        column: String,
+    },
+
+    /// TODO: Add docstring
+    Datatype {
+        #[arg(value_name = "DATATYPE", action = ArgAction::Set, help = DATATYPE_HELP)]
+        datatype: String,
+    },
 }
 
 #[derive(Subcommand)]
-enum ConfigSubcommands {
-    /// Add tables, columns, and datatypes to the database
-    Add {
-        #[command(subcommand)]
-        subcommand: ConfigAddSubcommands,
+enum RenameSubcommands {
+    /// Rename a table
+    Table {
+        #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
+        table: String,
+
+        #[arg(value_name = "NEW_NAME", action = ArgAction::Set,
+              help = "The desired new name for the table")]
+        new_name: String,
+    },
+
+    /// Rename a datatype
+    Datatype {
+        #[arg(value_name = "DATATYPE", action = ArgAction::Set, help = DATATYPE_HELP)]
+        datatype: String,
+
+        #[arg(value_name = "NEW_NAME", action = ArgAction::Set,
+              help = "The desired new name for the column")]
+        new_name: String,
     },
 
     /// Rename a column
-    Rename {
+    Column {
         #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
         table: String,
 
@@ -461,93 +551,6 @@ enum ConfigSubcommands {
         #[arg(value_name = "NEW_NAME", action = ArgAction::Set,
               help = "The desired new name for the column")]
         new_name: String,
-    },
-
-    /// Move a column to a new table
-    Move {
-        #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
-        table: String,
-
-        #[arg(value_name = "COLUMN", action = ArgAction::Set, help = COLUMN_HELP)]
-        column: String,
-
-        #[arg(value_name = "NEW_TABLE", action = ArgAction::Set,
-              help = "The name of the table to move the column to")]
-        new_table: String,
-    },
-
-    /// Delete tables, columns, datatypes and rules
-    Delete {
-        #[command(subcommand)]
-        subcommand: ConfigDeleteSubcommands,
-    },
-}
-
-#[derive(Subcommand)]
-enum ConfigAddSubcommands {
-    /// Add a table to the database
-    Table {
-        #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
-        table: String,
-
-        #[arg(value_name = "PATH", action = ArgAction::Set,
-              help = "The TSV file representing the table whose column configuration will be \
-                      guessed.")]
-        path: String,
-
-        #[arg(long, value_name = "SIZE", action = ArgAction::Set,
-              help = "Sample size to use when guessing",
-              default_value_t = 10000)]
-        sample_size: usize,
-
-        #[arg(long, value_name = "RATE", action = ArgAction::Set,
-              help = "A number between 0 and 1 (inclusive) representing the proportion of errors \
-                      expected",
-              default_value_t = 0.1)]
-        error_rate: f32,
-
-        #[arg(long, value_name = "SEED", action = ArgAction::Set,
-              help = "Use SEED for random sampling")]
-        seed: Option<u64>,
-    },
-
-    /// TODO: Add docstring
-    Column {
-        #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
-        table: String,
-
-        #[arg(value_name = "COLUMN", action = ArgAction::Set, help = COLUMN_HELP)]
-        column: String,
-    },
-
-    /// TODO: Add docstring
-    Datatype {
-        #[arg(value_name = "DATATYPE", action = ArgAction::Set, help = "A datatype name")]
-        datatype: String,
-    },
-}
-
-#[derive(Subcommand)]
-enum ConfigDeleteSubcommands {
-    /// TODO: Add docstring
-    Table {
-        #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
-        table: String,
-    },
-
-    /// TODO: Add docstring
-    Column {
-        #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
-        table: String,
-
-        #[arg(value_name = "COLUMN", action = ArgAction::Set, help = COLUMN_HELP)]
-        column: String,
-    },
-
-    /// TODO: Add docstring
-    Datatype {
-        #[arg(value_name = "DATATYPE", action = ArgAction::Set, help = "A datatype name")]
-        datatype: String,
     },
 }
 
@@ -723,6 +726,17 @@ async fn main() -> Result<()> {
     match &cli.command {
         Commands::Add { subcommand } => {
             match subcommand {
+                AddSubcommands::Column { .. } => todo!(),
+                AddSubcommands::Datatype { .. } => todo!(),
+                AddSubcommands::Message { table, row, column } => {
+                    let (table, row, column, value, level, rule, message) =
+                        read_input_message(table, row, column);
+                    let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
+                    let message_id = valve
+                        .insert_message(&table, row, &column, &value, &level, &rule, &message)
+                        .await?;
+                    println!("{message_id}");
+                }
                 AddSubcommands::Row { table } => {
                     let mut row = String::new();
                     io::stdin()
@@ -747,63 +761,35 @@ async fn main() -> Result<()> {
                         );
                     }
                 }
-                AddSubcommands::Message { table, row, column } => {
-                    let (table, row, column, value, level, rule, message) =
-                        read_input_message(table, row, column);
-                    let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
-                    let message_id = valve
-                        .insert_message(&table, row, &column, &value, &level, &rule, &message)
-                        .await?;
-                    println!("{message_id}");
-                }
-            };
-        }
-        Commands::Config { subcommand } => {
-            let mut valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
-            match subcommand {
-                // TODO: Although the table table must be named "table", the column
-                // table could in principle have a different name. We need to take this into account
-                // when updating the column table in the match arms below.
-                ConfigSubcommands::Add { subcommand } => match subcommand {
-                    ConfigAddSubcommands::Table {
-                        table,
+                AddSubcommands::Table {
+                    table,
+                    path,
+                    sample_size,
+                    error_rate,
+                    seed,
+                } => {
+                    let mut valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
+                    let table_added = guess(
+                        &valve,
+                        cli.verbose,
+                        Some(table),
                         path,
+                        seed,
                         sample_size,
                         error_rate,
-                        seed,
-                    } => {
-                        let table_added = guess(
-                            &valve,
-                            cli.verbose,
-                            Some(table),
-                            path,
-                            seed,
-                            sample_size,
-                            error_rate,
-                            cli.assume_yes,
-                        );
-                        if table_added {
-                            valve.save_tables(&vec!["table", "column"], &None).await?;
-                            valve.reconfigure().expect(RECONFIGURE_ERROR);
-                            valve
-                                .load_tables(&vec!["table", "column"], cli.assume_yes)
-                                .await?;
-                            valve.ensure_all_tables_created().await?;
-                        }
+                        // TODO: This is unnecessary since this flag is available via the
+                        // valve instance (first arg above).
+                        cli.assume_yes,
+                    );
+                    if table_added {
+                        valve.save_tables(&vec!["table", "column"], &None).await?;
+                        valve.reconfigure().expect(RECONFIGURE_ERROR);
+                        valve.load_tables(&vec!["table", "column"], true).await?;
+                        valve.ensure_all_tables_created().await?;
+                        // TODO: Ask the user if they want to load the table now. If assume_yes
+                        // is set to true, then load by default.
                     }
-                    ConfigAddSubcommands::Column { .. } => todo!(),
-                    ConfigAddSubcommands::Datatype { .. } => todo!(),
-                },
-                // TODO: Note that in the below match arms, in addition to updating the column
-                // name in the column table, we also need to update any structures that refer to
-                // that column in other tables.
-                ConfigSubcommands::Rename { .. } => todo!(),
-                ConfigSubcommands::Move { .. } => todo!(),
-                ConfigSubcommands::Delete { subcommand } => match subcommand {
-                    ConfigDeleteSubcommands::Table { .. } => todo!(),
-                    ConfigDeleteSubcommands::Column { .. } => todo!(),
-                    ConfigDeleteSubcommands::Datatype { .. } => todo!(),
-                },
+                }
             };
         }
         Commands::Create {} => {
@@ -816,14 +802,8 @@ async fn main() -> Result<()> {
         Commands::Delete { subcommand } => {
             let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
             match subcommand {
-                DeleteSubcommands::Row { table, rows } => {
-                    for row in rows {
-                        valve
-                            .delete_row(table, row)
-                            .await
-                            .expect("Could not delete row");
-                    }
-                }
+                DeleteSubcommands::Column { .. } => todo!(),
+                DeleteSubcommands::Datatype { .. } => todo!(),
                 DeleteSubcommands::Messages { message_id, rule } => {
                     if let Some(message_id) = message_id {
                         valve
@@ -839,6 +819,15 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
+                DeleteSubcommands::Row { table, rows } => {
+                    for row in rows {
+                        valve
+                            .delete_row(table, row)
+                            .await
+                            .expect("Could not delete row");
+                    }
+                }
+                DeleteSubcommands::Table { .. } => todo!(),
             };
         }
         Commands::DropAll {} => {
@@ -851,16 +840,21 @@ async fn main() -> Result<()> {
         Commands::Get { subcommand } => {
             let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
             match subcommand {
-                GetSubcommands::Row { table, row } => {
-                    let row = valve
-                        .get_row_from_db(table, row)
-                        .await
-                        .expect("Error getting row");
+                GetSubcommands::Ancestors { datatype } => {
                     println!(
                         "{}",
-                        json!(row
-                            .to_rich_json()
-                            .expect("Error converting row to rich JSON"))
+                        valve
+                            .get_datatype_ancestor_names(datatype)
+                            .iter()
+                            .map(|name| {
+                                if name.contains(" ") {
+                                    format!("'{name}'")
+                                } else {
+                                    name.to_string()
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" ")
                     );
                 }
                 GetSubcommands::Cell { table, row, column } => {
@@ -875,47 +869,67 @@ async fn main() -> Result<()> {
                             .expect("Error converting cell to rich JSON"))
                     );
                 }
-                GetSubcommands::Value { table, row, column } => {
-                    let cell = valve
-                        .get_cell_from_db(table, row, column)
-                        .await
-                        .expect("Error getting cell");
-                    println!("{}", cell.strvalue());
+                GetSubcommands::ColumnConfig { table, column } => {
+                    let column_config = valve
+                        .config
+                        .table
+                        .get(table)
+                        .expect(&format!("Table '{table}' not found"))
+                        .column
+                        .get(column)
+                        .expect(&format!("Column '{column}' not found"));
+                    println!("{}", json!(column_config));
                 }
-                GetSubcommands::Table { table } => {
-                    let (sql, sql_params) =
-                        generic_select_with_message_values(table, &valve.config, &valve.db_kind);
-                    let sql = local_sql_syntax(&valve.db_kind, &sql);
-                    let mut query = sqlx_query(&sql);
-                    for param in &sql_params {
-                        query = query.bind(param);
-                    }
-
-                    let mut row_stream = query.fetch(&valve.pool);
-                    let mut is_first = true;
-                    print!("[");
-                    while let Some(row) = row_stream.try_next().await? {
-                        if !is_first {
-                            print!(",");
-                        } else {
-                            is_first = false;
-                        }
-                        let row = ValveRow::from_any_row(
-                            &valve.config,
-                            &valve.db_kind,
-                            table,
-                            &row,
-                            &None,
-                        )
-                        .expect("Error converting to ValveRow");
-                        println!(
-                            "{}",
-                            json!(row
-                                .to_rich_json()
-                                .expect("Error converting row to rich JSON"))
-                        );
-                    }
-                    println!("]");
+                GetSubcommands::Constraints { table } => {
+                    let mut table_constraints = HashMap::new();
+                    table_constraints.insert(
+                        "primary",
+                        json!(valve
+                            .config
+                            .constraint
+                            .primary
+                            .get(table)
+                            .expect(&format!("No table '{table}'"))),
+                    );
+                    table_constraints.insert(
+                        "unique",
+                        json!(valve
+                            .config
+                            .constraint
+                            .unique
+                            .get(table)
+                            .expect(&format!("No table '{table}'"))),
+                    );
+                    table_constraints.insert(
+                        "foreign",
+                        json!(valve
+                            .config
+                            .constraint
+                            .foreign
+                            .get(table)
+                            .expect(&format!("No table '{table}'"))),
+                    );
+                    table_constraints.insert(
+                        "tree",
+                        json!(valve
+                            .config
+                            .constraint
+                            .tree
+                            .get(table)
+                            .expect(&format!("No table '{table}'"))),
+                    );
+                    println!("{}", json!(table_constraints));
+                }
+                GetSubcommands::DatatypeConfig { datatype } => {
+                    let dt_config = valve
+                        .config
+                        .datatype
+                        .get(datatype)
+                        .expect(&format!("Datatype '{datatype}' not found"));
+                    println!("{}", json!(dt_config));
+                }
+                GetSubcommands::IncomingDeps {} => {
+                    print_dependencies(&valve, true);
                 }
                 GetSubcommands::Messages {
                     table,
@@ -999,94 +1013,22 @@ async fn main() -> Result<()> {
                     }
                     println!("]");
                 }
-            };
-        }
-        Commands::GetConfig { subcommand } => {
-            let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
-            match subcommand {
-                GetConfigSubcommands::Ancestors { datatype } => {
-                    println!(
-                        "{}",
-                        valve
-                            .get_datatype_ancestor_names(datatype)
-                            .iter()
-                            .map(|name| {
-                                if name.contains(" ") {
-                                    format!("'{name}'")
-                                } else {
-                                    name.to_string()
-                                }
-                            })
-                            .collect::<Vec<_>>()
-                            .join(" ")
-                    );
-                }
-                GetConfigSubcommands::Column { table, column } => {
-                    let column_config = valve
-                        .config
-                        .table
-                        .get(table)
-                        .expect(&format!("Table '{table}' not found"))
-                        .column
-                        .get(column)
-                        .expect(&format!("Column '{column}' not found"));
-                    println!("{}", json!(column_config));
-                }
-                GetConfigSubcommands::Constraints { table } => {
-                    let mut table_constraints = HashMap::new();
-                    table_constraints.insert(
-                        "primary",
-                        json!(valve
-                            .config
-                            .constraint
-                            .primary
-                            .get(table)
-                            .expect(&format!("No table '{table}'"))),
-                    );
-                    table_constraints.insert(
-                        "unique",
-                        json!(valve
-                            .config
-                            .constraint
-                            .unique
-                            .get(table)
-                            .expect(&format!("No table '{table}'"))),
-                    );
-                    table_constraints.insert(
-                        "foreign",
-                        json!(valve
-                            .config
-                            .constraint
-                            .foreign
-                            .get(table)
-                            .expect(&format!("No table '{table}'"))),
-                    );
-                    table_constraints.insert(
-                        "tree",
-                        json!(valve
-                            .config
-                            .constraint
-                            .tree
-                            .get(table)
-                            .expect(&format!("No table '{table}'"))),
-                    );
-                    println!("{}", json!(table_constraints));
-                }
-                GetConfigSubcommands::Datatype { datatype } => {
-                    let dt_config = valve
-                        .config
-                        .datatype
-                        .get(datatype)
-                        .expect(&format!("Datatype '{datatype}' not found"));
-                    println!("{}", json!(dt_config));
-                }
-                GetConfigSubcommands::IncomingDeps {} => {
-                    print_dependencies(&valve, true);
-                }
-                GetConfigSubcommands::OutgoingDeps {} => {
+                GetSubcommands::OutgoingDeps {} => {
                     print_dependencies(&valve, false);
                 }
-                GetConfigSubcommands::Rules { table, column } => {
+                GetSubcommands::Row { table, row } => {
+                    let row = valve
+                        .get_row_from_db(table, row)
+                        .await
+                        .expect("Error getting row");
+                    println!(
+                        "{}",
+                        json!(row
+                            .to_rich_json()
+                            .expect("Error converting row to rich JSON"))
+                    );
+                }
+                GetSubcommands::Rules { table, column } => {
                     if !valve.config.table.contains_key(table) {
                         panic!("No table '{table}'");
                     }
@@ -1101,7 +1043,12 @@ async fn main() -> Result<()> {
                         };
                     }
                 }
-                GetConfigSubcommands::Special { table } => {
+                GetSubcommands::Schema {} => {
+                    let valve = build_valve(&cli.source, "").expect(BUILD_ERROR);
+                    let schema = valve.dump_schema().await.expect("Error dumping schema");
+                    println!("{}", schema);
+                }
+                GetSubcommands::Special { table } => {
                     match table {
                         None => {
                             println!("Table table name: '{}'", valve.config.special.table);
@@ -1121,7 +1068,42 @@ async fn main() -> Result<()> {
                         }
                     };
                 }
-                GetConfigSubcommands::Table { table } => {
+                GetSubcommands::Table { table } => {
+                    let (sql, sql_params) =
+                        generic_select_with_message_values(table, &valve.config, &valve.db_kind);
+                    let sql = local_sql_syntax(&valve.db_kind, &sql);
+                    let mut query = sqlx_query(&sql);
+                    for param in &sql_params {
+                        query = query.bind(param);
+                    }
+
+                    let mut row_stream = query.fetch(&valve.pool);
+                    let mut is_first = true;
+                    print!("[");
+                    while let Some(row) = row_stream.try_next().await? {
+                        if !is_first {
+                            print!(",");
+                        } else {
+                            is_first = false;
+                        }
+                        let row = ValveRow::from_any_row(
+                            &valve.config,
+                            &valve.db_kind,
+                            table,
+                            &row,
+                            &None,
+                        )
+                        .expect("Error converting to ValveRow");
+                        println!(
+                            "{}",
+                            json!(row
+                                .to_rich_json()
+                                .expect("Error converting row to rich JSON"))
+                        );
+                    }
+                    println!("]");
+                }
+                GetSubcommands::TableConfig { table } => {
                     let table_config = valve
                         .config
                         .table
@@ -1129,19 +1111,21 @@ async fn main() -> Result<()> {
                         .expect(&format!("{table} not found"));
                     println!("{}", json!(table_config));
                 }
-                GetConfigSubcommands::TableOrder {} => {
+                GetSubcommands::TableOrder {} => {
                     let sorted_table_list = valve.get_sorted_table_list(false);
                     println!("{}", sorted_table_list.join(", "));
                 }
-                GetConfigSubcommands::Valve {} => {
+                GetSubcommands::Value { table, row, column } => {
+                    let cell = valve
+                        .get_cell_from_db(table, row, column)
+                        .await
+                        .expect("Error getting cell");
+                    println!("{}", cell.strvalue());
+                }
+                GetSubcommands::ValveConfig {} => {
                     println!("{}", valve.config)
                 }
-            }
-        }
-        Commands::GetSchema {} => {
-            let valve = build_valve(&cli.source, "").expect(BUILD_ERROR);
-            let schema = valve.dump_schema().await.expect("Error dumping schema");
-            println!("{}", schema);
+            };
         }
         Commands::History { context } => {
             let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
@@ -1200,9 +1184,14 @@ async fn main() -> Result<()> {
                 .await
                 .expect("Error loading tables");
         }
-        Commands::Move { table, row, after } => {
+        Commands::Move { subcommand } => {
             let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
-            valve.move_row(table, row, after).await?;
+            match subcommand {
+                MoveSubcommands::Column { .. } => todo!(),
+                MoveSubcommands::Row { table, row, after } => {
+                    valve.move_row(table, row, after).await?;
+                }
+            };
         }
         Commands::Redo {} | Commands::Undo {} => {
             let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
@@ -1219,6 +1208,14 @@ async fn main() -> Result<()> {
                         .expect("Error converting row to rich JSON"))
                 );
             }
+        }
+        Commands::Rename { subcommand } => {
+            let _valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
+            match subcommand {
+                RenameSubcommands::Column { .. } => todo!(),
+                RenameSubcommands::Datatype { .. } => todo!(),
+                RenameSubcommands::Table { .. } => todo!(),
+            };
         }
         Commands::Save { save_dir, tables } => {
             let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
@@ -1240,7 +1237,10 @@ async fn main() -> Result<()> {
                 .expect("Error saving tables");
         }
         Commands::SaveAs { table, path } => {
-            let mut valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
+            let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
+            valve.save_table(table, path).await?;
+            // TODO: DON'T NEED TO DO THE STUFF BELOW. REMOVE IT:
+            /*
             let sql = local_sql_syntax(
                 &valve.db_kind,
                 &format!(r#"UPDATE "table" SET "path" = {SQL_PARAM} WHERE "table" = {SQL_PARAM}"#),
@@ -1254,6 +1254,7 @@ async fn main() -> Result<()> {
             valve.reconfigure().expect(RECONFIGURE_ERROR);
             valve.load_tables(&vec!["table"], true).await?;
             valve.ensure_all_tables_created().await?;
+            */
         }
         Commands::TestApi {} => {
             let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
