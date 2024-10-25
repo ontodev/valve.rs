@@ -629,31 +629,52 @@ async fn main() -> Result<()> {
             .expect("Can't convert to simple JSON")
     }
 
-    fn read_json_input() -> JsonRow {
-        let mut json_row = String::new();
-        io::stdin()
-            .read_line(&mut json_row)
-            .expect("Error reading from STDIN");
-        let json_row = serde_json::from_str::<SerdeValue>(&json_row)
-            .expect(&format!("Invalid JSON: {json_row}"))
-            .as_object()
-            .expect(&format!("{json_row} is not a JSON object"))
-            .clone();
+    // Read a JSON-formatted string from STDIN and verify, using the given Valve instance, that
+    // the fields in the JSON correspond to the allowed fields in the given table:
+    fn read_json_input(valve: &Valve, table: &str) -> JsonRow {
+        let json_row = {
+            let mut json_row = String::new();
+            io::stdin()
+                .read_line(&mut json_row)
+                .expect("Error reading from STDIN");
+            let json_row = serde_json::from_str::<SerdeValue>(&json_row)
+                .expect(&format!("Invalid JSON: {json_row}"))
+                .as_object()
+                .expect(&format!("{json_row} is not a JSON object"))
+                .clone();
+            json_row
+        };
+        // Verify that all of the columns specified in the input JSON exist in the table:
+        let json_columns = json_row.keys().collect::<Vec<_>>();
+        let ignored_columns = {
+            if table == "message" {
+                vec!["message_id"]
+            } else if table == "history" {
+                vec!["history_id"]
+            } else {
+                vec!["row_number", "row_order"]
+            }
+        };
+        let configured_columns = valve
+            .config
+            .table
+            .get(table)
+            .expect(&format!("No configuration found for '{table}'"))
+            .column
+            .keys()
+            .collect::<Vec<_>>();
+        for column in &json_columns {
+            if !ignored_columns.contains(&column.as_str()) && !configured_columns.contains(column) {
+                panic!("No column '{column}' in '{table}'");
+            }
+        }
+
         json_row
     }
 
-    // Reads a row from STDIN. This should be formatted as a simple JSON, optionally with
-    // a "row_number" field included. Returns the row number (if any) that was included in the
-    // JSON, as well as a JSON representation of the row  without the row_number field included.
-    fn read_row_input() -> (Option<u32>, JsonRow) {
-        let mut json_row = read_json_input();
-
-        // TODO: Handle unrecognized columns.
-
-        // If the input row contains a row number as one of its cells, remove it from the JSON
-        // and return it separately as the first position of the returned tuple. Otherwise the
-        // first position in the tuple will be None.
-        let row_number = match json_row.get("row_number") {
+    /// Try to extract the row number from the given JSON row:
+    fn extract_rn(json_row: &mut JsonRow) -> Option<u32> {
+        match json_row.get("row_number") {
             None => None,
             Some(value) => {
                 let row_number = value.as_i64().expect("Not a number");
@@ -661,16 +682,15 @@ async fn main() -> Result<()> {
                 json_row.remove("row_number").expect("No row_number in row");
                 row_number
             }
-        };
-
-        (row_number, json_row)
+        }
     }
 
     /// TODO: Add docstring
-    fn read_column_input(table_param: &Option<String>, column_param: &Option<String>) -> JsonRow {
-        // TODO: Handle unrecognized fields in the JSON.
-
-        let json_row = read_json_input();
+    fn extract_column(
+        json_row: &JsonRow,
+        table_param: &Option<String>,
+        column_param: &Option<String>,
+    ) -> JsonRow {
         // Mandatory fields that may optionally be provided as arguments to this function:
         let table = match json_row.get("table") {
             Some(input_table) => match table_param {
@@ -756,14 +776,12 @@ async fn main() -> Result<()> {
     // Reads and parses a JSON-formatted string representing a validation message (for the expected
     // format see, e.g., AddSubcommands::Message above), and returns the tuple:
     // (table, row, column, value, level, rule, message)
-    fn read_message_input(
+    fn extract_message(
         table_param: &Option<String>,
         row_param: &Option<u32>,
         column_param: &Option<String>,
+        json_row: &JsonRow,
     ) -> (String, u32, String, String, String, String, String) {
-        // TODO: Handle unrecognized fields in the JSON.
-
-        let json_row = read_json_input();
         let table = match json_row.get("table") {
             Some(input_table) => match table_param {
                 Some(table_param) if table_param != input_table => {
@@ -828,27 +846,29 @@ async fn main() -> Result<()> {
         Commands::Add { subcommand } => {
             match subcommand {
                 AddSubcommands::Column { table, column } => {
-                    let column_json = read_column_input(table, column);
                     let mut valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
+                    let json_row = read_json_input(&valve, "column");
+                    let column_json = extract_column(&json_row, table, column);
                     valve
                         .add_column(table, column, &column_json, !cli.assume_yes)
                         .await?;
                 }
                 AddSubcommands::Datatype { .. } => todo!(),
                 AddSubcommands::Message { table, row, column } => {
-                    let (table, row, column, value, level, rule, message) =
-                        read_message_input(table, row, column);
                     let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
+                    let json_message = read_json_input(&valve, "message");
+                    let (table, row, column, value, level, rule, message) =
+                        extract_message(table, row, column, &json_message);
                     let message_id = valve
                         .insert_message(&table, row, &column, &value, &level, &rule, &message)
                         .await?;
                     println!("{message_id}");
                 }
                 AddSubcommands::Row { table } => {
-                    let (_, row) = read_row_input();
                     let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
+                    let json_row = read_json_input(&valve, table);
                     let (_, row) = valve
-                        .insert_row(table, &row)
+                        .insert_row(table, &json_row)
                         .await
                         .expect("Error inserting row");
                     if cli.verbose {
@@ -1358,9 +1378,10 @@ async fn main() -> Result<()> {
                 column,
             } = subcommand
             {
-                let (table, row, column, value, level, rule, message) =
-                    read_message_input(table, row, column);
                 let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
+                let json_message = read_json_input(&valve, "message");
+                let (table, row, column, value, level, rule, message) =
+                    extract_message(table, row, column, &json_message);
                 valve
                     .update_message(
                         *message_id,
@@ -1376,7 +1397,8 @@ async fn main() -> Result<()> {
             } else {
                 let (table, row_number, input_row) = match subcommand {
                     UpdateSubcommands::Row { table, row } => {
-                        let (input_rn, json_row) = read_row_input();
+                        let mut json_row = read_json_input(&valve, table);
+                        let input_rn = extract_rn(&mut json_row);
                         let row = match input_rn {
                             Some(input_rn) => match row {
                                 Some(row) if *row != input_rn => panic!(
@@ -1440,7 +1462,8 @@ async fn main() -> Result<()> {
                     (Some(rn), input_row)
                 }
                 None => {
-                    let (rn, input_row) = read_row_input();
+                    let mut input_row = read_json_input(&valve, table);
+                    let rn = extract_rn(&mut input_row);
                     // If now row was input, default to `row` (which could still be None)
                     let rn = match rn {
                         Some(rn) => {
