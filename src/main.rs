@@ -7,7 +7,7 @@ use clap::{ArgAction, Parser, Subcommand};
 use futures::{executor::block_on, TryStreamExt};
 use ontodev_valve::{
     guess::guess,
-    toolkit::{generic_select_with_message_values, local_sql_syntax},
+    toolkit::{generic_select_with_message_values, local_sql_syntax, DbKind},
     valve::{JsonRow, Valve, ValveCell, ValveRow},
     SQL_PARAM,
 };
@@ -28,7 +28,7 @@ static DATATYPE_HELP: &str = "A datatype name";
 
 static BUILD_ERROR: &str = "Error building Valve";
 
-static REBUILD_ERROR: &str = "Could not rebuild Valve";
+static REBUILD_ERROR: &str = "Error rebuilding Valve";
 
 #[derive(Parser)]
 #[command(version,
@@ -62,10 +62,10 @@ struct Cli {
     command: Commands,
 }
 
+// Note that the subcommands are declared below in the order in which we want them to appear
+// in the usage statement when valve is run with the option --help.
 #[derive(Subcommand)]
 enum Commands {
-    // Note that the commands are declared below in the order in which we want them to appear
-    // in the usage statement when valve is run with the option --help.
     /// Load all of the Valve-managed tables in a given database with data
     Load {
         #[arg(long,
@@ -77,6 +77,8 @@ enum Commands {
                       guaranteed in the case of an interrupted transaction.")]
         initial_load: bool,
         // TODO: Add a --dry-run flag.
+        #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
+        table: Option<String>,
     },
 
     /// Create all of the Valve-managed tables in a given database without loading any data.
@@ -386,7 +388,7 @@ enum AddSubcommands {
     /// Add a datatype to the datatype table
     Datatype {
         #[arg(value_name = "DATATYPE", action = ArgAction::Set, help = DATATYPE_HELP)]
-        datatype: String,
+        datatype: Option<String>,
     },
 }
 
@@ -842,6 +844,47 @@ async fn main() -> Result<()> {
         (table, row, column, value, level, rule, message)
     }
 
+    fn extract_datatype(
+        datatype_param: &Option<String>,
+        json_row: &JsonRow,
+    ) -> (String, String, String, String, String, String, String) {
+        //&vec!["datatype", "sql_type", "condition", "description", "parent"],
+        let datatype = match json_row.get("datatype") {
+            Some(input_datatype) => match datatype_param {
+                Some(datatype_param) if datatype_param != input_datatype => {
+                    panic!("Mismatch between input datatype and positional parameter, DATATYPE")
+                }
+                None | Some(_) => input_datatype.as_str().expect("Not a string").to_string(),
+            },
+            None => match datatype_param {
+                Some(datatype_param) => datatype_param.to_string(),
+                None => panic!("No datatype given"),
+            },
+        };
+        let parent = match json_row.get("parent") {
+            Some(parent) => parent.as_str().expect("Not a string").to_string(),
+            None => panic!("No parent given"),
+        };
+        let condition = match json_row.get("condition") {
+            Some(condition) => condition.as_str().expect("Not a string").to_string(),
+            None => panic!("No condition given"),
+        };
+        let description = match json_row.get("description") {
+            Some(description) => description.as_str().expect("Not a string").to_string(),
+            None => panic!("No description given"),
+        };
+        let sql_type = match json_row.get("sql_type") {
+            Some(sql_type) => sql_type.as_str().expect("Not a string").to_string(),
+            None => panic!("No sql_type given"),
+        };
+        // TODO: Are these the only optional columns we want to allow? Can we allow arbitrary
+        // ones?
+        let html_type = json_row.get("html_type").unwrap_or(&SerdeValue::Null).to_string();
+        let dt_format = json_row.get("dt_format").unwrap_or(&SerdeValue::Null).to_string();
+
+        (datatype, parent, condition, description, sql_type, html_type, dt_format)
+    }
+
     match &cli.command {
         Commands::Add { subcommand } => {
             match subcommand {
@@ -853,7 +896,13 @@ async fn main() -> Result<()> {
                         .add_column(table, column, &column_json, !cli.assume_yes)
                         .await?;
                 }
-                AddSubcommands::Datatype { .. } => todo!(),
+                AddSubcommands::Datatype { datatype } => {
+                    let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
+                    let json_datatype = read_json_input(&valve, "message");
+                    let (table, row, column, value, level, rule, message) =
+                        extract_datatype(datatype, &json_datatype);
+                    //valve.insert_datatype(datatype, ...
+                },
                 AddSubcommands::Message { table, row, column } => {
                     let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
                     let json_message = read_json_input(&valve, "message");
@@ -1292,16 +1341,38 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Commands::Load { initial_load } => {
+        Commands::Load {
+            initial_load,
+            table,
+        } => {
             let mut valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
             if *initial_load {
+                if valve.db_kind == DbKind::Sqlite && !cli.assume_yes {
+                    if let Some(_) = table {
+                        print!(
+                            "The --initial_load option is intended for use on an empty database. \
+                             It should not normally be set when loading a single table as it is \
+                             unsafe and could result in data corruption in the case of an \
+                             interrupted transaction. Are you sure you want to continue? [y/N] "
+                        );
+                        if !proceed::proceed() {
+                            std::process::exit(1);
+                        }
+                    }
+                }
                 block_on(valve.configure_for_initial_load())
                     .expect("Could not configure for initial load");
             }
-            valve
-                .load_all_tables(true)
-                .await
-                .expect("Error loading tables");
+            match table {
+                None => valve
+                    .load_all_tables(true)
+                    .await
+                    .expect("Error loading tables"),
+                Some(table) => valve
+                    .load_tables(&vec![table.as_str()], true)
+                    .await
+                    .expect("Error loading table"),
+            };
         }
         Commands::Move { subcommand } => {
             let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);

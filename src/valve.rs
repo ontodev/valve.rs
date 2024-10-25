@@ -1669,6 +1669,11 @@ impl Valve {
                         "Undefined structure '{}'",
                         structure
                     )))?;
+                // TODO: There are some cases in which a structure will not have an associated
+                // constraint in the database (which wasn't the case when this was originally
+                // coded). This is mainly applicable to foreign keys: When a foreign key refers
+                // to a view, when a foreign key refers to a column that has the list() type, and
+                // possibly some other cases.
                 if structure_has_changed(&parsed_structure, table, &cname, &pk)? {
                     if self.verbose || self.interactive {
                         print!(
@@ -2312,6 +2317,7 @@ impl Valve {
             Ok(())
         };
 
+        // TODO: Shouldn't dependent tables be reloaded too?
         for table in table_list {
             let table_config = self.get_table_config(&table)?;
 
