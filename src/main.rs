@@ -28,7 +28,7 @@ static DATATYPE_HELP: &str = "A datatype name";
 
 static BUILD_ERROR: &str = "Error building Valve";
 
-static RECONFIGURE_ERROR: &str = "Could not reconfigure Valve";
+static REBUILD_ERROR: &str = "Could not rebuild Valve";
 
 #[derive(Parser)]
 #[command(version,
@@ -177,7 +177,7 @@ enum Commands {
         context: usize,
     },
 
-    /// TODO: Add docstring
+    /// Rename table, rows, and datatypes
     Rename {
         #[command(subcommand)]
         subcommand: RenameSubcommands,
@@ -374,16 +374,16 @@ enum AddSubcommands {
         seed: Option<u64>,
     },
 
-    /// TODO: Add docstring
+    /// Add a column to a database table
     Column {
         #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
-        table: String,
+        table: Option<String>,
 
         #[arg(value_name = "COLUMN", action = ArgAction::Set, help = COLUMN_HELP)]
-        column: String,
+        column: Option<String>,
     },
 
-    /// TODO: Add docstring
+    /// Add a datatype to the datatype table
     Datatype {
         #[arg(value_name = "DATATYPE", action = ArgAction::Set, help = DATATYPE_HELP)]
         datatype: String,
@@ -445,7 +445,7 @@ enum UpdateSubcommands {
 
 #[derive(Subcommand)]
 enum MoveSubcommands {
-    /// TODO: Add docstring.
+    /// Move a row within a given database table
     Row {
         #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
         table: String,
@@ -496,13 +496,13 @@ enum DeleteSubcommands {
         rule: Option<String>,
     },
 
-    /// TODO: Add docstring
+    /// Delete a table
     Table {
         #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
         table: String,
     },
 
-    /// TODO: Add docstring
+    /// Delete a column from a given table
     Column {
         #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
         table: String,
@@ -511,7 +511,7 @@ enum DeleteSubcommands {
         column: String,
     },
 
-    /// TODO: Add docstring
+    /// Remove a datatype
     Datatype {
         #[arg(value_name = "DATATYPE", action = ArgAction::Set, help = DATATYPE_HELP)]
         datatype: String,
@@ -629,22 +629,26 @@ async fn main() -> Result<()> {
             .expect("Can't convert to simple JSON")
     }
 
-    // Reads an intput row from STDIN. This should be formatted as a simple JSON, optionally with
+    fn read_json_input() -> JsonRow {
+        let mut json_row = String::new();
+        io::stdin()
+            .read_line(&mut json_row)
+            .expect("Error reading from STDIN");
+        let json_row = serde_json::from_str::<SerdeValue>(&json_row)
+            .expect(&format!("Invalid JSON: {json_row}"))
+            .as_object()
+            .expect(&format!("{json_row} is not a JSON object"))
+            .clone();
+        json_row
+    }
+
+    // Reads a row from STDIN. This should be formatted as a simple JSON, optionally with
     // a "row_number" field included. Returns the row number (if any) that was included in the
-    // JSON, as well as a JSON representation of the row without the row_number field included.
-    async fn input_row() -> (Option<u32>, JsonRow) {
-        let mut json_row = {
-            let mut json_row = String::new();
-            io::stdin()
-                .read_line(&mut json_row)
-                .expect("Error reading from STDIN");
-            let json_row = serde_json::from_str::<SerdeValue>(&json_row)
-                .expect(&format!("Invalid JSON: {json_row}"))
-                .as_object()
-                .expect(&format!("{json_row} is not a JSON object"))
-                .clone();
-            json_row
-        };
+    // JSON, as well as a JSON representation of the row  without the row_number field included.
+    fn read_row_input() -> (Option<u32>, JsonRow) {
+        let mut json_row = read_json_input();
+
+        // TODO: Handle unrecognized columns.
 
         // If the input row contains a row number as one of its cells, remove it from the JSON
         // and return it separately as the first position of the returned tuple. Otherwise the
@@ -662,47 +666,144 @@ async fn main() -> Result<()> {
         (row_number, json_row)
     }
 
+    /// TODO: Add docstring
+    fn read_column_input(table_param: &Option<String>, column_param: &Option<String>) -> JsonRow {
+        // TODO: Handle unrecognized fields in the JSON.
+
+        let json_row = read_json_input();
+        // Mandatory fields that may optionally be provided as arguments to this function:
+        let table = match json_row.get("table") {
+            Some(input_table) => match table_param {
+                Some(table_param) if table_param != input_table => {
+                    panic!("Mismatch between input table and positional parameter, TABLE")
+                }
+                None | Some(_) => input_table.clone(),
+            },
+            None => match table_param {
+                Some(table_param) => json!(table_param),
+                None => panic!("No table given"),
+            },
+        };
+        let column = match json_row.get("column") {
+            Some(input_column) => match column_param {
+                Some(column_param) if column_param != input_column => {
+                    panic!("Mismatch between input column and positional parameter, COLUMN")
+                }
+                None | Some(_) => input_column.clone(),
+            },
+            None => match column_param {
+                Some(column_param) => json!(column_param),
+                None => panic!("No column given"),
+            },
+        };
+
+        // Mandatory field:
+        let datatype = match json_row.get("datatype") {
+            None => panic!("No datatype given"),
+            Some(datatype) => datatype.clone(),
+        };
+
+        // Optional fields:
+        let label = match json_row.get("label") {
+            None => SerdeValue::Null,
+            Some(label) => match label {
+                SerdeValue::String(_) => label.clone(),
+                _ => panic!("Field 'label' is not a string"),
+            },
+        };
+        let nulltype = match json_row.get("nulltype") {
+            None => SerdeValue::Null,
+            Some(nulltype) => match nulltype {
+                SerdeValue::String(_) => nulltype.clone(),
+                _ => panic!("Field 'nulltype' is not a string"),
+            },
+        };
+        let structure = match json_row.get("structure") {
+            None => SerdeValue::Null,
+            Some(structure) => match structure {
+                SerdeValue::String(_) => structure.clone(),
+                _ => panic!("Field 'structure' is not a string"),
+            },
+        };
+        let description = match json_row.get("description") {
+            None => SerdeValue::Null,
+            Some(description) => match description {
+                SerdeValue::String(_) => description.clone(),
+                _ => panic!("Field 'description' is not a string"),
+            },
+        };
+
+        let mut column_config = JsonRow::new();
+        column_config.insert("table".to_string(), table);
+        column_config.insert("column".to_string(), column);
+        column_config.insert("datatype".to_string(), datatype);
+        if label != SerdeValue::Null {
+            column_config.insert("label".to_string(), label);
+        }
+        if nulltype != SerdeValue::Null {
+            column_config.insert("nulltype".to_string(), nulltype);
+        }
+        if structure != SerdeValue::Null {
+            column_config.insert("structure".to_string(), structure);
+        }
+        if description != SerdeValue::Null {
+            column_config.insert("description".to_string(), description);
+        }
+
+        column_config
+    }
+
     // Reads and parses a JSON-formatted string representing a validation message (for the expected
     // format see, e.g., AddSubcommands::Message above), and returns the tuple:
     // (table, row, column, value, level, rule, message)
-    fn read_input_message(
-        table: &Option<String>,
-        row: &Option<u32>,
-        column: &Option<String>,
+    fn read_message_input(
+        table_param: &Option<String>,
+        row_param: &Option<u32>,
+        column_param: &Option<String>,
     ) -> (String, u32, String, String, String, String, String) {
-        let mut json_row = String::new();
-        io::stdin()
-            .read_line(&mut json_row)
-            .expect("Error reading from STDIN");
-        let json_row = serde_json::from_str::<SerdeValue>(&json_row)
-            .expect(&format!("Invalid JSON: {json_row}"))
-            .as_object()
-            .expect(&format!("{json_row} is not a JSON object"))
-            .clone();
+        // TODO: Handle unrecognized fields in the JSON.
+
+        let json_row = read_json_input();
         let table = match json_row.get("table") {
-            Some(table) => table.as_str().expect("Not a string").to_string(),
-            None => match table {
-                Some(table) => table.to_string(),
+            Some(input_table) => match table_param {
+                Some(table_param) if table_param != input_table => {
+                    panic!("Mismatch between input table and positional parameter, TABLE")
+                }
+                None | Some(_) => input_table.as_str().expect("Not a string").to_string(),
+            },
+            None => match table_param {
+                Some(table_param) => table_param.to_string(),
                 None => panic!("No table given"),
             },
         };
         let row = match json_row.get("row") {
-            Some(rn) => {
-                let rn = rn.as_i64().expect("Not a number");
-                rn as u32
-            }
-            None => match row {
-                Some(rn) => rn.clone(),
+            Some(input_row) => match row_param {
+                Some(row_param) if row_param != input_row => {
+                    panic!("Mismatch between input row and positional parameter, ROW")
+                }
+                None | Some(_) => {
+                    let input_row = input_row.as_i64().expect("Not a number");
+                    input_row as u32
+                }
+            },
+            None => match row_param {
+                Some(row_param) => *row_param,
                 None => panic!("No row given"),
             },
         };
         let column = match json_row.get("column") {
-            Some(column) => column.as_str().expect("Not a string").to_string(),
-            None => match column {
-                Some(column) => column.to_string(),
+            Some(input_column) => match column_param {
+                Some(column_param) if column_param != input_column => {
+                    panic!("Mismatch between input column and positional parameter, COLUMN")
+                }
+                None | Some(_) => input_column.as_str().expect("Not a string").to_string(),
+            },
+            None => match column_param {
+                Some(column_param) => column_param.to_string(),
                 None => panic!("No column given"),
             },
         };
+
         let value = match json_row.get("value") {
             Some(value) => value.as_str().expect("Not a string").to_string(),
             None => panic!("No value given"),
@@ -726,11 +827,17 @@ async fn main() -> Result<()> {
     match &cli.command {
         Commands::Add { subcommand } => {
             match subcommand {
-                AddSubcommands::Column { .. } => todo!(),
+                AddSubcommands::Column { table, column } => {
+                    let column_json = read_column_input(table, column);
+                    let mut valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
+                    valve
+                        .add_column(table, column, &column_json, !cli.assume_yes)
+                        .await?;
+                }
                 AddSubcommands::Datatype { .. } => todo!(),
                 AddSubcommands::Message { table, row, column } => {
                     let (table, row, column, value, level, rule, message) =
-                        read_input_message(table, row, column);
+                        read_message_input(table, row, column);
                     let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
                     let message_id = valve
                         .insert_message(&table, row, &column, &value, &level, &rule, &message)
@@ -738,18 +845,10 @@ async fn main() -> Result<()> {
                     println!("{message_id}");
                 }
                 AddSubcommands::Row { table } => {
-                    let mut row = String::new();
-                    io::stdin()
-                        .read_line(&mut row)
-                        .expect("Error reading from STDIN");
-                    let row: SerdeValue =
-                        serde_json::from_str(&row).expect(&format!("Invalid JSON: {row}"));
-                    let row = row
-                        .as_object()
-                        .expect(&format!("{row} is not a JSON object"));
+                    let (_, row) = read_row_input();
                     let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
                     let (_, row) = valve
-                        .insert_row(table, row)
+                        .insert_row(table, &row)
                         .await
                         .expect("Error inserting row");
                     if cli.verbose {
@@ -783,7 +882,7 @@ async fn main() -> Result<()> {
                     );
                     if table_added {
                         valve.save_tables(&vec!["table", "column"], &None).await?;
-                        valve.reconfigure().expect(RECONFIGURE_ERROR);
+                        valve.rebuild().expect(REBUILD_ERROR);
                         valve.load_tables(&vec!["table", "column"], true).await?;
                         valve.ensure_all_tables_created().await?;
                         // TODO: Ask the user if they want to load the table now. If assume_yes
@@ -1239,22 +1338,6 @@ async fn main() -> Result<()> {
         Commands::SaveAs { table, path } => {
             let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
             valve.save_table(table, path).await?;
-            // TODO: DON'T NEED TO DO THE STUFF BELOW. REMOVE IT:
-            /*
-            let sql = local_sql_syntax(
-                &valve.db_kind,
-                &format!(r#"UPDATE "table" SET "path" = {SQL_PARAM} WHERE "table" = {SQL_PARAM}"#),
-            );
-            let mut query = sqlx_query(&sql);
-            query = query.bind(path);
-            query = query.bind(table);
-            query.execute(&valve.pool).await?;
-            valve.save_tables(&vec!["table"], &None).await?;
-            valve.save_tables(&vec![table], &None).await?;
-            valve.reconfigure().expect(RECONFIGURE_ERROR);
-            valve.load_tables(&vec!["table"], true).await?;
-            valve.ensure_all_tables_created().await?;
-            */
         }
         Commands::TestApi {} => {
             let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
@@ -1276,7 +1359,7 @@ async fn main() -> Result<()> {
             } = subcommand
             {
                 let (table, row, column, value, level, rule, message) =
-                    read_input_message(table, row, column);
+                    read_message_input(table, row, column);
                 let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
                 valve
                     .update_message(
@@ -1293,12 +1376,20 @@ async fn main() -> Result<()> {
             } else {
                 let (table, row_number, input_row) = match subcommand {
                     UpdateSubcommands::Row { table, row } => {
-                        let (json_row_number, json_row) = input_row().await;
-                        let row = match json_row_number {
-                            None => row.clone(),
-                            Some(value) => Some(value),
+                        let (input_rn, json_row) = read_row_input();
+                        let row = match input_rn {
+                            Some(input_rn) => match row {
+                                Some(row) if *row != input_rn => panic!(
+                                    "Mismatch between input row and positional parameter, ROW"
+                                ),
+                                None | Some(_) => input_rn,
+                            },
+                            None => match row {
+                                Some(row) => *row,
+                                None => panic!("No row given"),
+                            },
                         };
-                        (table, row, json_row)
+                        (table, Some(row), json_row)
                     }
                     UpdateSubcommands::Value {
                         table,
@@ -1349,10 +1440,19 @@ async fn main() -> Result<()> {
                     (Some(rn), input_row)
                 }
                 None => {
-                    let (rn, input_row) = input_row().await;
+                    let (rn, input_row) = read_row_input();
                     // If now row was input, default to `row` (which could still be None)
                     let rn = match rn {
-                        Some(rn) => Some(rn),
+                        Some(rn) => {
+                            if let Some(row) = row {
+                                if *row != rn {
+                                    panic!(
+                                        "Mismatch between input row and positional parameter, ROW"
+                                    )
+                                }
+                            }
+                            Some(rn)
+                        }
                         None => *row,
                     };
                     (rn, input_row)

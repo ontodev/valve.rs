@@ -8,9 +8,9 @@ use crate::{
         add_message_counts, cast_column_sql_to_text, correct_row_datatypes, delete_row_tx,
         generate_datatype_conditions, generate_rule_conditions, get_column_for_label,
         get_column_value_as_string, get_db_records_to_redo, get_db_records_to_undo,
-        get_json_array_from_column, get_json_object_from_column, get_next_undo_id,
-        get_parsed_structure_conditions, get_pool_from_connection_string, get_previous_row_tx,
-        get_sql_for_standard_view, get_sql_for_text_view, get_sql_type,
+        get_json_array_from_column, get_json_object_from_column, get_next_new_row_tx,
+        get_next_undo_id, get_parsed_structure_conditions, get_pool_from_connection_string,
+        get_previous_row_tx, get_sql_for_standard_view, get_sql_for_text_view, get_sql_type,
         get_sql_type_from_global_config, get_text_row_from_db_tx, insert_chunks, insert_new_row_tx,
         local_sql_syntax, move_row_tx, normalize_options, read_config_files, record_row_change_tx,
         record_row_move_tx, switch_undone_state_tx, undo_or_redo_move_tx, update_row_tx,
@@ -899,7 +899,7 @@ impl Valve {
     }
 
     /// TODO: Add docstring here
-    pub fn reconfigure(&mut self) -> Result<()> {
+    pub fn rebuild(&mut self) -> Result<()> {
         let table_path = self.get_path()?;
         let parser = StartParser::new();
         let (
@@ -1015,6 +1015,99 @@ impl Valve {
     pub fn set_interactive(&mut self, interactive: bool) -> &mut Self {
         self.interactive = interactive;
         self
+    }
+
+    /// TODO: Add docstring
+    pub async fn add_column(
+        &mut self,
+        table: &Option<String>,
+        column: &Option<String>,
+        column_details: &JsonRow,
+        _interactive: bool,
+    ) -> Result<()> {
+        let make_err =
+            |err_str: &str| -> ValveError { ValveError::InputError(err_str.to_string()) };
+
+        // Extract the required and optional fields from the column_details JSON:
+        let table = match column_details.get("table") {
+            Some(input_table) => match table {
+                Some(table) if table != input_table => {
+                    return Err(make_err(
+                        "Mismatch between input table and positional parameter, TABLE",
+                    )
+                    .into())
+                }
+                None | Some(_) => input_table.as_str().ok_or(make_err("Not a string"))?,
+            },
+            None => match table {
+                Some(table) => table,
+                None => return Err(make_err("No table given").into()),
+            },
+        };
+        let column = match column_details.get("column") {
+            Some(input_column) => match column {
+                Some(column) if column != input_column => {
+                    return Err(make_err(
+                        "Mismatch between input column and positional parameter, COLUMN",
+                    )
+                    .into())
+                }
+                None | Some(_) => input_column.as_str().ok_or(make_err("Not a string"))?,
+            },
+            None => match column {
+                Some(column) => column,
+                None => return Err(make_err("No column given").into()),
+            },
+        };
+        let datatype = match column_details.get("datatype") {
+            Some(datatype) => datatype.as_str().ok_or(make_err("Not a string"))?,
+            None => return Err(make_err("No datatype given").into()),
+        };
+        let label = column_details.get("label").and_then(|l| l.as_str());
+        let nulltype = column_details.get("nulltype").and_then(|l| l.as_str());
+        let structure = column_details.get("structure").and_then(|l| l.as_str());
+        let description = column_details.get("description").and_then(|l| l.as_str());
+
+        // Generate an insert statement and execute it:
+        let mut fields = vec![r#""table""#, r#""column""#, r#""datatype""#];
+        let mut placeholders = vec![SQL_PARAM, SQL_PARAM, SQL_PARAM];
+        let mut field_params = vec![table, column, datatype];
+        for (field, field_param) in [
+            (r#""label""#, label),
+            (r#""nulltype""#, nulltype),
+            (r#""structure""#, structure),
+            (r#""description""#, description),
+        ] {
+            if let Some(param) = field_param {
+                fields.push(field);
+                placeholders.push(SQL_PARAM);
+                field_params.push(param);
+            }
+        }
+        let (rn, ro) =
+            get_next_new_row_tx(&self.db_kind, &mut self.pool.begin().await?, "column").await?;
+        let sql = local_sql_syntax(
+            &self.db_kind,
+            &format!(
+                r#"INSERT INTO "column" ("row_number", "row_order", {fields})
+                   VALUES ({rn}, {ro}, {placeholders})"#,
+                fields = fields.join(", "),
+                placeholders = placeholders.join(", ")
+            ),
+        );
+        let mut query = sqlx_query(&sql);
+        for param in &field_params {
+            query = query.bind(param);
+        }
+        query.execute(&self.pool).await?;
+
+        // Save the column table and then rebuild valve:
+        self.save_tables(&vec!["column", table], &None).await?;
+        self.rebuild()?;
+
+        // Load the newly modified table:
+        self.load_tables(&vec![table], true).await?;
+        Ok(())
     }
 
     /// (Private function.) Given a SQL string, execute it using the connection pool associated
@@ -1845,47 +1938,6 @@ impl Valve {
         Ok(output)
     }
 
-    /// Drop and recreate the tables in the given list
-    pub async fn recreate_tables(&self, tables: &Vec<&str>) -> Result<&Self> {
-        println!("Entering recreate_tables()");
-        let setup_statements = self.get_setup_statements().await?;
-        for table in tables {
-            let table_config = self.get_table_config(table)?;
-            if table_config.options.contains("db_view") {
-                // See the comment at a similar point in ensure_all_tables_created() for an
-                // explanation of this logic.
-                if table_config.path.to_lowercase().ends_with(".sql") {
-                    self.execute_sql_file(&table_config.path).await?;
-                } else if table_config.path != "" {
-                    self.execute_script(&table_config.path, &vec![&self.db_path, table])?;
-                } else {
-                    log::warn!("View '{table}' has an empty path. Doing nothing.");
-                }
-                // Check to make sure that the view now exists:
-                if !self.view_exists(table).await? {
-                    return Err(ValveError::DataError(format!(
-                        "No view named '{}' exists in the database",
-                        table
-                    ))
-                    .into());
-                }
-            } else {
-                self.drop_tables(&vec![table]).await?;
-                let table_statements =
-                    setup_statements
-                        .get(*table)
-                        .ok_or(ValveError::ConfigError(format!(
-                            "Could not find setup statements for {}",
-                            table
-                        )))?;
-                for stmt in table_statements {
-                    self.execute_sql(stmt).await?;
-                }
-            }
-        }
-        Ok(self)
-    }
-
     /// Create all configured database tables and views if they do not already exist as configured.
     pub async fn ensure_all_tables_created(&self) -> Result<&Self> {
         let setup_statements = self.get_setup_statements().await?;
@@ -2613,18 +2665,6 @@ impl Valve {
             }
         }
 
-        // Construct the query to use to retrieve the data:
-        let query_table = format!("\"{}_text_view\"", table);
-        let sql = format!(
-            r#"SELECT "row_number", {} FROM {} ORDER BY "row_order""#,
-            columns
-                .keys()
-                .map(|c| format!(r#""{}""#, c))
-                .collect::<Vec<_>>()
-                .join(", "),
-            query_table
-        );
-
         // Query the database and use the results to construct the records that will be written
         // to the TSV file:
         let format_regex = Regex::new(PRINTF_RE)?;
@@ -2637,11 +2677,40 @@ impl Valve {
             .map(|(_, (label, _))| label)
             .collect::<Vec<_>>();
         writer.write_record(tsv_header_row)?;
+
+        let existing_columns = {
+            let mut existing_columns = vec![];
+            for column in columns.keys() {
+                if self.column_enabled_in_db(table, column).await? {
+                    existing_columns.push(column);
+                }
+            }
+            existing_columns
+        };
+
+        // Construct the query to use to retrieve the data:
+        let query_table = format!("\"{}_text_view\"", table);
+        let sql = format!(
+            r#"SELECT "row_number", {} FROM {} ORDER BY "row_order""#,
+            existing_columns
+                .iter()
+                .map(|c| format!(r#""{}""#, c))
+                .collect::<Vec<_>>()
+                .join(", "),
+            query_table
+        );
+
         let mut stream = sqlx_query(&sql).fetch(&self.pool);
         while let Some(row) = stream.try_next().await? {
             let mut record: Vec<String> = vec![];
             for (column, (_, colformat)) in &columns {
-                let cell = row.try_get::<&str, &str>(column).ok().unwrap_or_default();
+                let cell = {
+                    if existing_columns.contains(&column) {
+                        row.try_get::<&str, &str>(column).ok().unwrap_or_default()
+                    } else {
+                        ""
+                    }
+                };
                 if *colformat != "" {
                     let formatted_cell = format_cell(&colformat, &format_regex, &cell);
                     record.push(formatted_cell.to_string());
@@ -2742,6 +2811,12 @@ impl Valve {
                 .unwrap_or_default();
             Ok(format_string.to_string())
         }
+    }
+
+    /// TODO: Add doctring
+    pub async fn get_next_new_row(&self, table: &str) -> Result<(u32, u32)> {
+        let mut tx = self.pool.begin().await?;
+        get_next_new_row_tx(&self.db_kind, &mut tx, table).await
     }
 
     /// Given a table name and a row number, return a [ValveRow] representing that row.

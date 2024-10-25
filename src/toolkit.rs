@@ -918,8 +918,7 @@ pub fn read_config_files(
         for foreign in table_foreigns {
             let ftable = &foreign.ftable;
             let funiques = constraints_config.unique.get_mut(ftable).expect(&format!(
-                "No unique constraints found for table '{}'",
-                ftable
+                "No unique constraints found for table '{ftable}' (or '{ftable}' does not exist)",
             ));
             let fprimaries = constraints_config.primary.get(ftable).expect(&format!(
                 "No primary constraints found for table '{}'",
@@ -2977,6 +2976,44 @@ pub async fn get_previous_row_tx(
     }
 }
 
+/// TODO: Add docstring
+pub async fn get_next_new_row_tx(
+    db_kind: &DbKind,
+    tx: &mut Transaction<'_, sqlx::Any>,
+    table: &str,
+) -> Result<(u32, u32)> {
+    let sql = local_sql_syntax(
+        db_kind,
+        &format!(
+            r#"SELECT MAX("row_number") AS "row_number" FROM (
+                 SELECT MAX("row_number") AS "row_number"
+                   FROM "{table}_view"
+                 UNION ALL
+                 SELECT MAX("row") AS "row_number"
+                   FROM "history"
+                   WHERE "table" = {SQL_PARAM}
+               ) t"#,
+        ),
+    );
+    let query = sqlx_query(&sql).bind(table);
+    let result_rows = query.fetch_all(tx.acquire().await?).await?;
+    let new_row_number: i64;
+    if result_rows.len() == 0 {
+        new_row_number = 1;
+    } else {
+        let result_row = &result_rows[0];
+        let result = result_row.try_get_raw("row_number")?;
+        if result.is_null() {
+            new_row_number = 1;
+        } else {
+            new_row_number = result_row.get("row_number");
+        }
+    }
+    let new_row_number = new_row_number as u32 + 1;
+    let new_row_order = new_row_number * MOVE_INTERVAL;
+    Ok((new_row_number, new_row_order))
+}
+
 /// Given a table name, a row number, the new row order to assign to the row, and a database
 /// transaction, update the row order for the row in the database. Note that the row_order is
 /// represented using the signed i64 type but it can never actually be negative. This function
@@ -3141,37 +3178,10 @@ pub async fn insert_new_row_tx(
 
     // Now prepare the row and messages for insertion to the database.
     let new_row_number = match row.row_number {
-        Some(n) => n,
+        Some(rn) => rn,
         None => {
-            let sql = local_sql_syntax(
-                &DbKind::from_pool(pool)?,
-                &format!(
-                    r#"SELECT MAX("row_number") AS "row_number" FROM (
-                         SELECT MAX("row_number") AS "row_number"
-                           FROM "{table}_view"
-                         UNION ALL
-                          SELECT MAX("row") AS "row_number"
-                            FROM "history"
-                           WHERE "table" = {SQL_PARAM}
-                       ) t"#,
-                ),
-            );
-            let query = sqlx_query(&sql).bind(table);
-            let result_rows = query.fetch_all(tx.acquire().await?).await?;
-            let new_row_number: i64;
-            if result_rows.len() == 0 {
-                new_row_number = 1;
-            } else {
-                let result_row = &result_rows[0];
-                let result = result_row.try_get_raw("row_number")?;
-                if result.is_null() {
-                    new_row_number = 1;
-                } else {
-                    new_row_number = result_row.get("row_number");
-                }
-            }
-            let new_row_number = new_row_number as u32 + 1;
-            new_row_number
+            let (rn, _) = get_next_new_row_tx(&DbKind::from_pool(pool)?, tx, table).await?;
+            rn
         }
     };
 
