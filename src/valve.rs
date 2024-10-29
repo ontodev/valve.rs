@@ -2,7 +2,7 @@
 
 use crate::{
     ast::Expression,
-    internal::{generate_internal_table_ddl, INTERNAL_TABLES},
+    internal::generate_internal_table_ddl,
     toolkit,
     toolkit::{
         add_message_counts, cast_column_sql_to_text, correct_row_datatypes, delete_row_tx,
@@ -19,7 +19,7 @@ use crate::{
     },
     validate::{validate_row_tx, validate_tree_foreign_keys, with_tree_sql},
     valve_grammar::StartParser,
-    CHUNK_SIZE, PRINTF_RE, SQL_PARAM, SQL_TYPES,
+    CHUNK_SIZE, INTERNAL_TABLES, PRINTF_RE, SQL_PARAM, SQL_TYPES,
 };
 use anyhow::Result;
 use csv::{QuoteStyle, ReaderBuilder, WriterBuilder};
@@ -1018,12 +1018,46 @@ impl Valve {
     }
 
     /// TODO: Add docstring
+    pub async fn add_datatype(&mut self, dt_map: &HashMap<String, String>) -> Result<()> {
+        let mut columns = vec![];
+        let mut placeholders = vec![];
+        let mut params = vec![];
+        for (column, value) in dt_map.iter() {
+            columns.push(format!(r#""{column}""#));
+            placeholders.push(SQL_PARAM);
+            params.push(value);
+        }
+
+        let (rn, ro) =
+            get_next_new_row_tx(&self.db_kind, &mut self.pool.begin().await?, "datatype").await?;
+        let sql = local_sql_syntax(
+            &self.db_kind,
+            &format!(
+                r#"INSERT INTO "datatype" ("row_number", "row_order", {columns})
+                   VALUES ({rn}, {ro}, {placeholders})"#,
+                columns = columns.join(", "),
+                placeholders = placeholders.join(", "),
+            ),
+        );
+
+        let mut query = sqlx_query(&sql);
+        for param in params {
+            query = query.bind(param);
+        }
+        query.execute(&self.pool).await?;
+
+        // Save the column table and then rebuild valve:
+        self.save_tables(&vec!["datatype"], &None).await?;
+        self.rebuild()
+    }
+
+    /// TODO: Add docstring
     pub async fn add_column(
         &mut self,
         table: &Option<String>,
         column: &Option<String>,
         column_details: &JsonRow,
-        _interactive: bool,
+        _interactive: bool, // TODO: ?
     ) -> Result<()> {
         let make_err =
             |err_str: &str| -> ValveError { ValveError::InputError(err_str.to_string()) };

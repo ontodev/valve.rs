@@ -2,7 +2,7 @@
 
 use crate::{
     ast::Expression,
-    internal::{generate_internal_table_config, INTERNAL_TABLES},
+    internal::generate_internal_table_config,
     validate::{validate_row_tx, validate_rows_constraints, validate_rows_intra},
     valve::{
         ValveCell, ValveCellMessage, ValveColumnConfig, ValveConfig, ValveConstraintConfig,
@@ -10,7 +10,9 @@ use crate::{
         ValveRuleConfig, ValveSpecialConfig, ValveTableConfig, ValveTreeConstraint,
     },
     valve_grammar::StartParser,
-    CHUNK_SIZE, MAX_DB_CONNECTIONS, MOVE_INTERVAL, MULTI_THREADED, SQL_PARAM,
+    ALLOWED_OPTIONS, CHUNK_SIZE, INTERNAL_TABLES, MAX_DB_CONNECTIONS, MOVE_INTERVAL,
+    MULTI_THREADED, REQUIRED_COLUMN_COLUMNS, REQUIRED_DATATYPE_COLUMNS, REQUIRED_RULE_COLUMNS,
+    REQUIRED_TABLE_COLUMNS, SQL_PARAM,
 };
 use anyhow::Result;
 use async_recursion::async_recursion;
@@ -21,7 +23,6 @@ use indexmap::IndexMap;
 use indoc::indoc;
 use is_executable::IsExecutable;
 use itertools::{IntoChunks, Itertools};
-use lazy_static::lazy_static;
 use petgraph::{
     algo::{all_simple_paths, toposort},
     graphmap::DiGraphMap,
@@ -41,24 +42,6 @@ use std::{
     str::FromStr,
     sync::Arc,
 };
-
-lazy_static! {
-    static ref ALLOWED_OPTIONS: HashSet<&'static str> = HashSet::from([
-        "db_table",
-        "db_view",
-        "truncate",
-        "load",
-        "conflict",
-        "internal",
-        "validate_on_load",
-        "edit",
-        "save",
-        "no-conflict",
-        "no-validate_on_load",
-        "no-edit",
-        "no-save",
-    ]);
-}
 
 /// Represents the kind of database being managed
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -275,11 +258,7 @@ pub fn read_config_files(
         // enumerate() begins at 0 but we want to count rows from 1:
         let row_number = row_number as u32;
         let row_number = row_number + 1;
-        if let Err(e) = check_table_requirements(
-            &vec!["table", "path", "type", "description"],
-            &vec!["table"],
-            &row,
-        ) {
+        if let Err(e) = check_table_requirements(&REQUIRED_TABLE_COLUMNS, &vec!["table"], &row) {
             return Err(ValveError::ConfigError(format!(
                 "Error while reading '{}': {:?}",
                 path, e
@@ -516,11 +495,9 @@ pub fn read_config_files(
     let mut datatypes_config = HashMap::new();
     let rows = get_special_config("datatype", &specials_config, &tables_config, path, pool)?;
     for row in rows {
-        if let Err(e) = check_table_requirements(
-            &vec!["datatype", "sql_type", "condition", "description", "parent"],
-            &vec!["datatype"],
-            &row,
-        ) {
+        if let Err(e) =
+            check_table_requirements(&REQUIRED_DATATYPE_COLUMNS, &vec!["datatype"], &row)
+        {
             return Err(ValveError::ConfigError(format!(
                 "Error while reading from datatype table: {:?}",
                 e
@@ -569,15 +546,7 @@ pub fn read_config_files(
     let mut defined_column_orderings = IndexMap::new();
     for row in rows {
         if let Err(e) = check_table_requirements(
-            &vec![
-                "table",
-                "nulltype",
-                "datatype",
-                "column",
-                "description",
-                "label",
-                "structure",
-            ],
+            &REQUIRED_COLUMN_COLUMNS,
             &vec!["table", "column", "datatype"],
             &row,
         ) {
@@ -677,15 +646,7 @@ pub fn read_config_files(
         let rows = get_special_config(table_name, &specials_config, &tables_config, path, pool)?;
         for row in rows {
             if let Err(e) = check_table_requirements(
-                &vec![
-                    "table",
-                    "when column",
-                    "when condition",
-                    "then column",
-                    "then condition",
-                    "level",
-                    "description",
-                ],
+                &REQUIRED_RULE_COLUMNS,
                 &vec![
                     "table",
                     "when column",

@@ -3,14 +3,10 @@
 use crate::{
     toolkit::DbKind,
     valve::{ValveColumnConfig, ValveTableConfig},
+    INTERNAL_TABLES,
 };
 use indoc::indoc;
-use lazy_static::lazy_static;
 use std::collections::{HashMap, HashSet};
-
-lazy_static! {
-    pub static ref INTERNAL_TABLES: Vec<&'static str> = vec!["message", "history"];
-}
 
 pub fn generate_internal_table_config(table_name: &str) -> ValveTableConfig {
     if !INTERNAL_TABLES.contains(&table_name) {

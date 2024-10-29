@@ -9,7 +9,7 @@ use ontodev_valve::{
     guess::guess,
     toolkit::{generic_select_with_message_values, local_sql_syntax, DbKind},
     valve::{JsonRow, Valve, ValveCell, ValveRow},
-    SQL_PARAM,
+    REQUIRED_DATATYPE_COLUMNS, SQL_PARAM,
 };
 use serde_json::{json, Value as SerdeValue};
 use sqlx::{query as sqlx_query, Row};
@@ -844,11 +844,14 @@ async fn main() -> Result<()> {
         (table, row, column, value, level, rule, message)
     }
 
-    fn extract_datatype(
+    // TODO: Add a comment here.
+    fn extract_datatype_fields(
+        valve: &Valve,
         datatype_param: &Option<String>,
         json_row: &JsonRow,
-    ) -> (String, String, String, String, String, String, String) {
-        //&vec!["datatype", "sql_type", "condition", "description", "parent"],
+    ) -> HashMap<String, String> {
+        let mut dt_fields = HashMap::new();
+        // Add the datatype field to the map first:
         let datatype = match json_row.get("datatype") {
             Some(input_datatype) => match datatype_param {
                 Some(datatype_param) if datatype_param != input_datatype => {
@@ -858,38 +861,50 @@ async fn main() -> Result<()> {
             },
             None => match datatype_param {
                 Some(datatype_param) => datatype_param.to_string(),
-                None => panic!("No datatype given"),
+                None => panic!("No 'datatype' given"),
             },
         };
-        let parent = match json_row.get("parent") {
-            Some(parent) => parent.as_str().expect("Not a string").to_string(),
-            None => panic!("No parent given"),
-        };
-        let condition = match json_row.get("condition") {
-            Some(condition) => condition.as_str().expect("Not a string").to_string(),
-            None => panic!("No condition given"),
-        };
-        let description = match json_row.get("description") {
-            Some(description) => description.as_str().expect("Not a string").to_string(),
-            None => panic!("No description given"),
-        };
-        let sql_type = match json_row.get("sql_type") {
-            Some(sql_type) => sql_type.as_str().expect("Not a string").to_string(),
-            None => panic!("No sql_type given"),
-        };
-        // TODO: Are these the only optional columns we want to allow? Can we allow arbitrary
-        // ones?
-        let html_type = json_row.get("html_type").unwrap_or(&SerdeValue::Null).to_string();
-        let dt_format = json_row.get("dt_format").unwrap_or(&SerdeValue::Null).to_string();
+        dt_fields.insert("datatype".to_string(), datatype);
 
-        (datatype, parent, condition, description, sql_type, html_type, dt_format)
+        // Now add fields corresponding to the values of every configured column:
+        let mut json_row = json_row.clone();
+        json_row.remove("datatype");
+        let configured_columns = valve
+            .config
+            .table
+            .get("datatype")
+            .expect(&format!("No configuration found for 'datatype'"))
+            .column
+            .keys()
+            .filter(|col| *col != "datatype")
+            .collect::<Vec<_>>();
+        for column in configured_columns {
+            let value = match json_row.get(column) {
+                Some(value) => value.as_str().expect("Not a string").to_string(),
+                None => {
+                    if REQUIRED_DATATYPE_COLUMNS.contains(&column.as_str()) {
+                        panic!("No '{column}' given");
+                    }
+                    "".to_string()
+                }
+            };
+            dt_fields.insert(column.to_string(), value);
+            json_row.remove(column);
+        }
+        // There should be no leftover columns after we've gone through all of the
+        // configured columns:
+        if !json_row.is_empty() {
+            panic!("Extra columns found in input row: {}", json!(json_row));
+        }
+
+        dt_fields
     }
 
     match &cli.command {
         Commands::Add { subcommand } => {
+            let mut valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
             match subcommand {
                 AddSubcommands::Column { table, column } => {
-                    let mut valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
                     let json_row = read_json_input(&valve, "column");
                     let column_json = extract_column(&json_row, table, column);
                     valve
@@ -897,14 +912,11 @@ async fn main() -> Result<()> {
                         .await?;
                 }
                 AddSubcommands::Datatype { datatype } => {
-                    let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
-                    let json_datatype = read_json_input(&valve, "message");
-                    let (table, row, column, value, level, rule, message) =
-                        extract_datatype(datatype, &json_datatype);
-                    //valve.insert_datatype(datatype, ...
-                },
+                    let json_datatype = read_json_input(&valve, "datatype");
+                    let dt_fields = extract_datatype_fields(&valve, datatype, &json_datatype);
+                    valve.add_datatype(&dt_fields).await?;
+                }
                 AddSubcommands::Message { table, row, column } => {
-                    let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
                     let json_message = read_json_input(&valve, "message");
                     let (table, row, column, value, level, rule, message) =
                         extract_message(table, row, column, &json_message);
@@ -914,7 +926,6 @@ async fn main() -> Result<()> {
                     println!("{message_id}");
                 }
                 AddSubcommands::Row { table } => {
-                    let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
                     let json_row = read_json_input(&valve, table);
                     let (_, row) = valve
                         .insert_row(table, &json_row)
@@ -936,7 +947,6 @@ async fn main() -> Result<()> {
                     error_rate,
                     seed,
                 } => {
-                    let mut valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
                     let table_added = guess(
                         &valve,
                         cli.verbose,
