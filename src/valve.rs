@@ -1066,6 +1066,39 @@ impl Valve {
         self.rebuild()
     }
 
+    /// TODO: Add docstring here
+    pub async fn delete_table(&mut self, table: &str) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        let sql = local_sql_syntax(
+            &self.db_kind,
+            &format!(r#"DELETE FROM "column" WHERE "table" = {SQL_PARAM}"#),
+        );
+        let query = sqlx_query(&sql).bind(table);
+        if self.verbose {
+            println!("Removing '{table}' from column table.")
+        }
+        query.execute(&mut tx).await?;
+
+        let sql = local_sql_syntax(
+            &self.db_kind,
+            &format!(r#"DELETE FROM "table" WHERE "table" = {SQL_PARAM}"#),
+        );
+        let query = sqlx_query(&sql).bind(table);
+        if self.verbose {
+            println!("Removing '{table}' from table table.")
+        }
+        query.execute(&mut tx).await?;
+
+        tx.commit().await?;
+
+        // Save the column and table tables and rebuild valve:
+        self.save_tables(&vec!["table", "column"], &None).await?;
+        if self.verbose {
+            println!("Updating valve configuration.")
+        }
+        self.rebuild()
+    }
+
     /// TODO: Add docstring
     pub async fn add_column(
         &mut self,

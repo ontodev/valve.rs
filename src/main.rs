@@ -1015,7 +1015,12 @@ async fn main() -> Result<()> {
                             .expect("Could not delete row");
                     }
                 }
-                DeleteSubcommands::Table { .. } => todo!(),
+                DeleteSubcommands::Table { table } => {
+                    valve
+                        .delete_table(table)
+                        .await
+                        .expect("Error deleting table");
+                }
             };
         }
         Commands::DropAll {} => {
