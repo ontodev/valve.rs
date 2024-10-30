@@ -978,10 +978,20 @@ async fn main() -> Result<()> {
                 .expect("Error creating tables");
         }
         Commands::Delete { subcommand } => {
-            let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
+            let mut valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
             match subcommand {
-                DeleteSubcommands::Column { .. } => todo!(),
-                DeleteSubcommands::Datatype { .. } => todo!(),
+                DeleteSubcommands::Column { table, column } => {
+                    valve
+                        .delete_column(table, column)
+                        .await
+                        .expect("Error deleting column");
+                }
+                DeleteSubcommands::Datatype { datatype } => {
+                    valve
+                        .delete_datatype(datatype)
+                        .await
+                        .expect("Error deleting datatype");
+                }
                 DeleteSubcommands::Messages { message_id, rule } => {
                     if let Some(message_id) = message_id {
                         valve

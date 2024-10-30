@@ -1046,7 +1046,22 @@ impl Valve {
         }
         query.execute(&self.pool).await?;
 
-        // Save the column table and then rebuild valve:
+        // Save the datatype table and then rebuild valve:
+        self.save_tables(&vec!["datatype"], &None).await?;
+        self.rebuild()
+    }
+
+    /// TODO: Add docstring here
+    pub async fn delete_datatype(&mut self, datatype: &str) -> Result<()> {
+        let sql = local_sql_syntax(
+            &self.db_kind,
+            &format!(r#"DELETE FROM "datatype" WHERE "datatype" = {SQL_PARAM}"#),
+        );
+
+        let query = sqlx_query(&sql).bind(datatype);
+        query.execute(&self.pool).await?;
+
+        // Save the datatype table and then rebuild valve:
         self.save_tables(&vec!["datatype"], &None).await?;
         self.rebuild()
     }
@@ -1135,7 +1150,28 @@ impl Valve {
         }
         query.execute(&self.pool).await?;
 
-        // Save the column table and then rebuild valve:
+        // Save the column table and the data table and then rebuild valve:
+        self.save_tables(&vec!["column", table], &None).await?;
+        self.rebuild()?;
+
+        // Load the newly modified table:
+        self.load_tables(&vec![table], true).await?;
+        Ok(())
+    }
+
+    /// TODO: Add docstring here
+    pub async fn delete_column(&mut self, table: &str, column: &str) -> Result<()> {
+        let sql = local_sql_syntax(
+            &self.db_kind,
+            &format!(
+                r#"DELETE FROM "column" WHERE "table" = {SQL_PARAM} AND "column" = {SQL_PARAM}"#
+            ),
+        );
+
+        let query = sqlx_query(&sql).bind(table).bind(column);
+        query.execute(&self.pool).await?;
+
+        // Save the column table and the data table and then rebuild valve:
         self.save_tables(&vec!["column", table], &None).await?;
         self.rebuild()?;
 
