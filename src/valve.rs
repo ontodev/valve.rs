@@ -1024,8 +1024,12 @@ impl Valve {
         let mut params = vec![];
         for (column, value) in dt_map.iter() {
             columns.push(format!(r#""{column}""#));
-            placeholders.push(SQL_PARAM);
-            params.push(value);
+            if value == "" {
+                placeholders.push("NULL");
+            } else {
+                placeholders.push(SQL_PARAM);
+                params.push(value);
+            }
         }
 
         let (rn, ro) =
@@ -1105,7 +1109,6 @@ impl Valve {
         table: &Option<String>,
         column: &Option<String>,
         column_details: &JsonRow,
-        _interactive: bool, // TODO: ?
     ) -> Result<()> {
         let make_err =
             |err_str: &str| -> ValveError { ValveError::InputError(err_str.to_string()) };
@@ -1162,8 +1165,12 @@ impl Valve {
         ] {
             if let Some(param) = field_param {
                 fields.push(field);
-                placeholders.push(SQL_PARAM);
-                field_params.push(param);
+                if param == "" {
+                    placeholders.push("NULL");
+                } else {
+                    placeholders.push(SQL_PARAM);
+                    field_params.push(param);
+                }
             }
         }
         let (rn, ro) =

@@ -463,15 +463,16 @@ enum MoveSubcommands {
     },
     /// Move a column to a new table
     Column {
-        #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
-        table: String,
-
         #[arg(value_name = "COLUMN", action = ArgAction::Set, help = COLUMN_HELP)]
         column: String,
 
-        #[arg(value_name = "NEW_TABLE", action = ArgAction::Set,
+        #[arg(value_name = "FROM_TABLE", action = ArgAction::Set,
+              help = "The name of the table to which this column belongs")]
+        from_table: String,
+
+        #[arg(value_name = "TO_TABLE", action = ArgAction::Set,
               help = "The name of the table to move the column to")]
-        new_table: String,
+        to_table: String,
     },
 }
 
@@ -907,9 +908,7 @@ async fn main() -> Result<()> {
                 AddSubcommands::Column { table, column } => {
                     let json_row = read_json_input(&valve, "column");
                     let column_json = extract_column(&json_row, table, column);
-                    valve
-                        .add_column(table, column, &column_json, !cli.assume_yes)
-                        .await?;
+                    valve.add_column(table, column, &column_json).await?;
                 }
                 AddSubcommands::Datatype { datatype } => {
                     let json_datatype = read_json_input(&valve, "datatype");
@@ -1400,9 +1399,52 @@ async fn main() -> Result<()> {
             };
         }
         Commands::Move { subcommand } => {
-            let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
+            let mut valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
             match subcommand {
-                MoveSubcommands::Column { .. } => todo!(),
+                MoveSubcommands::Column {
+                    column,
+                    from_table,
+                    to_table,
+                } => {
+                    let column_config = valve
+                        .config
+                        .table
+                        .get(from_table)
+                        .expect(&format!("Table '{from_table}' not found"))
+                        .column
+                        .get(column)
+                        .expect(&format!("Column '{column}' not found"))
+                        .clone();
+
+                    if cli.verbose {
+                        println!("Deleting column '{column}' from table '{from_table}'.");
+                    }
+
+                    valve
+                        .delete_column(from_table, column)
+                        .await
+                        .expect("Error deleting column");
+
+                    if cli.verbose {
+                        println!("Adding column '{column}' to table '{from_table}'.");
+                    }
+
+                    let mut input_json = JsonRow::new();
+                    input_json.insert("datatype".to_string(), json!(column_config.datatype));
+                    input_json.insert("description".to_string(), json!(column_config.description));
+                    input_json.insert("label".to_string(), json!(column_config.label));
+                    input_json.insert("structure".to_string(), json!(column_config.structure));
+                    input_json.insert("nulltype".to_string(), json!(column_config.nulltype));
+
+                    valve
+                        .add_column(
+                            &Some(to_table.to_string()),
+                            &Some(column.to_string()),
+                            &input_json,
+                        )
+                        .await
+                        .expect("Error adding column");
+                }
                 MoveSubcommands::Row { table, row, after } => {
                     valve.move_row(table, row, after).await?;
                 }
