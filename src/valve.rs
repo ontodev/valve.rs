@@ -1032,6 +1032,7 @@ impl Valve {
             }
         }
 
+        // TODO: Why aren't we using the transaction here?
         let (rn, ro) =
             get_next_new_row_tx(&self.db_kind, &mut self.pool.begin().await?, "datatype").await?;
         let sql = local_sql_syntax(
@@ -1068,6 +1069,138 @@ impl Valve {
         // Save the datatype table and then rebuild valve:
         self.save_tables(&vec!["datatype"], &None).await?;
         self.rebuild()
+    }
+
+    /// TODO: Add docstring here
+    pub async fn rename_datatype(&mut self, datatype: &str, new_name: &str) -> Result<()> {
+        // TODO: Use the transaction.
+        let (rn, ro) =
+            get_next_new_row_tx(&self.db_kind, &mut self.pool.begin().await?, "datatype").await?;
+        let sql = local_sql_syntax(
+            &self.db_kind,
+            // TODO: Determine the columns from the column config
+            &format!(
+                r#"INSERT INTO "datatype" (
+                       "row_number", "row_order", "datatype",
+                       "parent", "condition", "description", "sql_type"
+                   )
+                   SELECT
+                      {rn} AS row_number,
+                      {ro} as row_order,
+                      {SQL_PARAM} as "datatype",
+                      t2.parent, t2.condition, t2.description, t2.sql_type
+                     FROM "datatype" t2
+                    WHERE t2."datatype" = {SQL_PARAM}"#
+            ),
+        );
+        let query = sqlx_query(&sql).bind(new_name).bind(datatype);
+        query.execute(&self.pool).await?;
+
+        let sql = local_sql_syntax(
+            &self.db_kind,
+            &format!(
+                r#"UPDATE "column"
+                    SET "datatype" = CASE
+                      WHEN "datatype" = {SQL_PARAM} THEN {SQL_PARAM} ELSE "datatype"
+                    END, "nulltype" = CASE
+                      WHEN "nulltype" = {SQL_PARAM} THEN {SQL_PARAM} ELSE "nulltype"
+                    END"#
+            ),
+        );
+        let query = sqlx_query(&sql)
+            .bind(datatype)
+            .bind(new_name)
+            .bind(datatype)
+            .bind(new_name);
+        query.execute(&self.pool).await?;
+
+        let sql = local_sql_syntax(
+            &self.db_kind,
+            &format!(
+                r#"UPDATE "datatype"
+                    SET "parent" =
+                      CASE
+                        WHEN "parent" = {SQL_PARAM} THEN {SQL_PARAM} ELSE "parent"
+                      END"#
+            ),
+        );
+        let query = sqlx_query(&sql).bind(datatype).bind(new_name);
+        query.execute(&self.pool).await?;
+
+        // TODO: We need to adjust any of the following that refer to the datatype:
+        // - datatype conditions (for list() types)
+        // - rule then and when conditions
+
+        let sql = local_sql_syntax(
+            &self.db_kind,
+            &format!(r#"DELETE FROM "datatype" WHERE "datatype" = {SQL_PARAM}"#),
+        );
+        let query = sqlx_query(&sql).bind(datatype);
+        query.execute(&self.pool).await?;
+
+        // Save the column table and the data table and then rebuild valve:
+        self.save_tables(&vec!["datatype"], &None).await?;
+        self.rebuild()?;
+
+        Ok(())
+    }
+
+    /// TODO: Add docstring here
+    pub async fn rename_table(&mut self, table: &str, new_name: &str) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        let (rn, ro) = get_next_new_row_tx(&self.db_kind, &mut tx, "table").await?;
+        let sql = local_sql_syntax(
+            &self.db_kind,
+            &format!(
+                // TODO: Determine the columns from the column config
+                r#"INSERT INTO "table" (
+                       "row_number", "row_order", "table",
+                       "path", "type", "options", "description"
+                   )
+                   SELECT
+                      {rn} AS row_number,
+                      {ro} as row_order,
+                      {SQL_PARAM} as "table",
+                      t2.path, t2.type, t2.options, t2.description
+                     FROM "table" t2
+                    WHERE t2."table" = {SQL_PARAM}"#
+            ),
+        );
+        let query = sqlx_query(&sql).bind(new_name).bind(table);
+        query.execute(&mut tx).await?;
+
+        for config_table in ["rule", "column"] {
+            let sql = local_sql_syntax(
+                &self.db_kind,
+                &format!(
+                    r#"UPDATE "{config_table}"
+                      SET "table" = {SQL_PARAM}
+                    WHERE "table" = {SQL_PARAM}"#
+                ),
+            );
+            let query = sqlx_query(&sql).bind(new_name).bind(table);
+            query.execute(&mut tx).await?;
+        }
+
+        let sql = local_sql_syntax(
+            &self.db_kind,
+            &format!(r#"DELETE FROM "table" WHERE "table" = {SQL_PARAM}"#),
+        );
+        let query = sqlx_query(&sql).bind(table);
+        query.execute(&mut tx).await?;
+
+        // Commit the transaction:
+        tx.commit().await?;
+
+        // TODO: We need to change the table name also in
+        // - The column table's structure" field.
+
+        // Save the column table and the data table and then rebuild valve:
+        self.save_tables(&vec!["table", "column", "rule"], &None)
+            .await?;
+        self.rebuild()?;
+
+        Ok(())
     }
 
     /// TODO: Add docstring here
@@ -1210,6 +1343,42 @@ impl Valve {
 
         let query = sqlx_query(&sql).bind(table).bind(column);
         query.execute(&self.pool).await?;
+
+        // Save the column table and the data table and then rebuild valve:
+        self.save_tables(&vec!["column", table], &None).await?;
+        self.rebuild()?;
+
+        // Load the newly modified table:
+        self.load_tables(&vec![table], true).await?;
+        Ok(())
+    }
+
+    /// TODO: Add docstring here
+    pub async fn rename_column(
+        &mut self,
+        table: &str,
+        column: &str,
+        new_name: &str,
+        new_label: &Option<String>,
+    ) -> Result<()> {
+        let sql = local_sql_syntax(
+            &self.db_kind,
+            &format!(
+                r#"UPDATE "column"
+                      SET "column" = {SQL_PARAM},
+                          "label" = {SQL_PARAM}
+                    WHERE "table" = {SQL_PARAM} AND "column" = {SQL_PARAM}"#
+            ),
+        );
+
+        let query = sqlx_query(&sql)
+            .bind(new_name)
+            .bind(new_label)
+            .bind(table)
+            .bind(column);
+        query.execute(&self.pool).await?;
+
+        // TODO: We need to adjust any structures that refer to the old column name.
 
         // Save the column table and the data table and then rebuild valve:
         self.save_tables(&vec!["column", table], &None).await?;

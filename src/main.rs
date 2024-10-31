@@ -554,6 +554,10 @@ enum RenameSubcommands {
         #[arg(value_name = "NEW_NAME", action = ArgAction::Set,
               help = "The desired new name for the column")]
         new_name: String,
+
+        #[arg(value_name = "NEW_LABEL", action = ArgAction::Set,
+              help = "The desired new label for the column")]
+        new_label: Option<String>,
     },
 }
 
@@ -965,6 +969,7 @@ async fn main() -> Result<()> {
                         valve.ensure_all_tables_created().await?;
                         // TODO: Ask the user if they want to load the table now. If assume_yes
                         // is set to true, then load by default.
+                        // Same goes when adding or removing a column from a table etc.
                     }
                 }
             };
@@ -1467,11 +1472,31 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Rename { subcommand } => {
-            let _valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
+            let mut valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
             match subcommand {
-                RenameSubcommands::Column { .. } => todo!(),
-                RenameSubcommands::Datatype { .. } => todo!(),
-                RenameSubcommands::Table { .. } => todo!(),
+                RenameSubcommands::Column {
+                    table,
+                    column,
+                    new_name,
+                    new_label,
+                } => {
+                    valve
+                        .rename_column(table, column, new_name, new_label)
+                        .await
+                        .expect("Error renaming column");
+                }
+                RenameSubcommands::Datatype { datatype, new_name } => {
+                    valve
+                        .rename_datatype(datatype, new_name)
+                        .await
+                        .expect("Error renaming datatype");
+                }
+                RenameSubcommands::Table { table, new_name } => {
+                    valve
+                        .rename_table(table, new_name)
+                        .await
+                        .expect("Error renaming table");
+                }
             };
         }
         Commands::Save { save_dir, tables } => {
