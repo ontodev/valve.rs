@@ -899,7 +899,7 @@ impl Valve {
     }
 
     /// TODO: Add docstring here
-    pub fn rebuild(&mut self) -> Result<()> {
+    pub fn reconfigure(&mut self) -> Result<()> {
         let table_path = self.get_path()?;
         let parser = StartParser::new();
         let (
@@ -912,7 +912,7 @@ impl Valve {
             sorted_table_list,
             table_dependencies_in,
             table_dependencies_out,
-            startup_table_messages,
+            _startup_table_messages,
         ) = read_config_files(&table_path, &parser, &self.pool)?;
 
         let config = ValveConfig {
@@ -935,18 +935,15 @@ impl Valve {
         self.datatype_conditions = datatype_conditions;
         self.rule_conditions = rule_conditions;
         self.structure_conditions = structure_conditions;
-        self.user = String::from("VALVE");
-        self.verbose = false;
-        self.interactive = false;
-        self.initial_load = false;
-        self.startup_table_messages = startup_table_messages;
         Ok(())
     }
 
-    /// Configures a SQLite database for initial loading by setting a number of unsafe PRAGMAs
-    /// that are unsafe in general but suitable when setting up a Valve database for the first
+    /// Configures a SQLite database session for initial loading by setting a number of PRAGMAs
+    /// that are unsafe in general but appropriate when setting up a Valve database for the first
     /// time. Note that if Valve's managed database is not a SQLite database, calling this function
-    /// has no effect.
+    /// has no effect. Note that once a database session has been configured for initial loading,
+    /// it cannot be unconfigured. To connect to the database in a normal manner it is required to
+    /// create a new [Valve] instance.
     pub async fn configure_for_initial_load(&mut self) -> Result<&mut Self> {
         if self.initial_load {
             Ok(self)
@@ -1051,9 +1048,9 @@ impl Valve {
         }
         query.execute(&self.pool).await?;
 
-        // Save the datatype table and then rebuild valve:
+        // Save the datatype table and then reconfigure valve:
         self.save_tables(&vec!["datatype"], &None).await?;
-        self.rebuild()
+        self.reconfigure()
     }
 
     /// TODO: Add docstring here
@@ -1066,9 +1063,9 @@ impl Valve {
         let query = sqlx_query(&sql).bind(datatype);
         query.execute(&self.pool).await?;
 
-        // Save the datatype table and then rebuild valve:
+        // Save the datatype table and then reconfigure valve:
         self.save_tables(&vec!["datatype"], &None).await?;
-        self.rebuild()
+        self.reconfigure()
     }
 
     /// TODO: Add docstring here
@@ -1138,9 +1135,9 @@ impl Valve {
         let query = sqlx_query(&sql).bind(datatype);
         query.execute(&self.pool).await?;
 
-        // Save the column table and the data table and then rebuild valve:
+        // Save the column table and the data table and then reconfigure valve:
         self.save_tables(&vec!["datatype"], &None).await?;
-        self.rebuild()?;
+        self.reconfigure()?;
 
         Ok(())
     }
@@ -1195,10 +1192,10 @@ impl Valve {
         // TODO: We need to change the table name also in
         // - The column table's structure" field.
 
-        // Save the column table and the data table and then rebuild valve:
+        // Save the column table and the data table and then reconfigure valve:
         self.save_tables(&vec!["table", "column", "rule"], &None)
             .await?;
-        self.rebuild()?;
+        self.reconfigure()?;
 
         Ok(())
     }
@@ -1228,12 +1225,12 @@ impl Valve {
 
         tx.commit().await?;
 
-        // Save the column and table tables and rebuild valve:
+        // Save the column and table tables and reconfigure valve:
         self.save_tables(&vec!["table", "column"], &None).await?;
         if self.verbose {
             println!("Updating valve configuration.")
         }
-        self.rebuild()
+        self.reconfigure()
     }
 
     /// TODO: Add docstring
@@ -1323,9 +1320,9 @@ impl Valve {
         }
         query.execute(&self.pool).await?;
 
-        // Save the column table and the data table and then rebuild valve:
+        // Save the column table and the data table and then reconfigure valve:
         self.save_tables(&vec!["column", table], &None).await?;
-        self.rebuild()?;
+        self.reconfigure()?;
 
         // Load the newly modified table:
         self.load_tables(&vec![table], true).await?;
@@ -1344,9 +1341,9 @@ impl Valve {
         let query = sqlx_query(&sql).bind(table).bind(column);
         query.execute(&self.pool).await?;
 
-        // Save the column table and the data table and then rebuild valve:
+        // Save the column table and the data table and then reconfigure valve:
         self.save_tables(&vec!["column", table], &None).await?;
-        self.rebuild()?;
+        self.reconfigure()?;
 
         // Load the newly modified table:
         self.load_tables(&vec![table], true).await?;
@@ -1380,9 +1377,9 @@ impl Valve {
 
         // TODO: We need to adjust any structures that refer to the old column name.
 
-        // Save the column table and the data table and then rebuild valve:
+        // Save the column table and the data table and then reconfigure valve:
         self.save_tables(&vec!["column", table], &None).await?;
-        self.rebuild()?;
+        self.reconfigure()?;
 
         // Load the newly modified table:
         self.load_tables(&vec![table], true).await?;
@@ -1459,24 +1456,31 @@ impl Valve {
         sorted_tables
     }
 
-    /// Return the list of configured tables in sorted order, or reverse sorted order if the
-    /// reverse flag is set.
-    pub fn get_sorted_table_list(&self, reverse: bool) -> Vec<&str> {
-        let mut sorted_tables = self
-            .sorted_table_list
+    /// Return the list of configured tables in sorted order.
+    pub fn get_sorted_table_list(&self) -> Vec<&str> {
+        self.sorted_table_list
             .iter()
             .map(|i| i.as_str())
-            .collect::<Vec<_>>();
-        if reverse {
-            sorted_tables.reverse();
-        }
+            .collect::<Vec<_>>()
+    }
+
+    /// Return the list of configured tables in reverse sorted order.
+    pub fn get_reverse_sorted_table_list(&self) -> Vec<&str> {
+        let mut sorted_tables = self.get_sorted_table_list();
+        sorted_tables.reverse();
         sorted_tables
     }
 
-    /// Given a subset of the configured tables, return them in sorted dependency order, or in
-    /// reverse dependency order if `reverse` is set to true.
-    pub fn sort_tables(&self, table_subset: &Vec<&str>, reverse: bool) -> Result<Vec<String>> {
-        let full_table_list = self.get_sorted_table_list(false);
+    /// Given a subset of the configured tables, return them in reverse dependency order.
+    pub fn reverse_sort_tables(&self, table_subset: &Vec<&str>) -> Result<Vec<String>> {
+        let mut sorted_subset = self.sort_tables(table_subset)?;
+        sorted_subset.reverse();
+        Ok(sorted_subset)
+    }
+
+    /// Given a subset of the configured tables, return them sorted in dependency order.
+    pub fn sort_tables(&self, table_subset: &Vec<&str>) -> Result<Vec<String>> {
+        let full_table_list = self.get_sorted_table_list();
         if !table_subset
             .iter()
             .all(|item| full_table_list.contains(item))
@@ -1502,16 +1506,11 @@ impl Valve {
 
         // Since the result of verify_table_deps_and_sort() will include dependencies of the tables
         // in its input list, we filter those out here:
-        let mut sorted_subset = sorted_subset
+        Ok(sorted_subset
             .iter()
             .filter(|m| table_subset.contains(&m.as_str()))
             .map(|s| s.to_string())
-            .collect::<Vec<_>>();
-
-        if reverse {
-            sorted_subset.reverse();
-        }
-        Ok(sorted_subset)
+            .collect::<Vec<_>>())
     }
 
     /// Get all the incoming (tables that depend on it) or outgoing (tables it depends on)
@@ -1581,7 +1580,7 @@ impl Valve {
     /// Returns an IndexMap, indexed by configured table, containing lists of their dependencies.
     /// If incoming is true, the lists are incoming dependencies, else they are outgoing.
     pub fn collect_dependencies(&self, incoming: bool) -> Result<IndexMap<String, Vec<String>>> {
-        let tables = self.get_sorted_table_list(false);
+        let tables = self.get_sorted_table_list();
         let mut dependencies = IndexMap::new();
         for table in tables {
             dependencies.insert(table.to_string(), self.get_dependencies(table, incoming)?);
@@ -1596,7 +1595,10 @@ impl Valve {
     /// more columns does not match the configured SQL type for that column; (3) Some column with a
     /// 'unique', 'primary', or 'from(table, column)' in its column configuration fails to be
     /// associated, in the database, with a unique constraint, primary key, or foreign key,
-    /// respectively; or vice versa; (4) The table does not exist in the database.
+    /// respectively; or vice versa; (4) The table does not exist in the database. When
+    /// [Valve::interactive] is set to true, this function will inform the user, via the terminal,
+    /// whenever the table needs to be changed with an explanation of the reason why, and will
+    /// wait for explicit confirmation before proceeding.
     pub async fn table_has_changed(&self, table: &str) -> Result<bool> {
         // A clojure that, given a parsed structure condition, a table and column name, and an
         // unsigned integer representing whether the given column, in the case of a SQLite database,
@@ -2223,9 +2225,13 @@ impl Valve {
     }
 
     /// Create all configured database tables and views if they do not already exist as configured.
-    pub async fn ensure_all_tables_created(&self) -> Result<&Self> {
+    pub async fn ensure_all_tables_created(&mut self) -> Result<&Self> {
+        // We turn off interactive mode for all "all" operations:
+        let saved_interactive = self.interactive;
+        self.set_interactive(false);
+
         let setup_statements = self.get_setup_statements().await?;
-        let sorted_table_list = self.get_sorted_table_list(false);
+        let sorted_table_list = self.get_sorted_table_list();
         for table in &sorted_table_list {
             let table_config = self.get_table_config(table)?;
             if table_config.options.contains("db_view") {
@@ -2263,6 +2269,8 @@ impl Valve {
                 }
             }
         }
+
+        self.set_interactive(saved_interactive);
         Ok(self)
     }
 
@@ -2322,16 +2330,44 @@ impl Valve {
     }
 
     /// Drop all configured tables, in reverse dependency order.
-    pub async fn drop_all_tables(&self) -> Result<&Self> {
+    pub async fn drop_all_tables(&mut self) -> Result<&Self> {
+        // We turn off interactive mode for all "all" operations:
+        let saved_interactive = self.interactive;
+        self.set_interactive(false);
+
         // Drop all of the editable database tables in the reverse of their sorted order:
-        self.drop_tables(&self.get_sorted_table_list(true)).await?;
+        self.drop_tables(&self.get_reverse_sorted_table_list())
+            .await?;
+
+        // Set interactive mode back to what it was before:
+        self.set_interactive(saved_interactive);
         Ok(self)
     }
 
     /// Given a vector of table names, drop those tables, in the given order, including any tables
-    /// that must be dropped implicitly because of a dependency relationship.
+    /// that must be dropped implicitly because of a dependency relationship. Note that if
+    /// [Valve::interactive] is set, and if more tables need to be dropped than were requested,
+    /// Valve will prompt the user for confirmation via the terminal.
     pub async fn drop_tables(&self, tables: &Vec<&str>) -> Result<&Self> {
         let drop_list = self.add_dependencies(tables, true)?;
+        if self.interactive {
+            let drop_set = drop_list.iter().collect::<HashSet<_>>();
+            let table_set = tables.iter().map(|t| t.to_string()).collect::<HashSet<_>>();
+            let table_set = table_set.iter().collect::<HashSet<_>>();
+            let extra_tables = drop_set.difference(&table_set).collect::<Vec<_>>();
+            if !extra_tables.is_empty() {
+                print!(
+                    "In order to drop: {tables:?}, Valve must also drop the following tables: \
+                     {extra_tables:?}. ",
+                );
+                print!("Do you want to continue? [y/N] ");
+                if !proceed::proceed() {
+                    return Err(
+                        ValveError::UserError("Execution aborted by user".to_string()).into(),
+                    );
+                }
+            }
+        }
         for table in &drop_list {
             let table_config = self.get_table_config(table)?;
             if table_config.path != "" {
@@ -2356,17 +2392,49 @@ impl Valve {
     }
 
     /// Truncate all configured tables, in reverse dependency order.
-    pub async fn truncate_all_tables(&self) -> Result<&Self> {
-        self.truncate_tables(&self.get_sorted_table_list_with_option("edit", true))
-            .await?;
+    pub async fn truncate_all_tables(&mut self) -> Result<&Self> {
+        // This makes Rust's borrow checker happy. The issue is that get_sorted_table_list()
+        // is defined for an immutable self, but in the rest of the current function, self is
+        // borrowed as mutable. The solution is to clone the table list, which we do in two steps:
+        let sorted_editable_tables = self
+            .get_sorted_table_list_with_option("edit", true)
+            .iter()
+            .map(|t| t.to_string())
+            .collect::<Vec<_>>();
+        let sorted_editable_tables = sorted_editable_tables
+            .iter()
+            .map(|t| t.as_str())
+            .collect::<Vec<_>>();
+
+        self.truncate_tables(&sorted_editable_tables).await?;
         Ok(self)
     }
 
     /// Given a vector of table names, truncate those tables, in the given order, including any
-    /// tables that must be truncated implicitly because of a dependency relationship.
-    pub async fn truncate_tables(&self, tables: &Vec<&str>) -> Result<&Self> {
+    /// tables that must be truncated implicitly because of a dependency relationship. Note that if
+    /// [Valve::interactive] is set, and if more tables need to be truncated than were requested,
+    /// Valve will prompt the user for confirmation via the terminal.
+    pub async fn truncate_tables(&mut self, tables: &Vec<&str>) -> Result<&Self> {
         self.ensure_all_tables_created().await?;
         let truncate_list = self.add_dependencies(tables, true)?;
+        if self.interactive {
+            let truncate_set = truncate_list.iter().collect::<HashSet<_>>();
+            let table_set = tables.iter().map(|t| t.to_string()).collect::<HashSet<_>>();
+            let table_set = table_set.iter().collect::<HashSet<_>>();
+            let extra_tables = truncate_set.difference(&table_set).collect::<Vec<_>>();
+            if !extra_tables.is_empty() {
+                print!(
+                    "In order to truncate: {tables:?}, Valve must also truncate the following \
+                     tables: {extra_tables:?}. ",
+                );
+                print!("Do you want to continue? [y/N] ");
+                if !proceed::proceed() {
+                    return Err(
+                        ValveError::UserError("Execution aborted by user".to_string()).into(),
+                    );
+                }
+            }
+        }
 
         // We must use CASCADE in the case of PostgreSQL since we cannot truncate a table, T, that
         // depends on another table, T', even in the case where we have previously truncated T'.
@@ -2397,22 +2465,45 @@ impl Valve {
 
     /// Load all configured tables in dependency order. If `validate` is false, just try to insert
     /// all rows, irrespective of whether they are valid or not or will possibly trigger a db error.
-    pub async fn load_all_tables(&self, validate: bool) -> Result<&Self> {
-        let table_list = self.get_sorted_table_list(false);
+    pub async fn load_all_tables(&mut self, validate: bool) -> Result<&Self> {
+        // This makes Rust's borrow checker happy. The issue is that get_sorted_table_list()
+        // is defined for an immutable self, but in the rest of the current function, self is
+        // borrowed as mutable. The solution is to clone the table list, which we do in two steps:
+        let table_list = self
+            .get_sorted_table_list()
+            .iter()
+            .map(|t| t.to_string())
+            .collect::<Vec<_>>();
+        let table_list = table_list.iter().map(|t| t.as_str()).collect::<Vec<_>>();
+
         if self.verbose {
             println!("Processing {} tables.", table_list.len());
         }
 
-        self.load_tables(&table_list, validate).await
+        // We turn off interactive mode for all "all" operations:
+        let saved_interactive = self.interactive;
+        self.set_interactive(false);
+
+        self.load_tables(&table_list, validate).await?;
+
+        // Clear the startup messages, which will have been inserted during loading:
+        self.startup_table_messages.clear();
+
+        // Set interactive mode back to what it was before:
+        self.set_interactive(saved_interactive);
+        Ok(self)
     }
 
     /// Given a vector of table names, truncate each table, as well as any that depend on a given
     /// table via a foreign key dependency, then load the tables in `table_list` in the given order.
     /// If `validate` is false, just try to insert all rows, irrespective of whether they are valid
     /// or not or whether they may trigger a db error, otherwise all rows are validated as they are
-    /// inserted to the database.
-    pub async fn load_tables(&self, table_list: &Vec<&str>, validate: bool) -> Result<&Self> {
-        let list_for_truncation = self.sort_tables(table_list, true)?;
+    /// inserted to the database. Note that if other tables need to be truncated in order to load
+    /// any tables on the list---for instance if tableA is to be (re)loaded, and there is a table
+    /// called tableB which has a foreign key referencing tableA, then before (re)loading tableA
+    /// we need to truncate tableB---those tables will not automatically be reloaded as well.
+    pub async fn load_tables(&mut self, table_list: &Vec<&str>, validate: bool) -> Result<&Self> {
+        let list_for_truncation = self.reverse_sort_tables(table_list)?;
         self.truncate_tables(
             &list_for_truncation
                 .iter()
@@ -2596,7 +2687,6 @@ impl Valve {
             Ok(())
         };
 
-        // TODO: Shouldn't dependent tables be reloaded too?
         for table in table_list {
             let table_config = self.get_table_config(&table)?;
 
@@ -2948,6 +3038,10 @@ impl Valve {
             } else {
                 columns.insert(column.into(), (label.into(), format.into()));
             }
+        }
+
+        if columns.is_empty() {
+            return Err(ValveError::DataError(format!("No table: '{table}' to save")).into());
         }
 
         // Query the database and use the results to construct the records that will be written

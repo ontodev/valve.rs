@@ -103,7 +103,7 @@ sqlite_api_test: valve test/src/table.tsv build/valve.db test/insert_update.sh |
 	diff --strip-trailing-cr -q test/expected/history.tsv test/output/history.tsv
 	# We drop all of the db tables because the schema for the next test (random test) is different
 	# from the schema used for this test.
-	./$<  --source $(word 2,$^) --database $(word 3,$^) --assume-yes drop-all
+	./$<  --source $(word 2,$^) --database $(word 3,$^) --assume-yes drop
 	@echo "Test succeeded!"
 
 .PHONY: pg_api_test
@@ -118,7 +118,7 @@ pg_api_test: valve test/src/table.tsv test/insert_update.sh | test/output
 	tail -n +2 test/expected/history.tsv | diff --strip-trailing-cr -q test/output/history.tsv -
 	# We drop all of the db tables because the schema for the next test (random test) is different
 	# from the schema used for this test.
-	./$< --source $(word 2,$^) --database $(pg_connect_string) --assume-yes drop-all
+	./$< --source $(word 2,$^) --database $(pg_connect_string) --assume-yes drop
 	@echo "Test succeeded!"
 
 sqlite_random_db = build/valve_random.db
@@ -160,7 +160,7 @@ penguin_test_threshold = 50
 num_penguin_rows = 100000
 penguin_command_sqlite = ./valve --source src/schema/table.tsv --database penguins.db --assume-yes load --initial-load
 penguin_command_pg = ./valve --source src/schema/table.tsv --database $(pg_connect_string) --assume-yes load
-penguin_command_pg_drop = ./valve --source src/schema/table.tsv --database $(pg_connect_string)  --assume-yes drop-all
+penguin_command_pg_drop = ./valve --source src/schema/table.tsv --database $(pg_connect_string)  --assume-yes drop
 
 .PHONY: penguin_test
 penguin_test: valve | test/penguins/src/data

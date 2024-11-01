@@ -16,19 +16,13 @@ use sqlx::{query as sqlx_query, Row};
 use std::{collections::HashMap, io};
 
 // Help strings that are used in more than one subcommand:
-static SAVE_DIR_HELP: &str = "Save tables to DIR instead of to their configured paths";
-
-static TABLE_HELP: &str = "A table name";
-
-static ROW_HELP: &str = "A row number";
-
-static COLUMN_HELP: &str = "A column name or label";
-
-static DATATYPE_HELP: &str = "A datatype name";
-
 static BUILD_ERROR: &str = "Error building Valve";
-
-static REBUILD_ERROR: &str = "Error rebuilding Valve";
+static COLUMN_HELP: &str = "A column name or label";
+static DATATYPE_HELP: &str = "A datatype name";
+static RECONFIGURE_ERROR: &str = "Error reconfiguring Valve";
+static ROW_HELP: &str = "A row number";
+static SAVE_DIR_HELP: &str = "Save tables to DIR instead of to their configured paths";
+static TABLE_HELP: &str = "A table name";
 
 #[derive(Parser)]
 #[command(version,
@@ -63,10 +57,10 @@ struct Cli {
 }
 
 // Note that the subcommands are declared below in the order in which we want them to appear
-// in the usage statement when valve is run with the option --help.
+// in the usage statement that is printed when valve is run with the option `--help`.
 #[derive(Subcommand)]
 enum Commands {
-    /// Load all of the Valve-managed tables in a given database with data
+    /// Load (a table)
     Load {
         #[arg(long,
               action = ArgAction::SetTrue,
@@ -77,15 +71,28 @@ enum Commands {
                       guaranteed in the case of an interrupted transaction.")]
         initial_load: bool,
         // TODO: Add a --dry-run flag.
-        #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
+        #[arg(value_name = "TABLE", action = ArgAction::Set,
+              help = "The name of the table to load. If unspecified Valve will load all tables.")]
         table: Option<String>,
     },
 
-    /// Create all of the Valve-managed tables in a given database without loading any data.
+    /// Ensure that all of the Valve-managed tables have been created as configured.
     Create {},
 
-    /// Drop all of the Valve-managed tables in a given database.
-    DropAll {},
+    /// Drop (a particular) Valve-managed table(s)
+    Drop {
+        #[arg(value_name = "TABLE", action = ArgAction::Set,
+              help = "The name of the table to drop. If unspecified Valve will drop all tables.")]
+        table: Option<String>,
+    },
+
+    /// Truncate (a particular) Valve-managed table(s)
+    Truncate {
+        #[arg(value_name = "TABLE", action = ArgAction::Set,
+              help = "The name of the table to truncate. If unspecified Valve will truncate all \
+                      tables.")]
+        table: Option<String>,
+    },
 
     /// Save all saveable tables as TSV files. If save_dir is specified, all tables will be saved,
     /// with the same filename, to save_dir instead of to their default locations.
@@ -678,6 +685,8 @@ fn extract_column(
     table_param: &Option<String>,
     column_param: &Option<String>,
 ) -> JsonRow {
+    // TODO: Return an error if unrecognized columns are in the input json.
+
     // Mandatory fields that may optionally be provided as arguments to this function:
     let table = match json_row.get("table") {
         Some(input_table) => match table_param {
@@ -769,6 +778,8 @@ fn extract_message(
     column_param: &Option<String>,
     json_row: &JsonRow,
 ) -> (String, u32, String, String, String, String, String) {
+    // TODO: Return an error if unrecognised fields are in the input json.
+
     let table = match json_row.get("table") {
         Some(input_table) => match table_param {
             Some(table_param) if table_param != input_table => {
@@ -964,7 +975,7 @@ async fn main() -> Result<()> {
                     );
                     if table_added {
                         valve.save_tables(&vec!["table", "column"], &None).await?;
-                        valve.rebuild().expect(REBUILD_ERROR);
+                        valve.reconfigure().expect(RECONFIGURE_ERROR);
                         valve.load_tables(&vec!["table", "column"], true).await?;
                         valve.ensure_all_tables_created().await?;
                         // TODO: Ask the user if they want to load the table now. If assume_yes
@@ -975,11 +986,11 @@ async fn main() -> Result<()> {
             };
         }
         Commands::Create {} => {
-            let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
+            let mut valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
             valve
                 .ensure_all_tables_created()
                 .await
-                .expect("Error creating tables");
+                .expect("Error ensuring all tables created");
         }
         Commands::Delete { subcommand } => {
             let mut valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
@@ -1027,12 +1038,18 @@ async fn main() -> Result<()> {
                 }
             };
         }
-        Commands::DropAll {} => {
-            let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
-            valve
-                .drop_all_tables()
-                .await
-                .expect("Error dropping tables");
+        Commands::Drop { table } => {
+            let mut valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
+            match table {
+                None => valve
+                    .drop_all_tables()
+                    .await
+                    .expect("Error dropping tables"),
+                Some(table) => valve
+                    .drop_tables(&vec![table.as_str()])
+                    .await
+                    .expect("Error dropping table"),
+            };
         }
         Commands::Get { subcommand } => {
             let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
@@ -1309,7 +1326,7 @@ async fn main() -> Result<()> {
                     println!("{}", json!(table_config));
                 }
                 GetSubcommands::TableOrder {} => {
-                    let sorted_table_list = valve.get_sorted_table_list(false);
+                    let sorted_table_list = valve.get_sorted_table_list();
                     println!("{}", sorted_table_list.join(", "));
                 }
                 GetSubcommands::Value { table, row, column } => {
@@ -1379,7 +1396,7 @@ async fn main() -> Result<()> {
                 if valve.db_kind == DbKind::Sqlite && !cli.assume_yes {
                     if let Some(_) = table {
                         print!(
-                            "The --initial_load option is intended for use on an empty database. \
+                            "The --initial-load option is intended for use on an empty database. \
                              It should not normally be set when loading a single table as it is \
                              unsafe and could result in data corruption in the case of an \
                              interrupted transaction. Are you sure you want to continue? [y/N] "
@@ -1388,6 +1405,9 @@ async fn main() -> Result<()> {
                             std::process::exit(1);
                         }
                     }
+                }
+                if valve.db_kind == DbKind::Postgres {
+                    eprintln!("Warning: ignoring --initial-load flag for PostgreSQL database");
                 }
                 block_on(valve.configure_for_initial_load())
                     .expect("Could not configure for initial load");
@@ -1531,6 +1551,19 @@ async fn main() -> Result<()> {
         Commands::TestDtHierarchy {} => {
             let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
             run_dt_hierarchy_tests(&valve).expect("Error running datatype hierarchy tests");
+        }
+        Commands::Truncate { table } => {
+            let mut valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
+            match table {
+                None => valve
+                    .truncate_all_tables()
+                    .await
+                    .expect("Error truncating tables"),
+                Some(table) => valve
+                    .truncate_tables(&vec![table.as_str()])
+                    .await
+                    .expect("Error truncating table"),
+            };
         }
         Commands::Update { subcommand } => {
             let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
