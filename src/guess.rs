@@ -52,13 +52,11 @@ pub struct FCMatch {
 /// changes have been written to the database, and false otherwise.
 pub fn guess(
     valve: &Valve,
-    verbose: bool,
     table: Option<&str>,
     table_tsv: &str,
     seed: &Option<u64>,
     sample_size: &usize,
     error_rate: &f32,
-    assume_yes: bool,
 ) -> bool {
     // If a seed was provided, use it to create the random number generator instead of
     // creating it using fresh entropy:
@@ -84,7 +82,7 @@ pub fn guess(
     };
 
     // Collect the random data samples from the tsv file:
-    if verbose {
+    if valve.verbose {
         println!(
             "Getting {} random samples of rows from {} ...",
             sample_size, table_tsv
@@ -94,12 +92,12 @@ pub fn guess(
 
     // Annotate the samples:
     for (i, (label, sample)) in samples.iter_mut().enumerate() {
-        if verbose {
+        if valve.verbose {
             println!("Annotating sample for label '{}' ...", label);
         }
         annotate(label, sample, &valve, error_rate, i == 0);
     }
-    if verbose {
+    if valve.verbose {
         println!("Done!");
     }
 
@@ -114,7 +112,7 @@ pub fn guess(
         "description",
     ];
 
-    if !assume_yes {
+    if valve.interactive {
         // Given tabular data, find the longest cell and return its length.
         fn get_col_width(data: &Vec<Vec<String>>) -> usize {
             let col_width = data
@@ -218,7 +216,7 @@ pub fn guess(
     }
 
     // Table configuration
-    if verbose {
+    if valve.verbose {
         println!("Updating the table configuration in the database ...");
     }
     let row_number = get_max_row_number_from_table(valve, "table");
@@ -236,14 +234,14 @@ pub fn guess(
             ),
         )
     };
-    if verbose {
+    if valve.verbose {
         println!("Executing SQL: {}", sql);
     }
     let query = sqlx_query(&sql).bind(table).bind(table_tsv);
     block_on(query.execute(&valve.pool)).expect(&format!("Error executing SQL '{}'", sql));
 
     // Column configuration
-    if verbose {
+    if valve.verbose {
         println!("Updating the column configuration in the database ...");
     }
     let mut row_number = get_max_row_number_from_table(valve, "column");
@@ -318,7 +316,7 @@ pub fn guess(
                 column_names, values
             ),
         );
-        if verbose {
+        if valve.verbose {
             println!("Executing SQL: {}", sql);
         }
         let mut query = sqlx_query(&sql);
@@ -328,7 +326,7 @@ pub fn guess(
         block_on(query.execute(&valve.pool)).expect(&format!("Error executing SQL '{}'", sql));
         row_number += 1;
     }
-    if verbose {
+    if valve.verbose {
         println!("Done!");
     }
     return true;

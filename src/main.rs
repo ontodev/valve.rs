@@ -6,7 +6,6 @@ use anyhow::Result;
 use clap::{ArgAction, Parser, Subcommand};
 use futures::{executor::block_on, TryStreamExt};
 use ontodev_valve::{
-    guess::guess,
     toolkit::{generic_select_with_message_values, local_sql_syntax, DbKind},
     valve::{JsonRow, Valve, ValveCell, ValveRow},
     REQUIRED_DATATYPE_COLUMNS, SQL_PARAM,
@@ -19,7 +18,6 @@ use std::{collections::HashMap, io};
 static BUILD_ERROR: &str = "Error building Valve";
 static COLUMN_HELP: &str = "A column name or label";
 static DATATYPE_HELP: &str = "A datatype name";
-static RECONFIGURE_ERROR: &str = "Error reconfiguring Valve";
 static ROW_HELP: &str = "A row number";
 static SAVE_DIR_HELP: &str = "Save tables to DIR instead of to their configured paths";
 static TABLE_HELP: &str = "A table name";
@@ -94,22 +92,16 @@ enum Commands {
         table: Option<String>,
     },
 
-    /// Save all saveable tables as TSV files. If save_dir is specified, all tables will be saved,
-    /// with the same filename, to save_dir instead of to their default locations.
-    SaveAll {
-        #[arg(long, value_name = "DIR", action = ArgAction::Set, help = SAVE_DIR_HELP)]
-        save_dir: Option<String>,
-    },
-
-    /// Save the tables from a given list as TSV files. If save_dir is specified, all tables will be
-    /// saved, with the same filename, to save_dir instead of to their default locations.
+    /// Save (a given list of) tables as TSV files. If LIST is empty, save all of the saveable
+    /// tables. Otherwise save the tables in LIST. If the --save_dir option is given, tables are
+    /// saved, with their current filename, under DIR instead of their default locations.
     Save {
         #[arg(value_name = "LIST",
               action = ArgAction::Set,
-              value_delimiter = ',',
-              help = "A comma-separated list of tables to save. Note that table names with spaces \
+              value_delimiter = ' ',
+              help = "A space-separated list of tables to save. Note that table names with spaces \
                       must be enclosed within quotes.")]
-        tables: Vec<String>,
+        tables: Option<Vec<String>>,
 
         #[arg(long, value_name = "DIR", action = ArgAction::Set, help = SAVE_DIR_HELP)]
         save_dir: Option<String>,
@@ -186,7 +178,7 @@ enum Commands {
         context: usize,
     },
 
-    /// Rename table, rows, and datatypes
+    /// Rename table, rows, columns, and datatypes
     Rename {
         #[command(subcommand)]
         subcommand: RenameSubcommands,
@@ -203,7 +195,7 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum GetSubcommands {
-    /// Get all rows from the given table.
+    /// Get the rows from a given table.
     Table {
         #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
         table: String,
@@ -363,24 +355,27 @@ enum AddSubcommands {
         table: String,
 
         #[arg(value_name = "PATH", action = ArgAction::Set,
-              help = "The TSV file representing the table whose column configuration will be \
-                      guessed.")]
+              help = "The TSV file representing the table to be added.")]
         path: String,
 
         #[arg(long, value_name = "SIZE", action = ArgAction::Set,
-              help = "Sample size to use when guessing",
+              help = "Sample size to use when guessing the table configuration",
               default_value_t = 10000)]
         sample_size: usize,
 
         #[arg(long, value_name = "RATE", action = ArgAction::Set,
-              help = "A number between 0 and 1 (inclusive) representing the proportion of errors \
-                      expected",
+              help = "A number between 0 and 1 (inclusive) representing the proportion of data \
+                      errors (incorrect datatypes, unsatisfied data dependencies, etc.) that are \
+                      expected to be in the data.",
               default_value_t = 0.1)]
         error_rate: f32,
 
         #[arg(long, value_name = "SEED", action = ArgAction::Set,
-              help = "Use SEED for random sampling")]
+              help = "Use SEED to generate pseudo-random samples.")]
         seed: Option<u64>,
+
+        #[arg(long, action = ArgAction::SetTrue, help = "Do not load the table after creating it")]
+        no_load: bool,
     },
 
     /// Add a column to a database table
@@ -390,6 +385,10 @@ enum AddSubcommands {
 
         #[arg(value_name = "COLUMN", action = ArgAction::Set, help = COLUMN_HELP)]
         column: Option<String>,
+
+        #[arg(long, action = ArgAction::SetTrue,
+              help = "Do not load the table after adding COLUMN")]
+        no_load: bool,
     },
 
     /// Add a datatype to the datatype table
@@ -480,6 +479,10 @@ enum MoveSubcommands {
         #[arg(value_name = "TO_TABLE", action = ArgAction::Set,
               help = "The name of the table to move the column to")]
         to_table: String,
+
+        #[arg(long, action = ArgAction::SetTrue,
+              help = "Do not load the table after moving COLUMN")]
+        no_load: bool,
     },
 }
 
@@ -510,6 +513,10 @@ enum DeleteSubcommands {
     Table {
         #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
         table: String,
+
+        #[arg(long, action = ArgAction::SetTrue,
+              help = "Do not drop the table after deleting it from the Valve configuration.")]
+        no_drop: bool,
     },
 
     /// Delete a column from a given table
@@ -519,6 +526,10 @@ enum DeleteSubcommands {
 
         #[arg(value_name = "COLUMN", action = ArgAction::Set, help = COLUMN_HELP)]
         column: String,
+
+        #[arg(long, action = ArgAction::SetTrue,
+              help = "Do not load the table after deleting COLUMN")]
+        no_load: bool,
     },
 
     /// Remove a datatype
@@ -565,6 +576,10 @@ enum RenameSubcommands {
         #[arg(value_name = "NEW_LABEL", action = ArgAction::Set,
               help = "The desired new label for the column")]
         new_label: Option<String>,
+
+        #[arg(long, action = ArgAction::SetTrue,
+              help = "Do not load the table after deleting COLUMN")]
+        no_load: bool,
     },
 }
 
@@ -625,7 +640,7 @@ async fn fetch_row_with_input_value(
 
 /// Read a JSON-formatted string from STDIN and verify, using the given Valve instance, that
 /// the fields in the JSON correspond to the allowed fields in the given table:
-fn read_json_input(valve: &Valve, table: &str) -> JsonRow {
+fn read_json_row_for_table(valve: &Valve, table: &str) -> JsonRow {
     let json_row = {
         let mut json_row = String::new();
         io::stdin()
@@ -679,14 +694,16 @@ fn extract_rn(json_row: &mut JsonRow) -> Option<u32> {
     }
 }
 
-/// TODO: Add docstring
-fn extract_column(
+/// Given a JSON representation of a row, which is assumed to be from the column table, and
+/// optionally a table name and a column name, extract the column table fields for that column
+/// from the row and return them all as a JSON object. Note that if table_name or column_name
+/// are not given then json_row must contain them (i.e., a "table" and a "column" field,
+/// respectively).
+fn extract_column_fields(
     json_row: &JsonRow,
     table_param: &Option<String>,
     column_param: &Option<String>,
 ) -> JsonRow {
-    // TODO: Return an error if unrecognized columns are in the input json.
-
     // Mandatory fields that may optionally be provided as arguments to this function:
     let table = match json_row.get("table") {
         Some(input_table) => match table_param {
@@ -770,16 +787,16 @@ fn extract_column(
 }
 
 /// Reads and parses a JSON-formatted string representing a validation message (for the expected
-/// format see, e.g., AddSubcommands::Message above), and returns the tuple:
-/// (table, row, column, value, level, rule, message)
-fn extract_message(
+/// format see documentation for [AddSubcommands::Message]), and returns the tuple:
+/// (table, row, column, value, level, rule, message). If any of table_param, column_param, or
+/// row_param are not provided, then a "table", "column", or "row" field, respectively should be
+/// present in json_row.
+fn extract_message_fields(
     table_param: &Option<String>,
     row_param: &Option<u32>,
     column_param: &Option<String>,
     json_row: &JsonRow,
 ) -> (String, u32, String, String, String, String, String) {
-    // TODO: Return an error if unrecognised fields are in the input json.
-
     let table = match json_row.get("table") {
         Some(input_table) => match table_param {
             Some(table_param) if table_param != input_table => {
@@ -840,7 +857,10 @@ fn extract_message(
     (table, row, column, value, level, rule, message)
 }
 
-/// TODO: Add a docstring here.
+/// Given a JSON representation of a row, which is assumed to be from the datatype table, and
+/// optionally a datatype name, extract the datatype table fields for that datatype
+/// from the row and return them all as a HashMap. Note that if datatype_name
+/// is not given then json_row must contain it, i.e., it must have a "datatype" field.
 fn extract_datatype_fields(
     valve: &Valve,
     datatype_param: &Option<String>,
@@ -862,7 +882,7 @@ fn extract_datatype_fields(
     };
     dt_fields.insert("datatype".to_string(), datatype);
 
-    // Now add fields corresponding to the values of every configured column:
+    // Now add fields corresponding to the values of every datatype column:
     let mut json_row = json_row.clone();
     json_row.remove("datatype");
     let configured_columns = valve
@@ -920,27 +940,33 @@ async fn main() -> Result<()> {
         Commands::Add { subcommand } => {
             let mut valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
             match subcommand {
-                AddSubcommands::Column { table, column } => {
-                    let json_row = read_json_input(&valve, "column");
-                    let column_json = extract_column(&json_row, table, column);
-                    valve.add_column(table, column, &column_json).await?;
+                AddSubcommands::Column {
+                    table,
+                    column,
+                    no_load,
+                } => {
+                    let json_row = read_json_row_for_table(&valve, "column");
+                    let column_json = extract_column_fields(&json_row, table, column);
+                    valve
+                        .add_column(table, column, &column_json, *no_load)
+                        .await?;
                 }
                 AddSubcommands::Datatype { datatype } => {
-                    let json_datatype = read_json_input(&valve, "datatype");
+                    let json_datatype = read_json_row_for_table(&valve, "datatype");
                     let dt_fields = extract_datatype_fields(&valve, datatype, &json_datatype);
                     valve.add_datatype(&dt_fields).await?;
                 }
                 AddSubcommands::Message { table, row, column } => {
-                    let json_message = read_json_input(&valve, "message");
+                    let json_message = read_json_row_for_table(&valve, "message");
                     let (table, row, column, value, level, rule, message) =
-                        extract_message(table, row, column, &json_message);
+                        extract_message_fields(table, row, column, &json_message);
                     let message_id = valve
                         .insert_message(&table, row, &column, &value, &level, &rule, &message)
                         .await?;
                     println!("{message_id}");
                 }
                 AddSubcommands::Row { table } => {
-                    let json_row = read_json_input(&valve, table);
+                    let json_row = read_json_row_for_table(&valve, table);
                     let (_, row) = valve
                         .insert_row(table, &json_row)
                         .await
@@ -960,33 +986,18 @@ async fn main() -> Result<()> {
                     sample_size,
                     error_rate,
                     seed,
+                    no_load,
                 } => {
-                    let table_added = guess(
-                        &valve,
-                        cli.verbose,
-                        Some(table),
-                        path,
-                        seed,
-                        sample_size,
-                        error_rate,
-                        // TODO: This is unnecessary since this flag is available via the
-                        // valve instance (first arg above).
-                        cli.assume_yes,
-                    );
-                    if table_added {
-                        valve.save_tables(&vec!["table", "column"], &None).await?;
-                        valve.reconfigure().expect(RECONFIGURE_ERROR);
-                        valve.load_tables(&vec!["table", "column"], true).await?;
-                        valve.ensure_all_tables_created().await?;
-                        // TODO: Ask the user if they want to load the table now. If assume_yes
-                        // is set to true, then load by default.
-                        // Same goes when adding or removing a column from a table etc.
-                    }
+                    valve
+                        .add_table(table, path, sample_size, error_rate, seed, *no_load)
+                        .await?;
                 }
             };
         }
         Commands::Create {} => {
             let mut valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
+            // We turn interactive mode off since this is an "all" operation:
+            valve.set_interactive(false);
             valve
                 .ensure_all_tables_created()
                 .await
@@ -995,9 +1006,13 @@ async fn main() -> Result<()> {
         Commands::Delete { subcommand } => {
             let mut valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
             match subcommand {
-                DeleteSubcommands::Column { table, column } => {
+                DeleteSubcommands::Column {
+                    table,
+                    column,
+                    no_load,
+                } => {
                     valve
-                        .delete_column(table, column)
+                        .delete_column(table, column, *no_load)
                         .await
                         .expect("Error deleting column");
                 }
@@ -1014,11 +1029,15 @@ async fn main() -> Result<()> {
                             .await
                             .expect("Could not delete message");
                     } else {
-                        if let Some(rule) = rule {
-                            valve
+                        match rule {
+                            Some(rule) => valve
                                 .delete_messages_like(rule)
                                 .await
-                                .expect("Could not delete message");
+                                .expect("Could not delete message"),
+                            None => panic!(
+                                "Either a MESSAGE_ID or a RULE (possibly with wildcards) \
+                                 is required. To delete all messages use the option '--rule %'."
+                            ),
                         }
                     }
                 }
@@ -1030,9 +1049,9 @@ async fn main() -> Result<()> {
                             .expect("Could not delete row");
                     }
                 }
-                DeleteSubcommands::Table { table } => {
+                DeleteSubcommands::Table { table, no_drop } => {
                     valve
-                        .delete_table(table)
+                        .delete_table(table, *no_drop)
                         .await
                         .expect("Error deleting table");
                 }
@@ -1041,10 +1060,18 @@ async fn main() -> Result<()> {
         Commands::Drop { table } => {
             let mut valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
             match table {
-                None => valve
-                    .drop_all_tables()
-                    .await
-                    .expect("Error dropping tables"),
+                None => {
+                    if !cli.assume_yes {
+                        print!("Are you sure you want to drop all managed tables? [y/N] ");
+                        if !proceed::proceed() {
+                            std::process::exit(1);
+                        }
+                    }
+                    valve
+                        .drop_all_tables()
+                        .await
+                        .expect("Error dropping tables")
+                }
                 Some(table) => valve
                     .drop_tables(&vec![table.as_str()])
                     .await
@@ -1430,6 +1457,7 @@ async fn main() -> Result<()> {
                     column,
                     from_table,
                     to_table,
+                    no_load,
                 } => {
                     let column_config = valve
                         .config
@@ -1446,13 +1474,9 @@ async fn main() -> Result<()> {
                     }
 
                     valve
-                        .delete_column(from_table, column)
+                        .delete_column(from_table, column, true)
                         .await
                         .expect("Error deleting column");
-
-                    if cli.verbose {
-                        println!("Adding column '{column}' to table '{from_table}'.");
-                    }
 
                     let mut input_json = JsonRow::new();
                     input_json.insert("datatype".to_string(), json!(column_config.datatype));
@@ -1466,9 +1490,30 @@ async fn main() -> Result<()> {
                             &Some(to_table.to_string()),
                             &Some(column.to_string()),
                             &input_json,
+                            true,
                         )
                         .await
                         .expect("Error adding column");
+
+                    let load_table = {
+                        if *no_load {
+                            false
+                        } else if cli.assume_yes {
+                            true
+                        } else {
+                            // Ask the user if they would like to load now:
+                            print!(
+                                "Column '{column}' moved from '{from_table}' to '{to_table}'. \
+                                 Do you want to load '{from_table}' and '{to_table}' now? [y/N] ",
+                            );
+                            proceed::proceed()
+                        }
+                    };
+                    if load_table {
+                        valve.load_tables(&vec![from_table, to_table], true).await?;
+                    } else if cli.verbose {
+                        println!("Leaving '{from_table}' and '{to_table}' empty as instructed.");
+                    }
                 }
                 MoveSubcommands::Row { table, row, after } => {
                     valve.move_row(table, row, after).await?;
@@ -1499,9 +1544,10 @@ async fn main() -> Result<()> {
                     column,
                     new_name,
                     new_label,
+                    no_load,
                 } => {
                     valve
-                        .rename_column(table, column, new_name, new_label)
+                        .rename_column(table, column, new_name, new_label, *no_load)
                         .await
                         .expect("Error renaming column");
                 }
@@ -1521,22 +1567,25 @@ async fn main() -> Result<()> {
         }
         Commands::Save { save_dir, tables } => {
             let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
-            let tables = tables
-                .iter()
-                .filter(|s| *s != "")
-                .map(|s| s.as_str())
-                .collect::<Vec<_>>();
-            valve
-                .save_tables(&tables, &save_dir)
-                .await
-                .expect("Error saving tables");
-        }
-        Commands::SaveAll { save_dir } => {
-            let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
-            valve
-                .save_all_tables(&save_dir)
-                .await
-                .expect("Error saving tables");
+            match tables {
+                None => {
+                    valve
+                        .save_all_tables(&save_dir)
+                        .await
+                        .expect("Error saving tables");
+                }
+                Some(tables) => {
+                    let tables = tables
+                        .iter()
+                        .filter(|s| *s != "")
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>();
+                    valve
+                        .save_tables(&tables, &save_dir)
+                        .await
+                        .expect("Error saving tables");
+                }
+            };
         }
         Commands::SaveAs { table, path } => {
             let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
@@ -1575,9 +1624,9 @@ async fn main() -> Result<()> {
             } = subcommand
             {
                 let valve = build_valve(&cli.source, &cli.database).expect(BUILD_ERROR);
-                let json_message = read_json_input(&valve, "message");
+                let json_message = read_json_row_for_table(&valve, "message");
                 let (table, row, column, value, level, rule, message) =
-                    extract_message(table, row, column, &json_message);
+                    extract_message_fields(table, row, column, &json_message);
                 valve
                     .update_message(
                         *message_id,
@@ -1593,7 +1642,7 @@ async fn main() -> Result<()> {
             } else {
                 let (table, row_number, input_row) = match subcommand {
                     UpdateSubcommands::Row { table, row } => {
-                        let mut json_row = read_json_input(&valve, table);
+                        let mut json_row = read_json_row_for_table(&valve, table);
                         let input_rn = extract_rn(&mut json_row);
                         let row = match input_rn {
                             Some(input_rn) => match row {
@@ -1658,7 +1707,7 @@ async fn main() -> Result<()> {
                     (Some(rn), input_row)
                 }
                 None => {
-                    let mut input_row = read_json_input(&valve, table);
+                    let mut input_row = read_json_row_for_table(&valve, table);
                     let rn = extract_rn(&mut input_row);
                     // If now row was input, default to `row` (which could still be None)
                     let rn = match rn {

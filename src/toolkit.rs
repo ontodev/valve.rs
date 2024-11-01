@@ -2937,7 +2937,9 @@ pub async fn get_previous_row_tx(
     }
 }
 
-/// TODO: Add docstring
+/// Return the row_number and row_order that will be assigned to the next row created
+/// in the given table. Uses the given transaction and the database kind to determine
+/// the SQL syntax to use when querying the database.
 pub async fn get_next_new_row_tx(
     db_kind: &DbKind,
     tx: &mut Transaction<'_, sqlx::Any>,

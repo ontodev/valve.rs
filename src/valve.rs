@@ -2,6 +2,7 @@
 
 use crate::{
     ast::Expression,
+    guess::guess,
     internal::generate_internal_table_ddl,
     toolkit,
     toolkit::{
@@ -33,7 +34,7 @@ use serde_json::{json, Value as SerdeValue};
 use sprintf::sprintf;
 use sqlx::{
     any::{AnyPool, AnyRow},
-    query as sqlx_query, Column, Row, ValueRef,
+    query as sqlx_query, Acquire, Column, Row, ValueRef,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -898,7 +899,7 @@ impl Valve {
         })
     }
 
-    /// TODO: Add docstring here
+    /// Reload the valve configuration from the configuration table files.
     pub fn reconfigure(&mut self) -> Result<()> {
         let table_path = self.get_path()?;
         let parser = StartParser::new();
@@ -1014,8 +1015,11 @@ impl Valve {
         self
     }
 
-    /// TODO: Add docstring
+    /// Given a map from datatype table column names to their corresponding values, add the
+    /// given datatype to Valve.
     pub async fn add_datatype(&mut self, dt_map: &HashMap<String, String>) -> Result<()> {
+        // Separate the datatype fields into the columns and column parameters that we will
+        // use to construct the INSERT statement:
         let mut columns = vec![];
         let mut placeholders = vec![];
         let mut params = vec![];
@@ -1029,9 +1033,9 @@ impl Valve {
             }
         }
 
-        // TODO: Why aren't we using the transaction here?
-        let (rn, ro) =
-            get_next_new_row_tx(&self.db_kind, &mut self.pool.begin().await?, "datatype").await?;
+        // Begin a transaction and generate an INSERT statement:
+        let mut tx = self.pool.begin().await?;
+        let (rn, ro) = get_next_new_row_tx(&self.db_kind, &mut tx, "datatype").await?;
         let sql = local_sql_syntax(
             &self.db_kind,
             &format!(
@@ -1042,24 +1046,27 @@ impl Valve {
             ),
         );
 
+        // Insert the datatype:
         let mut query = sqlx_query(&sql);
         for param in params {
             query = query.bind(param);
         }
-        query.execute(&self.pool).await?;
+        query.execute(&mut tx).await?;
+
+        // Commit the transaction:
+        tx.commit().await?;
 
         // Save the datatype table and then reconfigure valve:
         self.save_tables(&vec!["datatype"], &None).await?;
         self.reconfigure()
     }
 
-    /// TODO: Add docstring here
+    /// Given the name of a datatype, delete it from the datatype table.
     pub async fn delete_datatype(&mut self, datatype: &str) -> Result<()> {
         let sql = local_sql_syntax(
             &self.db_kind,
             &format!(r#"DELETE FROM "datatype" WHERE "datatype" = {SQL_PARAM}"#),
         );
-
         let query = sqlx_query(&sql).bind(datatype);
         query.execute(&self.pool).await?;
 
@@ -1068,40 +1075,65 @@ impl Valve {
         self.reconfigure()
     }
 
-    /// TODO: Add docstring here
+    /// Change the name of the given datatype to the given new name.
     pub async fn rename_datatype(&mut self, datatype: &str, new_name: &str) -> Result<()> {
-        // TODO: Use the transaction.
-        let (rn, ro) =
-            get_next_new_row_tx(&self.db_kind, &mut self.pool.begin().await?, "datatype").await?;
+        // Begin a transaction:
+        let mut tx = self.pool.begin().await?;
+
+        // Optional datatype columns are not found in the config, so in order to preserve them
+        // after the renaming we need to find out what they are by querying the column table:
+        let cols_for_query = {
+            let query = sqlx_query(
+                r#"SELECT "column"
+                     FROM "column"
+                    WHERE "table" = 'datatype'
+                      AND "column" != 'datatype'
+                    ORDER BY "row_order""#,
+            );
+            query
+                .fetch_all(tx.acquire().await?)
+                .await?
+                .iter()
+                .map(|c| c.get::<&str, &str>("column").to_string())
+                .map(|c| format!(r#""{c}""#))
+                .collect::<Vec<_>>()
+        };
+        let main_column_list = cols_for_query.join(", ");
+        let t2_column_list = cols_for_query
+            .iter()
+            .map(|col| format!("t2.{col}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        // First add a new datatype corresponding to the new name:
+        let (rn, ro) = get_next_new_row_tx(&self.db_kind, &mut tx, "datatype").await?;
         let sql = local_sql_syntax(
             &self.db_kind,
-            // TODO: Determine the columns from the column config
             &format!(
-                r#"INSERT INTO "datatype" (
-                       "row_number", "row_order", "datatype",
-                       "parent", "condition", "description", "sql_type"
-                   )
+                r#"INSERT INTO "datatype"
+                   ("row_number", "row_order", "datatype", {main_column_list})
                    SELECT
                       {rn} AS row_number,
                       {ro} as row_order,
                       {SQL_PARAM} as "datatype",
-                      t2.parent, t2.condition, t2.description, t2.sql_type
+                      {t2_column_list}
                      FROM "datatype" t2
                     WHERE t2."datatype" = {SQL_PARAM}"#
             ),
         );
         let query = sqlx_query(&sql).bind(new_name).bind(datatype);
-        query.execute(&self.pool).await?;
+        query.execute(tx.acquire().await?).await?;
 
+        // Now update any columns that used the old name as their datatype to the new name:
         let sql = local_sql_syntax(
             &self.db_kind,
             &format!(
                 r#"UPDATE "column"
-                    SET "datatype" = CASE
-                      WHEN "datatype" = {SQL_PARAM} THEN {SQL_PARAM} ELSE "datatype"
-                    END, "nulltype" = CASE
-                      WHEN "nulltype" = {SQL_PARAM} THEN {SQL_PARAM} ELSE "nulltype"
-                    END"#
+                     SET "datatype" = CASE
+                       WHEN "datatype" = {SQL_PARAM} THEN {SQL_PARAM} ELSE "datatype"
+                     END, "nulltype" = CASE
+                       WHEN "nulltype" = {SQL_PARAM} THEN {SQL_PARAM} ELSE "nulltype"
+                     END"#
             ),
         );
         let query = sqlx_query(&sql)
@@ -1109,8 +1141,9 @@ impl Valve {
             .bind(new_name)
             .bind(datatype)
             .bind(new_name);
-        query.execute(&self.pool).await?;
+        query.execute(tx.acquire().await?).await?;
 
+        // Now update the parents of any datatypes that used the old name to the new name:
         let sql = local_sql_syntax(
             &self.db_kind,
             &format!(
@@ -1122,43 +1155,192 @@ impl Valve {
             ),
         );
         let query = sqlx_query(&sql).bind(datatype).bind(new_name);
-        query.execute(&self.pool).await?;
+        query.execute(tx.acquire().await?).await?;
+
+        // Now update the when_column and/or the then_column of any rules that refer to the
+        // datatype:
+        let sql = local_sql_syntax(
+            &self.db_kind,
+            &format!(
+                r#"UPDATE "rule"
+                     SET "when_condition" = CASE
+                       WHEN "when_condition" = {SQL_PARAM} THEN {SQL_PARAM} ELSE "when_condition"
+                     END, SET "then_condition" = CASE
+                       WHEN "then_condition" = {SQL_PARAM} THEN {SQL_PARAM} ELSE "then_condition"
+                     END"#
+            ),
+        );
+        let query = sqlx_query(&sql)
+            .bind(datatype)
+            .bind(new_name)
+            .bind(datatype)
+            .bind(new_name);
+        query.execute(tx.acquire().await?).await?;
 
         // TODO: We need to adjust any of the following that refer to the datatype:
-        // - datatype conditions (for list() types)
-        // - rule then and when conditions
+        // - from() structures in rule then/when conditions that refer to the datatype
+        // - datatype conditions (for list() types) that refer to the datatype
 
+        // Now delete the old datatype name from the database:
         let sql = local_sql_syntax(
             &self.db_kind,
             &format!(r#"DELETE FROM "datatype" WHERE "datatype" = {SQL_PARAM}"#),
         );
         let query = sqlx_query(&sql).bind(datatype);
-        query.execute(&self.pool).await?;
+        query.execute(tx.acquire().await?).await?;
+
+        // Commit:
+        tx.commit().await?;
 
         // Save the column table and the data table and then reconfigure valve:
         self.save_tables(&vec!["datatype"], &None).await?;
+        self.reconfigure()
+    }
+
+    /// Given a table name, the path of the table's associated TSV file, and other parameters
+    /// used as input to the function, [guess()], guess the table's configuration on the basis
+    /// of the contents of the TSV file and the other, and add it to the database.
+    pub async fn add_table(
+        &mut self,
+        table: &str,
+        path: &str,
+        sample_size: &usize,
+        error_rate: &f32,
+        seed: &Option<u64>,
+        no_load: bool,
+    ) -> Result<()> {
+        let table_added = guess(self, Some(table), path, seed, sample_size, error_rate);
+        if table_added {
+            self.save_tables(&vec!["table", "column"], &None).await?;
+            self.reconfigure()?;
+            self.load_tables(&vec!["table", "column"], true).await?;
+            self.ensure_all_tables_created().await?;
+            let load_table = {
+                if no_load {
+                    false
+                } else if !self.interactive {
+                    true
+                } else {
+                    // Ask the user if they would like to load now:
+                    print!("Table '{table}' added. Do you want to load it now? [y/N] ",);
+                    proceed::proceed()
+                }
+            };
+            if load_table {
+                self.load_tables(&vec![table], true).await?;
+            } else {
+                println!("Leaving '{table}' empty as instructed.");
+            }
+        }
+        Ok(())
+    }
+
+    /// Delete the given table from the database.
+    pub async fn delete_table(&mut self, table: &str, no_drop: bool) -> Result<()> {
+        // Begin a DB transaction:
+        let mut tx = self.pool.begin().await?;
+
+        // Delete from the column table:
+        let sql = local_sql_syntax(
+            &self.db_kind,
+            &format!(r#"DELETE FROM "column" WHERE "table" = {SQL_PARAM}"#),
+        );
+        let query = sqlx_query(&sql).bind(table);
+        if self.verbose {
+            println!("Removing '{table}' from column table.")
+        }
+        query.execute(&mut tx).await?;
+
+        // Delete from tbe table table:
+        let sql = local_sql_syntax(
+            &self.db_kind,
+            &format!(r#"DELETE FROM "table" WHERE "table" = {SQL_PARAM}"#),
+        );
+        let query = sqlx_query(&sql).bind(table);
+        if self.verbose {
+            println!("Removing '{table}' from table table.")
+        }
+        query.execute(&mut tx).await?;
+
+        // Commit the transaction:
+        tx.commit().await?;
+
+        // Save the column and table tables and reconfigure valve:
+        self.save_tables(&vec!["table", "column"], &None).await?;
+        if self.verbose {
+            println!("Updating valve configuration.")
+        }
         self.reconfigure()?;
+
+        // Drop the table in the database:
+        let drop_table = {
+            if no_drop {
+                false
+            } else if !self.interactive {
+                true
+            } else {
+                // Ask the user if they would like to drop now:
+                print!(
+                    "Table '{table}' deleted from Valve configuration. Do you want to drop it \
+                     now? [y/N] ",
+                );
+                proceed::proceed()
+            }
+        };
+        if drop_table {
+            self.drop_tables(&vec![table]).await?;
+        } else {
+            println!("Leaving no-longer-managed '{table}' in the database as instructed.");
+        }
 
         Ok(())
     }
 
-    /// TODO: Add docstring here
+    /// Change the name of the given table to the given new name.
     pub async fn rename_table(&mut self, table: &str, new_name: &str) -> Result<()> {
+        if table == "table" {
+            return Err(ValveError::InputError("Can't rename the table table".to_string()).into());
+        }
         let mut tx = self.pool.begin().await?;
+
+        // Optional table table columns are not found in the config, so in order to preserve them
+        // after the renaming we need to find out what they are by querying the column table:
+        let cols_for_query = {
+            let query = sqlx_query(
+                r#"SELECT "column"
+                     FROM "column"
+                    WHERE "table" = 'table'
+                      AND "column" != 'table'
+                    ORDER BY "row_order""#,
+            );
+            query
+                .fetch_all(tx.acquire().await?)
+                .await?
+                .iter()
+                .map(|c| c.get::<&str, &str>("column").to_string())
+                .map(|c| format!(r#""{c}""#))
+                .collect::<Vec<_>>()
+        };
+        let main_column_list = cols_for_query.join(", ");
+        let t2_column_list = cols_for_query
+            .iter()
+            .map(|col| format!("t2.{col}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+
         let (rn, ro) = get_next_new_row_tx(&self.db_kind, &mut tx, "table").await?;
         let sql = local_sql_syntax(
             &self.db_kind,
             &format!(
-                // TODO: Determine the columns from the column config
                 r#"INSERT INTO "table" (
                        "row_number", "row_order", "table",
-                       "path", "type", "options", "description"
+                       {main_column_list}
                    )
                    SELECT
                       {rn} AS row_number,
                       {ro} as row_order,
                       {SQL_PARAM} as "table",
-                      t2.path, t2.type, t2.options, t2.description
+                      {t2_column_list}
                      FROM "table" t2
                     WHERE t2."table" = {SQL_PARAM}"#
             ),
@@ -1191,54 +1373,24 @@ impl Valve {
 
         // TODO: We need to change the table name also in
         // - The column table's structure" field.
+        // - from() conditions in when and then rule conditions
+        // - rule descriptions.
 
         // Save the column table and the data table and then reconfigure valve:
         self.save_tables(&vec!["table", "column", "rule"], &None)
             .await?;
-        self.reconfigure()?;
-
-        Ok(())
-    }
-
-    /// TODO: Add docstring here
-    pub async fn delete_table(&mut self, table: &str) -> Result<()> {
-        let mut tx = self.pool.begin().await?;
-        let sql = local_sql_syntax(
-            &self.db_kind,
-            &format!(r#"DELETE FROM "column" WHERE "table" = {SQL_PARAM}"#),
-        );
-        let query = sqlx_query(&sql).bind(table);
-        if self.verbose {
-            println!("Removing '{table}' from column table.")
-        }
-        query.execute(&mut tx).await?;
-
-        let sql = local_sql_syntax(
-            &self.db_kind,
-            &format!(r#"DELETE FROM "table" WHERE "table" = {SQL_PARAM}"#),
-        );
-        let query = sqlx_query(&sql).bind(table);
-        if self.verbose {
-            println!("Removing '{table}' from table table.")
-        }
-        query.execute(&mut tx).await?;
-
-        tx.commit().await?;
-
-        // Save the column and table tables and reconfigure valve:
-        self.save_tables(&vec!["table", "column"], &None).await?;
-        if self.verbose {
-            println!("Updating valve configuration.")
-        }
         self.reconfigure()
     }
 
-    /// TODO: Add docstring
+    /// Add a column to the database corresponding to the given column details. If table is not
+    /// given, then the column details must include a "table" field. If column is not given, then
+    /// the column details must include a "column" field.
     pub async fn add_column(
         &mut self,
         table: &Option<String>,
         column: &Option<String>,
         column_details: &JsonRow,
+        no_load: bool,
     ) -> Result<()> {
         let make_err =
             |err_str: &str| -> ValveError { ValveError::InputError(err_str.to_string()) };
@@ -1283,6 +1435,9 @@ impl Valve {
         let structure = column_details.get("structure").and_then(|l| l.as_str());
         let description = column_details.get("description").and_then(|l| l.as_str());
 
+        // Begin a transaction:
+        let mut tx = self.pool.begin().await?;
+
         // Generate an insert statement and execute it:
         let mut fields = vec![r#""table""#, r#""column""#, r#""datatype""#];
         let mut placeholders = vec![SQL_PARAM, SQL_PARAM, SQL_PARAM];
@@ -1303,8 +1458,7 @@ impl Valve {
                 }
             }
         }
-        let (rn, ro) =
-            get_next_new_row_tx(&self.db_kind, &mut self.pool.begin().await?, "column").await?;
+        let (rn, ro) = get_next_new_row_tx(&self.db_kind, &mut tx, "column").await?;
         let sql = local_sql_syntax(
             &self.db_kind,
             &format!(
@@ -1318,19 +1472,40 @@ impl Valve {
         for param in &field_params {
             query = query.bind(param);
         }
-        query.execute(&self.pool).await?;
+        query.execute(&mut tx).await?;
+
+        // Commit:
+        tx.commit().await?;
 
         // Save the column table and the data table and then reconfigure valve:
         self.save_tables(&vec!["column", table], &None).await?;
         self.reconfigure()?;
 
-        // Load the newly modified table:
-        self.load_tables(&vec![table], true).await?;
+        // Refresh the database but do not load any data:
+        self.ensure_all_tables_created().await?;
+
+        let load_table = {
+            if no_load {
+                false
+            } else if !self.interactive {
+                true
+            } else {
+                // Ask the user if they would like to load now:
+                print!(
+                    "Column '{column}' added to '{table}'. Do you want to load '{table}' \
+                     now? [y/N] ",
+                );
+                proceed::proceed()
+            }
+        };
+        if load_table {
+            self.load_tables(&vec![table], true).await?;
+        }
         Ok(())
     }
 
-    /// TODO: Add docstring here
-    pub async fn delete_column(&mut self, table: &str, column: &str) -> Result<()> {
+    /// Given a table and column name, delete the column from the table.
+    pub async fn delete_column(&mut self, table: &str, column: &str, no_load: bool) -> Result<()> {
         let sql = local_sql_syntax(
             &self.db_kind,
             &format!(
@@ -1345,19 +1520,43 @@ impl Valve {
         self.save_tables(&vec!["column", table], &None).await?;
         self.reconfigure()?;
 
-        // Load the newly modified table:
-        self.load_tables(&vec![table], true).await?;
+        // Refresh the database:
+        self.ensure_all_tables_created().await?;
+
+        // Possibly load the data table:
+        let load_table = {
+            if no_load {
+                false
+            } else if !self.interactive {
+                true
+            } else {
+                // Ask the user if they would like to load now:
+                print!(
+                    "Column '{column}' deleted from '{table}'. Do you want to load '{table}' \
+                     now? [y/N] ",
+                );
+                proceed::proceed()
+            }
+        };
+        if load_table {
+            self.load_tables(&vec![table], true).await?;
+        }
         Ok(())
     }
 
-    /// TODO: Add docstring here
+    /// Rename the given column from the given table to the given new name, optionally with the
+    /// given label. If no_load is set to true, don't load the table after recreating it.
     pub async fn rename_column(
         &mut self,
         table: &str,
         column: &str,
         new_name: &str,
         new_label: &Option<String>,
+        no_load: bool,
     ) -> Result<()> {
+        // Begin a transaction:
+        let mut tx = self.pool.begin().await?;
+
         let sql = local_sql_syntax(
             &self.db_kind,
             &format!(
@@ -1367,22 +1566,64 @@ impl Valve {
                     WHERE "table" = {SQL_PARAM} AND "column" = {SQL_PARAM}"#
             ),
         );
-
         let query = sqlx_query(&sql)
             .bind(new_name)
             .bind(new_label)
             .bind(table)
             .bind(column);
-        query.execute(&self.pool).await?;
+        query.execute(tx.acquire().await?).await?;
 
-        // TODO: We need to adjust any structures that refer to the old column name.
+        // Now update the when_column and/or the then_column of any rules that refer to the
+        // datatype:
+        let sql = local_sql_syntax(
+            &self.db_kind,
+            &format!(
+                r#"UPDATE "rule"
+                     SET "when_column" = CASE
+                       WHEN "when_column" = {SQL_PARAM} THEN {SQL_PARAM} ELSE "when_column"
+                     END, SET "then_column" = CASE
+                       WHEN "then_column" = {SQL_PARAM} THEN {SQL_PARAM} ELSE "then_column"
+                     END"#
+            ),
+        );
+        let query = sqlx_query(&sql)
+            .bind(column)
+            .bind(new_name)
+            .bind(column)
+            .bind(new_name);
+        query.execute(tx.acquire().await?).await?;
+
+        // TODO: We need to adjust any structures or rules that refer to the old column name:
+        // - structure field in the column table
+
+        // Commit the transaction:
+        tx.commit().await?;
 
         // Save the column table and the data table and then reconfigure valve:
         self.save_tables(&vec!["column", table], &None).await?;
         self.reconfigure()?;
 
-        // Load the newly modified table:
-        self.load_tables(&vec![table], true).await?;
+        // Refresh the database but do not load any data:
+        self.ensure_all_tables_created().await?;
+
+        let load_table = {
+            if no_load {
+                false
+            } else if !self.interactive {
+                true
+            } else {
+                // Ask the user if they would like to load now:
+                print!(
+                    "Column '{column}' renamed in '{table}'. Do you want to load '{table}' \
+                     now? [y/N] ",
+                );
+                proceed::proceed()
+            }
+        };
+        if load_table {
+            self.load_tables(&vec![table], true).await?;
+        }
+
         Ok(())
     }
 
@@ -1950,11 +2191,32 @@ impl Valve {
                         "Undefined structure '{}'",
                         structure
                     )))?;
-                // TODO: There are some cases in which a structure will not have an associated
-                // constraint in the database (which wasn't the case when this was originally
-                // coded). This is mainly applicable to foreign keys: When a foreign key refers
-                // to a view, when a foreign key refers to a column that has the list() type, and
-                // possibly some other cases.
+
+                // If the column's datatype is a list datatype, or if it has a from() constraint
+                // that references a view, these do not entail constraints and can be ignored:
+                match self.get_value_type(table, cname) {
+                    ValueType::List(_) => continue,
+                    _ => match &parsed_structure {
+                        Expression::Function(name, args) if name == "from" => {
+                            match &*args[0] {
+                                Expression::Field(ftable, _) => {
+                                    let ftable_config = self.config.table.get(ftable).ok_or(
+                                        ValveError::ConfigError(format!(
+                                            "Undefined table '{}'",
+                                            ftable
+                                        )),
+                                    )?;
+                                    if ftable_config.options.contains("db_view") {
+                                        continue;
+                                    }
+                                }
+                                _ => (),
+                            };
+                        }
+                        _ => (),
+                    },
+                };
+
                 if structure_has_changed(&parsed_structure, table, &cname, &pk)? {
                     if self.verbose || self.interactive {
                         print!(
@@ -2226,10 +2488,6 @@ impl Valve {
 
     /// Create all configured database tables and views if they do not already exist as configured.
     pub async fn ensure_all_tables_created(&mut self) -> Result<&Self> {
-        // We turn off interactive mode for all "all" operations:
-        let saved_interactive = self.interactive;
-        self.set_interactive(false);
-
         let setup_statements = self.get_setup_statements().await?;
         let sorted_table_list = self.get_sorted_table_list();
         for table in &sorted_table_list {
@@ -2270,7 +2528,6 @@ impl Valve {
             }
         }
 
-        self.set_interactive(saved_interactive);
         Ok(self)
     }
 
@@ -2393,6 +2650,10 @@ impl Valve {
 
     /// Truncate all configured tables, in reverse dependency order.
     pub async fn truncate_all_tables(&mut self) -> Result<&Self> {
+        // We turn off interactive mode for all "all" operations:
+        let saved_interactive = self.interactive;
+        self.set_interactive(false);
+
         // This makes Rust's borrow checker happy. The issue is that get_sorted_table_list()
         // is defined for an immutable self, but in the rest of the current function, self is
         // borrowed as mutable. The solution is to clone the table list, which we do in two steps:
@@ -2407,6 +2668,9 @@ impl Valve {
             .collect::<Vec<_>>();
 
         self.truncate_tables(&sorted_editable_tables).await?;
+
+        // Set the interactive move back to what it was before:
+        self.set_interactive(saved_interactive);
         Ok(self)
     }
 
@@ -3192,7 +3456,7 @@ impl Valve {
         }
     }
 
-    /// TODO: Add doctring
+    /// Get the row number and row order of the next new row to be inserted.
     pub async fn get_next_new_row(&self, table: &str) -> Result<(u32, u32)> {
         let mut tx = self.pool.begin().await?;
         get_next_new_row_tx(&self.db_kind, &mut tx, table).await
@@ -3488,7 +3752,8 @@ impl Valve {
         Ok(())
     }
 
-    /// Add the message with the given fields to the message table.
+    /// Add the message with the given fields to the message table and return the message_id of the
+    /// newly added message.    
     pub async fn insert_message(
         &self,
         table: &str,
