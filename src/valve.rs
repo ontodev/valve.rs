@@ -1373,8 +1373,8 @@ impl Valve {
 
         // TODO: We need to change the table name also in
         // - The column table's structure" field.
-        // - from() conditions in when and then rule conditions
-        // - rule descriptions.
+        // - from() conditions in when and then rule conditions that refer to the column
+        // - rule descriptions that refer to the column
 
         // Save the column table and the data table and then reconfigure valve:
         self.save_tables(&vec!["table", "column", "rule"], &None)
@@ -1593,8 +1593,9 @@ impl Valve {
             .bind(new_name);
         query.execute(tx.acquire().await?).await?;
 
-        // TODO: We need to adjust any structures or rules that refer to the old column name:
-        // - structure field in the column table
+        // TODO:
+        // - Check for values of "column"."structure" that refer to the column name.
+        // - Check structures in rule then/when conditions that refer to the column name.
 
         // Commit the transaction:
         tx.commit().await?;
