@@ -1,15 +1,15 @@
 //! API tests
 
-use anyhow::Result;
-use futures::executor::block_on;
-use indoc::indoc;
-use ontodev_valve::{
+use crate::{
     ast::Expression,
     toolkit::SerdeMap,
     validate::validate_cell_datatype,
     valve::{Valve, ValveCell, ValveDatatypeConfig, ValveError},
     PRINTF_RE,
 };
+use anyhow::Result;
+use futures::executor::block_on;
+use indoc::indoc;
 use rand::{
     distributions::{Alphanumeric, DistString, Distribution, Uniform},
     random,

@@ -8,8 +8,10 @@
 extern crate lalrpop_util;
 
 pub mod ast;
+pub mod cli;
 pub mod guess;
 pub mod internal;
+pub mod tests;
 pub mod toolkit;
 pub mod validate;
 pub mod valve;
