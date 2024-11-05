@@ -20,11 +20,6 @@ static ROW_HELP: &str = "A row number";
 static SAVE_DIR_HELP: &str = "Save tables to DIR instead of to their configured paths";
 static TABLE_HELP: &str = "A table name";
 
-// TODO: (1) Move all of the definitions above to cli.rs. (2) For each match arm write a function
-// that is particular to it, and call that function from the match arm. (3) Move the
-// `match &cli.command` (and also the build_valve()) code _itself_ to cli.rs and call just call it
-// from here. This makes everything maximally reusable I think, but with default behaviour.
-
 #[derive(Parser)]
 #[command(version,
           about = "Valve: A lightweight validation engine -- command line interface",
