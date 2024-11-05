@@ -561,6 +561,339 @@ pub enum RenameSubcommands {
     },
 }
 
+/// Prints the table dependencies in either incoming or outgoing order.
+pub fn print_dependencies(valve: &Valve, incoming: bool) {
+    let dependencies = valve
+        .collect_dependencies(incoming)
+        .expect("Could not collect dependencies");
+    for (table, deps) in dependencies.iter() {
+        let deps = {
+            let deps = deps.iter().map(|s| format!("'{}'", s)).collect::<Vec<_>>();
+            if deps.is_empty() {
+                "None".to_string()
+            } else {
+                deps.join(", ")
+            }
+        };
+        let preamble = {
+            if incoming {
+                format!("Tables that depend on '{}'", table)
+            } else {
+                format!("Table '{}' depends on", table)
+            }
+        };
+        println!("{}: {}", preamble, deps);
+    }
+}
+
+/// Given a Valve instance, a table name, a row number, a column name, and an input value,
+/// fetches the row from the given table with the given row number, such that the value of the
+/// given column is replaced with the given input_value.
+pub async fn fetch_row_with_input_value(
+    valve: &Valve,
+    table: &str,
+    row: u32,
+    column: &str,
+    input_value: &str,
+) -> JsonRow {
+    let mut row = valve
+        .get_row_from_db(table, &row)
+        .await
+        .expect("Error getting row");
+    let value = match serde_json::from_str::<SerdeValue>(&input_value) {
+        Ok(value) => value,
+        Err(_) => json!(input_value),
+    };
+    let cell = ValveCell {
+        value: value,
+        valid: true,
+        ..Default::default()
+    };
+    *row.contents
+        .get_mut(column)
+        .expect(&format!("No column '{column}' in row")) = cell;
+    row.contents_to_simple_json()
+        .expect("Can't convert to simple JSON")
+}
+
+/// Read a JSON-formatted string from STDIN and verify, using the given Valve instance, that
+/// the fields in the JSON correspond to the allowed fields in the given table:
+pub fn read_json_row_for_table(valve: &Valve, table: &str) -> JsonRow {
+    let json_row = {
+        let mut json_row = String::new();
+        io::stdin()
+            .read_line(&mut json_row)
+            .expect("Error reading from STDIN");
+        let json_row = serde_json::from_str::<SerdeValue>(&json_row)
+            .expect(&format!("Invalid JSON: {json_row}"))
+            .as_object()
+            .expect(&format!("{json_row} is not a JSON object"))
+            .clone();
+        json_row
+    };
+    // Verify that all of the columns specified in the input JSON exist in the table:
+    let json_columns = json_row.keys().collect::<Vec<_>>();
+    let ignored_columns = {
+        if table == "message" {
+            vec!["message_id"]
+        } else if table == "history" {
+            vec!["history_id"]
+        } else {
+            vec!["row_number", "row_order"]
+        }
+    };
+    let configured_columns = valve
+        .config
+        .table
+        .get(table)
+        .expect(&format!("No configuration found for '{table}'"))
+        .column
+        .keys()
+        .collect::<Vec<_>>();
+    for column in &json_columns {
+        if !ignored_columns.contains(&column.as_str()) && !configured_columns.contains(column) {
+            panic!("No column '{column}' in '{table}'");
+        }
+    }
+
+    json_row
+}
+
+/// Try to extract the row number from the given JSON row:
+pub fn extract_rn(json_row: &mut JsonRow) -> Option<u32> {
+    match json_row.get("row_number") {
+        None => None,
+        Some(value) => {
+            let row_number = value.as_i64().expect("Not a number");
+            let row_number = Some(row_number as u32);
+            json_row.remove("row_number").expect("No row_number in row");
+            row_number
+        }
+    }
+}
+
+/// Given a JSON representation of a row, which is assumed to be from the column table, and
+/// optionally a table name and a column name, extract the column table fields for that column
+/// from the row and return them all as a JSON object. Note that if table_name or column_name
+/// are not given then json_row must contain them (i.e., a "table" and a "column" field,
+/// respectively).
+pub fn extract_column_fields(
+    json_row: &JsonRow,
+    table_param: &Option<String>,
+    column_param: &Option<String>,
+) -> JsonRow {
+    // Mandatory fields that may optionally be provided as arguments to this function:
+    let table = match json_row.get("table") {
+        Some(input_table) => match table_param {
+            Some(table_param) if table_param != input_table => {
+                panic!("Mismatch between input table and positional parameter, TABLE")
+            }
+            None | Some(_) => input_table.clone(),
+        },
+        None => match table_param {
+            Some(table_param) => json!(table_param),
+            None => panic!("No table given"),
+        },
+    };
+    let column = match json_row.get("column") {
+        Some(input_column) => match column_param {
+            Some(column_param) if column_param != input_column => {
+                panic!("Mismatch between input column and positional parameter, COLUMN")
+            }
+            None | Some(_) => input_column.clone(),
+        },
+        None => match column_param {
+            Some(column_param) => json!(column_param),
+            None => panic!("No column given"),
+        },
+    };
+
+    // Mandatory field:
+    let datatype = match json_row.get("datatype") {
+        None => panic!("No datatype given"),
+        Some(datatype) => datatype.clone(),
+    };
+
+    // Optional fields:
+    let label = match json_row.get("label") {
+        None => SerdeValue::Null,
+        Some(label) => match label {
+            SerdeValue::String(_) => label.clone(),
+            _ => panic!("Field 'label' is not a string"),
+        },
+    };
+    let nulltype = match json_row.get("nulltype") {
+        None => SerdeValue::Null,
+        Some(nulltype) => match nulltype {
+            SerdeValue::String(_) => nulltype.clone(),
+            _ => panic!("Field 'nulltype' is not a string"),
+        },
+    };
+    let structure = match json_row.get("structure") {
+        None => SerdeValue::Null,
+        Some(structure) => match structure {
+            SerdeValue::String(_) => structure.clone(),
+            _ => panic!("Field 'structure' is not a string"),
+        },
+    };
+    let description = match json_row.get("description") {
+        None => SerdeValue::Null,
+        Some(description) => match description {
+            SerdeValue::String(_) => description.clone(),
+            _ => panic!("Field 'description' is not a string"),
+        },
+    };
+
+    let mut column_config = JsonRow::new();
+    column_config.insert("table".to_string(), table);
+    column_config.insert("column".to_string(), column);
+    column_config.insert("datatype".to_string(), datatype);
+    if label != SerdeValue::Null {
+        column_config.insert("label".to_string(), label);
+    }
+    if nulltype != SerdeValue::Null {
+        column_config.insert("nulltype".to_string(), nulltype);
+    }
+    if structure != SerdeValue::Null {
+        column_config.insert("structure".to_string(), structure);
+    }
+    if description != SerdeValue::Null {
+        column_config.insert("description".to_string(), description);
+    }
+
+    column_config
+}
+
+/// Reads and parses a JSON-formatted string representing a validation message (for the expected
+/// format see documentation for [AddSubcommands::Message]), and returns the tuple:
+/// (table, row, column, value, level, rule, message). If any of table_param, column_param, or
+/// row_param are not provided, then a "table", "column", or "row" field, respectively should be
+/// present in json_row.
+pub fn extract_message_fields(
+    table_param: &Option<String>,
+    row_param: &Option<u32>,
+    column_param: &Option<String>,
+    json_row: &JsonRow,
+) -> (String, u32, String, String, String, String, String) {
+    let table = match json_row.get("table") {
+        Some(input_table) => match table_param {
+            Some(table_param) if table_param != input_table => {
+                panic!("Mismatch between input table and positional parameter, TABLE")
+            }
+            None | Some(_) => input_table.as_str().expect("Not a string").to_string(),
+        },
+        None => match table_param {
+            Some(table_param) => table_param.to_string(),
+            None => panic!("No table given"),
+        },
+    };
+    let row = match json_row.get("row") {
+        Some(input_row) => match row_param {
+            Some(row_param) if row_param != input_row => {
+                panic!("Mismatch between input row and positional parameter, ROW")
+            }
+            None | Some(_) => {
+                let input_row = input_row.as_i64().expect("Not a number");
+                input_row as u32
+            }
+        },
+        None => match row_param {
+            Some(row_param) => *row_param,
+            None => panic!("No row given"),
+        },
+    };
+    let column = match json_row.get("column") {
+        Some(input_column) => match column_param {
+            Some(column_param) if column_param != input_column => {
+                panic!("Mismatch between input column and positional parameter, COLUMN")
+            }
+            None | Some(_) => input_column.as_str().expect("Not a string").to_string(),
+        },
+        None => match column_param {
+            Some(column_param) => column_param.to_string(),
+            None => panic!("No column given"),
+        },
+    };
+
+    let value = match json_row.get("value") {
+        Some(value) => value.as_str().expect("Not a string").to_string(),
+        None => panic!("No value given"),
+    };
+    let level = match json_row.get("level") {
+        Some(level) => level.as_str().expect("Not a string").to_string(),
+        None => panic!("No level given"),
+    };
+    let rule = match json_row.get("rule") {
+        Some(rule) => rule.as_str().expect("Not a string").to_string(),
+        None => panic!("No rule given"),
+    };
+    let message = match json_row.get("message") {
+        Some(message) => message.as_str().expect("Not a string").to_string(),
+        None => panic!("No message given"),
+    };
+
+    (table, row, column, value, level, rule, message)
+}
+
+/// Given a JSON representation of a row, which is assumed to be from the datatype table, and
+/// optionally a datatype name, extract the datatype table fields for that datatype
+/// from the row and return them all as a HashMap. Note that if datatype_name
+/// is not given then json_row must contain it, i.e., it must have a "datatype" field.
+pub fn extract_datatype_fields(
+    valve: &Valve,
+    datatype_param: &Option<String>,
+    json_row: &JsonRow,
+) -> HashMap<String, String> {
+    let mut dt_fields = HashMap::new();
+    // Add the datatype field to the map first:
+    let datatype = match json_row.get("datatype") {
+        Some(input_datatype) => match datatype_param {
+            Some(datatype_param) if datatype_param != input_datatype => {
+                panic!("Mismatch between input datatype and positional parameter, DATATYPE")
+            }
+            None | Some(_) => input_datatype.as_str().expect("Not a string").to_string(),
+        },
+        None => match datatype_param {
+            Some(datatype_param) => datatype_param.to_string(),
+            None => panic!("No 'datatype' given"),
+        },
+    };
+    dt_fields.insert("datatype".to_string(), datatype);
+
+    // Now add fields corresponding to the values of every datatype column:
+    let mut json_row = json_row.clone();
+    json_row.remove("datatype");
+    let configured_columns = valve
+        .config
+        .table
+        .get("datatype")
+        .expect(&format!("No configuration found for 'datatype'"))
+        .column
+        .keys()
+        .filter(|col| *col != "datatype")
+        .collect::<Vec<_>>();
+    for column in configured_columns {
+        let value = match json_row.get(column) {
+            Some(value) => value.as_str().expect("Not a string").to_string(),
+            None => {
+                if REQUIRED_DATATYPE_COLUMNS.contains(&column.as_str()) {
+                    panic!("No '{column}' given");
+                }
+                "".to_string()
+            }
+        };
+        dt_fields.insert(column.to_string(), value);
+        json_row.remove(column);
+    }
+    // There should be no leftover columns after we've gone through all of the
+    // configured columns:
+    if !json_row.is_empty() {
+        panic!("Extra columns found in input row: {}", json!(json_row));
+    }
+
+    dt_fields
+}
+
 /// Process Valve commands and command-line options. Note that this function will panic if it
 /// encouters an error.
 pub async fn process_command() -> Result<()> {
@@ -1327,337 +1660,4 @@ pub async fn process_command() -> Result<()> {
     }
 
     Ok(())
-}
-
-/// Prints the table dependencies in either incoming or outgoing order.
-pub fn print_dependencies(valve: &Valve, incoming: bool) {
-    let dependencies = valve
-        .collect_dependencies(incoming)
-        .expect("Could not collect dependencies");
-    for (table, deps) in dependencies.iter() {
-        let deps = {
-            let deps = deps.iter().map(|s| format!("'{}'", s)).collect::<Vec<_>>();
-            if deps.is_empty() {
-                "None".to_string()
-            } else {
-                deps.join(", ")
-            }
-        };
-        let preamble = {
-            if incoming {
-                format!("Tables that depend on '{}'", table)
-            } else {
-                format!("Table '{}' depends on", table)
-            }
-        };
-        println!("{}: {}", preamble, deps);
-    }
-}
-
-/// Given a Valve instance, a table name, a row number, a column name, and an input value,
-/// fetches the row from the given table with the given row number, such that the value of the
-/// given column is replaced with the given input_value.
-pub async fn fetch_row_with_input_value(
-    valve: &Valve,
-    table: &str,
-    row: u32,
-    column: &str,
-    input_value: &str,
-) -> JsonRow {
-    let mut row = valve
-        .get_row_from_db(table, &row)
-        .await
-        .expect("Error getting row");
-    let value = match serde_json::from_str::<SerdeValue>(&input_value) {
-        Ok(value) => value,
-        Err(_) => json!(input_value),
-    };
-    let cell = ValveCell {
-        value: value,
-        valid: true,
-        ..Default::default()
-    };
-    *row.contents
-        .get_mut(column)
-        .expect(&format!("No column '{column}' in row")) = cell;
-    row.contents_to_simple_json()
-        .expect("Can't convert to simple JSON")
-}
-
-/// Read a JSON-formatted string from STDIN and verify, using the given Valve instance, that
-/// the fields in the JSON correspond to the allowed fields in the given table:
-pub fn read_json_row_for_table(valve: &Valve, table: &str) -> JsonRow {
-    let json_row = {
-        let mut json_row = String::new();
-        io::stdin()
-            .read_line(&mut json_row)
-            .expect("Error reading from STDIN");
-        let json_row = serde_json::from_str::<SerdeValue>(&json_row)
-            .expect(&format!("Invalid JSON: {json_row}"))
-            .as_object()
-            .expect(&format!("{json_row} is not a JSON object"))
-            .clone();
-        json_row
-    };
-    // Verify that all of the columns specified in the input JSON exist in the table:
-    let json_columns = json_row.keys().collect::<Vec<_>>();
-    let ignored_columns = {
-        if table == "message" {
-            vec!["message_id"]
-        } else if table == "history" {
-            vec!["history_id"]
-        } else {
-            vec!["row_number", "row_order"]
-        }
-    };
-    let configured_columns = valve
-        .config
-        .table
-        .get(table)
-        .expect(&format!("No configuration found for '{table}'"))
-        .column
-        .keys()
-        .collect::<Vec<_>>();
-    for column in &json_columns {
-        if !ignored_columns.contains(&column.as_str()) && !configured_columns.contains(column) {
-            panic!("No column '{column}' in '{table}'");
-        }
-    }
-
-    json_row
-}
-
-/// Try to extract the row number from the given JSON row:
-pub fn extract_rn(json_row: &mut JsonRow) -> Option<u32> {
-    match json_row.get("row_number") {
-        None => None,
-        Some(value) => {
-            let row_number = value.as_i64().expect("Not a number");
-            let row_number = Some(row_number as u32);
-            json_row.remove("row_number").expect("No row_number in row");
-            row_number
-        }
-    }
-}
-
-/// Given a JSON representation of a row, which is assumed to be from the column table, and
-/// optionally a table name and a column name, extract the column table fields for that column
-/// from the row and return them all as a JSON object. Note that if table_name or column_name
-/// are not given then json_row must contain them (i.e., a "table" and a "column" field,
-/// respectively).
-pub fn extract_column_fields(
-    json_row: &JsonRow,
-    table_param: &Option<String>,
-    column_param: &Option<String>,
-) -> JsonRow {
-    // Mandatory fields that may optionally be provided as arguments to this function:
-    let table = match json_row.get("table") {
-        Some(input_table) => match table_param {
-            Some(table_param) if table_param != input_table => {
-                panic!("Mismatch between input table and positional parameter, TABLE")
-            }
-            None | Some(_) => input_table.clone(),
-        },
-        None => match table_param {
-            Some(table_param) => json!(table_param),
-            None => panic!("No table given"),
-        },
-    };
-    let column = match json_row.get("column") {
-        Some(input_column) => match column_param {
-            Some(column_param) if column_param != input_column => {
-                panic!("Mismatch between input column and positional parameter, COLUMN")
-            }
-            None | Some(_) => input_column.clone(),
-        },
-        None => match column_param {
-            Some(column_param) => json!(column_param),
-            None => panic!("No column given"),
-        },
-    };
-
-    // Mandatory field:
-    let datatype = match json_row.get("datatype") {
-        None => panic!("No datatype given"),
-        Some(datatype) => datatype.clone(),
-    };
-
-    // Optional fields:
-    let label = match json_row.get("label") {
-        None => SerdeValue::Null,
-        Some(label) => match label {
-            SerdeValue::String(_) => label.clone(),
-            _ => panic!("Field 'label' is not a string"),
-        },
-    };
-    let nulltype = match json_row.get("nulltype") {
-        None => SerdeValue::Null,
-        Some(nulltype) => match nulltype {
-            SerdeValue::String(_) => nulltype.clone(),
-            _ => panic!("Field 'nulltype' is not a string"),
-        },
-    };
-    let structure = match json_row.get("structure") {
-        None => SerdeValue::Null,
-        Some(structure) => match structure {
-            SerdeValue::String(_) => structure.clone(),
-            _ => panic!("Field 'structure' is not a string"),
-        },
-    };
-    let description = match json_row.get("description") {
-        None => SerdeValue::Null,
-        Some(description) => match description {
-            SerdeValue::String(_) => description.clone(),
-            _ => panic!("Field 'description' is not a string"),
-        },
-    };
-
-    let mut column_config = JsonRow::new();
-    column_config.insert("table".to_string(), table);
-    column_config.insert("column".to_string(), column);
-    column_config.insert("datatype".to_string(), datatype);
-    if label != SerdeValue::Null {
-        column_config.insert("label".to_string(), label);
-    }
-    if nulltype != SerdeValue::Null {
-        column_config.insert("nulltype".to_string(), nulltype);
-    }
-    if structure != SerdeValue::Null {
-        column_config.insert("structure".to_string(), structure);
-    }
-    if description != SerdeValue::Null {
-        column_config.insert("description".to_string(), description);
-    }
-
-    column_config
-}
-
-/// Reads and parses a JSON-formatted string representing a validation message (for the expected
-/// format see documentation for [AddSubcommands::Message]), and returns the tuple:
-/// (table, row, column, value, level, rule, message). If any of table_param, column_param, or
-/// row_param are not provided, then a "table", "column", or "row" field, respectively should be
-/// present in json_row.
-pub fn extract_message_fields(
-    table_param: &Option<String>,
-    row_param: &Option<u32>,
-    column_param: &Option<String>,
-    json_row: &JsonRow,
-) -> (String, u32, String, String, String, String, String) {
-    let table = match json_row.get("table") {
-        Some(input_table) => match table_param {
-            Some(table_param) if table_param != input_table => {
-                panic!("Mismatch between input table and positional parameter, TABLE")
-            }
-            None | Some(_) => input_table.as_str().expect("Not a string").to_string(),
-        },
-        None => match table_param {
-            Some(table_param) => table_param.to_string(),
-            None => panic!("No table given"),
-        },
-    };
-    let row = match json_row.get("row") {
-        Some(input_row) => match row_param {
-            Some(row_param) if row_param != input_row => {
-                panic!("Mismatch between input row and positional parameter, ROW")
-            }
-            None | Some(_) => {
-                let input_row = input_row.as_i64().expect("Not a number");
-                input_row as u32
-            }
-        },
-        None => match row_param {
-            Some(row_param) => *row_param,
-            None => panic!("No row given"),
-        },
-    };
-    let column = match json_row.get("column") {
-        Some(input_column) => match column_param {
-            Some(column_param) if column_param != input_column => {
-                panic!("Mismatch between input column and positional parameter, COLUMN")
-            }
-            None | Some(_) => input_column.as_str().expect("Not a string").to_string(),
-        },
-        None => match column_param {
-            Some(column_param) => column_param.to_string(),
-            None => panic!("No column given"),
-        },
-    };
-
-    let value = match json_row.get("value") {
-        Some(value) => value.as_str().expect("Not a string").to_string(),
-        None => panic!("No value given"),
-    };
-    let level = match json_row.get("level") {
-        Some(level) => level.as_str().expect("Not a string").to_string(),
-        None => panic!("No level given"),
-    };
-    let rule = match json_row.get("rule") {
-        Some(rule) => rule.as_str().expect("Not a string").to_string(),
-        None => panic!("No rule given"),
-    };
-    let message = match json_row.get("message") {
-        Some(message) => message.as_str().expect("Not a string").to_string(),
-        None => panic!("No message given"),
-    };
-
-    (table, row, column, value, level, rule, message)
-}
-
-/// Given a JSON representation of a row, which is assumed to be from the datatype table, and
-/// optionally a datatype name, extract the datatype table fields for that datatype
-/// from the row and return them all as a HashMap. Note that if datatype_name
-/// is not given then json_row must contain it, i.e., it must have a "datatype" field.
-pub fn extract_datatype_fields(
-    valve: &Valve,
-    datatype_param: &Option<String>,
-    json_row: &JsonRow,
-) -> HashMap<String, String> {
-    let mut dt_fields = HashMap::new();
-    // Add the datatype field to the map first:
-    let datatype = match json_row.get("datatype") {
-        Some(input_datatype) => match datatype_param {
-            Some(datatype_param) if datatype_param != input_datatype => {
-                panic!("Mismatch between input datatype and positional parameter, DATATYPE")
-            }
-            None | Some(_) => input_datatype.as_str().expect("Not a string").to_string(),
-        },
-        None => match datatype_param {
-            Some(datatype_param) => datatype_param.to_string(),
-            None => panic!("No 'datatype' given"),
-        },
-    };
-    dt_fields.insert("datatype".to_string(), datatype);
-
-    // Now add fields corresponding to the values of every datatype column:
-    let mut json_row = json_row.clone();
-    json_row.remove("datatype");
-    let configured_columns = valve
-        .config
-        .table
-        .get("datatype")
-        .expect(&format!("No configuration found for 'datatype'"))
-        .column
-        .keys()
-        .filter(|col| *col != "datatype")
-        .collect::<Vec<_>>();
-    for column in configured_columns {
-        let value = match json_row.get(column) {
-            Some(value) => value.as_str().expect("Not a string").to_string(),
-            None => {
-                if REQUIRED_DATATYPE_COLUMNS.contains(&column.as_str()) {
-                    panic!("No '{column}' given");
-                }
-                "".to_string()
-            }
-        };
-        dt_fields.insert(column.to_string(), value);
-        json_row.remove(column);
-    }
-    // There should be no leftover columns after we've gone through all of the
-    // configured columns:
-    if !json_row.is_empty() {
-        panic!("Extra columns found in input row: {}", json!(json_row));
-    }
-
-    dt_fields
 }
