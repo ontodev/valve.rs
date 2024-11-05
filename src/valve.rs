@@ -1130,9 +1130,11 @@ impl Valve {
             &format!(
                 r#"UPDATE "column"
                      SET "datatype" = CASE
-                       WHEN "datatype" = {SQL_PARAM} THEN {SQL_PARAM} ELSE "datatype"
+                       WHEN "datatype" = {SQL_PARAM} THEN {SQL_PARAM}
+                       ELSE "datatype"
                      END, "nulltype" = CASE
-                       WHEN "nulltype" = {SQL_PARAM} THEN {SQL_PARAM} ELSE "nulltype"
+                       WHEN "nulltype" = {SQL_PARAM} THEN {SQL_PARAM}
+                       ELSE "nulltype"
                      END"#
             ),
         );
@@ -1143,18 +1145,58 @@ impl Valve {
             .bind(new_name);
         query.execute(tx.acquire().await?).await?;
 
-        // Now update the parents of any datatypes that used the old name to the new name:
+        // Look through the datatype config for any datatypes that are list() types and which
+        // refer to the current datatype as their base type. Then construct a SQL CASE statement
+        // to update the "condition" column of the datatype table appropriately given the renaming.
+        let mut condition_params = vec![];
+        let condition_sql = {
+            let mut sql_lines = vec![];
+            for (_, dt_condition) in self.datatype_conditions.iter() {
+                if let ValueType::List(reference_dt, list_sep) = &dt_condition.value_type {
+                    if reference_dt == datatype {
+                        let old_condition = dt_condition.original.to_string();
+                        let new_condition = format!("list({new_name}, '{list_sep}')");
+                        sql_lines.push(format!(
+                            r#"WHEN "condition" = {SQL_PARAM} THEN {SQL_PARAM}"#
+                        ));
+                        condition_params.push(old_condition);
+                        condition_params.push(new_condition);
+                    }
+                }
+            }
+            if !sql_lines.is_empty() {
+                format!(
+                    r#""condition" = CASE
+                          {case_clause}
+                          ELSE "condition"
+                        END, "#,
+                    case_clause = sql_lines.join("\n")
+                )
+            } else {
+                "".to_string()
+            }
+        };
+
+        // In addition to the (list) conditions of any datatypes that referred to the old name,
+        // any datatypes whose parents refer to the datatype by its old name need to be updated
+        // as well:
         let sql = local_sql_syntax(
             &self.db_kind,
             &format!(
                 r#"UPDATE "datatype"
-                    SET "parent" =
-                      CASE
-                        WHEN "parent" = {SQL_PARAM} THEN {SQL_PARAM} ELSE "parent"
-                      END"#
+                    SET {condition_sql}"parent" = CASE
+                      WHEN "parent" = {SQL_PARAM} THEN {SQL_PARAM}
+                      ELSE "parent"
+                    END"#
             ),
         );
-        let query = sqlx_query(&sql).bind(datatype).bind(new_name);
+        let mut query = sqlx_query(&sql);
+        for condition_param in &condition_params {
+            query = query.bind(condition_param);
+        }
+        for parent_param in [datatype, new_name] {
+            query = query.bind(parent_param);
+        }
         query.execute(tx.acquire().await?).await?;
 
         // Now update the when_column and/or the then_column of any rules that refer to the
@@ -1163,10 +1205,12 @@ impl Valve {
             &self.db_kind,
             &format!(
                 r#"UPDATE "rule"
-                     SET "when_condition" = CASE
-                       WHEN "when_condition" = {SQL_PARAM} THEN {SQL_PARAM} ELSE "when_condition"
-                     END, SET "then_condition" = CASE
-                       WHEN "then_condition" = {SQL_PARAM} THEN {SQL_PARAM} ELSE "then_condition"
+                     SET "when condition" = CASE
+                       WHEN "when condition" = {SQL_PARAM} THEN {SQL_PARAM}
+                       ELSE "when condition"
+                     END, "then condition" = CASE
+                       WHEN "then condition" = {SQL_PARAM} THEN {SQL_PARAM}
+                       ELSE "then condition"
                      END"#
             ),
         );
@@ -1176,10 +1220,6 @@ impl Valve {
             .bind(datatype)
             .bind(new_name);
         query.execute(tx.acquire().await?).await?;
-
-        // TODO: We need to adjust any of the following that refer to the datatype:
-        // - from() structures in rule then/when conditions that refer to the datatype
-        // - datatype conditions (for list() types) that refer to the datatype
 
         // Now delete the old datatype name from the database:
         let sql = local_sql_syntax(
@@ -1193,7 +1233,8 @@ impl Valve {
         tx.commit().await?;
 
         // Save the column table and the data table and then reconfigure valve:
-        self.save_tables(&vec!["datatype"], &None).await?;
+        self.save_tables(&vec!["datatype", "column", "rule"], &None)
+            .await?;
         self.reconfigure()
     }
 
@@ -1372,9 +1413,9 @@ impl Valve {
         tx.commit().await?;
 
         // TODO: We need to change the table name also in
-        // - The column table's structure" field.
+        // - from() structures in the column table that refer to the column.
         // - from() conditions in when and then rule conditions that refer to the column
-        // - rule descriptions that refer to the column
+        // See the function rename_datatype() for an example.
 
         // Save the column table and the data table and then reconfigure valve:
         self.save_tables(&vec!["table", "column", "rule"], &None)
@@ -1580,9 +1621,11 @@ impl Valve {
             &format!(
                 r#"UPDATE "rule"
                      SET "when_column" = CASE
-                       WHEN "when_column" = {SQL_PARAM} THEN {SQL_PARAM} ELSE "when_column"
+                       WHEN "when_column" = {SQL_PARAM} THEN {SQL_PARAM}
+                       ELSE "when_column"
                      END, SET "then_column" = CASE
-                       WHEN "then_column" = {SQL_PARAM} THEN {SQL_PARAM} ELSE "then_column"
+                       WHEN "then_column" = {SQL_PARAM} THEN {SQL_PARAM}
+                       ELSE "then_column"
                      END"#
             ),
         );
@@ -1594,8 +1637,9 @@ impl Valve {
         query.execute(tx.acquire().await?).await?;
 
         // TODO:
-        // - Check for values of "column"."structure" that refer to the column name.
-        // - Check structures in rule then/when conditions that refer to the column name.
+        // - from() and tree() structures in the column table that refer to the column.
+        // - from() and tree() conditions in when and then rule conditions that refer to the column
+        // See the function rename_datatype() for an example.
 
         // Commit the transaction:
         tx.commit().await?;
@@ -2196,7 +2240,7 @@ impl Valve {
                 // If the column's datatype is a list datatype, or if it has a from() constraint
                 // that references a view, these do not entail constraints and can be ignored:
                 match self.get_value_type(table, cname) {
-                    ValueType::List(_) => continue,
+                    ValueType::List(_, _) => continue,
                     _ => match &parsed_structure {
                         Expression::Function(name, args) if name == "from" => {
                             match &*args[0] {

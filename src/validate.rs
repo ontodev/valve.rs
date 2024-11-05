@@ -542,7 +542,7 @@ pub async fn validate_rows_constraints(
                         let value_type = get_value_type(config, datatype_conditions, table, column);
                         match &value_type {
                             ValueType::Single => vec![cell.value.clone()],
-                            ValueType::List(separator) => cell
+                            ValueType::List(_, separator) => cell
                                 .strvalue()
                                 .split(separator)
                                 .map(|s| json!(s))
@@ -942,7 +942,7 @@ pub fn validate_cell_datatype(
         dt_description: &str,
     ) -> String {
         match &condition.value_type {
-            ValueType::List(_) if dt_description == "" => {
+            ValueType::List(_, _) if dt_description == "" => {
                 let concrete_dt = match &condition.parsed {
                     Expression::Function(name, args) if name == "list" => match &*args[0] {
                         Expression::Label(datatype) => datatype,
@@ -957,7 +957,7 @@ pub fn validate_cell_datatype(
                     value, column, concrete_dt
                 )
             }
-            ValueType::List(_) => {
+            ValueType::List(_, _) => {
                 format!(
                     "Value '{}' of column {} should be one of {}",
                     value, column, dt_description
@@ -990,7 +990,7 @@ pub fn validate_cell_datatype(
         let strvalue = cell.strvalue();
         let values = match &primary_dt_cond.value_type {
             ValueType::Single => vec![strvalue.as_str()],
-            ValueType::List(separator) => strvalue.split(separator).collect::<Vec<_>>(),
+            ValueType::List(_, separator) => strvalue.split(separator).collect::<Vec<_>>(),
         };
         for value in &values {
             if (primary_dt_cond.compiled)(&value) {
@@ -1344,7 +1344,7 @@ pub async fn validate_cell_foreign_constraints(
         let value_type = get_value_type(config, datatype_conditions, table_name, column_name);
         match &value_type {
             ValueType::Single => vec![strvalue.as_str()],
-            ValueType::List(separator) => strvalue.split(separator).collect::<Vec<_>>(),
+            ValueType::List(_, separator) => strvalue.split(separator).collect::<Vec<_>>(),
         }
     };
     for value in &values {

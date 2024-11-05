@@ -91,8 +91,10 @@ impl std::fmt::Debug for ParsedStructure {
 /// The type of value the condition should be applied to.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ValueType {
+    /// A single value
     Single,
-    List(String),
+    /// List(DATATYPE, SEP): A list of values of a given datatype, separated by a given separator.
+    List(String, String),
 }
 
 /// Represents a condition in three different ways: (i) in String format, (ii) as a parsed
@@ -1177,7 +1179,10 @@ pub fn compile_condition(
                         };
                         let separator = String::from(unquoted_re.replace(separator, "$unquoted"));
                         Ok(CompiledCondition {
-                            value_type: ValueType::List(separator.to_string()),
+                            value_type: ValueType::List(
+                                datatype.to_string(),
+                                separator.to_string(),
+                            ),
                             original: condition.to_string(),
                             parsed: *parsed_condition.clone(),
                             compiled: compiled,
@@ -4674,7 +4679,7 @@ pub async fn insert_chunk(
         // has a foreign constraint on that column:
         table_config.column.keys().any(|column_name| {
             match get_value_type(config, datatype_conditions, table_name, column_name) {
-                ValueType::List(_) => {
+                ValueType::List(_, _) => {
                     let foreigns = config.constraint.foreign.get(table_name).expect(&format!(
                         "Cannot find foreign constraints for table '{}'",
                         table_name
