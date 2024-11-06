@@ -1,8 +1,6 @@
-use anyhow::Result;
 use ontodev_valve::cli;
 
 #[async_std::main]
-async fn main() -> Result<()> {
+async fn main() {
     cli::process_command().await;
-    Ok(())
 }

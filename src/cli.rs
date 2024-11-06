@@ -560,17 +560,22 @@ pub enum RenameSubcommands {
     },
 }
 
-/// TODO: Add docstring
-pub async fn build_valve(source: &str, database: &str, verbose: bool, batch_mode: bool) -> Valve {
-    let mut valve = Valve::build(&source, &database).await.expect(BUILD_ERROR);
-    valve.set_verbose(verbose);
-    valve.set_interactive(!batch_mode);
+/// Build a Valve instance in conformity with the given command-line options and parameters.
+pub async fn build_valve(cli: &Cli) -> Valve {
+    let mut valve = Valve::build(&cli.source, &cli.database)
+        .await
+        .expect(BUILD_ERROR);
+    valve.set_verbose(cli.verbose);
+    valve.set_interactive(!cli.assume_yes);
     valve
 }
 
-/// TODO: Add docstring
+/// Use Valve, in conformity with the given command-line parameters, to add a column to the
+/// given table in the database. The column details are read from STDIN. These must contain
+/// information about the table and column name, if these fields have not been given as arguments
+/// to the function. If the `no_load` option is set, do not load the modified table.
 pub async fn add_column(cli: &Cli, table: &Option<String>, column: &Option<String>, no_load: bool) {
-    let mut valve = build_valve(&cli.source, &cli.database, cli.verbose, cli.assume_yes).await;
+    let mut valve = build_valve(&cli).await;
     let json_row = read_json_row_for_table(&valve, "column");
     let column_json = extract_column_fields(&json_row, table, column);
     valve
@@ -579,9 +584,11 @@ pub async fn add_column(cli: &Cli, table: &Option<String>, column: &Option<Strin
         .expect("Error adding column");
 }
 
-/// TODO: Add docstring
+/// Use Valve, in conformity with the given command-line parameters, to add a datatype to the
+/// database, The details of the datatype are read from STDIN. These must include the datatype
+/// name if it has not been given as an argument to the function.
 pub async fn add_datatype(cli: &Cli, datatype: &Option<String>) {
-    let mut valve = build_valve(&cli.source, &cli.database, cli.verbose, cli.assume_yes).await;
+    let mut valve = build_valve(&cli).await;
     let json_datatype = read_json_row_for_table(&valve, "datatype");
     let dt_fields = extract_datatype_fields(&valve, datatype, &json_datatype);
     valve
@@ -590,14 +597,17 @@ pub async fn add_datatype(cli: &Cli, datatype: &Option<String>) {
         .expect("Error adding datatype");
 }
 
-/// TODO: Add docstring
+/// Use Valve, in conformity with the given command-line parameters, to add a message to the
+/// message table. The details of the message are read from STDIN. If these have not been provided
+/// as arguments to the function, the message details must include information about the table, row
+/// and column to which the message pertains.
 pub async fn add_message(
     cli: &Cli,
     table: &Option<String>,
     row: &Option<u32>,
     column: &Option<String>,
 ) {
-    let valve = build_valve(&cli.source, &cli.database, cli.verbose, cli.assume_yes).await;
+    let valve = build_valve(&cli).await;
     let json_message = read_json_row_for_table(&valve, "message");
     let (table, row, column, value, level, rule, message) =
         extract_message_fields(table, row, column, &json_message);
@@ -608,9 +618,10 @@ pub async fn add_message(
     println!("{message_id}");
 }
 
-/// TODO: Add docstring
+/// Use Valve, in conformity with the given command-line parameters, to add a row to the given
+/// table in the database. The row details are read from STDIN.
 pub async fn add_row(cli: &Cli, table: &str) {
-    let valve = build_valve(&cli.source, &cli.database, cli.verbose, cli.assume_yes).await;
+    let valve = build_valve(&cli).await;
     let json_row = read_json_row_for_table(&valve, table);
     let (_, row) = valve
         .insert_row(table, &json_row)
@@ -626,7 +637,10 @@ pub async fn add_row(cli: &Cli, table: &str) {
     }
 }
 
-/// TODO: Add docstring
+/// Use Valve, in conformity with the given command-line parameters, to add a given `table`, located
+/// at a given `path`, to the database. If `no_load` is set, do not load the newly created table.
+/// The arguments `sample_size`, `error_rate`, and `seed` are passed to
+/// [guess()](crate::guess::guess()), which is used to guess the new table's configuration.
 pub async fn add_table(
     cli: &Cli,
     table: &str,
@@ -636,16 +650,17 @@ pub async fn add_table(
     seed: &Option<u64>,
     no_load: bool,
 ) {
-    let mut valve = build_valve(&cli.source, &cli.database, cli.verbose, cli.assume_yes).await;
+    let mut valve = build_valve(&cli).await;
     valve
         .add_table(table, path, sample_size, error_rate, seed, no_load)
         .await
         .expect("Error adding table");
 }
 
-/// TODO: Add docstring
+/// Use Valve, in conformity with the given command-line parameters, to (re)create an empty
+/// database.
 pub async fn create_all(cli: &Cli) {
-    let mut valve = build_valve(&cli.source, &cli.database, cli.verbose, cli.assume_yes).await;
+    let mut valve = build_valve(&cli).await;
     // We turn interactive mode off since this is an "all" operation:
     valve.set_interactive(false);
     valve
@@ -658,31 +673,35 @@ pub async fn create_all(cli: &Cli) {
         .expect("Error ensuring that all tables are created");
 }
 
-/// TODO: Add docstring
+/// Use Valve, in conformity with the given command-line parameters, to delete the given datatype.
 pub async fn delete_datatype(cli: &Cli, datatype: &str) {
-    let mut valve = build_valve(&cli.source, &cli.database, cli.verbose, cli.assume_yes).await;
+    let mut valve = build_valve(&cli).await;
     valve
         .delete_datatype(datatype)
         .await
         .expect("Error deleting datatype");
 }
 
-/// TODO: Add docstring
+/// Use Valve, in conformity with the given command-line parameters, to delete a given column
+/// from a given table.
 pub async fn delete_column(cli: &Cli, table: &str, column: &str, no_load: bool) {
-    let mut valve = build_valve(&cli.source, &cli.database, cli.verbose, cli.assume_yes).await;
+    let mut valve = build_valve(&cli).await;
     valve
         .delete_column(table, column, no_load)
         .await
         .expect("Error deleting column");
 }
 
-/// TODO: Add docstring
+/// Use Valve, in conformity with the given command-line parameters, to either (i) in the case
+/// where a `message_id` has been given, delete that particular message, or (ii) delete any
+/// messages whose rule matches `rule`, where the latter is in the form of a SQL LIKE clause,
+/// which may contain wildcards and can in principle match multiple messages.
 pub async fn delete_messages_by_id_or_rule(
     cli: &Cli,
     message_id: &Option<u16>,
     rule: &Option<String>,
 ) {
-    let valve = build_valve(&cli.source, &cli.database, cli.verbose, cli.assume_yes).await;
+    let valve = build_valve(&cli).await;
     if let Some(message_id) = message_id {
         valve
             .delete_message(*message_id)
@@ -702,18 +721,21 @@ pub async fn delete_messages_by_id_or_rule(
     }
 }
 
-/// TODO: Add docstring
+/// Use Valve, in conformity with the given command-line parameters, to delete the given table
+/// from the column table. Also drop the table in the database unless the `no_drop` flag has been
+/// set.
 pub async fn delete_table(cli: &Cli, table: &str, no_drop: bool) {
-    let mut valve = build_valve(&cli.source, &cli.database, cli.verbose, cli.assume_yes).await;
+    let mut valve = build_valve(&cli).await;
     valve
         .delete_table(table, no_drop)
         .await
         .expect("Error deleting table");
 }
 
-/// TODO: Add docstring
+/// Use Valve, in conformity with the given command-line parameters, to delete the rows with the
+/// given row numbers from the given table.
 pub async fn delete_rows(cli: &Cli, table: &str, rows: &Vec<u32>) {
-    let valve = build_valve(&cli.source, &cli.database, cli.verbose, cli.assume_yes).await;
+    let valve = build_valve(&cli).await;
     for row in rows {
         valve
             .delete_row(table, row)
@@ -722,27 +744,28 @@ pub async fn delete_rows(cli: &Cli, table: &str, rows: &Vec<u32>) {
     }
 }
 
-/// TODO: Add docstring
+/// Use Valve, in conformity with the given command-line parameters, to drop all of the tables.
 pub async fn drop_all_tables(cli: &Cli) {
-    let mut valve = build_valve(&cli.source, &cli.database, cli.verbose, cli.assume_yes).await;
+    let mut valve = build_valve(&cli).await;
     valve
         .drop_all_tables()
         .await
         .expect("Error dropping all tables");
 }
 
-/// TODO: Add docstring
+/// Use Valve, in conformity with the given command-line parameters, to drop the given table.
 pub async fn drop_table(cli: &Cli, table: &str) {
-    let valve = build_valve(&cli.source, &cli.database, cli.verbose, cli.assume_yes).await;
+    let valve = build_valve(&cli).await;
     valve
         .drop_tables(&vec![table])
         .await
         .expect("Error dropping tables");
 }
 
-/// TODO: Add docstring
+/// Use Valve, in conformity with the given command-line parameters, to print the ancestor
+/// datatypes of the given datatype.
 pub async fn print_ancestors(cli: &Cli, datatype: &str) {
-    let valve = build_valve(&cli.source, &cli.database, cli.verbose, cli.assume_yes).await;
+    let valve = build_valve(&cli).await;
 
     println!(
         "{}",
@@ -761,9 +784,10 @@ pub async fn print_ancestors(cli: &Cli, datatype: &str) {
     );
 }
 
-/// TODO: Add docstring
+/// Use Valve, in conformity with the given command-line parameters, to print the [ValveCell]
+/// corresponding to the given column of the given row of the given table.
 pub async fn print_cell(cli: &Cli, table: &str, row: u32, column: &str) {
-    let valve = build_valve(&cli.source, &cli.database, cli.verbose, cli.assume_yes).await;
+    let valve = build_valve(&cli).await;
     let cell = valve
         .get_cell_from_db(table, &row, column)
         .await
@@ -776,9 +800,10 @@ pub async fn print_cell(cli: &Cli, table: &str, row: u32, column: &str) {
     );
 }
 
-/// TODO: Add docstring
+/// Use Valve, in conformity with the given command-line parameters, to print the column
+/// configuration of the given column of the given table.
 pub async fn print_column_config(cli: &Cli, table: &str, column: &str) {
-    let valve = build_valve(&cli.source, &cli.database, cli.verbose, cli.assume_yes).await;
+    let valve = build_valve(&cli).await;
     let column_config = valve
         .config
         .table
@@ -790,9 +815,10 @@ pub async fn print_column_config(cli: &Cli, table: &str, column: &str) {
     println!("{}", json!(column_config));
 }
 
-/// TODO: Add docstring
+/// Use Valve, in conformity with the given command-line parameters, to print the constraints that
+/// are associated with the given table.
 pub async fn print_constraints(cli: &Cli, table: &str) {
-    let valve = build_valve(&cli.source, &cli.database, cli.verbose, cli.assume_yes).await;
+    let valve = build_valve(&cli).await;
     let mut table_constraints = HashMap::new();
     table_constraints.insert(
         "primary",
@@ -833,9 +859,10 @@ pub async fn print_constraints(cli: &Cli, table: &str) {
     println!("{}", json!(table_constraints));
 }
 
-/// TODO: Add docstring
+/// Use Valve, in conformity with the given command-line parameters, to print the given datatype's
+/// datatype configuration.
 pub async fn print_datatype_config(cli: &Cli, datatype: &str) {
-    let valve = build_valve(&cli.source, &cli.database, cli.verbose, cli.assume_yes).await;
+    let valve = build_valve(&cli).await;
     let dt_config = valve
         .config
         .datatype
@@ -844,7 +871,15 @@ pub async fn print_datatype_config(cli: &Cli, datatype: &str) {
     println!("{}", json!(dt_config));
 }
 
-/// TODO: Add docstring
+/// Use Valve, in conformity with the given command-line parameters, to print messages from the
+/// message table. If none of `message_id`, `table`, `row`, `column`, or `rule` have been given,
+/// print all of the messages in the message table. Otherwise:
+/// (i) If `message_id` is given, print the particular message and exit.
+/// (ii) If `table` is given, only show the messages for that table. If, in addition, `row` is
+/// given, show only messages for that row of the table. And if `column` is also given, show only
+/// messages for that column in the row.
+/// (iii) If `rule` is given, show only messages with that rule. Note that it is possible to
+/// filter messages by rule regardless of whether `table`, `row`, or `column` have been set.
 pub async fn print_messages(
     cli: &Cli,
     table: &Option<String>,
@@ -853,12 +888,11 @@ pub async fn print_messages(
     rule: &Option<String>,
     message_id: &Option<u16>,
 ) {
-    let valve = build_valve(&cli.source, &cli.database, cli.verbose, cli.assume_yes).await;
+    let valve = build_valve(&cli).await;
 
     let mut sql = format!(
-        r#"SELECT "message_id",
-                                  "table", "row", "column", "value", "level", "rule", "message"
-                             FROM "message""#
+        r#"SELECT "message_id", "table", "row", "column", "value", "level", "rule", "message"
+           FROM "message""#
     );
     let mut sql_params = vec![];
     match message_id {
@@ -866,14 +900,21 @@ pub async fn print_messages(
             sql.push_str(&format!(r#" WHERE "message_id" = {message_id}"#));
         }
         None => {
+            // We are trusting the command-line parser to ensure that TABLE has been given
+            // whenever ROW is given, and that TABLE and ROW have both been given
+            // whenever COLUMN is given. The case of RULE is different since it is
+            // a long parameter that is parsed independently.
+            if *row != None && *table == None {
+                panic!("A table must be given when a row is given");
+            }
+            if *column != None && (*table == None || *row == None) {
+                panic!("A table and row must be given when a column is given");
+            }
+
             if let Some(table) = table {
                 sql.push_str(&format!(r#"WHERE "table" = {SQL_PARAM}"#));
                 sql_params.push(table);
             }
-            // The command-line parser will ensure that TABLE has been given
-            // whenever ROW is given, and that TABLE and ROW have both been given
-            // whenever COLUMN is given. The case of RULE is different since it is
-            // a long parameter that is parsed independently.
             if let Some(row) = row {
                 sql.push_str(&format!(r#" AND "row" = {row}"#));
             }
@@ -935,9 +976,10 @@ pub async fn print_messages(
     println!("]");
 }
 
-/// TODO: Add docstring
+/// Use Valve, in conformity with the given command-line parameters, to print the row with the
+/// given row number from the given table.
 pub async fn print_row(cli: &Cli, table: &str, row: u32) {
-    let valve = build_valve(&cli.source, &cli.database, cli.verbose, cli.assume_yes).await;
+    let valve = build_valve(&cli).await;
     let row = valve
         .get_row_from_db(table, &row)
         .await
@@ -950,12 +992,12 @@ pub async fn print_row(cli: &Cli, table: &str, row: u32) {
     );
 }
 
-/// TODO: Add docstring
+/// Use Valve, in conformity with the given command-line parameters, to print the rules
+/// associated with the given table, optionally filtered by the given column.
 pub async fn print_rules(cli: &Cli, table: &str, column: &Option<String>) {
-    let valve = build_valve(&cli.source, &cli.database, cli.verbose, cli.assume_yes).await;
-
+    let valve = build_valve(&cli).await;
     if !valve.config.table.contains_key(table) {
-        panic!("No table '{table}'");
+        panic!("No table config for '{table}'");
     }
     if let Some(table_rules) = valve.config.rule.get(table) {
         match column {
@@ -969,16 +1011,17 @@ pub async fn print_rules(cli: &Cli, table: &str, column: &Option<String>) {
     }
 }
 
-/// TODO: Add docstring
+/// Use Valve, in conformity with the given command-line parameters, to print the database schema.
 pub async fn print_schema(cli: &Cli) {
-    let valve = build_valve(&cli.source, "", cli.verbose, cli.assume_yes).await;
+    let valve = build_valve(&cli).await;
     let schema = valve.dump_schema().await.expect("Error dumping schema");
     println!("{}", schema);
 }
 
-/// TODO: Add docstring
+/// Use Valve, in conformity with the given command-line parameters, to print the names of the
+/// special configuration tables.
 pub async fn print_special(cli: &Cli, table: &Option<String>) {
-    let valve = build_valve(&cli.source, &cli.database, cli.verbose, cli.assume_yes).await;
+    let valve = build_valve(&cli).await;
 
     match table {
         None => {
@@ -1000,9 +1043,10 @@ pub async fn print_special(cli: &Cli, table: &Option<String>) {
     };
 }
 
-/// TODO: Add docstring
+/// Use Valve, in conformity with the given command-line parameters, to print all of the rows
+/// in the given table.
 pub async fn print_table(cli: &Cli, table: &str) {
-    let valve = build_valve(&cli.source, &cli.database, cli.verbose, cli.assume_yes).await;
+    let valve = build_valve(&cli).await;
 
     let (sql, sql_params) =
         generic_select_with_message_values(table, &valve.config, &valve.db_kind);
@@ -1037,9 +1081,10 @@ pub async fn print_table(cli: &Cli, table: &str) {
     println!("]");
 }
 
-/// TODO: Add docstring
+/// Use Valve, in conformity with the given command-line parameters, to print the table
+/// configuration for the given table.
 pub async fn print_table_config(cli: &Cli, table: &str) {
-    let valve = build_valve(&cli.source, &cli.database, cli.verbose, cli.assume_yes).await;
+    let valve = build_valve(&cli).await;
 
     let table_config = valve
         .config
@@ -1049,18 +1094,18 @@ pub async fn print_table_config(cli: &Cli, table: &str) {
     println!("{}", json!(table_config));
 }
 
-/// TODO: Add docstring
+/// Use Valve, in conformity with the given command-line parameters, to print the list of
+/// configured tables in sorted order.
 pub async fn print_table_order(cli: &Cli) {
-    let valve = build_valve(&cli.source, &cli.database, cli.verbose, cli.assume_yes).await;
-
+    let valve = build_valve(&cli).await;
     let sorted_table_list = valve.get_sorted_table_list();
     println!("{}", sorted_table_list.join(", "));
 }
 
-/// TODO: Add docstring
+/// Use Valve, in conformity with the given command-line parameters, to print the value of the
+/// given column of the given row of the given table.
 pub async fn print_value(cli: &Cli, table: &str, row: u32, column: &str) {
-    let valve = build_valve(&cli.source, &cli.database, cli.verbose, cli.assume_yes).await;
-
+    let valve = build_valve(&cli).await;
     let cell = valve
         .get_cell_from_db(table, &row, column)
         .await
@@ -1068,16 +1113,20 @@ pub async fn print_value(cli: &Cli, table: &str, row: u32, column: &str) {
     println!("{}", cell.strvalue());
 }
 
-/// TODO: Add docstring
+/// Use Valve, in conformity with the given command-line parameters, to print the global Valve
+/// configuration.
 pub async fn print_valve_config(cli: &Cli) {
-    let valve = build_valve(&cli.source, &cli.database, cli.verbose, cli.assume_yes).await;
-
+    let valve = build_valve(&cli).await;
     println!("{}", valve.config)
 }
 
-/// TODO: Add docstring
+/// Use Valve, in conformity with the given command-line parameters, to print a list of operations
+/// that have been previously executed and that can be undone, a list of such operations that
+/// can be redone, and markers to indicate where the state of the Valve instance with respect to
+/// those lists. When `context` is non-zero, limit the redo and undo lists to no more than that
+/// many operations.
 pub async fn print_history(cli: &Cli, context: usize) {
-    let valve = build_valve(&cli.source, &cli.database, cli.verbose, cli.assume_yes).await;
+    let valve = build_valve(&cli).await;
     let mut undo_history = valve
         .get_changes_to_undo(context)
         .await
@@ -1129,9 +1178,10 @@ pub async fn print_history(cli: &Cli, context: usize) {
     }
 }
 
-/// TODO: Add docstring
+/// Use Valve, in conformity with the given command-line parameters, to load all of the tables in
+/// the database.
 pub async fn load_all(cli: &Cli) {
-    let mut valve = build_valve(&cli.source, &cli.database, cli.verbose, cli.assume_yes).await;
+    let mut valve = build_valve(&cli).await;
     valve
         .configure_for_initial_load()
         .await
@@ -1142,9 +1192,11 @@ pub async fn load_all(cli: &Cli) {
         .expect("Error loading tables");
 }
 
-/// TODO: Add docstring
+/// Use Valve, in conformity with the given command-line parameters, to load a table. When
+/// `initial_load` has been set, then (SQLite only) use unsafe parameters that are normally
+/// only reserved for the initial loading of a freshly created database.
 pub async fn load_table(cli: &Cli, table: &str, initial_load: bool) {
-    let mut valve = build_valve(&cli.source, &cli.database, cli.verbose, cli.assume_yes).await;
+    let mut valve = build_valve(&cli).await;
     if initial_load {
         if valve.db_kind == DbKind::Sqlite && !cli.assume_yes {
             print!(
@@ -1168,9 +1220,10 @@ pub async fn load_table(cli: &Cli, table: &str, initial_load: bool) {
         .expect("Error loading table");
 }
 
-/// TODO: Add docstring
+/// Use Valve, in conformity with the given command-line parameters, to move the given `row` from
+/// the given `table` so that it comes after the row `after` in `table`.
 pub async fn move_row(cli: &Cli, table: &str, row: u32, after: u32) {
-    let valve = build_valve(&cli.source, &cli.database, cli.verbose, cli.assume_yes).await;
+    let valve = build_valve(&cli).await;
     valve
         .move_row(table, &row, &after)
         .await
@@ -1179,7 +1232,7 @@ pub async fn move_row(cli: &Cli, table: &str, row: u32, after: u32) {
 
 /// TODO: Add docstring
 pub async fn undo_or_redo(cli: &Cli) {
-    let valve = build_valve(&cli.source, &cli.database, cli.verbose, cli.assume_yes).await;
+    let valve = build_valve(&cli).await;
     let updated_row = match &cli.command {
         Commands::Undo {} => valve.undo().await.expect("Error undoing"),
         Commands::Redo {} => valve.redo().await.expect("Error redoing"),
@@ -1204,7 +1257,7 @@ pub async fn rename_column(
     new_label: &Option<String>,
     no_load: bool,
 ) {
-    let mut valve = build_valve(&cli.source, &cli.database, cli.verbose, cli.assume_yes).await;
+    let mut valve = build_valve(&cli).await;
     valve
         .rename_column(table, column, new_name, new_label, no_load)
         .await
@@ -1213,7 +1266,7 @@ pub async fn rename_column(
 
 /// TODO: Add docstring
 pub async fn rename_datatype(cli: &Cli, datatype: &str, new_name: &str) {
-    let mut valve = build_valve(&cli.source, &cli.database, cli.verbose, cli.assume_yes).await;
+    let mut valve = build_valve(&cli).await;
     valve
         .rename_datatype(datatype, new_name)
         .await
@@ -1222,7 +1275,7 @@ pub async fn rename_datatype(cli: &Cli, datatype: &str, new_name: &str) {
 
 /// TODO: Add docstring
 pub async fn rename_table(cli: &Cli, table: &str, new_name: &str) {
-    let mut valve = build_valve(&cli.source, &cli.database, cli.verbose, cli.assume_yes).await;
+    let mut valve = build_valve(&cli).await;
     valve
         .rename_table(table, new_name)
         .await
@@ -1231,7 +1284,7 @@ pub async fn rename_table(cli: &Cli, table: &str, new_name: &str) {
 
 /// TODO: Add docstring
 pub async fn save(cli: &Cli, tables: &Option<Vec<String>>, save_dir: &Option<String>) {
-    let valve = build_valve(&cli.source, &cli.database, cli.verbose, cli.assume_yes).await;
+    let valve = build_valve(&cli).await;
     match tables {
         None => {
             valve
@@ -1255,7 +1308,7 @@ pub async fn save(cli: &Cli, tables: &Option<Vec<String>>, save_dir: &Option<Str
 
 /// TODO: Add docstring
 pub async fn save_as(cli: &Cli, table: &str, path: &str) {
-    let valve = build_valve(&cli.source, &cli.database, cli.verbose, cli.assume_yes).await;
+    let valve = build_valve(&cli).await;
     valve
         .save_table(table, path)
         .await
@@ -1264,7 +1317,7 @@ pub async fn save_as(cli: &Cli, table: &str, path: &str) {
 
 /// TODO: Add docstring
 pub async fn test_api(cli: &Cli) {
-    let valve = build_valve(&cli.source, &cli.database, cli.verbose, cli.assume_yes).await;
+    let valve = build_valve(&cli).await;
     run_api_tests(&valve)
         .await
         .expect("Error running API tests");
@@ -1272,13 +1325,13 @@ pub async fn test_api(cli: &Cli) {
 
 /// TODO: Add docstring
 pub async fn test_dt_hierarchy(cli: &Cli) {
-    let valve = build_valve(&cli.source, &cli.database, cli.verbose, cli.assume_yes).await;
+    let valve = build_valve(&cli).await;
     run_dt_hierarchy_tests(&valve).expect("Error running datatype hierarchy tests");
 }
 
 /// TODO: Add docstring
 pub async fn truncate_all_tables(cli: &Cli) {
-    let mut valve = build_valve(&cli.source, &cli.database, cli.verbose, cli.assume_yes).await;
+    let mut valve = build_valve(&cli).await;
     valve
         .truncate_all_tables()
         .await
@@ -1287,7 +1340,7 @@ pub async fn truncate_all_tables(cli: &Cli) {
 
 /// TODO: Add docstring
 pub async fn truncate_table(cli: &Cli, table: &str) {
-    let mut valve = build_valve(&cli.source, &cli.database, cli.verbose, cli.assume_yes).await;
+    let mut valve = build_valve(&cli).await;
     valve
         .truncate_tables(&vec![table])
         .await
@@ -1302,7 +1355,7 @@ pub async fn update_message(
     row: &Option<u32>,
     column: &Option<String>,
 ) {
-    let valve = build_valve(&cli.source, &cli.database, cli.verbose, cli.assume_yes).await;
+    let valve = build_valve(&cli).await;
     let json_message = read_json_row_for_table(&valve, "message");
     let (table, row, column, value, level, rule, message) =
         extract_message_fields(table, row, column, &json_message);
@@ -1316,7 +1369,7 @@ pub async fn update_message(
 
 /// TODO: Add docstring
 pub async fn update_row(cli: &Cli, table: &str, row: &Option<u32>) {
-    let valve = build_valve(&cli.source, &cli.database, cli.verbose, cli.assume_yes).await;
+    let valve = build_valve(&cli).await;
     let mut input_row = read_json_row_for_table(&valve, table);
     let input_rn = extract_rn(&mut input_row);
     let rn = match input_rn {
@@ -1346,7 +1399,7 @@ pub async fn update_row(cli: &Cli, table: &str, row: &Option<u32>) {
 
 /// TODO: Add docstring
 pub async fn update_value(cli: &Cli, table: &str, row: u32, column: &str, value: &str) {
-    let valve = build_valve(&cli.source, &cli.database, cli.verbose, cli.assume_yes).await;
+    let valve = build_valve(&cli).await;
 
     let json_row = fetch_row_with_input_value(&valve, table, row, column, value).await;
     let output_row = valve
@@ -1370,7 +1423,7 @@ pub async fn validate(
     column: &Option<String>,
     value: &Option<String>,
 ) {
-    let valve = build_valve(&cli.source, &cli.database, cli.verbose, cli.assume_yes).await;
+    let valve = build_valve(&cli).await;
     let (rn, input_row) = match value {
         Some(value) => {
             let rn = row.expect("No row given");
@@ -1429,7 +1482,7 @@ pub async fn validate(
 
 /// Prints the table dependencies in either incoming or outgoing order.
 pub async fn print_dependencies(cli: &Cli, incoming: bool) {
-    let valve = build_valve(&cli.source, &cli.database, cli.verbose, cli.assume_yes).await;
+    let valve = build_valve(&cli).await;
     let dependencies = valve
         .collect_dependencies(incoming)
         .expect("Could not collect dependencies");

@@ -1276,7 +1276,8 @@ impl Valve {
         Ok(())
     }
 
-    /// Delete the given table from the database.
+    /// Delete the given table from the column table. Also drop the table in the database unless
+    /// the `no_drop` flag has been set.
     pub async fn delete_table(&mut self, table: &str, no_drop: bool) -> Result<()> {
         // Begin a DB transaction:
         let mut tx = self.pool.begin().await?;
