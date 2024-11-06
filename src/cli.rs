@@ -1231,13 +1231,23 @@ pub async fn move_row(cli: &Cli, table: &str, row: u32, after: u32) {
 }
 
 /// TODO: Add docstring
-pub async fn undo_or_redo(cli: &Cli) {
+pub async fn redo(cli: &Cli) {
     let valve = build_valve(&cli).await;
-    let updated_row = match &cli.command {
-        Commands::Undo {} => valve.undo().await.expect("Error undoing"),
-        Commands::Redo {} => valve.redo().await.expect("Error redoing"),
-        _ => unreachable!(),
-    };
+    let updated_row = valve.redo().await.expect("Error redoing");
+    if let Some(valve_row) = updated_row {
+        print!(
+            "{}",
+            json!(valve_row
+                .to_rich_json()
+                .expect("Error converting row to rich JSON"))
+        );
+    }
+}
+
+/// TODO: Add docstring
+pub async fn undo(cli: &Cli) {
+    let valve = build_valve(&cli).await;
+    let updated_row = valve.undo().await.expect("Error undoing");
     if let Some(valve_row) = updated_row {
         print!(
             "{}",
@@ -1911,9 +1921,8 @@ pub async fn process_command() {
             table,
         } => load_table(&cli, table, *initial_load).await,
         Commands::Move { table, row, after } => move_row(&cli, table, *row, *after).await,
-        Commands::Redo {} | Commands::Undo {} => {
-            undo_or_redo(&cli).await;
-        }
+        Commands::Redo {} => undo(&cli).await,
+        Commands::Undo {} => redo(&cli).await,
         Commands::Rename { subcommand } => {
             match subcommand {
                 RenameSubcommands::Column {
