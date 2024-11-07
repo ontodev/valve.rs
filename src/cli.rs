@@ -196,13 +196,11 @@ pub enum Commands {
         subcommand: RenameSubcommands,
     },
 
-    /// Run a set of predefined tests, on a specified pre-loaded database, that will test Valve's
-    /// Application Programmer Interface.
-    TestApi {},
-
-    /// Run a set of predefined tests, on a specified pre-loaded database, that will test the
-    /// validity of the configured datatype hierarchy.
-    TestDtHierarchy {},
+    /// Run test suites designed to validate that Valve is installed and running correctly
+    Test {
+        #[command(subcommand)]
+        subcommand: TestSubcommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -560,6 +558,21 @@ pub enum RenameSubcommands {
     },
 }
 
+#[derive(Subcommand)]
+pub enum TestSubcommands {
+    /// Run a set of predefined tests, on a specified pre-loaded database, that will test Valve's
+    /// Application Programmer Interface.
+    TestApi {},
+
+    /// Run a set of predefined tests, on a specified pre-loaded database, that will test Valve's
+    /// Application Programmer Interface.
+    TestCli {},
+
+    /// Run a set of predefined tests, on a specified pre-loaded database, that will test the
+    /// validity of the configured datatype hierarchy.
+    TestDtHierarchy {},
+}
+
 /// Build a Valve instance in conformity with the given command-line options and parameters.
 pub async fn build_valve(cli: &Cli) -> Valve {
     let mut valve = Valve::build(&cli.source, &cli.database)
@@ -571,9 +584,9 @@ pub async fn build_valve(cli: &Cli) -> Valve {
 }
 
 /// Use Valve, in conformity with the given command-line parameters, to add a column to the
-/// given table in the database. The column details are read from STDIN. These must contain
-/// information about the table and column name, if these fields have not been given as arguments
-/// to the function. If the `no_load` option is set, do not load the modified table.
+/// given table in the database. The column details are read from STDIN. If `table` and `column`
+/// are not given then the fields "table" and "column", respectively, must be present in the INPUT
+/// JSON. If the `no_load` option is set, do not load the modified table.
 pub async fn add_column(cli: &Cli, table: &Option<String>, column: &Option<String>, no_load: bool) {
     let mut valve = build_valve(&cli).await;
     let json_row = read_json_row_for_table(&valve, "column");
@@ -585,8 +598,8 @@ pub async fn add_column(cli: &Cli, table: &Option<String>, column: &Option<Strin
 }
 
 /// Use Valve, in conformity with the given command-line parameters, to add a datatype to the
-/// database, The details of the datatype are read from STDIN. These must include the datatype
-/// name if it has not been given as an argument to the function.
+/// database. The datatype details are read from STDIN. Note that if `datatype` is not given then
+/// a field called "datatype" must be present in the INPUT JSON.
 pub async fn add_datatype(cli: &Cli, datatype: &Option<String>) {
     let mut valve = build_valve(&cli).await;
     let json_datatype = read_json_row_for_table(&valve, "datatype");
@@ -598,9 +611,10 @@ pub async fn add_datatype(cli: &Cli, datatype: &Option<String>) {
 }
 
 /// Use Valve, in conformity with the given command-line parameters, to add a message to the
-/// message table. The details of the message are read from STDIN. If these have not been provided
-/// as arguments to the function, the message details must include information about the table, row
-/// and column to which the message pertains.
+/// message table. The details of the message are read from STDIN. Note that if any of the
+/// function parameters, `table`, `row`, or `column` have not been specified, then a field
+/// ("table", "row", and "column", respectively) corresponding to the missing parameter must be
+/// provided in the input JSON.
 pub async fn add_message(
     cli: &Cli,
     table: &Option<String>,
@@ -766,7 +780,6 @@ pub async fn drop_table(cli: &Cli, table: &str) {
 /// datatypes of the given datatype.
 pub async fn print_ancestors(cli: &Cli, datatype: &str) {
     let valve = build_valve(&cli).await;
-
     println!(
         "{}",
         valve
@@ -873,13 +886,16 @@ pub async fn print_datatype_config(cli: &Cli, datatype: &str) {
 
 /// Use Valve, in conformity with the given command-line parameters, to print messages from the
 /// message table. If none of `message_id`, `table`, `row`, `column`, or `rule` have been given,
-/// print all of the messages in the message table. Otherwise:
+/// print all of the messages in the message table. Otherwise there are two mutually exclusive
+/// options:
 /// (i) If `message_id` is given, print the particular message and exit.
-/// (ii) If `table` is given, only show the messages for that table. If, in addition, `row` is
-/// given, show only messages for that row of the table. And if `column` is also given, show only
-/// messages for that column in the row.
-/// (iii) If `rule` is given, show only messages with that rule. Note that it is possible to
-/// filter messages by rule regardless of whether `table`, `row`, or `column` have been set.
+/// (ii), i.e.,
+///   (iia) If `table` is given, only show the messages for that table. If, in addition, `row` is
+///     given, show only messages for that row of the table. And if `column` is also given, show
+///     only messages for that column in the row.
+///   and/or
+///   (iib) If `rule` is given, show only messages with that rule.
+/// Note that (iia) and (iib) are compatible, i.e., one can filter by table/row/column and by rule.
 pub async fn print_messages(
     cli: &Cli,
     table: &Option<String>,
@@ -889,7 +905,6 @@ pub async fn print_messages(
     message_id: &Option<u16>,
 ) {
     let valve = build_valve(&cli).await;
-
     let mut sql = format!(
         r#"SELECT "message_id", "table", "row", "column", "value", "level", "rule", "message"
            FROM "message""#
@@ -900,15 +915,13 @@ pub async fn print_messages(
             sql.push_str(&format!(r#" WHERE "message_id" = {message_id}"#));
         }
         None => {
-            // We are trusting the command-line parser to ensure that TABLE has been given
-            // whenever ROW is given, and that TABLE and ROW have both been given
-            // whenever COLUMN is given. The case of RULE is different since it is
-            // a long parameter that is parsed independently.
+            // The command line parser should have taken care of this but we add in a check
+            // to be certain:
             if *row != None && *table == None {
-                panic!("A table must be given when a row is given");
+                unreachable!("A table must be given when a row is given");
             }
             if *column != None && (*table == None || *row == None) {
-                panic!("A table and row must be given when a column is given");
+                unreachable!("A table and row must be given when a column is given");
             }
 
             if let Some(table) = table {
@@ -1230,21 +1243,8 @@ pub async fn move_row(cli: &Cli, table: &str, row: u32, after: u32) {
         .expect("Error moving row");
 }
 
-/// TODO: Add docstring
-pub async fn redo(cli: &Cli) {
-    let valve = build_valve(&cli).await;
-    let updated_row = valve.redo().await.expect("Error redoing");
-    if let Some(valve_row) = updated_row {
-        print!(
-            "{}",
-            json!(valve_row
-                .to_rich_json()
-                .expect("Error converting row to rich JSON"))
-        );
-    }
-}
-
-/// TODO: Add docstring
+/// Use Valve, in conformity with the given command-line parameters, to undo the last operation and
+/// print the information, if any, that resulted from the undo.
 pub async fn undo(cli: &Cli) {
     let valve = build_valve(&cli).await;
     let updated_row = valve.undo().await.expect("Error undoing");
@@ -1258,23 +1258,41 @@ pub async fn undo(cli: &Cli) {
     }
 }
 
-/// TODO: Add docstring
+/// Use Valve, in conformity with the given command-line parameters, to redo the last operation
+/// that was undone and print the information, if any, that resulted from the redo.
+pub async fn redo(cli: &Cli) {
+    let valve = build_valve(&cli).await;
+    let updated_row = valve.redo().await.expect("Error redoing");
+    if let Some(valve_row) = updated_row {
+        print!(
+            "{}",
+            json!(valve_row
+                .to_rich_json()
+                .expect("Error converting row to rich JSON"))
+        );
+    }
+}
+
+/// Use Valve, in conformity with the given command-line parameters, to rename the given column
+/// of the given table to the given new name, optionally with a given label. Note that if no
+/// label is given it will be left unset. The column's old label will not be retained.
 pub async fn rename_column(
     cli: &Cli,
     table: &str,
     column: &str,
     new_name: &str,
-    new_label: &Option<String>,
+    label: &Option<String>,
     no_load: bool,
 ) {
     let mut valve = build_valve(&cli).await;
     valve
-        .rename_column(table, column, new_name, new_label, no_load)
+        .rename_column(table, column, new_name, label, no_load)
         .await
         .expect("Error renaming column");
 }
 
-/// TODO: Add docstring
+/// Use Valve, in conformity with the given command-line parameters, to rename the given datatype
+/// to the given new datatype name.
 pub async fn rename_datatype(cli: &Cli, datatype: &str, new_name: &str) {
     let mut valve = build_valve(&cli).await;
     valve
@@ -1283,7 +1301,8 @@ pub async fn rename_datatype(cli: &Cli, datatype: &str, new_name: &str) {
         .expect("Error renaming datatype");
 }
 
-/// TODO: Add docstring
+/// Use Valve, in conformity with the given command-line parameters, to rename the given table
+/// to the given new table name.
 pub async fn rename_table(cli: &Cli, table: &str, new_name: &str) {
     let mut valve = build_valve(&cli).await;
     valve
@@ -1292,7 +1311,9 @@ pub async fn rename_table(cli: &Cli, table: &str, new_name: &str) {
         .expect("Error renaming table");
 }
 
-/// TODO: Add docstring
+/// Use Valve, in conformity with the given command-line parameters, to save the given tables,
+/// or all tables if no table list is given, to the given save directory, or to each table's
+/// configured path if no save directory is given.
 pub async fn save(cli: &Cli, tables: &Option<Vec<String>>, save_dir: &Option<String>) {
     let valve = build_valve(&cli).await;
     match tables {
@@ -1303,11 +1324,7 @@ pub async fn save(cli: &Cli, tables: &Option<Vec<String>>, save_dir: &Option<Str
                 .expect("Error saving tables");
         }
         Some(tables) => {
-            let tables = tables
-                .iter()
-                .filter(|s| *s != "")
-                .map(|s| s.as_str())
-                .collect::<Vec<_>>();
+            let tables = tables.iter().map(|s| s.as_str()).collect::<Vec<_>>();
             valve
                 .save_tables(&tables, &save_dir)
                 .await
@@ -1316,7 +1333,8 @@ pub async fn save(cli: &Cli, tables: &Option<Vec<String>>, save_dir: &Option<Str
     };
 }
 
-/// TODO: Add docstring
+/// Use Valve, in conformity with the given command-line parameters, to save the given table
+/// to the given path.
 pub async fn save_as(cli: &Cli, table: &str, path: &str) {
     let valve = build_valve(&cli).await;
     valve
@@ -1325,7 +1343,8 @@ pub async fn save_as(cli: &Cli, table: &str, path: &str) {
         .expect("Error saving table");
 }
 
-/// TODO: Add docstring
+/// Use Valve, in conformity with the given command-line parameters, to run a set of functions
+/// designed to test Valve's Application Programmer Interface.
 pub async fn test_api(cli: &Cli) {
     let valve = build_valve(&cli).await;
     run_api_tests(&valve)
@@ -1333,13 +1352,20 @@ pub async fn test_api(cli: &Cli) {
         .expect("Error running API tests");
 }
 
-/// TODO: Add docstring
+/// Use Valve, in conformity with the given command-line parameters, to run a set of functions
+/// designed to test Valve's Command Line Interface.
+pub async fn test_cli(cli: &Cli) {
+    todo!()
+}
+
+/// Use Valve, in conformity with the given command-line parameters, to run a set of functions
+/// designed to test how Valve handles datatype hierarchies.
 pub async fn test_dt_hierarchy(cli: &Cli) {
     let valve = build_valve(&cli).await;
     run_dt_hierarchy_tests(&valve).expect("Error running datatype hierarchy tests");
 }
 
-/// TODO: Add docstring
+/// Use Valve, in conformity with the given command-line parameters, to truncate all of the tables.
 pub async fn truncate_all_tables(cli: &Cli) {
     let mut valve = build_valve(&cli).await;
     valve
@@ -1348,7 +1374,7 @@ pub async fn truncate_all_tables(cli: &Cli) {
         .expect("Error truncating tables");
 }
 
-/// TODO: Add docstring
+/// Use Valve, in conformity with the given command-line parameters, to truncate the given table.
 pub async fn truncate_table(cli: &Cli, table: &str) {
     let mut valve = build_valve(&cli).await;
     valve
@@ -1357,7 +1383,10 @@ pub async fn truncate_table(cli: &Cli, table: &str) {
         .expect("Error truncating table");
 }
 
-/// TODO: Add docstring
+/// Use Valve, in conformity with the given command-line parameters, to update a message in the
+/// message table. The details of the message are read from STDIN. Note that if any of `table`,
+/// `row`, or `column` have not been specified, then a field ("table", "row", "column",
+/// respectively) corresponding to the missing parameter must be provided in the input JSON.
 pub async fn update_message(
     cli: &Cli,
     message_id: u16,
@@ -1377,11 +1406,14 @@ pub async fn update_message(
         .expect("Error updating message");
 }
 
-/// TODO: Add docstring
+/// Use Valve, in conformity with the given command-line parameters, to update a row from the given
+/// table. The details of the message are read from STDIN using JSON format. Note that
+/// if the row number, `row`, is not given it must be included using the field name "row" or
+/// "row_number" in the input JSON.
 pub async fn update_row(cli: &Cli, table: &str, row: &Option<u32>) {
     let valve = build_valve(&cli).await;
     let mut input_row = read_json_row_for_table(&valve, table);
-    let input_rn = extract_rn(&mut input_row);
+    let input_rn = extract_and_remove_rn(&mut input_row);
     let rn = match input_rn {
         Some(input_rn) => match row {
             Some(rn) if *rn != input_rn => {
@@ -1407,10 +1439,10 @@ pub async fn update_row(cli: &Cli, table: &str, row: &Option<u32>) {
     );
 }
 
-/// TODO: Add docstring
+/// Use Valve, in conformity with the given command-line parameters, to update the given column
+/// of the given row of the given table with the given input value.
 pub async fn update_value(cli: &Cli, table: &str, row: u32, column: &str, value: &str) {
     let valve = build_valve(&cli).await;
-
     let json_row = fetch_row_with_input_value(&valve, table, row, column, value).await;
     let output_row = valve
         .update_row(table, &row, &json_row)
@@ -1452,7 +1484,7 @@ pub async fn validate(
         }
         None => {
             let mut input_row = read_json_row_for_table(&valve, table);
-            let rn = extract_rn(&mut input_row);
+            let rn = extract_and_remove_rn(&mut input_row);
             // If now row was input, default to `row` (which could still be None)
             let rn = match rn {
                 Some(rn) => {
@@ -1589,15 +1621,48 @@ pub fn read_json_row_for_table(valve: &Valve, table: &str) -> JsonRow {
     json_row
 }
 
-/// Try to extract the row number from the given JSON row:
-pub fn extract_rn(json_row: &mut JsonRow) -> Option<u32> {
-    match json_row.get("row_number") {
-        None => None,
+/// Try to extract the row number from the given JSON row. It shold be specified using the field
+/// name "row" or "row_number".
+pub fn extract_rn(json_row: &JsonRow) -> Option<u32> {
+    let extract_rn_from_value = |value: &SerdeValue| -> Option<u32> {
+        let row_number = value.as_i64().expect("Not a number");
+        let row_number = Some(row_number as u32);
+        row_number
+    };
+    match json_row.get("row") {
+        None => match json_row.get("row_number") {
+            None => None,
+            Some(value) => extract_rn_from_value(value),
+        },
+        Some(value) => extract_rn_from_value(value),
+    }
+}
+
+/// Try to extract the row number from the given JSON row. It shold be specified using the field
+/// name "row" or "row_number". Once extracted, remove it from the JSON row.
+pub fn extract_and_remove_rn(json_row: &mut JsonRow) -> Option<u32> {
+    let extract_rn_from_value = |value: &SerdeValue| -> Option<u32> {
+        let row_number = value.as_i64().expect("Not a number");
+        let row_number = Some(row_number as u32);
+        row_number
+    };
+    match json_row.get("row") {
+        None => match json_row.get("row_number") {
+            None => None,
+            Some(value) => {
+                let rn = extract_rn_from_value(value);
+                match json_row.remove("row_number") {
+                    None => unreachable!(),
+                    Some(_) => rn,
+                }
+            }
+        },
         Some(value) => {
-            let row_number = value.as_i64().expect("Not a number");
-            let row_number = Some(row_number as u32);
-            json_row.remove("row_number").expect("No row_number in row");
-            row_number
+            let rn = extract_rn_from_value(value);
+            match json_row.remove("row") {
+                None => unreachable!(),
+                Some(_) => rn,
+            }
         }
     }
 }
@@ -1697,8 +1762,8 @@ pub fn extract_column_fields(
 /// Reads and parses a JSON-formatted string representing a validation message (for the expected
 /// format see documentation for [AddSubcommands::Message]), and returns the tuple:
 /// (table, row, column, value, level, rule, message). If any of table_param, column_param, or
-/// row_param are not provided, then a "table", "column", or "row" field, respectively should be
-/// present in json_row.
+/// row_param are not provided, then a "table", "column", and/or "row" field, respectively should
+/// be present in json_row.
 pub fn extract_message_fields(
     table_param: &Option<String>,
     row_param: &Option<u32>,
@@ -1717,15 +1782,12 @@ pub fn extract_message_fields(
             None => panic!("No table given"),
         },
     };
-    let row = match json_row.get("row") {
+    let row = match extract_rn(json_row) {
         Some(input_row) => match row_param {
-            Some(row_param) if row_param != input_row => {
+            Some(row_param) if *row_param != input_row => {
                 panic!("Mismatch between input row and positional parameter, ROW")
             }
-            None | Some(_) => {
-                let input_row = input_row.as_i64().expect("Not a number");
-                input_row as u32
-            }
+            None | Some(_) => input_row,
         },
         None => match row_param {
             Some(row_param) => *row_param,
@@ -1946,11 +2008,18 @@ pub async fn process_command() {
         Commands::SaveAs { table, path } => {
             save_as(&cli, table, path).await;
         }
-        Commands::TestApi {} => {
-            test_api(&cli).await;
-        }
-        Commands::TestDtHierarchy {} => {
-            test_dt_hierarchy(&cli).await;
+        Commands::Test { subcommand } => {
+            match subcommand {
+                TestSubcommands::TestApi {} => {
+                    test_api(&cli).await;
+                }
+                TestSubcommands::TestCli {} => {
+                    test_cli(&cli).await;
+                }
+                TestSubcommands::TestDtHierarchy {} => {
+                    test_dt_hierarchy(&cli).await;
+                }
+            };
         }
         Commands::TruncateAll {} => {
             truncate_all_tables(&cli).await;
