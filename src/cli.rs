@@ -1457,7 +1457,11 @@ pub async fn update_value(cli: &Cli, table: &str, row: u32, column: &str, value:
     );
 }
 
-/// TODO: Add docstring
+/// Use Valve, in conformity with the given command-line parameters, to validate a row from a given
+/// table. If `value` is given, then fetch the row with the given row number from the database,
+/// and validate it using `value` as the value of the column `column` in that row instead of its
+/// current value. If `value` is not given, then read in the details of the row to validate (which
+/// need not include a row number) from STDIN and validate it.
 pub async fn validate(
     cli: &Cli,
     table: &str,

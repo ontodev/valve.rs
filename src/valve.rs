@@ -1145,24 +1145,36 @@ impl Valve {
             .bind(new_name);
         query.execute(tx.acquire().await?).await?;
 
-        // Look through the datatype config for any datatypes that are list() types and which
-        // refer to the current datatype as their base type. Then construct a SQL CASE statement
-        // to update the "condition" column of the datatype table appropriately given the renaming.
+        // TODO: Add a comment here:
+        let maybe_add_to_sql = |column: &str,
+                                ccond: &CompiledCondition,
+                                sql_lines: &mut Vec<String>,
+                                sql_params: &mut Vec<String>| {
+            if let ValueType::List(reference_dt, list_sep) = &ccond.value_type {
+                if reference_dt == datatype {
+                    let old_condition = ccond.original.to_string();
+                    let new_condition = format!("list({new_name}, '{list_sep}')");
+                    sql_lines.push(format!(r#"WHEN "{column}" = {SQL_PARAM} THEN {SQL_PARAM}"#));
+                    sql_params.push(old_condition);
+                    sql_params.push(new_condition);
+                }
+            }
+        };
+
+        // Look through the datatype config for any datatypes that are list() types and
+        // that refer to the current datatype as their base type. Then construct a SQL CASE
+        // statement to update the "condition" column of the datatype table appropriately given the
+        // renaming.
         let mut condition_params = vec![];
         let condition_sql = {
             let mut sql_lines = vec![];
             for (_, dt_condition) in self.datatype_conditions.iter() {
-                if let ValueType::List(reference_dt, list_sep) = &dt_condition.value_type {
-                    if reference_dt == datatype {
-                        let old_condition = dt_condition.original.to_string();
-                        let new_condition = format!("list({new_name}, '{list_sep}')");
-                        sql_lines.push(format!(
-                            r#"WHEN "condition" = {SQL_PARAM} THEN {SQL_PARAM}"#
-                        ));
-                        condition_params.push(old_condition);
-                        condition_params.push(new_condition);
-                    }
-                }
+                maybe_add_to_sql(
+                    "condition",
+                    dt_condition,
+                    &mut sql_lines,
+                    &mut condition_params,
+                );
             }
             if !sql_lines.is_empty() {
                 format!(
@@ -1197,28 +1209,69 @@ impl Valve {
         for parent_param in [datatype, new_name] {
             query = query.bind(parent_param);
         }
+
         query.execute(tx.acquire().await?).await?;
 
         // Now update the when_column and/or the then_column of any rules that refer to the
         // datatype:
+        let mut wcond_params = vec![];
+        let mut tcond_params = vec![];
+        // This closure is used to generate the SET clauses for "when condition" and
+        // "then condition" in the UPDATE statement for the rule table, and to populate
+        // wcond_params and tcond_params:
+        let get_rule_cond_sql = |column: &str, cond_params: &mut Vec<String>| {
+            let mut sql_lines = vec![];
+            // When/then datatype conditions that match the renamed datatype should
+            // be renamed as well:
+            sql_lines.push(format!(r#"WHEN "{column}" = {SQL_PARAM} THEN {SQL_PARAM}"#));
+            cond_params.push(datatype.to_string());
+            cond_params.push(new_name.to_string());
+
+            // When/then datatype conditions that are of the list() type, whose reference
+            // datatype corresponds to the given datatype, should also be renamed:
+            for (_, column_rules) in self.rule_conditions.iter() {
+                for (_, conditions) in column_rules.iter() {
+                    for cond in conditions.iter() {
+                        if column == "when condition" {
+                            maybe_add_to_sql(column, &cond.when, &mut sql_lines, cond_params);
+                        } else if column == "then condition" {
+                            maybe_add_to_sql(column, &cond.then, &mut sql_lines, cond_params);
+                        } else {
+                            panic!("Not a recognized condition column: {column}");
+                        }
+                    }
+                }
+            }
+
+            // Only actually build the clause if there were matching conditions:
+            if !sql_lines.is_empty() {
+                format!(
+                    r#""{column}" = CASE
+                          {case_clause}
+                          ELSE "{column}"
+                        END"#,
+                    case_clause = sql_lines.join("\n")
+                )
+            } else {
+                "".to_string()
+            }
+        };
+        let when_condition_sql = get_rule_cond_sql("when condition", &mut wcond_params);
+        let then_condition_sql = get_rule_cond_sql("then condition", &mut tcond_params);
         let sql = local_sql_syntax(
             &self.db_kind,
             &format!(
                 r#"UPDATE "rule"
-                     SET "when condition" = CASE
-                       WHEN "when condition" = {SQL_PARAM} THEN {SQL_PARAM}
-                       ELSE "when condition"
-                     END, "then condition" = CASE
-                       WHEN "then condition" = {SQL_PARAM} THEN {SQL_PARAM}
-                       ELSE "then condition"
-                     END"#
+                     SET {when_condition_sql}, {then_condition_sql}"#
             ),
         );
-        let query = sqlx_query(&sql)
-            .bind(datatype)
-            .bind(new_name)
-            .bind(datatype)
-            .bind(new_name);
+        let mut query = sqlx_query(&sql);
+        for param in &wcond_params {
+            query = query.bind(param);
+        }
+        for param in &tcond_params {
+            query = query.bind(param);
+        }
         query.execute(tx.acquire().await?).await?;
 
         // Now delete the old datatype name from the database:
@@ -1390,6 +1443,10 @@ impl Valve {
         let query = sqlx_query(&sql).bind(new_name).bind(table);
         query.execute(&mut tx).await?;
 
+        // TODO: We need to change the table name also in
+        // - from() structures in the column table that refer to the column.
+
+        /////////////// Old code
         for config_table in ["rule", "column"] {
             let sql = local_sql_syntax(
                 &self.db_kind,
@@ -1412,11 +1469,6 @@ impl Valve {
 
         // Commit the transaction:
         tx.commit().await?;
-
-        // TODO: We need to change the table name also in
-        // - from() structures in the column table that refer to the column.
-        // - from() conditions in when and then rule conditions that refer to the column
-        // See the function rename_datatype() for an example.
 
         // Save the column table and the data table and then reconfigure valve:
         self.save_tables(&vec!["table", "column", "rule"], &None)
