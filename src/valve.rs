@@ -1051,7 +1051,7 @@ impl Valve {
         for param in params {
             query = query.bind(param);
         }
-        query.execute(&mut tx).await?;
+        query.execute(tx.acquire().await?).await?;
 
         // Commit the transaction:
         tx.commit().await?;
@@ -1075,6 +1075,7 @@ impl Valve {
         self.reconfigure()
     }
 
+    // TODO: Keep the same row_number and row_order
     /// Change the name of the given datatype to the given new name.
     pub async fn rename_datatype(&mut self, datatype: &str, new_name: &str) -> Result<()> {
         // Begin a transaction:
@@ -1153,6 +1154,8 @@ impl Valve {
             if let ValueType::List(reference_dt, list_sep) = &ccond.value_type {
                 if reference_dt == datatype {
                     let old_condition = ccond.original.to_string();
+                    // TODO: Check to make sure that new_name is handled correctly when there
+                    // are spaces, otherwise handle it here.
                     let new_condition = format!("list({new_name}, '{list_sep}')");
                     sql_lines.push(format!(r#"WHEN "{column}" = {SQL_PARAM} THEN {SQL_PARAM}"#));
                     sql_params.push(old_condition);
@@ -1344,7 +1347,7 @@ impl Valve {
         if self.verbose {
             println!("Removing '{table}' from column table.")
         }
-        query.execute(&mut tx).await?;
+        query.execute(tx.acquire().await?).await?;
 
         // Delete from tbe table table:
         let sql = local_sql_syntax(
@@ -1355,7 +1358,7 @@ impl Valve {
         if self.verbose {
             println!("Removing '{table}' from table table.")
         }
-        query.execute(&mut tx).await?;
+        query.execute(tx.acquire().await?).await?;
 
         // Commit the transaction:
         tx.commit().await?;
@@ -1391,6 +1394,7 @@ impl Valve {
         Ok(())
     }
 
+    // TODO: Keep the same row_number and row_order
     /// Change the name of the given table to the given new name.
     pub async fn rename_table(&mut self, table: &str, new_name: &str) -> Result<()> {
         if table == "table" {
@@ -1398,24 +1402,17 @@ impl Valve {
         }
         let mut tx = self.pool.begin().await?;
 
-        // Optional table table columns are not found in the config, so in order to preserve them
-        // after the renaming we need to find out what they are by querying the column table:
-        let cols_for_query = {
-            let query = sqlx_query(
-                r#"SELECT "column"
-                     FROM "column"
-                    WHERE "table" = 'table'
-                      AND "column" != 'table'
-                    ORDER BY "row_order""#,
-            );
-            query
-                .fetch_all(tx.acquire().await?)
-                .await?
-                .iter()
-                .map(|c| c.get::<&str, &str>("column").to_string())
-                .map(|c| format!(r#""{c}""#))
-                .collect::<Vec<_>>()
-        };
+        let cols_for_query = self
+            .config
+            .table
+            .get("table")
+            .expect("Table table not found in config")
+            .column
+            .keys()
+            .filter(|col| *col != "table")
+            .map(|col| format!(r#""{col}""#))
+            .collect::<Vec<_>>();
+
         let main_column_list = cols_for_query.join(", ");
         let t2_column_list = cols_for_query
             .iter()
@@ -1441,31 +1438,78 @@ impl Valve {
             ),
         );
         let query = sqlx_query(&sql).bind(new_name).bind(table);
-        query.execute(&mut tx).await?;
+        query.execute(tx.acquire().await?).await?;
 
-        // TODO: We need to change the table name also in
-        // - from() structures in the column table that refer to the column.
+        // Update from() structures in the column table that refer to the column.
+        let mut structure_params = vec![];
+        let structure_sql = {
+            let mut sql_lines = vec![];
+            for (_, parsed) in self.structure_conditions.iter() {
+                if let Expression::Function(name, args) = &parsed.parsed {
+                    if name == "from" {
+                        if let Expression::Field(ftable, fcolumn) = &*args[0] {
+                            if ftable == table {
+                                sql_lines.push(format!(
+                                    r#"WHEN "structure" = {SQL_PARAM} THEN {SQL_PARAM}"#
+                                ));
+                                structure_params.push(parsed.original.to_string());
+                                let new_cond = format!("from({new_name}.{fcolumn})");
+                                structure_params.push(new_cond);
+                            }
+                        }
+                    }
+                }
+            }
 
-        /////////////// Old code
-        for config_table in ["rule", "column"] {
-            let sql = local_sql_syntax(
-                &self.db_kind,
-                &format!(
-                    r#"UPDATE "{config_table}"
+            // Only actually build the clause if there were matching conditions:
+            if !sql_lines.is_empty() {
+                format!(
+                    r#""structure" = CASE
+                          {case_clause}
+                          ELSE "structure"
+                        END"#,
+                    case_clause = sql_lines.join("\n")
+                )
+            } else {
+                "".to_string()
+            }
+        };
+
+        // Update column table:
+        let sql = local_sql_syntax(
+            &self.db_kind,
+            &format!(
+                r#"UPDATE "column"
+                      SET "table" = CASE
+                        WHEN "table" = {SQL_PARAM} THEN {SQL_PARAM}
+                        ELSE "table"
+                      END, {structure_sql}"#
+            ),
+        );
+        let mut query = sqlx_query(&sql).bind(table).bind(new_name);
+        for param in &structure_params {
+            query = query.bind(param);
+        }
+        query.execute(tx.acquire().await?).await?;
+
+        // Update rule table:
+        let sql = local_sql_syntax(
+            &self.db_kind,
+            &format!(
+                r#"UPDATE "rule"
                       SET "table" = {SQL_PARAM}
                     WHERE "table" = {SQL_PARAM}"#
-                ),
-            );
-            let query = sqlx_query(&sql).bind(new_name).bind(table);
-            query.execute(&mut tx).await?;
-        }
+            ),
+        );
+        let query = sqlx_query(&sql).bind(new_name).bind(table);
+        query.execute(tx.acquire().await?).await?;
 
         let sql = local_sql_syntax(
             &self.db_kind,
             &format!(r#"DELETE FROM "table" WHERE "table" = {SQL_PARAM}"#),
         );
         let query = sqlx_query(&sql).bind(table);
-        query.execute(&mut tx).await?;
+        query.execute(tx.acquire().await?).await?;
 
         // Commit the transaction:
         tx.commit().await?;
@@ -1566,7 +1610,7 @@ impl Valve {
         for param in &field_params {
             query = query.bind(param);
         }
-        query.execute(&mut tx).await?;
+        query.execute(tx.acquire().await?).await?;
 
         // Commit:
         tx.commit().await?;
@@ -1638,6 +1682,7 @@ impl Valve {
         Ok(())
     }
 
+    // TODO: Keep the same row_number and row_order
     /// Rename the given column from the given table to the given new name, optionally with the
     /// given label. If no_load is set to true, don't load the table after recreating it.
     pub async fn rename_column(
