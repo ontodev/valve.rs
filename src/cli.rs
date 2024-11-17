@@ -526,10 +526,6 @@ pub enum RenameSubcommands {
         #[arg(value_name = "NEW_NAME", action = ArgAction::Set,
               help = "The desired new name for the table")]
         new_name: String,
-
-        #[arg(long, action = ArgAction::SetTrue,
-              help = "Do not load the table after deleting COLUMN")]
-        no_load: bool,
     },
 
     /// Rename a datatype
@@ -1401,29 +1397,12 @@ pub async fn rename_datatype(cli: &Cli, datatype: &str, new_name: &str) {
 
 /// Use Valve, in conformity with the given command-line parameters, to rename the given table
 /// to the given new table name.
-pub async fn rename_table(cli: &Cli, table: &str, new_name: &str, no_load: bool) {
+pub async fn rename_table(cli: &Cli, table: &str, new_name: &str) {
     let mut valve = build_valve(&cli).await;
     valve
         .rename_table(table, new_name)
         .await
         .expect("Error renaming table");
-    let load_table = {
-        if no_load {
-            false
-        } else if !valve.interactive {
-            true
-        } else {
-            // Ask the user if they would like to load now:
-            print!("Table '{table}' was renamed. Do you want to load '{table}' now? [y/N] ",);
-            proceed::proceed()
-        }
-    };
-    if load_table {
-        valve
-            .load_tables(&vec![table], true)
-            .await
-            .expect("Error loading table");
-    }
 }
 
 /// Use Valve, in conformity with the given command-line parameters, to save the given tables,
@@ -2116,11 +2095,9 @@ pub async fn process_command() {
                 RenameSubcommands::Datatype { datatype, new_name } => {
                     rename_datatype(&cli, datatype, new_name).await
                 }
-                RenameSubcommands::Table {
-                    table,
-                    new_name,
-                    no_load,
-                } => rename_table(&cli, table, new_name, *no_load).await,
+                RenameSubcommands::Table { table, new_name } => {
+                    rename_table(&cli, table, new_name).await
+                }
             };
         }
         Commands::Save { save_dir, tables } => {

@@ -14,9 +14,9 @@ use crate::{
         get_previous_row_tx, get_sql_for_standard_view, get_sql_for_text_view, get_sql_type,
         get_sql_type_from_global_config, get_text_row_from_db_tx, insert_chunks, insert_new_row_tx,
         local_sql_syntax, move_row_tx, normalize_options, read_config_files, record_row_change_tx,
-        record_row_move_tx, rename_db_column_tx, switch_undone_state_tx, undo_or_redo_move_tx,
-        update_row_tx, verify_table_deps_and_sort, ColumnRule, CompiledCondition, DbKind,
-        ParsedStructure, ValueType,
+        record_row_move_tx, rename_db_column_tx, rename_db_table_tx, switch_undone_state_tx,
+        undo_or_redo_move_tx, update_row_tx, verify_table_deps_and_sort, ColumnRule,
+        CompiledCondition, DbKind, ParsedStructure, ValueType,
     },
     validate::{validate_row_tx, validate_tree_foreign_keys, with_tree_sql},
     valve_grammar::StartParser,
@@ -1081,7 +1081,6 @@ impl Valve {
         self.reconfigure()
     }
 
-    // TODO: Keep the same row_number and row_order
     /// Change the name of the given datatype to the given new name.
     pub async fn rename_datatype(&mut self, datatype: &str, new_name: &str) -> Result<()> {
         // Begin a transaction:
@@ -1105,7 +1104,25 @@ impl Valve {
             .collect::<Vec<_>>()
             .join(", ");
 
-        // First add a new datatype corresponding to the new name:
+        // We begin by saving the row number and row order of the datatype to be renamed:
+        let (saved_rn, saved_ro) = {
+            let sql = local_sql_syntax(
+                &self.db_kind,
+                &format!(
+                    r#"SELECT "row_number", "row_order" FROM "datatype"
+                        WHERE "datatype" = {SQL_PARAM}"#
+                ),
+            );
+            let row = sqlx_query(&sql)
+                .bind(datatype)
+                .fetch_one(tx.acquire().await?)
+                .await?;
+            let rn: i64 = row.try_get::<i64, &str>("row_number")?;
+            let ro: i64 = row.try_get::<i64, &str>("row_order")?;
+            (rn, ro)
+        };
+
+        // We then add a new datatype corresponding to the new name:
         let (rn, ro) = get_next_new_row_tx(&self.db_kind, &mut tx, "datatype").await?;
         let sql = local_sql_syntax(
             &self.db_kind,
@@ -1289,7 +1306,17 @@ impl Valve {
         let query = sqlx_query(&sql).bind(datatype);
         query.execute(tx.acquire().await?).await?;
 
-        // Commit:
+        // Finally update the newly added datatype's row number and row order to the values
+        // that we saved earlier, to complete the logical rename operation:
+        let sql = format!(
+            r#"UPDATE "datatype"
+                  SET "row_number" = {saved_rn}, "row_order" = {saved_ro}
+                WHERE "row_number" = {rn}"#
+        );
+        let query = sqlx_query(&sql);
+        query.execute(tx.acquire().await?).await?;
+
+        // Commit the transaction:
         tx.commit().await?;
 
         // Save the column table and the data table and then reconfigure valve:
@@ -1381,13 +1408,30 @@ impl Valve {
         Ok(())
     }
 
-    // TODO: Keep the same row_number and row_order
     /// Change the name of the given table to the given new name.
     pub async fn rename_table(&mut self, table: &str, new_name: &str) -> Result<()> {
         if table == "table" {
             return Err(ValveError::InputError("Can't rename the table table".to_string()).into());
         }
         let mut tx = self.pool.begin().await?;
+
+        // We begin by saving the row number and row order of the table to be renamed:
+        let (saved_rn, saved_ro) = {
+            let sql = local_sql_syntax(
+                &self.db_kind,
+                &format!(
+                    r#"SELECT "row_number", "row_order" FROM "table"
+                        WHERE "table" = {SQL_PARAM}"#
+                ),
+            );
+            let row = sqlx_query(&sql)
+                .bind(table)
+                .fetch_one(tx.acquire().await?)
+                .await?;
+            let rn: i64 = row.try_get::<i64, &str>("row_number")?;
+            let ro: i64 = row.try_get::<i64, &str>("row_order")?;
+            (rn, ro)
+        };
 
         let cols_for_query = self
             .config
@@ -1504,6 +1548,19 @@ impl Valve {
         );
         let query = sqlx_query(&sql).bind(table);
         query.execute(tx.acquire().await?).await?;
+
+        // Finally update the newly added table's row number and row order to the values
+        // that we saved earlier, to complete the logical rename operation:
+        let sql = format!(
+            r#"UPDATE "table"
+                  SET "row_number" = {saved_rn}, "row_order" = {saved_ro}
+                WHERE "row_number" = {rn}"#
+        );
+        let query = sqlx_query(&sql);
+        query.execute(tx.acquire().await?).await?;
+
+        // Rename the table in the database:
+        rename_db_table_tx(&self.db_kind, &self.config, &mut tx, table, new_name).await?;
 
         // Commit the transaction:
         tx.commit().await?;
@@ -1639,7 +1696,6 @@ impl Valve {
         Ok(())
     }
 
-    // TODO: Keep the same row_number and row_order
     /// Rename the given column from the given table to the given new name, optionally with the
     /// given label.
     pub async fn rename_column(
@@ -2625,7 +2681,7 @@ impl Valve {
 
                 let create_view_sql = get_sql_for_standard_view(&table, &self.db_kind);
                 let create_text_view_sql =
-                    get_sql_for_text_view(tables_config, &table, &self.db_kind);
+                    get_sql_for_text_view(tables_config, &table, None, &self.db_kind);
                 table_statements.push(create_view_sql);
                 table_statements.push(create_text_view_sql);
             }
