@@ -1553,6 +1553,7 @@ pub fn get_table_constraints(
                         match &*args[0] {
                             Expression::Field(ftable, fcolumn) => {
                                 foreigns.push(ValveForeignConstraint {
+                                    original: structure.to_string(),
                                     table: table_name.to_string(),
                                     column: column_name.to_string(),
                                     ftable: ftable.to_string(),
@@ -1597,6 +1598,8 @@ pub fn get_table_constraints(
                                     );
                                 }
                                 trees.push(ValveTreeConstraint {
+                                    original: structure.to_string(),
+                                    table: table_name.to_string(),
                                     child: child.to_string(),
                                     parent: column_name.to_string(),
                                 });
@@ -2091,6 +2094,28 @@ pub fn get_label_for_column(
         // If the label is empty then just return the column name:
         Ok(column.to_string())
     }
+}
+
+/// Given a table name, a column name, and a new name for the column, rename the column to the
+/// new name in the database table and associated views, using the given database transaction.
+pub async fn rename_db_column_tx(
+    tx: &mut Transaction<'_, sqlx::Any>,
+    table: &str,
+    column: &str,
+    new_name: &str,
+) -> Result<()> {
+    for table in [
+        table,
+        &format!("{table}_conflict"),
+        &format!("{table}_view"),
+        &format!("{table}_text_view"),
+    ] {
+        let sql = format!(r#"ALTER TABLE "{table}" RENAME COLUMN "{column}" TO "{new_name}""#);
+        let query = sqlx_query(&sql);
+        query.execute(tx.acquire().await?).await?;
+    }
+
+    Ok(())
 }
 
 /// Given a global config map, a map of compiled datatype conditions, a table name and a column

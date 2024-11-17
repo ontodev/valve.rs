@@ -1,3 +1,5 @@
+//! Command line interface
+
 use crate::{
     tests::{run_api_tests, run_dt_hierarchy_tests},
     toolkit::{generic_select_with_message_values, local_sql_syntax, DbKind},
@@ -524,6 +526,10 @@ pub enum RenameSubcommands {
         #[arg(value_name = "NEW_NAME", action = ArgAction::Set,
               help = "The desired new name for the table")]
         new_name: String,
+
+        #[arg(long, action = ArgAction::SetTrue,
+              help = "Do not load the table after deleting COLUMN")]
+        no_load: bool,
     },
 
     /// Rename a datatype
@@ -562,15 +568,15 @@ pub enum RenameSubcommands {
 pub enum TestSubcommands {
     /// Run a set of predefined tests, on a specified pre-loaded database, that will test Valve's
     /// Application Programmer Interface.
-    TestApi {},
+    Api {},
 
     /// Run a set of predefined tests, on a specified pre-loaded database, that will test Valve's
     /// Application Programmer Interface.
-    TestCli {},
+    Cli {},
 
     /// Run a set of predefined tests, on a specified pre-loaded database, that will test the
     /// validity of the configured datatype hierarchy.
-    TestDtHierarchy {},
+    DtHierarchy {},
 }
 
 /// Build a Valve instance in conformity with the given command-line options and parameters.
@@ -592,9 +598,40 @@ pub async fn add_column(cli: &Cli, table: &Option<String>, column: &Option<Strin
     let json_row = read_json_row_for_table(&valve, "column");
     let column_json = extract_column_fields(&json_row, table, column);
     valve
-        .add_column(table, column, &column_json, no_load)
+        .add_column(table, column, &column_json)
         .await
         .expect("Error adding column");
+
+    let column = column_json
+        .get("column")
+        .expect("No column given")
+        .as_str()
+        .expect("Not a string");
+    let table = column_json
+        .get("table")
+        .expect("No table given")
+        .as_str()
+        .expect("Not a string");
+    let load_table = {
+        if no_load {
+            false
+        } else if !valve.interactive {
+            true
+        } else {
+            // Ask the user if they would like to load now:
+            print!(
+                "Added column '{column}' to '{table}'. Do you want to load '{table}' \
+                 now? [y/N] ",
+            );
+            proceed::proceed()
+        }
+    };
+    if load_table {
+        valve
+            .load_tables(&vec![table], true)
+            .await
+            .expect("Error loading table");
+    }
 }
 
 /// Use Valve, in conformity with the given command-line parameters, to add a datatype to the
@@ -666,9 +703,26 @@ pub async fn add_table(
 ) {
     let mut valve = build_valve(&cli).await;
     valve
-        .add_table(table, path, sample_size, error_rate, seed, no_load)
+        .add_table(table, path, sample_size, error_rate, seed)
         .await
         .expect("Error adding table");
+    let load_table = {
+        if no_load {
+            false
+        } else if !valve.interactive {
+            true
+        } else {
+            // Ask the user if they would like to load now:
+            print!("Added table '{table}'. Do you want to load '{table}' now? [y/N] ",);
+            proceed::proceed()
+        }
+    };
+    if load_table {
+        valve
+            .load_tables(&vec![table], true)
+            .await
+            .expect("Error loading table");
+    }
 }
 
 /// Use Valve, in conformity with the given command-line parameters, to (re)create an empty
@@ -701,9 +755,31 @@ pub async fn delete_datatype(cli: &Cli, datatype: &str) {
 pub async fn delete_column(cli: &Cli, table: &str, column: &str, no_load: bool) {
     let mut valve = build_valve(&cli).await;
     valve
-        .delete_column(table, column, no_load)
+        .delete_column(table, column)
         .await
         .expect("Error deleting column");
+
+    // Possibly load the data table:
+    let load_table = {
+        if no_load {
+            false
+        } else if !valve.interactive {
+            true
+        } else {
+            // Ask the user if they would like to load now:
+            print!(
+                "Column '{column}' deleted from '{table}'. Do you want to load '{table}' \
+                 now? [y/N] ",
+            );
+            proceed::proceed()
+        }
+    };
+    if load_table {
+        valve
+            .load_tables(&vec![table], true)
+            .await
+            .expect("Error loading table");
+    }
 }
 
 /// Use Valve, in conformity with the given command-line parameters, to either (i) in the case
@@ -1286,9 +1362,31 @@ pub async fn rename_column(
 ) {
     let mut valve = build_valve(&cli).await;
     valve
-        .rename_column(table, column, new_name, label, no_load)
+        .rename_column(table, column, new_name, label)
         .await
         .expect("Error renaming column");
+
+    let load_table = {
+        if no_load {
+            false
+        } else if !valve.interactive {
+            true
+        } else {
+            // Ask the user if they would like to load now:
+            print!(
+                "Column '{column}' renamed in '{table}'. Do you want to load '{table}' \
+                 now? [y/N] ",
+            );
+            proceed::proceed()
+        }
+    };
+    if load_table {
+        valve.set_interactive(false);
+        valve
+            .load_tables(&vec![table], true)
+            .await
+            .expect("Error loading table");
+    }
 }
 
 /// Use Valve, in conformity with the given command-line parameters, to rename the given datatype
@@ -1303,12 +1401,29 @@ pub async fn rename_datatype(cli: &Cli, datatype: &str, new_name: &str) {
 
 /// Use Valve, in conformity with the given command-line parameters, to rename the given table
 /// to the given new table name.
-pub async fn rename_table(cli: &Cli, table: &str, new_name: &str) {
+pub async fn rename_table(cli: &Cli, table: &str, new_name: &str, no_load: bool) {
     let mut valve = build_valve(&cli).await;
     valve
         .rename_table(table, new_name)
         .await
         .expect("Error renaming table");
+    let load_table = {
+        if no_load {
+            false
+        } else if !valve.interactive {
+            true
+        } else {
+            // Ask the user if they would like to load now:
+            print!("Table '{table}' was renamed. Do you want to load '{table}' now? [y/N] ",);
+            proceed::proceed()
+        }
+    };
+    if load_table {
+        valve
+            .load_tables(&vec![table], true)
+            .await
+            .expect("Error loading table");
+    }
 }
 
 /// Use Valve, in conformity with the given command-line parameters, to save the given tables,
@@ -2001,9 +2116,11 @@ pub async fn process_command() {
                 RenameSubcommands::Datatype { datatype, new_name } => {
                     rename_datatype(&cli, datatype, new_name).await
                 }
-                RenameSubcommands::Table { table, new_name } => {
-                    rename_table(&cli, table, new_name).await
-                }
+                RenameSubcommands::Table {
+                    table,
+                    new_name,
+                    no_load,
+                } => rename_table(&cli, table, new_name, *no_load).await,
             };
         }
         Commands::Save { save_dir, tables } => {
@@ -2014,13 +2131,13 @@ pub async fn process_command() {
         }
         Commands::Test { subcommand } => {
             match subcommand {
-                TestSubcommands::TestApi {} => {
+                TestSubcommands::Api {} => {
                     test_api(&cli).await;
                 }
-                TestSubcommands::TestCli {} => {
+                TestSubcommands::Cli {} => {
                     test_cli(&cli).await;
                 }
-                TestSubcommands::TestDtHierarchy {} => {
+                TestSubcommands::DtHierarchy {} => {
                     test_dt_hierarchy(&cli).await;
                 }
             };

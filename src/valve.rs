@@ -14,9 +14,9 @@ use crate::{
         get_previous_row_tx, get_sql_for_standard_view, get_sql_for_text_view, get_sql_type,
         get_sql_type_from_global_config, get_text_row_from_db_tx, insert_chunks, insert_new_row_tx,
         local_sql_syntax, move_row_tx, normalize_options, read_config_files, record_row_change_tx,
-        record_row_move_tx, switch_undone_state_tx, undo_or_redo_move_tx, update_row_tx,
-        verify_table_deps_and_sort, ColumnRule, CompiledCondition, DbKind, ParsedStructure,
-        ValueType,
+        record_row_move_tx, rename_db_column_tx, switch_undone_state_tx, undo_or_redo_move_tx,
+        update_row_tx, verify_table_deps_and_sort, ColumnRule, CompiledCondition, DbKind,
+        ParsedStructure, ValueType,
     },
     validate::{validate_row_tx, validate_tree_foreign_keys, with_tree_sql},
     valve_grammar::StartParser,
@@ -385,7 +385,7 @@ impl std::fmt::Display for ValveError {
 impl Error for ValveError {}
 
 /// Represents a message associated with a particular value of a particular column.
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ValveMessage {
     /// The name of the column
     pub column: String,
@@ -400,7 +400,7 @@ pub struct ValveMessage {
 }
 
 /// Represents a change to a row in a database table.
-#[derive(Debug, Default, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct ValveRowChange {
     /// An identifier for this particular change
     pub history_id: u16,
@@ -616,7 +616,7 @@ impl ValveRowChange {
 
 // TODO: We should probably change the type of old_value and value to SerdeValue.
 /// Represents a change to a value in a row of a database table.
-#[derive(Debug, Default, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct ValveChange {
     /// The name of the column that the value is from
     pub column: String,
@@ -686,7 +686,7 @@ pub struct ValveColumnConfig {
 }
 
 /// Configuration information for a particular datatype
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ValveDatatypeConfig {
     /// The datatype's corresponding SQL type
     pub sql_type: String,
@@ -701,7 +701,7 @@ pub struct ValveDatatypeConfig {
 }
 
 /// Configuration information for a particular table rule
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ValveRuleConfig {
     /// The description of the rule
     pub description: String,
@@ -720,8 +720,12 @@ pub struct ValveRuleConfig {
 }
 
 /// Configuration information for a particular 'tree' constraint
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ValveTreeConstraint {
+    /// The way that the tree constraint is represented in the source data
+    pub original: String,
+    /// The table that the tree constraint is defined with respect to
+    pub table: String,
     /// The child node associated with this tree
     pub child: String,
     /// The child's parent
@@ -729,8 +733,10 @@ pub struct ValveTreeConstraint {
 }
 
 /// Configuration information for a particular foreign key constraint
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ValveForeignConstraint {
+    /// The way that the foreign constraint is represented in the source data
+    pub original: String,
     /// The table to which the column constrained by the key belongs
     pub table: String,
     /// The column constrained by the key
@@ -758,7 +764,7 @@ pub struct ValveConstraintConfig {
 }
 
 /// Configuration information for a particular Valve instance
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ValveConfig {
     /// Configuration specific to Valve's special tables
     pub special: ValveSpecialConfig,
@@ -1081,24 +1087,17 @@ impl Valve {
         // Begin a transaction:
         let mut tx = self.pool.begin().await?;
 
-        // Optional datatype columns are not found in the config, so in order to preserve them
-        // after the renaming we need to find out what they are by querying the column table:
-        let cols_for_query = {
-            let query = sqlx_query(
-                r#"SELECT "column"
-                     FROM "column"
-                    WHERE "table" = 'datatype'
-                      AND "column" != 'datatype'
-                    ORDER BY "row_order""#,
-            );
-            query
-                .fetch_all(tx.acquire().await?)
-                .await?
-                .iter()
-                .map(|c| c.get::<&str, &str>("column").to_string())
-                .map(|c| format!(r#""{c}""#))
-                .collect::<Vec<_>>()
-        };
+        let cols_for_query = self
+            .config
+            .table
+            .get("datatype")
+            .expect("Datatype table not found in config")
+            .column
+            .keys()
+            .filter(|col| *col != "datatype")
+            .map(|col| format!(r#""{col}""#))
+            .collect::<Vec<_>>();
+
         let main_column_list = cols_for_query.join(", ");
         let t2_column_list = cols_for_query
             .iter()
@@ -1154,8 +1153,13 @@ impl Valve {
             if let ValueType::List(reference_dt, list_sep) = &ccond.value_type {
                 if reference_dt == datatype {
                     let old_condition = ccond.original.to_string();
-                    // TODO: Check to make sure that new_name is handled correctly when there
-                    // are spaces, otherwise handle it here.
+                    let new_name = {
+                        if new_name.contains(char::is_whitespace) {
+                            &format!("'{new_name}'")
+                        } else {
+                            new_name
+                        }
+                    };
                     let new_condition = format!("list({new_name}, '{list_sep}')");
                     sql_lines.push(format!(r#"WHEN "{column}" = {SQL_PARAM} THEN {SQL_PARAM}"#));
                     sql_params.push(old_condition);
@@ -1304,7 +1308,6 @@ impl Valve {
         sample_size: &usize,
         error_rate: &f32,
         seed: &Option<u64>,
-        no_load: bool,
     ) -> Result<()> {
         let table_added = guess(self, Some(table), path, seed, sample_size, error_rate);
         if table_added {
@@ -1312,22 +1315,6 @@ impl Valve {
             self.reconfigure()?;
             self.load_tables(&vec!["table", "column"], true).await?;
             self.ensure_all_tables_created().await?;
-            let load_table = {
-                if no_load {
-                    false
-                } else if !self.interactive {
-                    true
-                } else {
-                    // Ask the user if they would like to load now:
-                    print!("Table '{table}' added. Do you want to load it now? [y/N] ",);
-                    proceed::proceed()
-                }
-            };
-            if load_table {
-                self.load_tables(&vec![table], true).await?;
-            } else {
-                println!("Leaving '{table}' empty as instructed.");
-            }
         }
         Ok(())
     }
@@ -1453,6 +1440,13 @@ impl Valve {
                                     r#"WHEN "structure" = {SQL_PARAM} THEN {SQL_PARAM}"#
                                 ));
                                 structure_params.push(parsed.original.to_string());
+                                let new_name = {
+                                    if new_name.contains(char::is_whitespace) {
+                                        &format!("'{new_name}'")
+                                    } else {
+                                        new_name
+                                    }
+                                };
                                 let new_cond = format!("from({new_name}.{fcolumn})");
                                 structure_params.push(new_cond);
                             }
@@ -1464,7 +1458,7 @@ impl Valve {
             // Only actually build the clause if there were matching conditions:
             if !sql_lines.is_empty() {
                 format!(
-                    r#""structure" = CASE
+                    r#", "structure" = CASE
                           {case_clause}
                           ELSE "structure"
                         END"#,
@@ -1483,7 +1477,7 @@ impl Valve {
                       SET "table" = CASE
                         WHEN "table" = {SQL_PARAM} THEN {SQL_PARAM}
                         ELSE "table"
-                      END, {structure_sql}"#
+                      END{structure_sql}"#
             ),
         );
         let mut query = sqlx_query(&sql).bind(table).bind(new_name);
@@ -1528,7 +1522,6 @@ impl Valve {
         table: &Option<String>,
         column: &Option<String>,
         column_details: &JsonRow,
-        no_load: bool,
     ) -> Result<()> {
         let make_err =
             |err_str: &str| -> ValveError { ValveError::InputError(err_str.to_string()) };
@@ -1621,29 +1614,11 @@ impl Valve {
 
         // Refresh the database but do not load any data:
         self.ensure_all_tables_created().await?;
-
-        let load_table = {
-            if no_load {
-                false
-            } else if !self.interactive {
-                true
-            } else {
-                // Ask the user if they would like to load now:
-                print!(
-                    "Column '{column}' added to '{table}'. Do you want to load '{table}' \
-                     now? [y/N] ",
-                );
-                proceed::proceed()
-            }
-        };
-        if load_table {
-            self.load_tables(&vec![table], true).await?;
-        }
         Ok(())
     }
 
     /// Given a table and column name, delete the column from the table.
-    pub async fn delete_column(&mut self, table: &str, column: &str, no_load: bool) -> Result<()> {
+    pub async fn delete_column(&mut self, table: &str, column: &str) -> Result<()> {
         let sql = local_sql_syntax(
             &self.db_kind,
             &format!(
@@ -1661,55 +1636,126 @@ impl Valve {
         // Refresh the database:
         self.ensure_all_tables_created().await?;
 
-        // Possibly load the data table:
-        let load_table = {
-            if no_load {
-                false
-            } else if !self.interactive {
-                true
-            } else {
-                // Ask the user if they would like to load now:
-                print!(
-                    "Column '{column}' deleted from '{table}'. Do you want to load '{table}' \
-                     now? [y/N] ",
-                );
-                proceed::proceed()
-            }
-        };
-        if load_table {
-            self.load_tables(&vec![table], true).await?;
-        }
         Ok(())
     }
 
     // TODO: Keep the same row_number and row_order
     /// Rename the given column from the given table to the given new name, optionally with the
-    /// given label. If no_load is set to true, don't load the table after recreating it.
+    /// given label.
     pub async fn rename_column(
         &mut self,
         table: &str,
         column: &str,
         new_name: &str,
         new_label: &Option<String>,
-        no_load: bool,
     ) -> Result<()> {
         // Begin a transaction:
         let mut tx = self.pool.begin().await?;
+
+        // Update from() structures in the column table that refer to the column.
+        let mut structure_params = vec![];
+        let mut where_params = vec![table];
+        let structure_sql = {
+            let mut sql_lines = vec![];
+            // Look through foreign constraints:
+            for (fkey_table, fkeys) in self.config.constraint.foreign.iter() {
+                for fkey in fkeys {
+                    if fkey.ftable == table && fkey.fcolumn == column {
+                        // Add the table that has a foreign key referencing the renamed column to
+                        // the list of tables that need to be updated:
+                        where_params.push(fkey_table);
+                        sql_lines.push(format!(
+                            r#"WHEN "structure" = {SQL_PARAM} THEN {SQL_PARAM}"#
+                        ));
+                        structure_params.push(fkey.original.to_string());
+                        let new_name = {
+                            if new_name.contains(char::is_whitespace) {
+                                &format!("'{new_name}'")
+                            } else {
+                                new_name
+                            }
+                        };
+                        structure_params
+                            .push(format!("from({ftable}.{new_name})", ftable = fkey.ftable));
+                    }
+                }
+            }
+
+            // Update tree() structures that refer to the renamed column:
+            for tkey in self
+                .config
+                .constraint
+                .tree
+                .get(table)
+                .expect("No tree found for table")
+            {
+                if tkey.child.as_str() == column {
+                    sql_lines.push(format!(
+                        r#"WHEN "structure" = {SQL_PARAM} THEN {SQL_PARAM}"#
+                    ));
+                    structure_params.push(tkey.original.to_string());
+                    let new_name = {
+                        if new_name.contains(char::is_whitespace) {
+                            &format!("'{new_name}'")
+                        } else {
+                            new_name
+                        }
+                    };
+                    let new_cond = format!("tree({new_name})");
+                    structure_params.push(new_cond);
+                }
+            }
+
+            // Only actually build the structure clause if there were matching conditions:
+            if !sql_lines.is_empty() {
+                format!(
+                    r#""structure" = CASE
+                         {case_clause}
+                         ELSE "structure"
+                       END, "#,
+                    case_clause = sql_lines.join("\n")
+                )
+            } else {
+                "".to_string()
+            }
+        };
+
+        let where_sql = format!(
+            r#"WHERE "table" IN ({})"#,
+            where_params
+                .iter()
+                .map(|_| SQL_PARAM)
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
 
         let sql = local_sql_syntax(
             &self.db_kind,
             &format!(
                 r#"UPDATE "column"
-                      SET "column" = {SQL_PARAM},
-                          "label" = {SQL_PARAM}
-                    WHERE "table" = {SQL_PARAM} AND "column" = {SQL_PARAM}"#
+                      SET {structure_sql}
+                          "column" = CASE WHEN "column" = {SQL_PARAM} THEN {SQL_PARAM}
+                                          ELSE "column"
+                                     END,
+                          "label" = CASE WHEN "column" = {SQL_PARAM} THEN {SQL_PARAM}
+                                          ELSE "label"
+                                     END
+                      {where_sql}"#
             ),
         );
-        let query = sqlx_query(&sql)
+
+        let mut query = sqlx_query(&sql);
+        for param in &structure_params {
+            query = query.bind(param);
+        }
+        query = query
+            .bind(column)
             .bind(new_name)
-            .bind(new_label)
-            .bind(table)
-            .bind(column);
+            .bind(column)
+            .bind(new_label);
+        for param in &where_params {
+            query = query.bind(param);
+        }
         query.execute(tx.acquire().await?).await?;
 
         // Now update the when_column and/or the then_column of any rules that refer to the
@@ -1718,54 +1764,41 @@ impl Valve {
             &self.db_kind,
             &format!(
                 r#"UPDATE "rule"
-                     SET "when_column" = CASE
-                       WHEN "when_column" = {SQL_PARAM} THEN {SQL_PARAM}
-                       ELSE "when_column"
-                     END, SET "then_column" = CASE
-                       WHEN "then_column" = {SQL_PARAM} THEN {SQL_PARAM}
-                       ELSE "then_column"
-                     END"#
+                     SET "when column" = CASE
+                       WHEN "when column" = {SQL_PARAM} THEN {SQL_PARAM}
+                       ELSE "when column"
+                     END, "then column" = CASE
+                       WHEN "then column" = {SQL_PARAM} THEN {SQL_PARAM}
+                       ELSE "then column"
+                     END
+                   WHERE "table" = {SQL_PARAM}"#
             ),
         );
+
         let query = sqlx_query(&sql)
             .bind(column)
             .bind(new_name)
             .bind(column)
-            .bind(new_name);
+            .bind(new_name)
+            .bind(table);
         query.execute(tx.acquire().await?).await?;
 
-        // TODO:
-        // - from() and tree() structures in the column table that refer to the column.
-        // - from() and tree() conditions in when and then rule conditions that refer to the column
-        // See the function rename_datatype() for an example.
+        // We also need to rename the column name of the data table in the database, because
+        // otherwise, when we call save_table() on the data table, when it tries to find the
+        // newly renamed column it won't be there and it will save all the values in the column
+        // as null.
+        rename_db_column_tx(&mut tx, table, column, new_name).await?;
 
         // Commit the transaction:
         tx.commit().await?;
 
-        // Save the column table and the data table and then reconfigure valve:
-        self.save_tables(&vec!["column", table], &None).await?;
+        // Save the column and rule tables, and the data table, and then reconfigure valve:
+        self.save_tables(&vec!["column", "rule", table], &None)
+            .await?;
         self.reconfigure()?;
 
         // Refresh the database but do not load any data:
         self.ensure_all_tables_created().await?;
-
-        let load_table = {
-            if no_load {
-                false
-            } else if !self.interactive {
-                true
-            } else {
-                // Ask the user if they would like to load now:
-                print!(
-                    "Column '{column}' renamed in '{table}'. Do you want to load '{table}' \
-                     now? [y/N] ",
-                );
-                proceed::proceed()
-            }
-        };
-        if load_table {
-            self.load_tables(&vec![table], true).await?;
-        }
 
         Ok(())
     }
