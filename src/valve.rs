@@ -1162,7 +1162,6 @@ impl Valve {
             .bind(new_name);
         query.execute(tx.acquire().await?).await?;
 
-        // TODO: Add a comment here:
         let maybe_add_to_sql = |column: &str,
                                 ccond: &CompiledCondition,
                                 sql_lines: &mut Vec<String>,
@@ -1341,18 +1340,21 @@ impl Valve {
             self.save_tables(&vec!["table", "column"], &None).await?;
             self.reconfigure()?;
             self.load_tables(&vec!["table", "column"], true).await?;
-            self.ensure_all_tables_created().await?;
+            self.ensure_all_tables_created(&vec![table]).await?;
         }
         Ok(())
     }
 
     /// Delete the given table from the column table. Also drop the table in the database unless
     /// the `no_drop` flag has been set.
-    pub async fn delete_table(&mut self, table: &str, no_drop: bool) -> Result<()> {
+    pub async fn delete_table(&mut self, table: &str) -> Result<()> {
         // Begin a DB transaction:
         let mut tx = self.pool.begin().await?;
 
-        // Delete from the column table:
+        // Drop the table in the database:
+        self.drop_tables(&vec![table]).await?;
+
+        // Delete it from the column table:
         let sql = local_sql_syntax(
             &self.db_kind,
             &format!(r#"DELETE FROM "column" WHERE "table" = {SQL_PARAM}"#),
@@ -1363,7 +1365,7 @@ impl Valve {
         }
         query.execute(tx.acquire().await?).await?;
 
-        // Delete from tbe table table:
+        // Delete it from tbe table table:
         let sql = local_sql_syntax(
             &self.db_kind,
             &format!(r#"DELETE FROM "table" WHERE "table" = {SQL_PARAM}"#),
@@ -1382,30 +1384,7 @@ impl Valve {
         if self.verbose {
             println!("Updating valve configuration.")
         }
-        self.reconfigure()?;
-
-        // Drop the table in the database:
-        let drop_table = {
-            if no_drop {
-                false
-            } else if !self.interactive {
-                true
-            } else {
-                // Ask the user if they would like to drop now:
-                print!(
-                    "Table '{table}' deleted from Valve configuration. Do you want to drop it \
-                     now? [y/N] ",
-                );
-                proceed::proceed()
-            }
-        };
-        if drop_table {
-            self.drop_tables(&vec![table]).await?;
-        } else {
-            println!("Leaving no-longer-managed '{table}' in the database as instructed.");
-        }
-
-        Ok(())
+        self.reconfigure()
     }
 
     /// Change the name of the given table to the given new name.
@@ -1670,7 +1649,7 @@ impl Valve {
         self.reconfigure()?;
 
         // Refresh the database but do not load any data:
-        self.ensure_all_tables_created().await?;
+        self.ensure_all_tables_created(&vec![table]).await?;
         Ok(())
     }
 
@@ -1691,7 +1670,7 @@ impl Valve {
         self.reconfigure()?;
 
         // Refresh the database:
-        self.ensure_all_tables_created().await?;
+        self.ensure_all_tables_created(&vec![table]).await?;
 
         Ok(())
     }
@@ -1854,7 +1833,7 @@ impl Valve {
         self.reconfigure()?;
 
         // Refresh the database but do not load any data:
-        self.ensure_all_tables_created().await?;
+        self.ensure_all_tables_created(&vec![table]).await?;
 
         Ok(())
     }
@@ -2719,9 +2698,15 @@ impl Valve {
     }
 
     /// Create all configured database tables and views if they do not already exist as configured.
-    pub async fn ensure_all_tables_created(&mut self) -> Result<&Self> {
+    /// If a table needs to be (re)created, ask the user for confirmation before proceeding unless
+    /// the table is in the `no_prompt` list.
+    pub async fn ensure_all_tables_created(&mut self, no_prompt: &Vec<&str>) -> Result<&Self> {
         let setup_statements = self.get_setup_statements().await?;
-        let sorted_table_list = self.get_sorted_table_list();
+        let sorted_table_list = self
+            .get_sorted_table_list()
+            .iter()
+            .map(|tbl| tbl.to_string())
+            .collect::<Vec<_>>();
         for table in &sorted_table_list {
             let table_config = self.get_table_config(table)?;
             if table_config.options.contains("db_view") {
@@ -2745,18 +2730,23 @@ impl Valve {
                     ))
                     .into());
                 }
-            } else if self.table_has_changed(*table).await? {
-                self.drop_tables(&vec![table]).await?;
-                let table_statements =
-                    setup_statements
-                        .get(*table)
-                        .ok_or(ValveError::ConfigError(format!(
-                            "Could not find setup statements for {}",
-                            table
-                        )))?;
-                for stmt in table_statements {
-                    self.execute_sql(stmt).await?;
+            } else {
+                let saved_interactive = self.interactive;
+                self.set_interactive(!no_prompt.contains(&table.as_str()));
+                if self.table_has_changed(table).await? {
+                    self.drop_tables(&vec![table]).await?;
+                    let table_statements =
+                        setup_statements
+                            .get(table)
+                            .ok_or(ValveError::ConfigError(format!(
+                                "Could not find setup statements for {}",
+                                table
+                            )))?;
+                    for stmt in table_statements {
+                        self.execute_sql(stmt).await?;
+                    }
                 }
+                self.set_interactive(saved_interactive);
             }
         }
 
@@ -2911,7 +2901,7 @@ impl Valve {
     /// [Valve::interactive] is set, and if more tables need to be truncated than were requested,
     /// Valve will prompt the user for confirmation via the terminal.
     pub async fn truncate_tables(&mut self, tables: &Vec<&str>) -> Result<&Self> {
-        self.ensure_all_tables_created().await?;
+        self.ensure_all_tables_created(tables).await?;
         let truncate_list = self.add_dependencies(tables, true)?;
         if self.interactive {
             let truncate_set = truncate_list.iter().collect::<HashSet<_>>();
@@ -2920,8 +2910,8 @@ impl Valve {
             let extra_tables = truncate_set.difference(&table_set).collect::<Vec<_>>();
             if !extra_tables.is_empty() {
                 print!(
-                    "In order to truncate: {tables:?}, Valve must also truncate the following \
-                     tables: {extra_tables:?}. ",
+                    "The tables: {tables:?} need to be truncated, but in order to do so, \
+                     Valve must also truncate the following tables: {extra_tables:?}. ",
                 );
                 print!("Do you want to continue? [y/N] ");
                 if !proceed::proceed() {

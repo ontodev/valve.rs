@@ -82,7 +82,7 @@ pub enum Commands {
     /// Drop all of the tables
     DropAll {},
 
-    /// Drop a particular table
+    /// Drop a particular table without deleting it from the Valve configuration.
     Drop {
         #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
         table: String,
@@ -490,10 +490,6 @@ pub enum DeleteSubcommands {
     Table {
         #[arg(value_name = "TABLE", action = ArgAction::Set, help = TABLE_HELP)]
         table: String,
-
-        #[arg(long, action = ArgAction::SetTrue,
-              help = "Do not drop the table after deleting it from the Valve configuration.")]
-        no_drop: bool,
     },
 
     /// Delete a column from a given table
@@ -732,7 +728,7 @@ pub async fn create_all(cli: &Cli) {
         .await
         .expect("Error truncating tables");
     valve
-        .ensure_all_tables_created()
+        .ensure_all_tables_created(&vec![])
         .await
         .expect("Error ensuring that all tables are created");
 }
@@ -810,10 +806,10 @@ pub async fn delete_messages_by_id_or_rule(
 /// Use Valve, in conformity with the given command-line parameters, to delete the given table
 /// from the column table. Also drop the table in the database unless the `no_drop` flag has been
 /// set.
-pub async fn delete_table(cli: &Cli, table: &str, no_drop: bool) {
+pub async fn delete_table(cli: &Cli, table: &str) {
     let mut valve = build_valve(&cli).await;
     valve
-        .delete_table(table, no_drop)
+        .delete_table(table)
         .await
         .expect("Error deleting table");
 }
@@ -2032,9 +2028,7 @@ pub async fn process_command() {
                     delete_messages_by_id_or_rule(&cli, message_id, rule).await
                 }
                 DeleteSubcommands::Row { table, rows } => delete_rows(&cli, table, rows).await,
-                DeleteSubcommands::Table { table, no_drop } => {
-                    delete_table(&cli, table, *no_drop).await
-                }
+                DeleteSubcommands::Table { table } => delete_table(&cli, table).await,
             };
         }
         Commands::DropAll {} => drop_all_tables(&cli).await,
