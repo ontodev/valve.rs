@@ -1324,6 +1324,7 @@ impl Valve {
         self.reconfigure()
     }
 
+    // TODO: This function doesn't seem to be able to handle a table name with spaces.
     /// Given a table name, the path of the table's associated TSV file, and other parameters
     /// used as input to the function, [guess()], guess the table's configuration on the basis
     /// of the contents of the TSV file and the other, and add it to the database.
@@ -1822,7 +1823,15 @@ impl Valve {
         // otherwise, when we call save_table() on the data table, when it tries to find the
         // newly renamed column it won't be there and it will save all the values in the column
         // as null.
-        rename_db_column_tx(&mut tx, table, column, new_name).await?;
+        rename_db_column_tx(
+            &self.db_kind,
+            &self.config,
+            &mut tx,
+            table,
+            column,
+            new_name,
+        )
+        .await?;
 
         // Commit the transaction:
         tx.commit().await?;
@@ -2660,7 +2669,7 @@ impl Valve {
 
                 let create_view_sql = get_sql_for_standard_view(&table, &self.db_kind);
                 let create_text_view_sql =
-                    get_sql_for_text_view(tables_config, &table, None, &self.db_kind);
+                    get_sql_for_text_view(tables_config, &table, None, None, &self.db_kind);
                 table_statements.push(create_view_sql);
                 table_statements.push(create_text_view_sql);
             }

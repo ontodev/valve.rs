@@ -1373,7 +1373,6 @@ pub async fn rename_column(
         }
     };
     if load_table {
-        valve.set_interactive(false);
         valve
             .load_tables(&vec![table], true)
             .await
