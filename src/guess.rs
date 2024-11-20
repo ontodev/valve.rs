@@ -3,7 +3,7 @@
 use crate::{
     toolkit::{get_query_param, local_sql_syntax, QueryParam},
     valve::{Valve, ValveConfig, ValveDatatypeConfig},
-    SQL_PARAM,
+    MOVE_INTERVAL, SQL_PARAM,
 };
 use fix_fn::fix_fn;
 use futures::executor::block_on;
@@ -220,6 +220,7 @@ pub fn guess(
         println!("Updating the table configuration in the database ...");
     }
     let row_number = get_max_row_number_from_table(valve, "table");
+    let row_order = row_number * MOVE_INTERVAL;
     let sql = {
         let column_names = &required_table_table_headers
             .iter()
@@ -229,8 +230,8 @@ pub fn guess(
         local_sql_syntax(
             &valve.db_kind,
             &format!(
-                r#"INSERT INTO "table" ("row_number", {column_names}) VALUES
-                   ({row_number}, {SQL_PARAM}, {SQL_PARAM}, NULL, NULL)"#,
+                r#"INSERT INTO "table" ("row_number", "row_order", {column_names}) VALUES
+                   ({row_number}, {row_order}, {SQL_PARAM}, {SQL_PARAM}, NULL, NULL)"#,
             ),
         )
     };
@@ -254,7 +255,8 @@ pub fn guess(
         let mut params = vec![];
         let values = vec![
             // row_number
-            format!("{}", row_number),
+            format!("{row_number}"),
+            format!("{row_order}", row_order = row_number * MOVE_INTERVAL),
             // table
             {
                 params.push(table);
@@ -312,7 +314,7 @@ pub fn guess(
         let sql = local_sql_syntax(
             &valve.db_kind,
             &format!(
-                r#"INSERT INTO "column" ("row_number", {}) VALUES ({})"#,
+                r#"INSERT INTO "column" ("row_number", "row_order", {}) VALUES ({})"#,
                 column_names, values
             ),
         );

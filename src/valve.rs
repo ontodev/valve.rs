@@ -1324,7 +1324,6 @@ impl Valve {
         self.reconfigure()
     }
 
-    // TODO: This function doesn't seem to be able to handle a table name with spaces.
     /// Given a table name, the path of the table's associated TSV file, and other parameters
     /// used as input to the function, [guess()], guess the table's configuration on the basis
     /// of the contents of the TSV file and the other, and add it to the database.
@@ -1340,7 +1339,6 @@ impl Valve {
         if table_added {
             self.save_tables(&vec!["table", "column"], &None).await?;
             self.reconfigure()?;
-            self.load_tables(&vec!["table", "column"], true).await?;
             self.ensure_all_tables_created(&vec![table]).await?;
         }
         Ok(())
