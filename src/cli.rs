@@ -2,13 +2,17 @@
 
 use crate::{
     tests::{run_api_tests, run_dt_hierarchy_tests},
-    toolkit::{generic_select_with_message_values, local_sql_syntax, DbKind},
+    toolkit::{
+        generic_select_with_message_values, get_sql_type, is_sql_type_error, local_sql_syntax,
+        DbKind,
+    },
     valve::{JsonRow, Valve, ValveCell, ValveRow},
     REQUIRED_DATATYPE_COLUMNS, SQL_PARAM,
 };
 use ansi_term::Style;
 use clap::{ArgAction, Parser, Subcommand};
 use futures::TryStreamExt;
+use promptly::prompt_default;
 use serde_json::{json, Value as SerdeValue};
 use sqlx::{query as sqlx_query, Row};
 use std::{collections::HashMap, io};
@@ -38,6 +42,12 @@ pub struct Cli {
     /// undefined.
     #[arg(long, action = ArgAction::Set, env = "VALVE_DATABASE")]
     pub database: String,
+
+    /// Can be one of: JSON (that's it for now). If unspecified Valve will attempt to read the
+    /// environment variable VALVE_INPUT. If that is also unset, the user will be presented with
+    /// questions whenever input is required.
+    #[arg(long, action = ArgAction::Set, env = "VALVE_INPUT")]
+    pub input: Option<String>,
 
     /// Use this option with caution. When set, Valve will not not ask the user for confirmation
     /// before executing potentially destructive operations on the database and/or table files.
@@ -136,8 +146,7 @@ pub enum Commands {
         #[arg(value_name = "ROW", action = ArgAction::Set, help = ROW_HELP)]
         row: Option<u32>,
 
-        #[arg(value_name = "COLUMN", action = ArgAction::Set, requires = "value",
-              help = COLUMN_HELP)]
+        #[arg(value_name = "COLUMN", action = ArgAction::Set, help = COLUMN_HELP)]
         column: Option<String>,
 
         #[arg(value_name = "VALUE", action = ArgAction::Set,
@@ -587,8 +596,17 @@ pub async fn build_valve(cli: &Cli) -> Valve {
 /// JSON. If the `no_load` option is set, do not load the modified table.
 pub async fn add_column(cli: &Cli, table: &Option<String>, column: &Option<String>, no_load: bool) {
     let mut valve = build_valve(&cli).await;
-    let json_row = read_json_row_for_table(&valve, "column");
+    let json_row = {
+        match &cli.input {
+            Some(s) if s == "JSON" => read_json_row_for_table(&valve, "column"),
+            Some(s) => panic!("Unsupported input type: '{s}'"),
+            None => {
+                todo!()
+            }
+        }
+    };
     let column_json = extract_column_fields(&json_row, table, column);
+
     valve
         .add_column(table, column, &column_json)
         .await
@@ -1575,25 +1593,83 @@ pub async fn validate(
             .await;
             (Some(rn), input_row)
         }
-        None => {
-            let mut input_row = read_json_row_for_table(&valve, table);
-            let rn = extract_and_remove_rn(&mut input_row);
-            // If now row was input, default to `row` (which could still be None)
-            let rn = match rn {
-                Some(rn) => {
-                    if let Some(row) = row {
-                        if *row != rn {
-                            panic!("Mismatch between input row and positional parameter, ROW")
+        None => match &cli.input {
+            Some(s) if s == "JSON" => {
+                let mut input_row = read_json_row_for_table(&valve, table);
+                let rn = extract_and_remove_rn(&mut input_row);
+                // If now row was input, default to `row` (which could still be None)
+                let rn = match rn {
+                    Some(rn) => {
+                        if let Some(row) = row {
+                            if *row != rn {
+                                panic!("Mismatch between input row and positional parameter, ROW")
+                            }
+                        }
+                        Some(rn)
+                    }
+                    None => *row,
+                };
+                (rn, input_row)
+            }
+            None => {
+                let columns = &valve
+                    .config
+                    .table
+                    .get(table)
+                    .expect("Table not found in config")
+                    .column_order;
+
+                let question_end = match row {
+                    Some(rn) => format!(" of row {rn}"),
+                    None => "".to_string(),
+                };
+
+                // This is the JSON that we will be sending back:
+                let mut json_row = JsonRow::new();
+
+                // A closure to get the value of a given column from the user and to validate that it's
+                // of the correct type:
+                let prompt_for_column_value = |column: &str| -> SerdeValue {
+                    let colconfig = &valve
+                        .config
+                        .table
+                        .get(table)
+                        .expect("Table not found")
+                        .column
+                        .get(column)
+                        .expect("Column not found");
+                    let question = format!("Enter a value for '{column}'{question_end}");
+                    let value: String =
+                        prompt_default(question, String::new()).expect("Error getting user input");
+                    let sql_type =
+                        get_sql_type(&valve.config.datatype, &colconfig.datatype, &valve.db_kind);
+                    if is_sql_type_error(&sql_type, &value) {
+                        panic!("Value '{value}' has wrong SQL type. Need '{sql_type}'");
+                    }
+                    json!(value)
+                };
+
+                match column {
+                    Some(column) => {
+                        let value = prompt_for_column_value(column);
+                        json_row.insert(column.to_string(), json!(value));
+                    }
+                    None => {
+                        for column in columns {
+                            let value = prompt_for_column_value(column);
+                            json_row.insert(column.to_string(), json!(value));
                         }
                     }
-                    Some(rn)
-                }
-                None => *row,
-            };
-            (rn, input_row)
-        }
+                };
+                (row.clone(), json_row)
+            }
+            Some(s) => panic!("Unsupported input type: '{s}'"),
+        },
     };
     // Validate the input row:
+    // TODO: validate_row() doesn't seem to be handling empty values correctly. Shouldn't it
+    // assign nulls? Note that the problem is independent of this function as the same issue
+    // arises when adding a new row.
     let output_row = valve
         .validate_row(table, &input_row, rn)
         .await
@@ -1671,22 +1747,23 @@ pub async fn fetch_row_with_input_value(
         .expect("Can't convert to simple JSON")
 }
 
-/// Read a JSON-formatted string from STDIN and verify, using the given Valve instance, that
-/// the fields in the JSON correspond to the allowed fields in the given table:
-pub fn read_json_row_for_table(valve: &Valve, table: &str) -> JsonRow {
-    let json_row = {
-        let mut json_row = String::new();
-        io::stdin()
-            .read_line(&mut json_row)
-            .expect("Error reading from STDIN");
-        let json_row = serde_json::from_str::<SerdeValue>(&json_row)
-            .expect(&format!("Invalid JSON: {json_row}"))
-            .as_object()
-            .expect(&format!("{json_row} is not a JSON object"))
-            .clone();
-        json_row
-    };
-    // Verify that all of the columns specified in the input JSON exist in the table:
+/// Read a JSON-formatted string from STDIN.
+pub fn read_json_row_from_stdin() -> JsonRow {
+    let mut json_row = String::new();
+    io::stdin()
+        .read_line(&mut json_row)
+        .expect("Error reading from STDIN");
+    let json_row = serde_json::from_str::<SerdeValue>(&json_row)
+        .expect(&format!("Invalid JSON: {json_row}"))
+        .as_object()
+        .expect(&format!("{json_row} is not a JSON object"))
+        .clone();
+    json_row
+}
+
+/// Given a Valve instance, a JSON representation of a row, and a table name, verifies that all
+/// of the row columns exist in the given table and panics otherwise.
+pub fn verify_json_columns_for_table(valve: &Valve, json_row: &JsonRow, table: &str) {
     let json_columns = json_row.keys().collect::<Vec<_>>();
     let ignored_columns = {
         if table == "message" {
@@ -1710,7 +1787,17 @@ pub fn read_json_row_for_table(valve: &Valve, table: &str) -> JsonRow {
             panic!("No column '{column}' in '{table}'");
         }
     }
+}
 
+/// Read a JSON-formatted string from STDIN and verify, using the given Valve instance, that
+/// the fields in the JSON correspond to the allowed fields in the given table:
+pub fn read_json_row_for_table(valve: &Valve, table: &str) -> JsonRow {
+    let json_row = read_json_row_from_stdin();
+
+    // Verify that all of the columns specified in the input JSON exist in the table:
+    verify_json_columns_for_table(valve, &json_row, table);
+
+    // Return the JSON row:
     json_row
 }
 
