@@ -703,7 +703,29 @@ pub async fn add_message(
     column: &Option<String>,
 ) {
     let valve = build_valve(&cli).await;
-    let json_message = read_json_row_for_table(&valve, "message");
+    let json_message = match &cli.input {
+        Some(s) if s == "JSON" => read_json_row_for_table(&valve, "message"),
+        Some(s) => panic!("Unsupported input type '{s}'"),
+        None => {
+            let message_columns = &valve
+                .config
+                .table
+                .get("message")
+                .expect("No message table configuration found")
+                .column_order
+                .iter()
+                .filter(|col| {
+                    // Only include the `table`, `row`, and `column` columns if they have not
+                    // already been provided as arguments to this function:
+                    (*col != "table" || *table == None)
+                        && (*col != "row" || *row == None)
+                        && (*col != "column" || *column == None)
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            prompt_for_parameter_values(&message_columns)
+        }
+    };
     let (table, row, column, value, level, rule, message) =
         extract_message_fields(table, row, column, &json_message);
     let message_id = valve
@@ -1799,13 +1821,13 @@ pub fn read_json_row_from_stdin() -> JsonRow {
 /// list is empty, then repeatedly ask the user if she would like to define a new parameter, and
 /// if so also ask for the value.
 pub fn prompt_for_parameter_values(columns: &Vec<String>) -> JsonRow {
-   // The row to be returned:
+    // The row to be returned:
     let mut json_row = JsonRow::new();
 
     let prompt_for_column_name = || -> String {
         let column: String = prompt_default(
             "Enter the name of a new parameter, or press enter to stop adding parameters:",
-            "".to_string()
+            "".to_string(),
         )
         .expect("Error getting user input");
         column
