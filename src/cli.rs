@@ -592,8 +592,8 @@ pub async fn build_valve(cli: &Cli) -> Valve {
 
 /// Use Valve, in conformity with the given command-line parameters, to add a column to the
 /// given table in the database. The column details are read from STDIN. If `table` and `column`
-/// are not given then the fields "table" and "column", respectively, must be present in the INPUT
-/// JSON. If the `no_load` option is set, do not load the modified table.
+/// are not given then the fields "table" and "column", respectively, must be present in the input.
+/// If the `no_load` option is set, do not load the modified table.
 pub async fn add_column(cli: &Cli, table: &Option<String>, column: &Option<String>, no_load: bool) {
     let mut valve = build_valve(&cli).await;
     let json_row = {
@@ -660,7 +660,7 @@ pub async fn add_column(cli: &Cli, table: &Option<String>, column: &Option<Strin
 
 /// Use Valve, in conformity with the given command-line parameters, to add a datatype to the
 /// database. The datatype details are read from STDIN. Note that if `datatype` is not given then
-/// a field called "datatype" must be present in the INPUT JSON.
+/// a field called "datatype" must be present in the input.
 pub async fn add_datatype(cli: &Cli, datatype: &Option<String>) {
     let mut valve = build_valve(&cli).await;
     let json_row = match &cli.input {
@@ -693,9 +693,8 @@ pub async fn add_datatype(cli: &Cli, datatype: &Option<String>) {
 
 /// Use Valve, in conformity with the given command-line parameters, to add a message to the
 /// message table. The details of the message are read from STDIN. Note that if any of the
-/// function parameters, `table`, `row`, or `column` have not been specified, then a field
-/// ("table", "row", and "column", respectively) corresponding to the missing parameter must be
-/// provided in the input JSON.
+/// parameters, `table`, `row`, or `column` have not been specified, they must be provided in the
+/// input.
 pub async fn add_message(
     cli: &Cli,
     table: &Option<String>,
@@ -703,7 +702,7 @@ pub async fn add_message(
     column: &Option<String>,
 ) {
     let valve = build_valve(&cli).await;
-    let json_message = match &cli.input {
+    let json_row = match &cli.input {
         Some(s) if s == "JSON" => read_json_row_for_table(&valve, "message"),
         Some(s) => panic!("Unsupported input type '{s}'"),
         None => {
@@ -727,7 +726,7 @@ pub async fn add_message(
         }
     };
     let (table, row, column, value, level, rule, message) =
-        extract_message_fields(table, row, column, &json_message);
+        extract_message_fields(table, row, column, &json_row);
     let message_id = valve
         .insert_message(&table, row, &column, &value, &level, &rule, &message)
         .await
@@ -739,7 +738,19 @@ pub async fn add_message(
 /// table in the database. The row details are read from STDIN.
 pub async fn add_row(cli: &Cli, table: &str) {
     let valve = build_valve(&cli).await;
-    let json_row = read_json_row_for_table(&valve, table);
+    let json_row = match &cli.input {
+        Some(s) if s == "JSON" => read_json_row_for_table(&valve, table),
+        Some(s) => panic!("Unsupported input type '{s}'"),
+        None => {
+            let table_columns = &valve
+                .config
+                .table
+                .get(table)
+                .expect("Table configuration not found")
+                .column_order;
+            prompt_for_parameter_values(&table_columns)
+        }
+    };
     let (_, row) = valve
         .insert_row(table, &json_row)
         .await
