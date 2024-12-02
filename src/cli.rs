@@ -605,15 +605,17 @@ pub async fn add_column(cli: &Cli, table: &Option<String>, column: &Option<Strin
                     .config
                     .table
                     .get("column")
-                    .expect("No column table config found")
+                    .expect("No column table configuration found")
                     .column_order
                     .iter()
                     .filter(|col| {
+                        // Only include the `table` and `column` columns if they are not already
+                        // present as arguments to this function:
                         (*col != "table" || *table == None) && (*col != "column" || *column == None)
                     })
                     .cloned()
                     .collect::<Vec<_>>();
-                prompt_for_column_values(&column_columns)
+                prompt_for_parameter_values(&column_columns)
             }
         }
     };
@@ -661,8 +663,28 @@ pub async fn add_column(cli: &Cli, table: &Option<String>, column: &Option<Strin
 /// a field called "datatype" must be present in the INPUT JSON.
 pub async fn add_datatype(cli: &Cli, datatype: &Option<String>) {
     let mut valve = build_valve(&cli).await;
-    let json_datatype = read_json_row_for_table(&valve, "datatype");
-    let dt_fields = extract_datatype_fields(&valve, datatype, &json_datatype);
+    let json_row = match &cli.input {
+        Some(s) if s == "JSON" => read_json_row_for_table(&valve, "datatype"),
+        Some(s) => panic!("Unsupported input type: '{s}'"),
+        None => {
+            let datatype_columns = &valve
+                .config
+                .table
+                .get("datatype")
+                .expect("No datatype table configuration found")
+                .column_order
+                .iter()
+                .filter(|col| {
+                    // Only include the `datatype` column if it is not already present as an
+                    // argument to this function:
+                    *col != "datatype" || *datatype == None
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            prompt_for_parameter_values(&datatype_columns)
+        }
+    };
+    let dt_fields = extract_datatype_fields(&valve, datatype, &json_row);
     valve
         .add_datatype(&dt_fields)
         .await
@@ -1776,20 +1798,26 @@ pub fn read_json_row_from_stdin() -> JsonRow {
 /// Given a list of parameters, prompt the user for the values of each of them. If the parameter
 /// list is empty, then repeatedly ask the user if she would like to define a new parameter, and
 /// if so also ask for the value.
-pub fn prompt_for_column_values(columns: &Vec<String>) -> JsonRow {
+pub fn prompt_for_parameter_values(columns: &Vec<String>) -> JsonRow {
+   // The row to be returned:
     let mut json_row = JsonRow::new();
 
     let prompt_for_column_name = || -> String {
-        let column: String = prompt_default("Enter the name of the next column:", "".to_string())
-            .expect("Error getting user input");
+        let column: String = prompt_default(
+            "Enter the name of a new parameter, or press enter to stop adding parameters:",
+            "".to_string()
+        )
+        .expect("Error getting user input");
         column
     };
     let prompt_for_column_value = |column: &str| -> SerdeValue {
-        let value: String = prompt_default(format!("Enter a value for {column}:"), "".to_string())
+        let value: String = prompt_default(format!("Enter the '{column}':"), "".to_string())
             .expect("Error getting user input");
         json!(value)
     };
 
+    // If the list of columns passed to this function is not empty, then prompt for each one.
+    // Otherwise get new column names interactively until a newline is received.
     if !columns.is_empty() {
         for column in columns {
             json_row.insert(column.to_string(), prompt_for_column_value(column));
