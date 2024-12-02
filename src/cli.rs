@@ -601,7 +601,19 @@ pub async fn add_column(cli: &Cli, table: &Option<String>, column: &Option<Strin
             Some(s) if s == "JSON" => read_json_row_for_table(&valve, "column"),
             Some(s) => panic!("Unsupported input type: '{s}'"),
             None => {
-                todo!()
+                let column_columns = &valve
+                    .config
+                    .table
+                    .get("column")
+                    .expect("No column table config found")
+                    .column_order
+                    .iter()
+                    .filter(|col| {
+                        (*col != "table" || *table == None) && (*col != "column" || *column == None)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                prompt_for_column_values(&column_columns)
             }
         }
     };
@@ -1758,6 +1770,37 @@ pub fn read_json_row_from_stdin() -> JsonRow {
         .as_object()
         .expect(&format!("{json_row} is not a JSON object"))
         .clone();
+    json_row
+}
+
+/// Given a list of parameters, prompt the user for the values of each of them. If the parameter
+/// list is empty, then repeatedly ask the user if she would like to define a new parameter, and
+/// if so also ask for the value.
+pub fn prompt_for_column_values(columns: &Vec<String>) -> JsonRow {
+    let mut json_row = JsonRow::new();
+
+    let prompt_for_column_name = || -> String {
+        let column: String = prompt_default("Enter the name of the next column:", "".to_string())
+            .expect("Error getting user input");
+        column
+    };
+    let prompt_for_column_value = |column: &str| -> SerdeValue {
+        let value: String = prompt_default(format!("Enter a value for {column}:"), "".to_string())
+            .expect("Error getting user input");
+        json!(value)
+    };
+
+    if !columns.is_empty() {
+        for column in columns {
+            json_row.insert(column.to_string(), prompt_for_column_value(column));
+        }
+    } else {
+        let mut column = prompt_for_column_name();
+        while column != "" {
+            json_row.insert(column.to_string(), prompt_for_column_value(&column));
+            column = prompt_for_column_name();
+        }
+    }
     json_row
 }
 
