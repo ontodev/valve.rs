@@ -600,23 +600,7 @@ pub async fn add_column(cli: &Cli, table: &Option<String>, column: &Option<Strin
         match &cli.input {
             Some(s) if s == "JSON" => read_json_row_for_table(&valve, "column"),
             Some(s) => panic!("Unsupported input type: '{s}'"),
-            None => {
-                let column_columns = &valve
-                    .config
-                    .table
-                    .get("column")
-                    .expect("No column table configuration found")
-                    .column_order
-                    .iter()
-                    .filter(|col| {
-                        // Only include the `table` and `column` columns if they are not already
-                        // present as arguments to this function:
-                        (*col != "table" || *table == None) && (*col != "column" || *column == None)
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                prompt_for_parameter_values(&column_columns)
-            }
+            None => prompt_for_column_columns(&valve, table, column),
         }
     };
     let column_json = extract_column_fields(&json_row, table, column);
@@ -705,25 +689,7 @@ pub async fn add_message(
     let json_row = match &cli.input {
         Some(s) if s == "JSON" => read_json_row_for_table(&valve, "message"),
         Some(s) => panic!("Unsupported input type '{s}'"),
-        None => {
-            let message_columns = &valve
-                .config
-                .table
-                .get("message")
-                .expect("No message table configuration found")
-                .column_order
-                .iter()
-                .filter(|col| {
-                    // Only include the `table`, `row`, and `column` columns if they have not
-                    // already been provided as arguments to this function:
-                    (*col != "table" || *table == None)
-                        && (*col != "row" || *row == None)
-                        && (*col != "column" || *column == None)
-                })
-                .cloned()
-                .collect::<Vec<_>>();
-            prompt_for_parameter_values(&message_columns)
-        }
+        None => prompt_for_message_columns(&valve, table, row, column),
     };
     let (table, row, column, value, level, rule, message) =
         extract_message_fields(table, row, column, &json_row);
@@ -741,15 +707,7 @@ pub async fn add_row(cli: &Cli, table: &str) {
     let json_row = match &cli.input {
         Some(s) if s == "JSON" => read_json_row_for_table(&valve, table),
         Some(s) => panic!("Unsupported input type '{s}'"),
-        None => {
-            let table_columns = &valve
-                .config
-                .table
-                .get(table)
-                .expect("Table configuration not found")
-                .column_order;
-            prompt_for_parameter_values(&table_columns)
-        }
+        None => prompt_for_table_columns(&valve, table, &None, false),
     };
     let (_, row) = valve
         .insert_row(table, &json_row)
@@ -1559,8 +1517,7 @@ pub async fn truncate_table(cli: &Cli, table: &str) {
 
 /// Use Valve, in conformity with the given command-line parameters, to update a message in the
 /// message table. The details of the message are read from STDIN. Note that if any of `table`,
-/// `row`, or `column` have not been specified, then a field ("table", "row", "column",
-/// respectively) corresponding to the missing parameter must be provided in the input JSON.
+/// `row`, or `column` have not been specified, then they must be provided in the input.
 pub async fn update_message(
     cli: &Cli,
     message_id: u16,
@@ -1569,9 +1526,13 @@ pub async fn update_message(
     column: &Option<String>,
 ) {
     let valve = build_valve(&cli).await;
-    let json_message = read_json_row_for_table(&valve, "message");
+    let json_row = match &cli.input {
+        Some(s) if s == "JSON" => read_json_row_for_table(&valve, "message"),
+        Some(s) => panic!("Unsupported input type '{s}'"),
+        None => prompt_for_message_columns(&valve, table, row, column),
+    };
     let (table, row, column, value, level, rule, message) =
-        extract_message_fields(table, row, column, &json_message);
+        extract_message_fields(table, row, column, &json_row);
     valve
         .update_message(
             message_id, &table, row, &column, &value, &level, &rule, &message,
@@ -1586,8 +1547,20 @@ pub async fn update_message(
 /// "row_number" in the input JSON.
 pub async fn update_row(cli: &Cli, table: &str, row: &Option<u32>) {
     let valve = build_valve(&cli).await;
-    let mut input_row = read_json_row_for_table(&valve, table);
-    let input_rn = extract_and_remove_rn(&mut input_row);
+    let mut json_row = match &cli.input {
+        Some(s) if s == "JSON" => read_json_row_for_table(&valve, table),
+        Some(s) => panic!("Unsupported input type '{s}'"),
+        None => prompt_for_table_columns(
+            &valve,
+            table,
+            row,
+            match row {
+                Some(_) => false,
+                None => true,
+            },
+        ),
+    };
+    let input_rn = extract_and_remove_rn(&mut json_row);
     let rn = match input_rn {
         Some(input_rn) => match row {
             Some(rn) if *rn != input_rn => {
@@ -1600,8 +1573,11 @@ pub async fn update_row(cli: &Cli, table: &str, row: &Option<u32>) {
             None => panic!("No row given"),
         },
     };
+    // TODO: Look into a possible bug related the row order being the same as the row number
+    // after update. It is possible that the bug only manifests itself when updating the first
+    // row in the table.
     let output_row = valve
-        .update_row(table, &rn, &input_row)
+        .update_row(table, &rn, &json_row)
         .await
         .expect("Error updating row");
     // Print the results to STDOUT:
@@ -1678,7 +1654,11 @@ pub async fn validate(
                 };
                 (rn, input_row)
             }
+            Some(s) => panic!("Unsupported input type: '{s}'"),
             None => {
+                // TODO: Instead of the code below, use the existing function cakked
+                // prompt_for_table_columns(). Note that we should probably not check the datatypes
+                // actually, since Valve's validate() function should take care of reporting those.
                 let columns = &valve
                     .config
                     .table
@@ -1730,7 +1710,6 @@ pub async fn validate(
                 };
                 (row.clone(), json_row)
             }
-            Some(s) => panic!("Unsupported input type: '{s}'"),
         },
     };
     // Validate the input row:
@@ -1863,6 +1842,99 @@ pub fn prompt_for_parameter_values(columns: &Vec<String>) -> JsonRow {
         }
     }
     json_row
+}
+
+/// TODO: Add docstring here
+pub fn prompt_for_table_columns(
+    valve: &Valve,
+    table: &str,
+    row: &Option<u32>,
+    include_rn: bool,
+) -> JsonRow {
+    let table_columns = {
+        let mut table_columns = match include_rn {
+            true => vec!["row_number".to_string()],
+            false => vec![],
+        };
+        table_columns.append(
+            &mut valve
+                .config
+                .table
+                .get(table)
+                .expect("Table configuration not found")
+                .column_order
+                .clone(),
+        );
+        table_columns
+    };
+    let mut json_row = prompt_for_parameter_values(&table_columns);
+    if include_rn {
+        // The row number will be formatted as a string but we need to convert it to a number:
+        json_row.insert("row_number".to_string(), {
+            let rn = json_row.get("row_number").expect("No row_number_found");
+            let rn = rn
+                .as_str()
+                .expect("Not a string")
+                .parse::<u32>()
+                .expect("Not a number");
+            if let Some(row) = row {
+                if rn != *row {
+                    panic!("Mismatch between input row and positional parameter, ROW")
+                }
+            }
+            json!(rn)
+        });
+    }
+    json_row
+}
+
+/// TODO: Add docstring here
+pub fn prompt_for_column_columns(
+    valve: &Valve,
+    table: &Option<String>,
+    column: &Option<String>,
+) -> JsonRow {
+    let column_columns = &valve
+        .config
+        .table
+        .get("column")
+        .expect("No column table configuration found")
+        .column_order
+        .iter()
+        .filter(|col| {
+            // Only include the `table` and `column` columns if they are not already
+            // present as arguments to this function:
+            (*col != "table" || *table == None) && (*col != "column" || *column == None)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    prompt_for_parameter_values(&column_columns)
+}
+
+/// TODO: Add docstring here
+pub fn prompt_for_message_columns(
+    valve: &Valve,
+    table: &Option<String>,
+    row: &Option<u32>,
+    column: &Option<String>,
+) -> JsonRow {
+    let message_columns = &valve
+        .config
+        .table
+        .get("message")
+        .expect("No message table configuration found")
+        .column_order
+        .iter()
+        .filter(|col| {
+            // Only include the `table`, `row`, and `column` columns if they have not
+            // already been provided as arguments to this function:
+            (*col != "table" || *table == None)
+                && (*col != "row" || *row == None)
+                && (*col != "column" || *column == None)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    prompt_for_parameter_values(&message_columns)
 }
 
 /// Given a Valve instance, a JSON representation of a row, and a table name, verifies that all
