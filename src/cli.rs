@@ -2,10 +2,7 @@
 
 use crate::{
     tests::{run_api_tests, run_dt_hierarchy_tests},
-    toolkit::{
-        generic_select_with_message_values, get_sql_type, is_sql_type_error, local_sql_syntax,
-        DbKind,
-    },
+    toolkit::{generic_select_with_message_values, local_sql_syntax, DbKind},
     valve::{JsonRow, Valve, ValveCell, ValveRow},
     REQUIRED_DATATYPE_COLUMNS, SQL_PARAM,
 };
@@ -650,23 +647,7 @@ pub async fn add_datatype(cli: &Cli, datatype: &Option<String>) {
     let json_row = match &cli.input {
         Some(s) if s == "JSON" => read_json_row_for_table(&valve, "datatype"),
         Some(s) => panic!("Unsupported input type: '{s}'"),
-        None => {
-            let datatype_columns = &valve
-                .config
-                .table
-                .get("datatype")
-                .expect("No datatype table configuration found")
-                .column_order
-                .iter()
-                .filter(|col| {
-                    // Only include the `datatype` column if it is not already present as an
-                    // argument to this function:
-                    *col != "datatype" || *datatype == None
-                })
-                .cloned()
-                .collect::<Vec<_>>();
-            prompt_for_parameter_values(&datatype_columns)
-        }
+        None => prompt_for_datatype_columns(&valve, datatype),
     };
     let dt_fields = extract_datatype_fields(&valve, datatype, &json_row);
     valve
@@ -1656,44 +1637,25 @@ pub async fn validate(
             }
             Some(s) => panic!("Unsupported input type: '{s}'"),
             None => {
-                // TODO: Instead of the code below, use the existing function cakked
-                // prompt_for_table_columns(). Note that we should probably not check the datatypes
-                // actually, since Valve's validate() function should take care of reporting those.
-                let columns = &valve
-                    .config
-                    .table
-                    .get(table)
-                    .expect("Table not found in config")
-                    .column_order;
-
                 let question_end = match row {
-                    Some(rn) => format!(" of row {rn}"),
+                    Some(rn) => format!(" for row {rn}"),
                     None => "".to_string(),
                 };
 
                 // This is the JSON that we will be sending back:
                 let mut json_row = JsonRow::new();
 
-                // A closure to get the value of a given column from the user and to validate that it's
-                // of the correct type:
+                // A closure to get the value of a given column from the user and to validate that
+                // it's of the correct type:
                 let prompt_for_column_value = |column: &str| -> SerdeValue {
-                    let colconfig = &valve
-                        .config
-                        .table
-                        .get(table)
-                        .expect("Table not found")
-                        .column
-                        .get(column)
-                        .expect("Column not found");
-                    let question = format!("Enter a value for '{column}'{question_end}");
+                    let question = format!("Enter the '{column}'{question_end}");
                     let value: String =
                         prompt_default(question, String::new()).expect("Error getting user input");
-                    let sql_type =
-                        get_sql_type(&valve.config.datatype, &colconfig.datatype, &valve.db_kind);
-                    if is_sql_type_error(&sql_type, &value) {
-                        panic!("Value '{value}' has wrong SQL type. Need '{sql_type}'");
+                    // If the valus is numeric, parse it as such. Otherwise parse it as a string:
+                    match value.as_str().parse::<u32>() {
+                        Ok(nvalue) => json!(nvalue),
+                        Err(_) => json!(value),
                     }
-                    json!(value)
                 };
 
                 match column {
@@ -1702,6 +1664,12 @@ pub async fn validate(
                         json_row.insert(column.to_string(), json!(value));
                     }
                     None => {
+                        let columns = &valve
+                            .config
+                            .table
+                            .get(table)
+                            .expect("Table not found in config")
+                            .column_order;
                         for column in columns {
                             let value = prompt_for_column_value(column);
                             json_row.insert(column.to_string(), json!(value));
@@ -1909,6 +1877,25 @@ pub fn prompt_for_column_columns(
         .cloned()
         .collect::<Vec<_>>();
     prompt_for_parameter_values(&column_columns)
+}
+
+/// TODO: Add docstring here
+pub fn prompt_for_datatype_columns(valve: &Valve, datatype: &Option<String>) -> JsonRow {
+    let datatype_columns = &valve
+        .config
+        .table
+        .get("datatype")
+        .expect("No datatype table configuration found")
+        .column_order
+        .iter()
+        .filter(|col| {
+            // Only include the `datatype` column if it is not already present as an
+            // argument to this function:
+            *col != "datatype" || *datatype == None
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    prompt_for_parameter_values(&datatype_columns)
 }
 
 /// TODO: Add docstring here
