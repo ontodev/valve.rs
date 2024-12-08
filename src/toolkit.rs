@@ -4246,7 +4246,7 @@ pub async fn add_datatype_tx(
     dt_map: &HashMap<String, String>,
     db_kind: &DbKind,
     tx: &mut Transaction<'_, sqlx::Any>,
-) -> Result<()> {
+) -> Result<u32> {
     // Separate the datatype fields into the columns and column parameters that we will
     // use to construct the INSERT statement:
     let mut columns = vec![];
@@ -4281,7 +4281,7 @@ pub async fn add_datatype_tx(
     }
     query.execute(tx.acquire().await?).await?;
 
-    Ok(())
+    Ok(rn)
 }
 
 /// TODO: Add docstring

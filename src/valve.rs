@@ -1028,9 +1028,26 @@ impl Valve {
     pub async fn add_datatype(&mut self, dt_map: &HashMap<String, String>) -> Result<()> {
         let mut tx = self.pool.begin().await?;
 
-        add_datatype_tx(dt_map, &self.db_kind, &mut tx).await?;
+        let rn = add_datatype_tx(dt_map, &self.db_kind, &mut tx).await?;
 
-        // TODO: record to history.
+        // TODO: Why were we using a HashMap to collect the dt details? Couldn't we just use a
+        // SerdeMap to begin with, rather than having to convert it here?
+        let dt_details = json!(dt_map);
+        let dt_details = dt_details
+            .as_object()
+            .ok_or(ValveError::InputError(format!(
+                "Not an object '{dt_map:?}'",
+            )))?;
+        record_config_change_tx(
+            &self.db_kind,
+            &mut tx,
+            "datatype",
+            &rn,
+            None,
+            Some(dt_details),
+            &self.user,
+        )
+        .await?;
 
         // Commit the transaction:
         tx.commit().await?;
@@ -1045,9 +1062,46 @@ impl Valve {
         // Begin a transaction:
         let mut tx = self.pool.begin().await?;
 
+        let dt_config = self
+            .config
+            .datatype
+            .get(datatype)
+            .ok_or(ValveError::InputError(format!(
+                "No datatype found '{datatype}'",
+            )))?;
+
+        let dt_config = json!(dt_config);
+        let dt_config = dt_config.as_object().ok_or(ValveError::InputError(format!(
+            "Not an object '{:?}'",
+            dt_config
+        )))?;
+
+        // TODO: Make this a function, or better, can the number be returned from the delete?
+        let dt_rn = {
+            let sql = local_sql_syntax(
+                &self.db_kind,
+                &format!("SELECT row_number FROM datatype WHERE datatype = {SQL_PARAM}"),
+            );
+            let row = sqlx_query(&sql)
+                .bind(datatype)
+                .fetch_one(&self.pool)
+                .await?;
+            let rn = row.try_get::<i64, _>("row_number").unwrap_or_default();
+            rn as u32
+        };
+
         delete_datatype_tx(datatype, &mut tx, &self.db_kind).await?;
 
-        // TODO: record the configuration change to the history table.
+        record_config_change_tx(
+            &self.db_kind,
+            &mut tx,
+            "datatype",
+            &dt_rn,
+            Some(dt_config),
+            None,
+            &self.user,
+        )
+        .await?;
 
         // Commit the transaction:
         tx.commit().await?;
@@ -1236,9 +1290,46 @@ impl Valve {
         // Begin a transaction:
         let mut tx = self.pool.begin().await?;
 
+        let colconfig = self
+            .config
+            .table
+            .get(table)
+            .ok_or(ValveError::InputError(format!("No table found '{table}'",)))?
+            .column
+            .get(column)
+            .ok_or(ValveError::InputError(format!(
+                "No column found '{column}'",
+            )))?;
+
+        let colconfig = json!(colconfig);
+        let colconfig = colconfig.as_object().ok_or(ValveError::InputError(format!(
+            "Not an object '{:?}'",
+            colconfig
+        )))?;
+
+        // TODO: Make this a function, or better, can the number be returned from the delete?
+        let col_rn = {
+            let sql = local_sql_syntax(
+                &self.db_kind,
+                &format!(r#"SELECT row_number FROM "column" WHERE "column" = {SQL_PARAM}"#),
+            );
+            let row = sqlx_query(&sql).bind(column).fetch_one(&self.pool).await?;
+            let rn = row.try_get::<i64, _>("row_number").unwrap_or_default();
+            rn as u32
+        };
+
         delete_column_tx(table, column, &mut tx, &self.db_kind).await?;
 
-        // TODO: Record the configuration change to the history table.
+        record_config_change_tx(
+            &self.db_kind,
+            &mut tx,
+            "column",
+            &col_rn,
+            Some(colconfig),
+            None,
+            &self.user,
+        )
+        .await?;
 
         // Commit:
         tx.commit().await?;
