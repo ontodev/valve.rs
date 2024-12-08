@@ -13,10 +13,11 @@ use crate::{
         get_next_undo_id, get_parsed_structure_conditions, get_pool_from_connection_string,
         get_previous_row_tx, get_sql_for_standard_view, get_sql_for_text_view, get_sql_type,
         get_sql_type_from_global_config, get_text_row_from_db_tx, insert_chunks, insert_new_row_tx,
-        local_sql_syntax, move_row_tx, normalize_options, read_config_files, record_row_change_tx,
-        record_row_move_tx, rename_db_column_tx, rename_db_table_tx, switch_undone_state_tx,
-        undo_or_redo_move_tx, update_row_tx, verify_table_deps_and_sort, ColumnRule,
-        CompiledCondition, DbKind, ParsedStructure, ValueType,
+        local_sql_syntax, move_row_tx, normalize_options, read_config_files,
+        record_config_change_tx, record_row_change_tx, record_row_move_tx, rename_db_column_tx,
+        rename_db_table_tx, switch_undone_state_tx, undo_or_redo_move_tx, update_row_tx,
+        verify_table_deps_and_sort, ColumnRule, CompiledCondition, DbKind, ParsedStructure,
+        ValueType,
     },
     validate::{validate_row_tx, validate_tree_foreign_keys, with_tree_sql},
     valve_grammar::StartParser,
@@ -1059,6 +1060,8 @@ impl Valve {
         }
         query.execute(tx.acquire().await?).await?;
 
+        // TODO: Here.
+
         // Commit the transaction:
         tx.commit().await?;
 
@@ -1075,6 +1078,8 @@ impl Valve {
         );
         let query = sqlx_query(&sql).bind(datatype);
         query.execute(&self.pool).await?;
+
+        // TODO: Here. And use a transaction rather than the pool.
 
         // Save the datatype table and then reconfigure valve:
         self.save_tables(&vec!["datatype"], &None).await?;
@@ -1315,6 +1320,8 @@ impl Valve {
         let query = sqlx_query(&sql);
         query.execute(tx.acquire().await?).await?;
 
+        // TODO: Here.
+
         // Commit the transaction:
         tx.commit().await?;
 
@@ -1374,6 +1381,8 @@ impl Valve {
             println!("Removing '{table}' from table table.")
         }
         query.execute(tx.acquire().await?).await?;
+
+        // TODO: Here.
 
         // Commit the transaction:
         tx.commit().await?;
@@ -1540,6 +1549,8 @@ impl Valve {
         // Rename the table in the database:
         rename_db_table_tx(&self.db_kind, &self.config, &mut tx, table, new_name).await?;
 
+        // TODO: Here.
+
         // Commit the transaction:
         tx.commit().await?;
 
@@ -1640,6 +1651,18 @@ impl Valve {
         }
         query.execute(tx.acquire().await?).await?;
 
+        // Record the configuration change to the history table:
+        record_config_change_tx(
+            &self.db_kind,
+            &mut tx,
+            "column",
+            &rn,
+            None,
+            Some(column_details),
+            &self.user,
+        )
+        .await?;
+
         // Commit:
         tx.commit().await?;
 
@@ -1663,6 +1686,8 @@ impl Valve {
 
         let query = sqlx_query(&sql).bind(table).bind(column);
         query.execute(&self.pool).await?;
+
+        // TODO: Here. And use a transaction rather than the pool.
 
         // Save the column table and the data table and then reconfigure valve:
         self.save_tables(&vec!["column", table], &None).await?;
@@ -1821,6 +1846,9 @@ impl Valve {
         // otherwise, when we call save_table() on the data table, when it tries to find the
         // newly renamed column it won't be there and it will save all the values in the column
         // as null.
+        // TODO: Maybe we need to add a flag to this function to prevent writing to history,
+        // since otherwise this operation is going to be writing to the history twice and that
+        // does not seem desirable.
         rename_db_column_tx(
             &self.db_kind,
             &self.config,
@@ -1830,6 +1858,8 @@ impl Valve {
             new_name,
         )
         .await?;
+
+        // TODO: Here.
 
         // Commit the transaction:
         tx.commit().await?;

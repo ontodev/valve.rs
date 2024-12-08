@@ -195,6 +195,8 @@ pub fn guess(
         }
     }
 
+    // TODO: Use a transaction rather than the pool directly.
+
     // Returns the largest row number in the given configured table:
     fn get_max_row_number_from_table(valve: &Valve, table: &str) -> u32 {
         let sql = format!(
@@ -328,6 +330,9 @@ pub fn guess(
         block_on(query.execute(&valve.pool)).expect(&format!("Error executing SQL '{}'", sql));
         row_number += 1;
     }
+
+    // TODO: (Around) here?
+
     if valve.verbose {
         println!("Done!");
     }

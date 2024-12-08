@@ -3724,7 +3724,7 @@ pub async fn record_row_change_tx(
 ) -> Result<()> {
     if let (None, None) = (from, to) {
         return Err(ValveError::InputError(
-            "Arguments 'from' and 'to' to function record_row_change() cannot both be None".into(),
+            "Arguments 'from' and 'to' to record_row_change_tx() cannot both be None".into(),
         )
         .into());
     }
@@ -3753,13 +3753,15 @@ pub async fn record_row_change_tx(
 
     fn summarize(from: Option<&SerdeMap>, to: Option<&SerdeMap>) -> Result<String> {
         // Constructs a summary of the form:
-        // {
-        //   "column":"bar",
-        //   "level":"update|move",
-        //   "message":"Value changed from 'A' to 'B'",
-        //   "old_value":"'A'",
-        //   "value":"'B'"
-        // }
+        // [{
+        //    "column":"bar",
+        //    "level":"update|move",
+        //    "message":"Value changed from 'A' to 'B'",
+        //    "old_value":"'A'",
+        //    "value":"'B'"
+        //  },
+        //  ...
+        // ]
         let mut summary = vec![];
         match (from, to) {
             (None, _) | (_, None) => Ok("NULL".to_string()),
@@ -3868,6 +3870,98 @@ pub async fn record_row_change_tx(
         if summary == "NULL" {
             summary
         } else {
+            params.push(&summary);
+            SQL_PARAM.to_string()
+        }
+    };
+    params.push(user);
+
+    let sql = format!(
+        r#"INSERT INTO "history" ("table", "row", "from", "to", "summary", "user")
+           VALUES ({SQL_PARAM}, {row_number}, {from_param},
+                   {to_param}, {summary_param}, {SQL_PARAM})"#,
+    );
+    let sql = local_sql_syntax(kind, &sql);
+
+    let mut query = sqlx_query(&sql);
+    for param in &params {
+        query = query.bind(param)
+    }
+    query.execute(tx.acquire().await?).await?;
+
+    Ok(())
+}
+
+/// TODO: Add docstring
+pub async fn record_config_change_tx(
+    kind: &DbKind,
+    tx: &mut Transaction<'_, sqlx::Any>,
+    table: &str,
+    row_number: &u32,
+    from: Option<&SerdeMap>,
+    to: Option<&SerdeMap>,
+    user: &str,
+) -> Result<()> {
+    fn to_text(details: Option<&SerdeMap>) -> String {
+        match details {
+            None => "NULL".to_string(),
+            Some(details) => format!("{}", json!(details)),
+        }
+    }
+
+    let summary = match (from, to) {
+        (None, None) => {
+            return Err(ValveError::InputError(
+                "Arguments 'from' and 'to' to record_config_change_tx() cannot both be None".into(),
+            )
+            .into())
+        }
+        (None, _) => match table {
+            "column" => "add column",
+            "datatype" => "add datatype",
+            "table" => "add table",
+            _ => {
+                return Err(ValveError::InputError(
+                    format!("In record_config_change_tx(): Unrecognized config table '{table}'.")
+                        .into(),
+                )
+                .into())
+            }
+        },
+        (_, None) => match table {
+            "column" => "delete column",
+            "datatype" => "delete datatype",
+            "table" => "delete table",
+            _ => {
+                return Err(ValveError::InputError(
+                    format!("In record_config_change_tx(): Unrecognized config table '{table}'.")
+                        .into(),
+                )
+                .into())
+            }
+        },
+        (Some(_), Some(_)) => todo!(),
+    };
+
+    let (from, to) = (to_text(from), to_text(to));
+    let mut params = vec![table];
+    let from_param = match from.as_str() {
+        "NULL" => from.to_string(),
+        _ => {
+            params.push(&from);
+            SQL_PARAM.to_string()
+        }
+    };
+    let to_param = match to.as_str() {
+        "NULL" => to.to_string(),
+        _ => {
+            params.push(&to);
+            SQL_PARAM.to_string()
+        }
+    };
+    let summary_param = match summary {
+        "NULL" => summary.to_string(),
+        _ => {
             params.push(&summary);
             SQL_PARAM.to_string()
         }
