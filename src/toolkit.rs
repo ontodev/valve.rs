@@ -1004,11 +1004,42 @@ pub fn read_tsv_into_vector(path: &str) -> Result<Vec<SerdeMap>> {
     Ok(rows)
 }
 
+// TODO: Accept a transaction optionlly:
 /// Given a database at the specified location, query the given table and return a vector of rows
 /// represented as [SerdeMaps](SerdeMap).
 pub fn read_db_table_into_vector(pool: &AnyPool, config_table: &str) -> Result<Vec<SerdeMap>> {
     let sql = format!("SELECT * FROM \"{}\"", config_table);
     let rows = block_on(sqlx_query(&sql).fetch_all(pool)).map_err(|e| {
+        ValveError::InputError(format!(
+            "Error while reading table '{}' from database: {}",
+            config_table, e
+        ))
+    })?;
+    let mut table_rows = vec![];
+    for row in rows {
+        let mut table_row = SerdeMap::new();
+        for column in row.columns() {
+            let cname = column.name();
+            if cname != "row_number" && cname != "row_order" {
+                let raw_value = row.try_get_raw(format!(r#"{}"#, cname).as_str()).unwrap();
+                if !raw_value.is_null() {
+                    let value = get_column_value_as_string(&row, &cname, "text");
+                    table_row.insert(cname.to_string(), json!(value));
+                } else {
+                    table_row.insert(cname.to_string(), json!(""));
+                }
+            }
+        }
+        table_rows.push(table_row);
+    }
+    Ok(table_rows)
+}
+pub async fn read_db_table_into_vector_tx(
+    tx: &mut Transaction<'_, sqlx::Any>,
+    config_table: &str,
+) -> Result<Vec<SerdeMap>> {
+    let sql = format!("SELECT * FROM \"{}\"", config_table);
+    let rows = block_on(sqlx_query(&sql).fetch_all(tx.acquire().await?)).map_err(|e| {
         ValveError::InputError(format!(
             "Error while reading table '{}' from database: {}",
             config_table, e

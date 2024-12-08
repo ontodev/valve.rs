@@ -15,10 +15,11 @@ use crate::{
         get_pool_from_connection_string, get_previous_row_tx, get_sql_for_standard_view,
         get_sql_for_text_view, get_sql_type, get_sql_type_from_global_config,
         get_text_row_from_db_tx, insert_chunks, insert_new_row_tx, local_sql_syntax, move_row_tx,
-        normalize_options, read_config_files, record_config_change_tx, record_row_change_tx,
-        record_row_move_tx, rename_column_tx, rename_datatype_tx, rename_table_tx,
-        switch_undone_state_tx, undo_or_redo_move_tx, update_row_tx, verify_table_deps_and_sort,
-        ColumnRule, CompiledCondition, DbKind, ParsedStructure, ValueType,
+        normalize_options, read_config_files, read_db_table_into_vector_tx,
+        record_config_change_tx, record_row_change_tx, record_row_move_tx, rename_column_tx,
+        rename_datatype_tx, rename_table_tx, switch_undone_state_tx, undo_or_redo_move_tx,
+        update_row_tx, verify_table_deps_and_sort, ColumnRule, CompiledCondition, DbKind,
+        ParsedStructure, ValueType,
     },
     validate::{validate_row_tx, validate_tree_foreign_keys, with_tree_sql},
     valve_grammar::StartParser,
@@ -1182,7 +1183,31 @@ impl Valve {
         .await;
 
         if table_added {
-            // TODO: Record the configuration change here.
+            let sloopfines = read_db_table_into_vector_tx(&mut tx, "table").await?;
+            let sloopfines = sloopfines
+                .iter()
+                .filter(|t| t.get("table").unwrap() == table)
+                .collect::<Vec<_>>();
+            let droopfines = read_db_table_into_vector_tx(&mut tx, "column").await?;
+            let droopfines = droopfines
+                .iter()
+                .filter(|t| t.get("table").unwrap() == table)
+                .collect::<Vec<_>>();
+
+            let mut to = JsonRow::new();
+            to.insert("table".to_string(), json!(sloopfines[0]));
+            to.insert("column".to_string(), json!(droopfines));
+
+            record_config_change_tx(
+                &self.db_kind,
+                &mut tx,
+                "table",
+                &0,
+                None,
+                Some(&to),
+                &self.user,
+            )
+            .await?;
 
             // Commit the transaction:
             tx.commit().await?;
@@ -1205,7 +1230,38 @@ impl Valve {
 
         delete_table_tx(table, &mut tx, &self.db_kind).await?;
 
-        // TODO: record the configuration change in the history table
+        let mut tconfig = self
+            .config
+            .table
+            .get(table)
+            .ok_or(ValveError::InputError(format!(
+                "No table sssfound '{table}'",
+            )))?;
+
+        let mut to = JsonRow::new();
+        to.insert("table".to_string(), json!(tconfig));
+
+        // TODO: Make this a function, or better, can the number be returned from the delete?
+        let table_rn = {
+            let sql = local_sql_syntax(
+                &self.db_kind,
+                &format!(r#"SELECT row_number FROM "table" WHERE "table" = {SQL_PARAM}"#),
+            );
+            let row = sqlx_query(&sql).bind(table).fetch_one(&self.pool).await?;
+            let rn = row.try_get::<i64, _>("row_number").unwrap_or_default();
+            rn as u32
+        };
+
+        record_config_change_tx(
+            &self.db_kind,
+            &mut tx,
+            "table",
+            &table_rn,
+            None,
+            Some(&to),
+            &self.user,
+        )
+        .await?;
 
         // Commit the transaction:
         tx.commit().await?;
