@@ -6,13 +6,12 @@ use crate::{
     MOVE_INTERVAL, SQL_PARAM,
 };
 use fix_fn::fix_fn;
-use futures::executor::block_on;
 use indexmap::IndexMap;
 use pad::{Alignment, PadStr};
 use rand::{distributions, rngs::StdRng, Rng, SeedableRng};
 use regex::Regex;
 use serde_json::json;
-use sqlx::{query as sqlx_query, Row, ValueRef};
+use sqlx::{query as sqlx_query, Acquire, Row, Transaction, ValueRef};
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
     fs::File,
@@ -50,8 +49,9 @@ pub struct FCMatch {
 /// messages will be written to STDOUT. if `assume_yes` is set to true the guessed configuration
 /// will be written to the database immediately without prompting the user. Returns true if the
 /// changes have been written to the database, and false otherwise.
-pub fn guess(
+pub async fn guess(
     valve: &Valve,
+    tx: &mut Transaction<'_, sqlx::Any>,
     table: Option<&str>,
     table_tsv: &str,
     seed: &Option<u64>,
@@ -95,7 +95,7 @@ pub fn guess(
         if valve.verbose {
             println!("Annotating sample for label '{}' ...", label);
         }
-        annotate(label, sample, &valve, error_rate, i == 0);
+        annotate(tx, label, sample, &valve, error_rate, i == 0).await;
     }
     if valve.verbose {
         println!("Done!");
@@ -195,16 +195,20 @@ pub fn guess(
         }
     }
 
-    // TODO: Use a transaction rather than the pool directly.
-
     // Returns the largest row number in the given configured table:
-    fn get_max_row_number_from_table(valve: &Valve, table: &str) -> u32 {
+    async fn get_max_row_number_from_table(
+        tx: &mut Transaction<'_, sqlx::Any>,
+        table: &str,
+    ) -> u32 {
         let sql = format!(
             r#"SELECT MAX("row_number") AS "row_number" FROM "{}""#,
             table
         );
         let query = sqlx_query(&sql);
-        let result = block_on(query.fetch_one(&valve.pool))
+        // TODO: Remove expect:
+        let result = query
+            .fetch_one(tx.acquire().await.expect("Bah!"))
+            .await
             .expect(&format!("Error executing SQL: '{}'", sql));
         let raw_row_number = result
             .try_get_raw("row_number")
@@ -221,7 +225,7 @@ pub fn guess(
     if valve.verbose {
         println!("Updating the table configuration in the database ...");
     }
-    let row_number = get_max_row_number_from_table(valve, "table");
+    let row_number = get_max_row_number_from_table(tx, "table").await;
     let row_order = row_number * MOVE_INTERVAL;
     let sql = {
         let column_names = &required_table_table_headers
@@ -241,13 +245,17 @@ pub fn guess(
         println!("Executing SQL: {}", sql);
     }
     let query = sqlx_query(&sql).bind(table).bind(table_tsv);
-    block_on(query.execute(&valve.pool)).expect(&format!("Error executing SQL '{}'", sql));
+    // TODO: Remove expect.
+    query
+        .execute(tx.acquire().await.expect("Bah!"))
+        .await
+        .expect(&format!("Error executing SQL '{}'", sql));
 
     // Column configuration
     if valve.verbose {
         println!("Updating the column configuration in the database ...");
     }
-    let mut row_number = get_max_row_number_from_table(valve, "column");
+    let mut row_number = get_max_row_number_from_table(tx, "column").await;
     for (label, sample) in &samples {
         let column_names = &required_column_table_headers
             .iter()
@@ -327,11 +335,13 @@ pub fn guess(
         for param in &params {
             query = query.bind(param);
         }
-        block_on(query.execute(&valve.pool)).expect(&format!("Error executing SQL '{}'", sql));
+        // TODO Remove expects
+        query
+            .execute(tx.acquire().await.expect("Bah!"))
+            .await
+            .expect(&format!("Error executing SQL '{}'", sql));
         row_number += 1;
     }
-
-    // TODO: (Around) here?
 
     if valve.verbose {
         println!("Done!");
@@ -341,7 +351,8 @@ pub fn guess(
 
 /// Add annotations to the data sample indicating best guesses as to the datatype, nulltype,
 /// and structure associated with the column identified by the given label.
-pub fn annotate(
+pub async fn annotate(
+    tx: &mut Transaction<'_, sqlx::Any>,
     label: &str,
     sample: &mut Sample,
     valve: &Valve,
@@ -647,8 +658,9 @@ pub fn annotate(
     // Checks a list of potential foreign columns against the given sample, and return those
     // columns from the list that are a good enough match, taking into consideration the given
     // acceptable error rate.
-    fn get_candidate_froms(
+    async fn get_candidate_froms(
         valve: &Valve,
+        tx: &mut Transaction<'_, sqlx::Any>,
         sample: &Sample,
         potential_foreign_columns: &Vec<FCMatch>,
         error_rate: &f32,
@@ -687,7 +699,10 @@ pub fn annotate(
                     QueryParam::Real(p) => query = query.bind(p),
                     QueryParam::String(p) => query = query.bind(p),
                 }
-                num_matches += block_on(query.fetch_all(&valve.pool))
+                // TODO: Remove expect:
+                num_matches += query
+                    .fetch_all(tx.acquire().await.expect("Bah!"))
+                    .await
                     .expect(&format!("Error executing SQL: {}", sql))
                     .len();
                 if ((num_values as f32 - num_matches as f32) / num_values as f32) < *error_rate {
@@ -720,7 +735,8 @@ pub fn annotate(
     // of the sampled column and possibly annotate the sample with a from() structure if there is
     // one and only candidate from().
     let potential_foreign_columns = get_potential_foreign_columns(valve, &sample.datatype);
-    let froms = get_candidate_froms(valve, sample, &potential_foreign_columns, error_rate);
+    let froms =
+        get_candidate_froms(valve, tx, sample, &potential_foreign_columns, error_rate).await;
     if froms.len() == 1 {
         sample.structure = froms[0].to_string();
     } else if froms.len() > 1 {
