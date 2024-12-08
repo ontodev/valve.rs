@@ -1118,7 +1118,34 @@ impl Valve {
 
         rename_datatype_tx(&self, datatype, new_name, &mut tx).await?;
 
-        // TODO: Record to history
+        // TODO: Make this a function, or better, can the number be returned from the delete?
+        let dt_rn = {
+            let sql = local_sql_syntax(
+                &self.db_kind,
+                &format!("SELECT row_number FROM datatype WHERE datatype = {SQL_PARAM}"),
+            );
+            let row = sqlx_query(&sql)
+                .bind(datatype)
+                .fetch_one(&self.pool)
+                .await?;
+            let rn = row.try_get::<i64, _>("row_number").unwrap_or_default();
+            rn as u32
+        };
+
+        let mut from = JsonRow::new();
+        let mut to = JsonRow::new();
+        from.insert("datatype".to_string(), datatype.into());
+        to.insert("datatype".to_string(), new_name.into());
+        record_config_change_tx(
+            &self.db_kind,
+            &mut tx,
+            "datatype",
+            &dt_rn,
+            Some(&from),
+            Some(&to),
+            &self.user,
+        )
+        .await?;
 
         // Commit the transaction:
         tx.commit().await?;
@@ -1201,7 +1228,31 @@ impl Valve {
         // Rename the table in the database:
         rename_table_tx(&self, &mut tx, table, new_name).await?;
 
-        // TODO: Record to history
+        // TODO: Make this a function, or better, can the number be returned from the delete?
+        let table_rn = {
+            let sql = local_sql_syntax(
+                &self.db_kind,
+                &format!(r#"SELECT row_number FROM "table" WHERE "table" = {SQL_PARAM}"#),
+            );
+            let row = sqlx_query(&sql).bind(table).fetch_one(&self.pool).await?;
+            let rn = row.try_get::<i64, _>("row_number").unwrap_or_default();
+            rn as u32
+        };
+
+        let mut from = JsonRow::new();
+        let mut to = JsonRow::new();
+        from.insert("table".to_string(), table.into());
+        to.insert("table".to_string(), new_name.into());
+        record_config_change_tx(
+            &self.db_kind,
+            &mut tx,
+            "table",
+            &table_rn,
+            Some(&from),
+            Some(&to),
+            &self.user,
+        )
+        .await?;
 
         // Commit the transaction:
         tx.commit().await?;
@@ -1362,7 +1413,31 @@ impl Valve {
         // as null.
         rename_column_tx(&self, &mut tx, table, column, new_name, new_label).await?;
 
-        // TODO: Record to history
+        // TODO: Make this a function, or better, can the number be returned from the delete?
+        let col_rn = {
+            let sql = local_sql_syntax(
+                &self.db_kind,
+                &format!(r#"SELECT row_number FROM "column" WHERE "column" = {SQL_PARAM}"#),
+            );
+            let row = sqlx_query(&sql).bind(column).fetch_one(&self.pool).await?;
+            let rn = row.try_get::<i64, _>("row_number").unwrap_or_default();
+            rn as u32
+        };
+
+        let mut from = JsonRow::new();
+        let mut to = JsonRow::new();
+        from.insert("column".to_string(), column.into());
+        to.insert("column".to_string(), new_name.into());
+        record_config_change_tx(
+            &self.db_kind,
+            &mut tx,
+            "column",
+            &col_rn,
+            Some(&from),
+            Some(&to),
+            &self.user,
+        )
+        .await?;
 
         // Commit the transaction:
         tx.commit().await?;

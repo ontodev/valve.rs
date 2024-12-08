@@ -4623,7 +4623,18 @@ pub async fn record_config_change_tx(
                 .into())
             }
         },
-        (Some(_), Some(_)) => todo!(),
+        (Some(_), Some(_)) => match table {
+            "column" => "rename column",
+            "datatype" => "rename datatype",
+            "table" => "rename table",
+            _ => {
+                return Err(ValveError::InputError(
+                    format!("In record_config_change_tx(): Unrecognized config table '{table}'.")
+                        .into(),
+                )
+                .into())
+            }
+        },
     };
 
     let (from, to) = (to_text(from), to_text(to));
