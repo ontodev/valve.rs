@@ -3909,7 +3909,7 @@ impl Valve {
                     }
                 },
                 "delete datatype" => match &from {
-                    None => return Err(make_err("No 'to' found").into()),
+                    None => return Err(make_err("No 'from' found").into()),
                     Some(from) => {
                         let dt_map = {
                             let mut dt_map = HashMap::new();
@@ -3921,14 +3921,6 @@ impl Valve {
 
                         let mut tx = self.pool.begin().await?;
                         add_datatype_tx(&dt_map, &self.db_kind, &mut tx).await?;
-                        switch_undone_state_tx(
-                            &self.user,
-                            history_id,
-                            true,
-                            &mut tx,
-                            &self.db_kind,
-                        )
-                        .await?;
 
                         let datatype = from
                             .get("datatype")
@@ -3948,6 +3940,15 @@ impl Valve {
                         };
                         let query = sqlx_query(&sql).bind(datatype);
                         query.execute(tx.acquire().await?).await?;
+
+                        switch_undone_state_tx(
+                            &self.user,
+                            history_id,
+                            true,
+                            &mut tx,
+                            &self.db_kind,
+                        )
+                        .await?;
 
                         tx.commit().await?;
 
@@ -4507,6 +4508,26 @@ impl Valve {
 
                         let mut tx = self.pool.begin().await?;
                         add_datatype_tx(&dt_map, &self.db_kind, &mut tx).await?;
+
+                        let datatype = to
+                            .get("datatype")
+                            .and_then(|d| d.as_str())
+                            .ok_or(make_err("No string 'datatype' found"))?;
+                        let sql = {
+                            let rn: i64 = next_redo.get("row");
+                            let rn = rn as u32;
+                            let ro = rn * MOVE_INTERVAL;
+                            local_sql_syntax(
+                                &self.db_kind,
+                                &format!(
+                                    r#"UPDATE "datatype" SET "row_number" = {rn}, "row_order" = {ro}
+                                       WHERE "datatype" = {SQL_PARAM}"#
+                                ),
+                            )
+                        };
+                        let query = sqlx_query(&sql).bind(datatype);
+                        query.execute(tx.acquire().await?).await?;
+
                         switch_undone_state_tx(
                             &self.user,
                             history_id,
@@ -4515,6 +4536,7 @@ impl Valve {
                             &self.db_kind,
                         )
                         .await?;
+
                         tx.commit().await?;
 
                         // Save the datatype table and then reconfigure valve:
