@@ -1338,7 +1338,7 @@ pub async fn move_row(cli: &Cli, table: &str, row: u32, after: u32) {
 /// Use Valve, in conformity with the given command-line parameters, to undo the last operation and
 /// print the information, if any, that resulted from the undo.
 pub async fn undo(cli: &Cli) {
-    let valve = build_valve(&cli).await;
+    let mut valve = build_valve(&cli).await;
     let updated_row = valve.undo().await.expect("Error undoing");
     if let Some(valve_row) = updated_row {
         print!(
@@ -1459,8 +1459,8 @@ pub async fn save_as(cli: &Cli, table: &str, path: &str) {
 /// Use Valve, in conformity with the given command-line parameters, to run a set of functions
 /// designed to test Valve's Application Programmer Interface.
 pub async fn test_api(cli: &Cli) {
-    let valve = build_valve(&cli).await;
-    run_api_tests(&valve)
+    let mut valve = build_valve(&cli).await;
+    run_api_tests(&mut valve)
         .await
         .expect("Error running API tests");
 }
@@ -2324,8 +2324,8 @@ pub async fn process_command() {
             table,
         } => load_table(&cli, table, *initial_load).await,
         Commands::Move { table, row, after } => move_row(&cli, table, *row, *after).await,
-        Commands::Redo {} => undo(&cli).await,
-        Commands::Undo {} => redo(&cli).await,
+        Commands::Redo {} => redo(&cli).await,
+        Commands::Undo {} => undo(&cli).await,
         Commands::Rename { subcommand } => {
             match subcommand {
                 RenameSubcommands::Column {

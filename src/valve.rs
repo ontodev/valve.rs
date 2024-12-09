@@ -23,7 +23,7 @@ use crate::{
     },
     validate::{validate_row_tx, validate_tree_foreign_keys, with_tree_sql},
     valve_grammar::StartParser,
-    CHUNK_SIZE, INTERNAL_TABLES, PRINTF_RE, SQL_PARAM, SQL_TYPES,
+    CHUNK_SIZE, INTERNAL_TABLES, MOVE_INTERVAL, PRINTF_RE, SQL_PARAM, SQL_TYPES,
 };
 use anyhow::Result;
 use csv::{QuoteStyle, ReaderBuilder, WriterBuilder};
@@ -37,7 +37,7 @@ use serde_json::{json, Value as SerdeValue};
 use sprintf::sprintf;
 use sqlx::{
     any::{AnyPool, AnyRow},
-    query as sqlx_query, Column, Row, ValueRef,
+    query as sqlx_query, Acquire, Column, Row, ValueRef,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -3754,7 +3754,7 @@ impl Valve {
     }
 
     /// Undo one change and return the change record or None if there was no change to undo.
-    pub async fn undo(&self) -> Result<Option<ValveRow>> {
+    pub async fn undo(&mut self) -> Result<Option<ValveRow>> {
         let records = get_db_records_to_undo(&self.pool, 1).await?;
         let last_change = match records.len() {
             0 => {
@@ -3779,24 +3779,103 @@ impl Valve {
         let from = get_json_object_from_column(&last_change, "from");
         let to = get_json_object_from_column(&last_change, "to");
 
+        let make_err = |err_str: &str| -> ValveError { ValveError::DataError(err_str.to_string()) };
+
         // Handle metadata changes and row moves:
-        let raw_summary = last_change
-            .try_get_raw("summary")
-            .expect("Unable to get raw value of summary from change record");
+        let raw_summary = last_change.try_get_raw("summary")?;
         if !raw_summary.is_null() {
             let summary: &str = last_change.get("summary");
             match summary {
-                "add column" => match to {
-                    Some(to) => todo!(), // TODO: YOU ARE HERE.
-                    None => {
-                        return Err(ValveError::DataError("No summary found".to_string()).into())
+                // Metadata changes:
+                "add column" => match &to {
+                    None => return Err(make_err("No to found").into()),
+                    Some(to) => {
+                        let table = to
+                            .get("table")
+                            .and_then(|t| t.as_str())
+                            .ok_or(make_err("No string 'table' found"))?;
+                        let column = to
+                            .get("column")
+                            .and_then(|t| t.as_str())
+                            .ok_or(make_err("No string 'column' found"))?;
+
+                        let mut tx = self.pool.begin().await?;
+                        delete_column_tx(table, column, &mut tx, &self.db_kind).await?;
+                        switch_undone_state_tx(
+                            &self.user,
+                            history_id,
+                            true,
+                            &mut tx,
+                            &self.db_kind,
+                        )
+                        .await?;
+                        tx.commit().await?;
+
+                        // Save the column table and the data table and then reconfigure valve:
+                        self.save_tables(&vec!["column", table], &None).await?;
+                        self.reconfigure()?;
+
+                        // Refresh the database:
+                        self.ensure_all_tables_created(&vec![table]).await?;
+
+                        return Ok(None);
                     }
                 },
-                "delete column" => todo!(),
+                "delete column" => match &from {
+                    None => return Err(make_err("No from found").into()),
+                    Some(from) => {
+                        let table = from
+                            .get("table")
+                            .and_then(|t| t.as_str())
+                            .ok_or(make_err("No string 'table' found"))?;
+                        let column = from
+                            .get("column")
+                            .and_then(|t| t.as_str())
+                            .ok_or(make_err("No string 'column' found"))?;
+
+                        let mut tx = self.pool.begin().await?;
+                        add_column_tx(table, column, from, &mut tx, &self.db_kind).await?;
+
+                        let sql = {
+                            let rn: i64 = last_change.get("row");
+                            let rn = rn as u32;
+                            let ro = rn * MOVE_INTERVAL;
+                            local_sql_syntax(
+                                &self.db_kind,
+                                &format!(
+                                    r#"UPDATE "column" SET "row_number" = {rn}, "row_order" = {ro}
+                                       WHERE "table" = {SQL_PARAM} AND "column" = {SQL_PARAM}"#
+                                ),
+                            )
+                        };
+                        let query = sqlx_query(&sql).bind(table).bind(column);
+                        query.execute(tx.acquire().await?).await?;
+
+                        switch_undone_state_tx(
+                            &self.user,
+                            history_id,
+                            true,
+                            &mut tx,
+                            &self.db_kind,
+                        )
+                        .await?;
+                        tx.commit().await?;
+
+                        // Save the column table and the data table and then reconfigure valve:
+                        self.save_tables(&vec!["column", table], &None).await?;
+                        self.reconfigure()?;
+
+                        // Refresh the database:
+                        self.ensure_all_tables_created(&vec![table]).await?;
+
+                        return Ok(None);
+                    }
+                },
                 "add datatype" => todo!(),
                 "delete datatype" => todo!(),
                 "add table" => todo!(),
                 "delete table" => todo!(),
+                // Moves:
                 _ => {
                     let summary = get_json_array_from_column(&last_change, "summary");
                     if let Some(summary) = summary {

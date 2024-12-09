@@ -307,7 +307,7 @@ async fn generate_operation_sequence(pool: &AnyPool) -> Result<Vec<DbOperation>>
     Ok(operations)
 }
 
-async fn test_randomized_api_test_with_undo_redo(valve: &Valve) -> Result<()> {
+async fn test_randomized_api_test_with_undo_redo(valve: &mut Valve) -> Result<()> {
     // Randomly generate a number of insert/update/delete operations, possibly followed by undos
     // and/or redos.
     eprint!("Running test_randomized_api_test_with_undo_redo() ... ");
@@ -419,7 +419,7 @@ async fn test_randomized_api_test_with_undo_redo(valve: &Valve) -> Result<()> {
     Ok(())
 }
 
-async fn test_undo_redo(valve: &Valve) -> Result<()> {
+async fn test_undo_redo(valve: &mut Valve) -> Result<()> {
     eprint!("Running test_undo_redo() ... ");
 
     // Undo/redo tests
@@ -875,7 +875,7 @@ async fn test_default(valve: &Valve) -> Result<()> {
     Ok(())
 }
 
-async fn test_move(valve: &Valve) -> Result<()> {
+async fn test_move(valve: &mut Valve) -> Result<()> {
     eprint!("Running test_move() ... ");
 
     async fn get_rows_in_order(valve: &Valve) -> Result<Vec<u32>> {
@@ -976,7 +976,7 @@ async fn test_move(valve: &Valve) -> Result<()> {
     Ok(())
 }
 
-pub async fn run_api_tests(valve: &Valve) -> Result<()> {
+pub async fn run_api_tests(valve: &mut Valve) -> Result<()> {
     // NOTE that you must use an external script to fetch the data from the database and run a diff
     // against a known good sample to verify that these tests yield the expected results:
     test_matching(&valve).await?;
@@ -986,11 +986,11 @@ pub async fn run_api_tests(valve: &Valve) -> Result<()> {
     test_insert_2(&valve).await?;
     test_insert_3(&valve).await?;
     test_dependencies(&valve).await?;
-    test_undo_redo(&valve).await?;
-    test_randomized_api_test_with_undo_redo(&valve).await?;
+    test_undo_redo(valve).await?;
+    test_randomized_api_test_with_undo_redo(valve).await?;
     test_modes(&valve).await?;
     test_default(&valve).await?;
-    test_move(&valve).await?;
+    test_move(valve).await?;
 
     // TODO: Add tests for adding, deleting, updating columns, tables, messages.
 
