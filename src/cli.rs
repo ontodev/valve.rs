@@ -1353,7 +1353,7 @@ pub async fn undo(cli: &Cli) {
 /// Use Valve, in conformity with the given command-line parameters, to redo the last operation
 /// that was undone and print the information, if any, that resulted from the redo.
 pub async fn redo(cli: &Cli) {
-    let valve = build_valve(&cli).await;
+    let mut valve = build_valve(&cli).await;
     let updated_row = valve.redo().await.expect("Error redoing");
     if let Some(valve_row) = updated_row {
         print!(

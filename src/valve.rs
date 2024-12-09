@@ -1195,7 +1195,18 @@ impl Valve {
                 .collect::<Vec<_>>();
 
             let mut to = JsonRow::new();
-            to.insert("table".to_string(), json!(sloopfines[0]));
+            let mloopfunes = {
+                let mut mloopfunes = JsonRow::new();
+                for (key, value) in sloopfines[0].iter() {
+                    if key == "type" {
+                        mloopfunes.insert(format!("table_{key}"), value.clone());
+                    } else {
+                        mloopfunes.insert(format!("{key}"), value.clone());
+                    }
+                }
+                mloopfunes
+            };
+            to.insert("table".to_string(), json!(mloopfunes));
             to.insert("column".to_string(), json!(droopfines));
 
             let (rn, _) = self.get_next_new_row("table").await?;
@@ -4331,7 +4342,7 @@ impl Valve {
     }
 
     /// Redo one change and return the change record or None if there was no change to redo.
-    pub async fn redo(&self) -> Result<Option<ValveRow>> {
+    pub async fn redo(&mut self) -> Result<Option<ValveRow>> {
         let records = get_db_records_to_redo(&self.pool, 1).await?;
         let next_undo_id = get_next_undo_id(&self.pool).await?;
         let next_redo = match records.len() {
@@ -4370,34 +4381,459 @@ impl Valve {
         let row_number = row_number as u32;
         let from = get_json_object_from_column(&next_redo, "from");
         let to = get_json_object_from_column(&next_redo, "to");
-        let summary = get_json_array_from_column(&next_redo, "summary");
-        if let Some(summary) = summary {
-            let num_moves = summary
-                .iter()
-                .filter(|o| {
-                    o.get("column").expect("No 'column' in summary") == "previous_row"
-                        && o.get("level").expect("No 'level' in summary") == "move"
-                })
-                .collect::<Vec<_>>()
-                .len();
-            if num_moves == 1 {
-                // Redo a move:
-                let mut tx = self.pool.begin().await?;
 
-                undo_or_redo_move_tx(table, &next_redo, history_id, &row_number, &mut tx, false)
-                    .await?;
-                switch_undone_state_tx(&self.user, history_id, false, &mut tx, &self.db_kind)
-                    .await?;
+        let make_err = |err_str: &str| -> ValveError { ValveError::DataError(err_str.to_string()) };
 
-                tx.commit().await?;
-                return Ok(None);
-            } else if num_moves > 1 {
-                return Err(ValveError::DataError(format!(
-                    "Invalid history record #{} indicated multiple moves",
-                    history_id
-                ))
-                .into());
-            }
+        // Handle metadata changes and row moves:
+        let raw_summary = next_redo.try_get_raw("summary")?;
+        if !raw_summary.is_null() {
+            let summary: &str = next_redo.get("summary");
+            match summary {
+                // Metadata changes:
+                "add column" => match &to {
+                    None => return Err(make_err("No 'to' found").into()),
+                    Some(to) => {
+                        let table = to
+                            .get("table")
+                            .and_then(|t| t.as_str())
+                            .ok_or(make_err("No string 'table' found"))?;
+                        let column = to
+                            .get("column")
+                            .and_then(|t| t.as_str())
+                            .ok_or(make_err("No string 'column' found"))?;
+
+                        let mut tx = self.pool.begin().await?;
+                        add_column_tx(table, column, to, &mut tx, &self.db_kind).await?;
+
+                        let sql = {
+                            let rn: i64 = next_redo.get("row");
+                            let rn = rn as u32;
+                            let ro = rn * MOVE_INTERVAL;
+                            local_sql_syntax(
+                                &self.db_kind,
+                                &format!(
+                                    r#"UPDATE "column" SET "row_number" = {rn}, "row_order" = {ro}
+                                       WHERE "table" = {SQL_PARAM} AND "column" = {SQL_PARAM}"#
+                                ),
+                            )
+                        };
+                        let query = sqlx_query(&sql).bind(table).bind(column);
+                        query.execute(tx.acquire().await?).await?;
+
+                        switch_undone_state_tx(
+                            &self.user,
+                            history_id,
+                            false,
+                            &mut tx,
+                            &self.db_kind,
+                        )
+                        .await?;
+                        tx.commit().await?;
+
+                        // Save the column table and the data table and then reconfigure valve:
+                        self.save_tables(&vec!["column", table], &None).await?;
+                        self.reconfigure()?;
+
+                        // Refresh the database:
+                        self.ensure_all_tables_created(&vec![table]).await?;
+
+                        return Ok(None);
+                    }
+                },
+                "delete column" => match &from {
+                    None => return Err(make_err("No 'from' found").into()),
+                    Some(from) => {
+                        let table = from
+                            .get("table")
+                            .and_then(|t| t.as_str())
+                            .ok_or(make_err("No string 'table' found"))?;
+                        let column = from
+                            .get("column")
+                            .and_then(|t| t.as_str())
+                            .ok_or(make_err("No string 'column' found"))?;
+
+                        let mut tx = self.pool.begin().await?;
+                        delete_column_tx(table, column, &mut tx, &self.db_kind).await?;
+                        switch_undone_state_tx(
+                            &self.user,
+                            history_id,
+                            false,
+                            &mut tx,
+                            &self.db_kind,
+                        )
+                        .await?;
+                        tx.commit().await?;
+
+                        // Save the column table and the data table and then reconfigure valve:
+                        self.save_tables(&vec!["column", table], &None).await?;
+                        self.reconfigure()?;
+
+                        // Refresh the database:
+                        self.ensure_all_tables_created(&vec![table]).await?;
+
+                        return Ok(None);
+                    }
+                },
+                "add datatype" => match &to {
+                    None => return Err(make_err("No 'to' found").into()),
+                    Some(to) => {
+                        let dt_map = {
+                            let mut dt_map = HashMap::new();
+                            for (key, value) in to.iter() {
+                                dt_map.insert(key.to_string(), value.as_str().unwrap().to_string());
+                            }
+                            dt_map
+                        };
+
+                        let mut tx = self.pool.begin().await?;
+                        add_datatype_tx(&dt_map, &self.db_kind, &mut tx).await?;
+                        switch_undone_state_tx(
+                            &self.user,
+                            history_id,
+                            false,
+                            &mut tx,
+                            &self.db_kind,
+                        )
+                        .await?;
+                        tx.commit().await?;
+
+                        // Save the datatype table and then reconfigure valve:
+                        self.save_tables(&vec!["datatype"], &None).await?;
+                        self.reconfigure()?;
+                        return Ok(None);
+                    }
+                },
+                "delete datatype" => match &from {
+                    None => return Err(make_err("No 'from' found").into()),
+                    Some(from) => {
+                        let datatype = from
+                            .get("datatype")
+                            .and_then(|t| t.as_str())
+                            .ok_or(make_err("No string 'datatype' found"))?;
+
+                        let mut tx = self.pool.begin().await?;
+                        delete_datatype_tx(datatype, &mut tx, &self.db_kind).await?;
+                        switch_undone_state_tx(
+                            &self.user,
+                            history_id,
+                            false,
+                            &mut tx,
+                            &self.db_kind,
+                        )
+                        .await?;
+                        tx.commit().await?;
+
+                        // Save the datatype table and then reconfigure valve:
+                        self.save_tables(&vec!["datatype"], &None).await?;
+                        self.reconfigure()?;
+
+                        return Ok(None);
+                    }
+                },
+                "add table" => match &to {
+                    None => return Err(make_err("No 'to' found").into()),
+                    Some(to) => {
+                        let mut values = vec![];
+                        let mut params = vec![];
+                        println!("TO: {to:#?}");
+                        let table = to
+                            .get("table")
+                            .and_then(|t| t.as_object())
+                            .and_then(|o| o.get("table"))
+                            .and_then(|t| t.as_str())
+                            .ok_or(make_err("No string 'table' found"))?;
+                        if table == "" {
+                            values.push("NULL");
+                        } else {
+                            values.push(SQL_PARAM);
+                            params.push(table);
+                        }
+                        let table_type = to
+                            .get("table")
+                            .and_then(|t| t.as_object())
+                            .and_then(|o| o.get("table_type"))
+                            .and_then(|t| t.as_str())
+                            .ok_or(make_err("No string 'table_type' found"))?;
+                        if table_type == "" {
+                            values.push("NULL");
+                        } else {
+                            values.push(SQL_PARAM);
+                            params.push(table_type);
+                        }
+                        let options = to
+                            .get("table")
+                            .and_then(|t| t.as_object())
+                            .and_then(|o| o.get("options"))
+                            .and_then(|t| t.as_str())
+                            .ok_or(make_err("No string 'options' found"))?;
+                        if options == "" {
+                            values.push("NULL");
+                        } else {
+                            values.push(SQL_PARAM);
+                            params.push(options);
+                        }
+                        let description = to
+                            .get("table")
+                            .and_then(|t| t.as_object())
+                            .and_then(|o| o.get("description"))
+                            .and_then(|t| t.as_str())
+                            .ok_or(make_err("No string 'description' found"))?;
+                        if description == "" {
+                            values.push("NULL");
+                        } else {
+                            values.push(SQL_PARAM);
+                            params.push(description);
+                        }
+                        let path = to
+                            .get("table")
+                            .and_then(|t| t.as_object())
+                            .and_then(|o| o.get("path"))
+                            .and_then(|t| t.as_str())
+                            .ok_or(make_err("No string 'path' found"))?;
+                        if path == "" {
+                            values.push("NULL");
+                        } else {
+                            values.push(SQL_PARAM);
+                            params.push(path);
+                        }
+
+                        let mut tx = self.pool.begin().await?;
+
+                        let sql = {
+                            let rn: i64 = next_redo.get("row");
+                            let rn = rn as u32;
+                            let ro = rn * MOVE_INTERVAL;
+                            local_sql_syntax(
+                                &self.db_kind,
+                                &format!(
+                                    r#"INSERT INTO "table"
+                                           ("row_number", "row_order", "table", "type", "options",
+                                            "description", "path")
+                                       VALUES ({rn}, {ro}, {remaining_values})"#,
+                                    remaining_values = values.join(", ")
+                                ),
+                            )
+                        };
+                        let mut query = sqlx_query(&sql);
+                        for param in params {
+                            query = query.bind(param);
+                        }
+                        query.execute(tx.acquire().await?).await?;
+
+                        let columns = to
+                            .get("column")
+                            .and_then(|t| t.as_array())
+                            .ok_or(make_err("No array 'column' found"))?;
+                        let (mut rn, mut ro) = self.get_next_new_row("column").await?;
+                        for details in columns.iter() {
+                            let mut values = vec![];
+                            let mut params = vec![];
+                            let table = details
+                                .get("table")
+                                .and_then(|t| t.as_str())
+                                .ok_or(make_err("No string 'table' found"))?;
+                            if table == "" {
+                                values.push("NULL");
+                            } else {
+                                values.push(SQL_PARAM);
+                                params.push(table);
+                            }
+                            let column = details
+                                .get("column")
+                                .and_then(|t| t.as_str())
+                                .ok_or(make_err("No string 'column' found"))?;
+                            if column == "" {
+                                values.push("NULL");
+                            } else {
+                                values.push(SQL_PARAM);
+                                params.push(column);
+                            }
+                            let datatype = details
+                                .get("datatype")
+                                .and_then(|t| t.as_str())
+                                .ok_or(make_err("No string 'datatype' found"))?;
+                            if datatype == "" {
+                                values.push("NULL");
+                            } else {
+                                values.push(SQL_PARAM);
+                                params.push(datatype);
+                            }
+                            let description = details
+                                .get("description")
+                                .and_then(|t| t.as_str())
+                                .ok_or(make_err("No string 'description' found"))?;
+                            if description == "" {
+                                values.push("NULL");
+                            } else {
+                                values.push(SQL_PARAM);
+                                params.push(description);
+                            }
+                            let label = details
+                                .get("label")
+                                .and_then(|t| t.as_str())
+                                .ok_or(make_err("No string 'label' found"))?;
+                            if label == "" {
+                                values.push("NULL");
+                            } else {
+                                values.push(SQL_PARAM);
+                                params.push(label);
+                            }
+                            let structure = details
+                                .get("structure")
+                                .and_then(|t| t.as_str())
+                                .ok_or(make_err("No string 'structure' found"))?;
+                            if structure == "" {
+                                values.push("NULL");
+                            } else {
+                                values.push(SQL_PARAM);
+                                params.push(structure);
+                            }
+                            let nulltype = details
+                                .get("nulltype")
+                                .and_then(|t| t.as_str())
+                                .ok_or(make_err("No string 'nulltype' found"))?;
+                            if nulltype == "" {
+                                values.push("NULL");
+                            } else {
+                                values.push(SQL_PARAM);
+                                params.push(nulltype);
+                            }
+                            let default = details
+                                .get("default")
+                                .ok_or(make_err("No 'default' found"))?;
+                            let default_str = default.to_string();
+                            match default {
+                                SerdeValue::Number(_) => {
+                                    values.push(&default_str);
+                                }
+                                SerdeValue::String(default) => {
+                                    if default == "" {
+                                        values.push("NULL");
+                                    } else {
+                                        values.push(SQL_PARAM);
+                                        params.push(default);
+                                    }
+                                }
+                                _ => return Err(make_err("Bah!").into()),
+                            };
+                            let sql = format!(
+                                r#"INSERT INTO "column"
+                                   ("row_number", "row_order", "table", "column",
+                                    "datatype", "description", "label", "structure",
+                                    "nulltype", "default")
+                                   VALUES
+                                   ({rn}, {ro}, {remaining_values})"#,
+                                remaining_values = values.join(", "),
+                            );
+                            let sql = local_sql_syntax(&self.db_kind, &sql.to_string());
+                            let mut query = sqlx_query(&sql);
+                            for param in params {
+                                query = query.bind(param);
+                            }
+                            query.execute(tx.acquire().await?).await?;
+                            rn += 1;
+                            ro = rn * MOVE_INTERVAL;
+                        }
+
+                        switch_undone_state_tx(
+                            &self.user,
+                            history_id,
+                            false,
+                            &mut tx,
+                            &self.db_kind,
+                        )
+                        .await?;
+
+                        tx.commit().await?;
+
+                        self.save_tables(&vec!["table", "column"], &None).await?;
+                        self.reconfigure()?;
+                        self.ensure_all_tables_created(&vec![table]).await?;
+                        return Ok(None);
+                    }
+                },
+                "delete table" => match &from {
+                    None => return Err(make_err("No 'from' found").into()),
+                    Some(from) => {
+                        let table = from
+                            .get("table")
+                            .and_then(|t| t.as_object())
+                            .and_then(|t| t.get("table"))
+                            .and_then(|t| t.as_str())
+                            .ok_or(make_err("No table found"))?;
+
+                        let mut tx = self.pool.begin().await?;
+
+                        delete_table_tx(table, &mut tx, &self.db_kind).await?;
+                        switch_undone_state_tx(
+                            &self.user,
+                            history_id,
+                            false,
+                            &mut tx,
+                            &self.db_kind,
+                        )
+                        .await?;
+
+                        // Commit the transaction:
+                        tx.commit().await?;
+
+                        // TODO: Maybe we should add a _tx version of this function:
+                        // Drop the table in the database:
+                        self.drop_tables(&vec![table]).await?;
+
+                        // Save the column and table tables and reconfigure valve:
+                        self.save_tables(&vec!["table", "column"], &None).await?;
+                        self.reconfigure()?;
+
+                        return Ok(None);
+                    }
+                },
+                // Moves
+                _ => {
+                    let summary = get_json_array_from_column(&next_redo, "summary");
+                    if let Some(summary) = summary {
+                        let num_moves = summary
+                            .iter()
+                            .filter(|o| {
+                                o.get("column").expect("No 'column' in summary") == "previous_row"
+                                    && o.get("level").expect("No 'level' in summary") == "move"
+                            })
+                            .collect::<Vec<_>>()
+                            .len();
+                        if num_moves == 1 {
+                            // Redo a move:
+                            let mut tx = self.pool.begin().await?;
+
+                            undo_or_redo_move_tx(
+                                table,
+                                &next_redo,
+                                history_id,
+                                &row_number,
+                                &mut tx,
+                                false,
+                            )
+                            .await?;
+                            switch_undone_state_tx(
+                                &self.user,
+                                history_id,
+                                false,
+                                &mut tx,
+                                &self.db_kind,
+                            )
+                            .await?;
+
+                            tx.commit().await?;
+                            return Ok(None);
+                        } else if num_moves > 1 {
+                            return Err(ValveError::DataError(format!(
+                                "Invalid history record #{} indicated multiple moves",
+                                history_id
+                            ))
+                            .into());
+                        }
+                    }
+                }
+            };
         }
 
         match (from, to) {
