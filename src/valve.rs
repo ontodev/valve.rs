@@ -3929,6 +3929,26 @@ impl Valve {
                             &self.db_kind,
                         )
                         .await?;
+
+                        let datatype = from
+                            .get("datatype")
+                            .and_then(|d| d.as_str())
+                            .ok_or(make_err("No string 'datatype' found"))?;
+                        let sql = {
+                            let rn: i64 = last_change.get("row");
+                            let rn = rn as u32;
+                            let ro = rn * MOVE_INTERVAL;
+                            local_sql_syntax(
+                                &self.db_kind,
+                                &format!(
+                                    r#"UPDATE "datatype" SET "row_number" = {rn}, "row_order" = {ro}
+                                       WHERE "datatype" = {SQL_PARAM}"#
+                                ),
+                            )
+                        };
+                        let query = sqlx_query(&sql).bind(datatype);
+                        query.execute(tx.acquire().await?).await?;
+
                         tx.commit().await?;
 
                         // Save the datatype table and then reconfigure valve:
