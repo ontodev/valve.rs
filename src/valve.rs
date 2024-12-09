@@ -3871,8 +3871,62 @@ impl Valve {
                         return Ok(None);
                     }
                 },
-                "add datatype" => todo!(),
-                "delete datatype" => todo!(),
+                "add datatype" => match &to {
+                    None => return Err(make_err("No from found").into()),
+                    Some(to) => {
+                        let datatype = to
+                            .get("datatype")
+                            .and_then(|t| t.as_str())
+                            .ok_or(make_err("No string 'datatype' found"))?;
+
+                        let mut tx = self.pool.begin().await?;
+                        delete_datatype_tx(datatype, &mut tx, &self.db_kind).await?;
+                        switch_undone_state_tx(
+                            &self.user,
+                            history_id,
+                            true,
+                            &mut tx,
+                            &self.db_kind,
+                        )
+                        .await?;
+                        tx.commit().await?;
+
+                        // Save the datatype table and then reconfigure valve:
+                        self.save_tables(&vec!["datatype"], &None).await?;
+                        self.reconfigure()?;
+
+                        return Ok(None);
+                    }
+                },
+                "delete datatype" => match &from {
+                    None => return Err(make_err("No to found").into()),
+                    Some(from) => {
+                        let dt_map = {
+                            let mut dt_map = HashMap::new();
+                            for (key, value) in from.iter() {
+                                dt_map.insert(key.to_string(), value.as_str().unwrap().to_string());
+                            }
+                            dt_map
+                        };
+
+                        let mut tx = self.pool.begin().await?;
+                        add_datatype_tx(&dt_map, &self.db_kind, &mut tx).await?;
+                        switch_undone_state_tx(
+                            &self.user,
+                            history_id,
+                            true,
+                            &mut tx,
+                            &self.db_kind,
+                        )
+                        .await?;
+                        tx.commit().await?;
+
+                        // Save the datatype table and then reconfigure valve:
+                        self.save_tables(&vec!["datatype"], &None).await?;
+                        self.reconfigure()?;
+                        return Ok(None);
+                    }
+                },
                 "add table" => todo!(),
                 "delete table" => todo!(),
                 // Moves:
