@@ -1198,11 +1198,13 @@ impl Valve {
             to.insert("table".to_string(), json!(sloopfines[0]));
             to.insert("column".to_string(), json!(droopfines));
 
+            let (rn, _) = self.get_next_new_row("table").await?;
+
             record_config_change_tx(
                 &self.db_kind,
                 &mut tx,
                 "table",
-                &0,
+                &rn,
                 None,
                 Some(&to),
                 &self.user,
@@ -1230,16 +1232,16 @@ impl Valve {
 
         delete_table_tx(table, &mut tx, &self.db_kind).await?;
 
-        let mut tconfig = self
+        let tconfig = self
             .config
             .table
             .get(table)
-            .ok_or(ValveError::InputError(format!(
-                "No table sssfound '{table}'",
-            )))?;
+            .ok_or(ValveError::InputError(format!("No table found '{table}'",)))?;
 
-        let mut to = JsonRow::new();
-        to.insert("table".to_string(), json!(tconfig));
+        let from = json!(tconfig);
+        let from = from.as_object().ok_or(ValveError::InputError(format!(
+            "Not an object: {tconfig:?}'",
+        )))?;
 
         // TODO: Make this a function, or better, can the number be returned from the delete?
         let table_rn = {
@@ -1257,8 +1259,8 @@ impl Valve {
             &mut tx,
             "table",
             &table_rn,
+            Some(&from),
             None,
-            Some(&to),
             &self.user,
         )
         .await?;
@@ -1268,9 +1270,6 @@ impl Valve {
 
         // Save the column and table tables and reconfigure valve:
         self.save_tables(&vec!["table", "column"], &None).await?;
-        if self.verbose {
-            println!("Updating valve configuration.")
-        }
         self.reconfigure()
     }
 
@@ -3788,7 +3787,7 @@ impl Valve {
             match summary {
                 // Metadata changes:
                 "add column" => match &to {
-                    None => return Err(make_err("No to found").into()),
+                    None => return Err(make_err("No 'to' found").into()),
                     Some(to) => {
                         let table = to
                             .get("table")
@@ -3822,7 +3821,7 @@ impl Valve {
                     }
                 },
                 "delete column" => match &from {
-                    None => return Err(make_err("No from found").into()),
+                    None => return Err(make_err("No 'from' found").into()),
                     Some(from) => {
                         let table = from
                             .get("table")
@@ -3872,7 +3871,7 @@ impl Valve {
                     }
                 },
                 "add datatype" => match &to {
-                    None => return Err(make_err("No from found").into()),
+                    None => return Err(make_err("No 'from' found").into()),
                     Some(to) => {
                         let datatype = to
                             .get("datatype")
@@ -3899,7 +3898,7 @@ impl Valve {
                     }
                 },
                 "delete datatype" => match &from {
-                    None => return Err(make_err("No to found").into()),
+                    None => return Err(make_err("No 'to' found").into()),
                     Some(from) => {
                         let dt_map = {
                             let mut dt_map = HashMap::new();
@@ -3927,8 +3926,257 @@ impl Valve {
                         return Ok(None);
                     }
                 },
-                "add table" => todo!(),
-                "delete table" => todo!(),
+                "add table" => match &to {
+                    None => return Err(make_err("No 'to' found").into()),
+                    Some(to) => {
+                        let table = to
+                            .get("table")
+                            .and_then(|t| t.as_object())
+                            .and_then(|t| t.get("table"))
+                            .and_then(|t| t.as_str())
+                            .ok_or(make_err("No table found"))?;
+
+                        let mut tx = self.pool.begin().await?;
+
+                        delete_table_tx(table, &mut tx, &self.db_kind).await?;
+                        switch_undone_state_tx(
+                            &self.user,
+                            history_id,
+                            true,
+                            &mut tx,
+                            &self.db_kind,
+                        )
+                        .await?;
+
+                        // Commit the transaction:
+                        tx.commit().await?;
+
+                        // TODO: Maybe we should add a _tx version of this function:
+                        // Drop the table in the database:
+                        self.drop_tables(&vec![table]).await?;
+
+                        // Save the column and table tables and reconfigure valve:
+                        self.save_tables(&vec!["table", "column"], &None).await?;
+                        self.reconfigure()?;
+
+                        return Ok(None);
+                    }
+                },
+                "delete table" => match &from {
+                    None => return Err(make_err("No 'to' found").into()),
+                    Some(from) => {
+                        let mut values = vec![];
+                        let mut params = vec![];
+                        let table = from
+                            .get("table")
+                            .and_then(|t| t.as_str())
+                            .ok_or(make_err("No string 'table_type' found"))?;
+                        if table == "" {
+                            values.push("NULL");
+                        } else {
+                            values.push(SQL_PARAM);
+                            params.push(table);
+                        }
+                        let table_type = from
+                            .get("table_type")
+                            .and_then(|t| t.as_str())
+                            .ok_or(make_err("No string 'table_type' found"))?;
+                        if table_type == "" {
+                            values.push("NULL");
+                        } else {
+                            values.push(SQL_PARAM);
+                            params.push(table_type);
+                        }
+                        let options = from
+                            .get("options")
+                            .and_then(|t| t.as_array())
+                            .ok_or(make_err("No array 'options' found"))?
+                            .iter()
+                            .map(|o| o.as_str().unwrap())
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        if options == "" {
+                            values.push("NULL");
+                        } else {
+                            values.push(SQL_PARAM);
+                            params.push(options.as_str());
+                        }
+                        let description = from
+                            .get("description")
+                            .and_then(|t| t.as_str())
+                            .ok_or(make_err("No string 'description' found"))?;
+                        if description == "" {
+                            values.push("NULL");
+                        } else {
+                            values.push(SQL_PARAM);
+                            params.push(description);
+                        }
+                        let path = from
+                            .get("path")
+                            .and_then(|t| t.as_str())
+                            .ok_or(make_err("No string 'path' found"))?;
+                        if path == "" {
+                            values.push("NULL");
+                        } else {
+                            values.push(SQL_PARAM);
+                            params.push(path);
+                        }
+
+                        let mut tx = self.pool.begin().await?;
+
+                        let sql = {
+                            let rn: i64 = last_change.get("row");
+                            let rn = rn as u32;
+                            let ro = rn * MOVE_INTERVAL;
+                            local_sql_syntax(
+                                &self.db_kind,
+                                &format!(
+                                    r#"INSERT INTO "table"
+                                           ("row_number", "row_order", "table", "type", "options",
+                                            "description", "path")
+                                       VALUES ({rn}, {ro}, {remaining_values})"#,
+                                    remaining_values = values.join(", ")
+                                ),
+                            )
+                        };
+                        let mut query = sqlx_query(&sql);
+                        for param in params {
+                            query = query.bind(param);
+                        }
+                        query.execute(tx.acquire().await?).await?;
+
+                        let columns = from
+                            .get("column")
+                            .and_then(|t| t.as_object())
+                            .ok_or(make_err("No object 'column' found"))?;
+                        let (mut rn, mut ro) = self.get_next_new_row("column").await?;
+                        for (_, details) in columns.iter() {
+                            let mut values = vec![];
+                            let mut params = vec![];
+                            let table = details
+                                .get("table")
+                                .and_then(|t| t.as_str())
+                                .ok_or(make_err("No string 'table' found"))?;
+                            if table == "" {
+                                values.push("NULL");
+                            } else {
+                                values.push(SQL_PARAM);
+                                params.push(table);
+                            }
+                            let column = details
+                                .get("column")
+                                .and_then(|t| t.as_str())
+                                .ok_or(make_err("No string 'column' found"))?;
+                            if column == "" {
+                                values.push("NULL");
+                            } else {
+                                values.push(SQL_PARAM);
+                                params.push(column);
+                            }
+                            let datatype = details
+                                .get("datatype")
+                                .and_then(|t| t.as_str())
+                                .ok_or(make_err("No string 'datatype' found"))?;
+                            if datatype == "" {
+                                values.push("NULL");
+                            } else {
+                                values.push(SQL_PARAM);
+                                params.push(datatype);
+                            }
+                            let description = details
+                                .get("description")
+                                .and_then(|t| t.as_str())
+                                .ok_or(make_err("No string 'description' found"))?;
+                            if description == "" {
+                                values.push("NULL");
+                            } else {
+                                values.push(SQL_PARAM);
+                                params.push(description);
+                            }
+                            let label = details
+                                .get("label")
+                                .and_then(|t| t.as_str())
+                                .ok_or(make_err("No string 'label' found"))?;
+                            if label == "" {
+                                values.push("NULL");
+                            } else {
+                                values.push(SQL_PARAM);
+                                params.push(label);
+                            }
+                            let structure = details
+                                .get("structure")
+                                .and_then(|t| t.as_str())
+                                .ok_or(make_err("No string 'structure' found"))?;
+                            if structure == "" {
+                                values.push("NULL");
+                            } else {
+                                values.push(SQL_PARAM);
+                                params.push(structure);
+                            }
+                            let nulltype = details
+                                .get("nulltype")
+                                .and_then(|t| t.as_str())
+                                .ok_or(make_err("No string 'nulltype' found"))?;
+                            if nulltype == "" {
+                                values.push("NULL");
+                            } else {
+                                values.push(SQL_PARAM);
+                                params.push(nulltype);
+                            }
+                            let default = details
+                                .get("default")
+                                .ok_or(make_err("No 'default' found"))?;
+                            let default_str = default.to_string();
+                            match default {
+                                SerdeValue::Number(_) => {
+                                    values.push(&default_str);
+                                }
+                                SerdeValue::String(default) => {
+                                    if default == "" {
+                                        values.push("NULL");
+                                    } else {
+                                        values.push(SQL_PARAM);
+                                        params.push(default);
+                                    }
+                                }
+                                _ => return Err(make_err("Bah!").into()),
+                            };
+                            let sql = format!(
+                                r#"INSERT INTO "column"
+                                   ("row_number", "row_order", "table", "column",
+                                    "datatype", "description", "label", "structure",
+                                    "nulltype", "default")
+                                   VALUES
+                                   ({rn}, {ro}, {remaining_values})"#,
+                                remaining_values = values.join(", "),
+                            );
+                            let sql = local_sql_syntax(&self.db_kind, &sql.to_string());
+                            let mut query = sqlx_query(&sql);
+                            for param in params {
+                                query = query.bind(param);
+                            }
+                            query.execute(tx.acquire().await?).await?;
+                            rn += 1;
+                            ro = rn * MOVE_INTERVAL;
+                        }
+
+                        switch_undone_state_tx(
+                            &self.user,
+                            history_id,
+                            true,
+                            &mut tx,
+                            &self.db_kind,
+                        )
+                        .await?;
+
+                        tx.commit().await?;
+
+                        self.save_tables(&vec!["table", "column"], &None).await?;
+                        self.reconfigure()?;
+                        self.ensure_all_tables_created(&vec![table]).await?;
+                        return Ok(None);
+                    }
+                },
                 // Moves:
                 _ => {
                     let summary = get_json_array_from_column(&last_change, "summary");
