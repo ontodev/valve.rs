@@ -4037,7 +4037,39 @@ impl Valve {
                         return Ok(None);
                     }
                 },
-                "rename datatype" => todo!(),
+                "rename datatype" => match &from {
+                    None => return Err(make_err("No 'from' found").into()),
+                    Some(from) => {
+                        let old_name = from.get("datatype").unwrap().as_str().unwrap();
+                        match &to {
+                            None => return Err(make_err("No 'to' found").into()),
+                            Some(to) => {
+                                let new_name = to.get("datatype").unwrap().as_str().unwrap();
+
+                                let mut tx = self.pool.begin().await?;
+                                rename_datatype_tx(&self, new_name, old_name, &mut tx).await?;
+                                switch_undone_state_tx(
+                                    &self.user,
+                                    history_id,
+                                    true,
+                                    &mut tx,
+                                    &self.db_kind,
+                                )
+                                .await?;
+
+                                // Commit the transaction:
+                                tx.commit().await?;
+
+                                // Save the column table and the data table and then reconfigure valve:
+                                self.save_tables(&vec!["datatype", "column", "rule"], &None)
+                                    .await?;
+                                self.reconfigure()?;
+
+                                return Ok(None);
+                            }
+                        };
+                    }
+                },
                 "add table" => match &to {
                     None => return Err(make_err("No 'to' found").into()),
                     Some(to) => {
@@ -4703,7 +4735,39 @@ impl Valve {
                         return Ok(None);
                     }
                 },
-                "rename datatype" => todo!(),
+                "rename datatype" => match &from {
+                    None => return Err(make_err("No 'from' found").into()),
+                    Some(from) => {
+                        let old_name = from.get("datatype").unwrap().as_str().unwrap();
+                        match &to {
+                            None => return Err(make_err("No 'to' found").into()),
+                            Some(to) => {
+                                let new_name = to.get("datatype").unwrap().as_str().unwrap();
+
+                                let mut tx = self.pool.begin().await?;
+                                rename_datatype_tx(&self, old_name, new_name, &mut tx).await?;
+                                switch_undone_state_tx(
+                                    &self.user,
+                                    history_id,
+                                    false,
+                                    &mut tx,
+                                    &self.db_kind,
+                                )
+                                .await?;
+
+                                // Commit the transaction:
+                                tx.commit().await?;
+
+                                // Save the column table and the data table and then reconfigure valve:
+                                self.save_tables(&vec!["datatype", "column", "rule"], &None)
+                                    .await?;
+                                self.reconfigure()?;
+
+                                return Ok(None);
+                            }
+                        };
+                    }
+                },
                 "add table" => match &to {
                     None => return Err(make_err("No 'to' found").into()),
                     Some(to) => {

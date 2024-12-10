@@ -2141,8 +2141,6 @@ pub async fn rename_column_tx(
     new_name: &str,
     new_label: &Option<String>,
 ) -> Result<()> {
-    // TODO: Double-check that the row number is preserved by this function after a rename.
-
     // Update from() structures in the column table that refer to the column.
     let mut structure_params = vec![];
     let mut where_params = vec![table];
