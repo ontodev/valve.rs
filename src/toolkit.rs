@@ -1037,6 +1037,7 @@ pub fn read_db_table_into_vector(pool: &AnyPool, config_table: &str) -> Result<V
 pub async fn read_db_table_into_vector_tx(
     tx: &mut Transaction<'_, sqlx::Any>,
     config_table: &str,
+    keep_rn: bool,
 ) -> Result<Vec<SerdeMap>> {
     let sql = format!("SELECT * FROM \"{}\"", config_table);
     let rows = block_on(sqlx_query(&sql).fetch_all(tx.acquire().await?)).map_err(|e| {
@@ -1058,6 +1059,9 @@ pub async fn read_db_table_into_vector_tx(
                 } else {
                     table_row.insert(cname.to_string(), json!(""));
                 }
+            } else if keep_rn && cname == "row_number" {
+                let value = row.get::<i64, _>("row_number") as u32;
+                table_row.insert(cname.to_string(), json!(value));
             }
         }
         table_rows.push(table_row);
@@ -2137,6 +2141,8 @@ pub async fn rename_column_tx(
     new_name: &str,
     new_label: &Option<String>,
 ) -> Result<()> {
+    // TODO: Double-check that the row number is preserved by this function after a rename.
+
     // Update from() structures in the column table that refer to the column.
     let mut structure_params = vec![];
     let mut where_params = vec![table];
@@ -2556,6 +2562,9 @@ pub async fn rename_table_tx(
     table: &str,
     new_name: &str,
 ) -> Result<()> {
+    // TODO: Verify that the row numbers in both the table and column tables are preserved
+    // by this function after a rename.
+
     // We begin by saving the row number and row order of the table to be renamed:
     let (saved_rn, saved_ro) = {
         let sql = local_sql_syntax(

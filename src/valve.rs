@@ -1183,12 +1183,12 @@ impl Valve {
         .await;
 
         if table_added {
-            let sloopfines = read_db_table_into_vector_tx(&mut tx, "table").await?;
+            let sloopfines = read_db_table_into_vector_tx(&mut tx, "table", true).await?;
             let sloopfines = sloopfines
                 .iter()
                 .filter(|t| t.get("table").unwrap() == table)
                 .collect::<Vec<_>>();
-            let droopfines = read_db_table_into_vector_tx(&mut tx, "column").await?;
+            let droopfines = read_db_table_into_vector_tx(&mut tx, "column", true).await?;
             let droopfines = droopfines
                 .iter()
                 .filter(|t| t.get("table").unwrap() == table)
@@ -1209,7 +1209,13 @@ impl Valve {
             to.insert("table".to_string(), json!(mloopfunes));
             to.insert("column".to_string(), json!(droopfines));
 
-            let (rn, _) = self.get_next_new_row("table").await?;
+            let rn = match mloopfunes.get("row_number") {
+                Some(SerdeValue::Number(n)) => match n.as_i64() {
+                    Some(rn) => rn as u32,
+                    _ => return Err(ValveError::DataError("Bah!".to_string()).into()),
+                },
+                _ => return Err(ValveError::DataError("Bah!".to_string()).into()),
+            };
 
             record_config_change_tx(
                 &self.db_kind,
@@ -1241,6 +1247,29 @@ impl Valve {
         // Begin a DB transaction:
         let mut tx = self.pool.begin().await?;
 
+        let table_rn = {
+            let sql = local_sql_syntax(
+                &self.db_kind,
+                &format!(r#"SELECT row_number FROM "table" WHERE "table" = {SQL_PARAM}"#),
+            );
+            let row = sqlx_query(&sql).bind(table).fetch_one(&self.pool).await?;
+            let rn = row.try_get::<i64, _>("row_number").unwrap();
+            rn as u32
+        };
+
+        let sql = local_sql_syntax(
+            &self.db_kind,
+            &format!(r#"SELECT "column", "row_number" FROM "column" WHERE "table" = {SQL_PARAM}"#),
+        );
+        let rows = sqlx_query(&sql).bind(table).fetch_all(&self.pool).await?;
+        let mut column_rows = JsonRow::new();
+        for row in rows {
+            let rn = row.get::<i64, _>("row_number");
+            let rn = rn as u32;
+            let column: &str = row.get("column");
+            column_rows.insert(column.to_string(), json!(rn));
+        }
+
         delete_table_tx(table, &mut tx, &self.db_kind).await?;
 
         let tconfig = self
@@ -1249,21 +1278,11 @@ impl Valve {
             .get(table)
             .ok_or(ValveError::InputError(format!("No table found '{table}'",)))?;
 
-        let from = json!(tconfig);
-        let from = from.as_object().ok_or(ValveError::InputError(format!(
+        let mut from = json!(tconfig);
+        let from = from.as_object_mut().ok_or(ValveError::InputError(format!(
             "Not an object: {tconfig:?}'",
         )))?;
-
-        // TODO: Make this a function, or better, can the number be returned from the delete?
-        let table_rn = {
-            let sql = local_sql_syntax(
-                &self.db_kind,
-                &format!(r#"SELECT row_number FROM "table" WHERE "table" = {SQL_PARAM}"#),
-            );
-            let row = sqlx_query(&sql).bind(table).fetch_one(&self.pool).await?;
-            let rn = row.try_get::<i64, _>("row_number").unwrap_or_default();
-            rn as u32
-        };
+        from.insert("column_rows".to_string(), json!(column_rows));
 
         record_config_change_tx(
             &self.db_kind,
@@ -3881,6 +3900,7 @@ impl Valve {
                         return Ok(None);
                     }
                 },
+                "rename column" => todo!(),
                 "add datatype" => match &to {
                     None => return Err(make_err("No 'from' found").into()),
                     Some(to) => {
@@ -3958,6 +3978,7 @@ impl Valve {
                         return Ok(None);
                     }
                 },
+                "rename datatype" => todo!(),
                 "add table" => match &to {
                     None => return Err(make_err("No 'to' found").into()),
                     Some(to) => {
@@ -4081,10 +4102,19 @@ impl Valve {
                             .get("column")
                             .and_then(|t| t.as_object())
                             .ok_or(make_err("No object 'column' found"))?;
-                        let (mut rn, mut ro) = self.get_next_new_row("column").await?;
-                        for (_, details) in columns.iter() {
+
+                        let column_rows = from
+                            .get("column_rows")
+                            .and_then(|t| t.as_object())
+                            .ok_or(make_err("No object 'column_rows' found"))?;
+
+                        for (column, details) in columns.iter() {
                             let mut values = vec![];
                             let mut params = vec![];
+
+                            let rn = column_rows.get(column).and_then(|rn| rn.as_i64()).unwrap();
+                            let rn = rn as u32;
+                            let ro = rn * MOVE_INTERVAL;
                             let table = details
                                 .get("table")
                                 .and_then(|t| t.as_str())
@@ -4188,8 +4218,6 @@ impl Valve {
                                 query = query.bind(param);
                             }
                             query.execute(tx.acquire().await?).await?;
-                            rn += 1;
-                            ro = rn * MOVE_INTERVAL;
                         }
 
                         switch_undone_state_tx(
@@ -4209,6 +4237,7 @@ impl Valve {
                         return Ok(None);
                     }
                 },
+                "rename table" => todo!(),
                 // Moves:
                 _ => {
                     let summary = get_json_array_from_column(&last_change, "summary");
@@ -4495,6 +4524,7 @@ impl Valve {
                         return Ok(None);
                     }
                 },
+                "rename column" => todo!(),
                 "add datatype" => match &to {
                     None => return Err(make_err("No 'to' found").into()),
                     Some(to) => {
@@ -4572,12 +4602,12 @@ impl Valve {
                         return Ok(None);
                     }
                 },
+                "rename datatype" => todo!(),
                 "add table" => match &to {
                     None => return Err(make_err("No 'to' found").into()),
                     Some(to) => {
                         let mut values = vec![];
                         let mut params = vec![];
-                        println!("TO: {to:#?}");
                         let table = to
                             .get("table")
                             .and_then(|t| t.as_object())
@@ -4666,10 +4696,22 @@ impl Valve {
                             .get("column")
                             .and_then(|t| t.as_array())
                             .ok_or(make_err("No array 'column' found"))?;
-                        let (mut rn, mut ro) = self.get_next_new_row("column").await?;
+
                         for details in columns.iter() {
                             let mut values = vec![];
                             let mut params = vec![];
+
+                            let rn = match details.get("row_number") {
+                                Some(SerdeValue::Number(n)) => match n.as_i64() {
+                                    Some(rn) => rn as u32,
+                                    _ => {
+                                        return Err(ValveError::DataError("Bah!".to_string()).into())
+                                    }
+                                },
+                                _ => return Err(ValveError::DataError("Bah!".to_string()).into()),
+                            };
+                            let ro = rn * MOVE_INTERVAL;
+
                             let table = details
                                 .get("table")
                                 .and_then(|t| t.as_str())
@@ -4773,8 +4815,6 @@ impl Valve {
                                 query = query.bind(param);
                             }
                             query.execute(tx.acquire().await?).await?;
-                            rn += 1;
-                            ro = rn * MOVE_INTERVAL;
                         }
 
                         switch_undone_state_tx(
@@ -4830,6 +4870,7 @@ impl Valve {
                         return Ok(None);
                     }
                 },
+                "rename table" => todo!(),
                 // Moves
                 _ => {
                     let summary = get_json_array_from_column(&next_redo, "summary");
