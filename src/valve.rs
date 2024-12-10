@@ -1183,33 +1183,33 @@ impl Valve {
         .await;
 
         if table_added {
-            let sloopfines = read_db_table_into_vector_tx(&mut tx, "table", true).await?;
-            let sloopfines = sloopfines
+            let table_config = read_db_table_into_vector_tx(&mut tx, "table", true).await?;
+            let table_config = table_config
                 .iter()
                 .filter(|t| t.get("table").unwrap() == table)
                 .collect::<Vec<_>>();
-            let droopfines = read_db_table_into_vector_tx(&mut tx, "column", true).await?;
-            let droopfines = droopfines
+            let column_config = read_db_table_into_vector_tx(&mut tx, "column", true).await?;
+            let column_config = column_config
                 .iter()
                 .filter(|t| t.get("table").unwrap() == table)
                 .collect::<Vec<_>>();
 
             let mut to = JsonRow::new();
-            let mloopfunes = {
-                let mut mloopfunes = JsonRow::new();
-                for (key, value) in sloopfines[0].iter() {
+            let table_config = {
+                let mut corrected_table_config = JsonRow::new();
+                for (key, value) in table_config[0].iter() {
                     if key == "type" {
-                        mloopfunes.insert(format!("table_{key}"), value.clone());
+                        corrected_table_config.insert(format!("table_{key}"), value.clone());
                     } else {
-                        mloopfunes.insert(format!("{key}"), value.clone());
+                        corrected_table_config.insert(format!("{key}"), value.clone());
                     }
                 }
-                mloopfunes
+                corrected_table_config
             };
-            to.insert("table".to_string(), json!(mloopfunes));
-            to.insert("column".to_string(), json!(droopfines));
+            to.insert("table".to_string(), json!(table_config));
+            to.insert("column".to_string(), json!(column_config));
 
-            let rn = match mloopfunes.get("row_number") {
+            let rn = match table_config.get("row_number") {
                 Some(SerdeValue::Number(n)) => match n.as_i64() {
                     Some(rn) => rn as u32,
                     _ => return Err(ValveError::DataError("Bah!".to_string()).into()),
@@ -4328,7 +4328,40 @@ impl Valve {
                         return Ok(None);
                     }
                 },
-                "rename table" => todo!(),
+                "rename table" => match &from {
+                    None => return Err(make_err("No 'from' found").into()),
+                    Some(from) => {
+                        let old_name = from.get("table").unwrap().as_str().unwrap();
+                        match &to {
+                            None => return Err(make_err("No 'to' found").into()),
+                            Some(to) => {
+                                let new_name = to.get("table").unwrap().as_str().unwrap();
+
+                                let mut tx = self.pool.begin().await?;
+                                rename_table_tx(&self, &mut tx, new_name, old_name).await?;
+                                switch_undone_state_tx(
+                                    &self.user,
+                                    history_id,
+                                    true,
+                                    &mut tx,
+                                    &self.db_kind,
+                                )
+                                .await?;
+
+                                // Commit the transaction:
+                                tx.commit().await?;
+
+                                // Save the column table and the data table and then reconfigure
+                                // valve:
+                                self.save_tables(&vec!["table", "column", "rule"], &None)
+                                    .await?;
+                                self.reconfigure()?;
+
+                                return Ok(None);
+                            }
+                        };
+                    }
+                },
                 // Moves:
                 _ => {
                     let summary = get_json_array_from_column(&last_change, "summary");
@@ -5035,7 +5068,40 @@ impl Valve {
                         return Ok(None);
                     }
                 },
-                "rename table" => todo!(),
+                "rename table" => match &from {
+                    None => return Err(make_err("No 'from' found").into()),
+                    Some(from) => {
+                        let old_name = from.get("table").unwrap().as_str().unwrap();
+                        match &to {
+                            None => return Err(make_err("No 'to' found").into()),
+                            Some(to) => {
+                                let new_name = to.get("table").unwrap().as_str().unwrap();
+
+                                let mut tx = self.pool.begin().await?;
+                                rename_table_tx(&self, &mut tx, old_name, new_name).await?;
+                                switch_undone_state_tx(
+                                    &self.user,
+                                    history_id,
+                                    false,
+                                    &mut tx,
+                                    &self.db_kind,
+                                )
+                                .await?;
+
+                                // Commit the transaction:
+                                tx.commit().await?;
+
+                                // Save the column table and the data table and then reconfigure
+                                // valve:
+                                self.save_tables(&vec!["table", "column", "rule"], &None)
+                                    .await?;
+                                self.reconfigure()?;
+
+                                return Ok(None);
+                            }
+                        };
+                    }
+                },
                 // Moves
                 _ => {
                     let summary = get_json_array_from_column(&next_redo, "summary");

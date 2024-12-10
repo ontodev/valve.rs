@@ -2560,9 +2560,6 @@ pub async fn rename_table_tx(
     table: &str,
     new_name: &str,
 ) -> Result<()> {
-    // TODO: Verify that the row numbers in both the table and column tables are preserved
-    // by this function after a rename.
-
     // We begin by saving the row number and row order of the table to be renamed:
     let (saved_rn, saved_ro) = {
         let sql = local_sql_syntax(
