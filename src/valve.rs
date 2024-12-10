@@ -1511,8 +1511,25 @@ impl Valve {
 
         let mut from = JsonRow::new();
         let mut to = JsonRow::new();
+        from.insert("table".to_string(), table.into());
         from.insert("column".to_string(), column.into());
+        let old_label = &self
+            .config
+            .table
+            .get(table)
+            .unwrap()
+            .column
+            .get(column)
+            .unwrap()
+            .label;
+        if old_label != "" {
+            from.insert("label".to_string(), json!(old_label));
+        }
+        to.insert("table".to_string(), table.into());
         to.insert("column".to_string(), new_name.into());
+        if let Some(new_label) = new_label {
+            to.insert("label".to_string(), json!(new_label));
+        }
         record_config_change_tx(
             &self.db_kind,
             &mut tx,
@@ -3900,7 +3917,49 @@ impl Valve {
                         return Ok(None);
                     }
                 },
-                "rename column" => todo!(),
+                "rename column" => match &from {
+                    None => return Err(make_err("No 'from' found").into()),
+                    Some(from) => {
+                        let table = from.get("table").unwrap().as_str().unwrap();
+                        let old_name = from.get("column").unwrap().as_str().unwrap();
+                        let old_label = match from.get("label") {
+                            None => None,
+                            Some(label) => Some(label.as_str().unwrap().to_string()),
+                        };
+                        match &to {
+                            None => return Err(make_err("No 'to' found").into()),
+                            Some(to) => {
+                                let new_name = to.get("column").unwrap().as_str().unwrap();
+
+                                let mut tx = self.pool.begin().await?;
+                                rename_column_tx(
+                                    &self, &mut tx, table, new_name, old_name, &old_label,
+                                )
+                                .await?;
+                                switch_undone_state_tx(
+                                    &self.user,
+                                    history_id,
+                                    true,
+                                    &mut tx,
+                                    &self.db_kind,
+                                )
+                                .await?;
+                                tx.commit().await?;
+
+                                // Save the column and rule tables, and the data table, and
+                                // then reconfigure valve:
+                                self.save_tables(&vec!["column", "rule", table], &None)
+                                    .await?;
+                                self.reconfigure()?;
+
+                                // Refresh the database but do not load any data:
+                                self.ensure_all_tables_created(&vec![table]).await?;
+
+                                return Ok(None);
+                            }
+                        };
+                    }
+                },
                 "add datatype" => match &to {
                     None => return Err(make_err("No 'from' found").into()),
                     Some(to) => {
@@ -4524,7 +4583,49 @@ impl Valve {
                         return Ok(None);
                     }
                 },
-                "rename column" => todo!(),
+                "rename column" => match &to {
+                    None => return Err(make_err("No 'to' found").into()),
+                    Some(to) => {
+                        let table = to.get("table").unwrap().as_str().unwrap();
+                        let new_name = to.get("column").unwrap().as_str().unwrap();
+                        let new_label = match to.get("label") {
+                            None => None,
+                            Some(label) => Some(label.as_str().unwrap().to_string()),
+                        };
+                        match &from {
+                            None => return Err(make_err("No 'from' found").into()),
+                            Some(from) => {
+                                let old_name = from.get("column").unwrap().as_str().unwrap();
+
+                                let mut tx = self.pool.begin().await?;
+                                rename_column_tx(
+                                    &self, &mut tx, table, old_name, new_name, &new_label,
+                                )
+                                .await?;
+                                switch_undone_state_tx(
+                                    &self.user,
+                                    history_id,
+                                    false,
+                                    &mut tx,
+                                    &self.db_kind,
+                                )
+                                .await?;
+                                tx.commit().await?;
+
+                                // Save the column and rule tables, and the data table, and
+                                // then reconfigure valve:
+                                self.save_tables(&vec!["column", "rule", table], &None)
+                                    .await?;
+                                self.reconfigure()?;
+
+                                // Refresh the database but do not load any data:
+                                self.ensure_all_tables_created(&vec![table]).await?;
+
+                                return Ok(None);
+                            }
+                        };
+                    }
+                },
                 "add datatype" => match &to {
                     None => return Err(make_err("No 'to' found").into()),
                     Some(to) => {
