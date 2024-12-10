@@ -64,6 +64,8 @@ impl DbKind {
     }
 }
 
+// TODO: Change this name from SerdeMap to JsonRow. It is just confusing to have two different
+// names.
 /// Alias for [Map](serde_json::map)<[String], [Value](serde_json::value)>.
 pub type SerdeMap = serde_json::Map<String, SerdeValue>;
 
@@ -2319,12 +2321,14 @@ pub async fn rename_datatype_tx(
     datatype: &str,
     new_name: &str,
     tx: &mut Transaction<'_, sqlx::Any>,
-) -> Result<()> {
+) -> Result<u32> {
     let cols_for_query = valve
         .config
         .table
         .get("datatype")
-        .expect("Datatype table not found in config")
+        .ok_or(ValveError::ConfigError(
+            "Datatype table not found in config".to_string(),
+        ))?
         .column
         .keys()
         .filter(|col| *col != "datatype")
@@ -2549,7 +2553,8 @@ pub async fn rename_datatype_tx(
     let query = sqlx_query(&sql);
     query.execute(tx.acquire().await?).await?;
 
-    Ok(())
+    let saved_rn = saved_rn as u32;
+    Ok(saved_rn)
 }
 
 /// Given a table name and a new name for the table, rename the table in the database using the
@@ -4262,7 +4267,7 @@ pub async fn add_column_tx(
         db_kind,
         &format!(
             r#"INSERT INTO "column" ("row_number", "row_order", {fields})
-                   VALUES ({rn}, {ro}, {placeholders})"#,
+               VALUES ({rn}, {ro}, {placeholders})"#,
             fields = fields.join(", "),
             placeholders = placeholders.join(", ")
         ),
@@ -4278,7 +4283,7 @@ pub async fn add_column_tx(
 
 /// TODO: Add docstring
 pub async fn add_datatype_tx(
-    dt_map: &HashMap<String, String>,
+    dt_map: &SerdeMap,
     db_kind: &DbKind,
     tx: &mut Transaction<'_, sqlx::Any>,
 ) -> Result<u32> {
@@ -4289,11 +4294,14 @@ pub async fn add_datatype_tx(
     let mut params = vec![];
     for (column, value) in dt_map.iter() {
         columns.push(format!(r#""{column}""#));
+        let value = value.as_str().ok_or(ValveError::InputError(
+            format!("Not a string: {value}").into(),
+        ))?;
         if value == "" {
             placeholders.push("NULL");
         } else {
             placeholders.push(SQL_PARAM);
-            params.push(value);
+            params.push(value.to_string());
         }
     }
 
@@ -4342,22 +4350,65 @@ pub async fn delete_datatype_tx(
     datatype: &str,
     tx: &mut Transaction<'_, sqlx::Any>,
     db_kind: &DbKind,
-) -> Result<()> {
+) -> Result<u32> {
     let sql = local_sql_syntax(
         db_kind,
-        &format!(r#"DELETE FROM "datatype" WHERE "datatype" = {SQL_PARAM}"#),
+        &format!(
+            r#"DELETE FROM "datatype" WHERE "datatype" = {SQL_PARAM}
+               RETURNING "row_number" AS "row_number""#
+        ),
     );
     let query = sqlx_query(&sql).bind(datatype);
-    query.execute(tx.acquire().await?).await?;
+    let row = query.fetch_one(tx.acquire().await?).await?;
+    let rn = row.get::<i64, _>("row_number") as u32;
+
+    Ok(rn)
+}
+
+/// TODO: Add docstring
+pub async fn drop_tables_tx(
+    valve: &Valve,
+    tables: &Vec<&str>,
+    tx: &mut Transaction<'_, sqlx::Any>,
+) -> Result<()> {
+    let drop_list = valve.add_dependencies(tables, true)?;
+    for table in &drop_list {
+        let table_config = valve.get_table_config(table)?;
+        if table_config.path != "" {
+            if table_config.options.contains("conflict") {
+                let sql = format!(r#"DROP VIEW IF EXISTS "{}_text_view""#, table);
+                let query = sqlx_query(&sql);
+                query.execute(tx.acquire().await?).await?;
+                let sql = format!(r#"DROP VIEW IF EXISTS "{}_view""#, table);
+                let query = sqlx_query(&sql);
+                query.execute(tx.acquire().await?).await?;
+                let sql = format!(r#"DROP TABLE IF EXISTS "{}_conflict""#, table);
+                let query = sqlx_query(&sql);
+                query.execute(tx.acquire().await?).await?;
+            }
+            let type_to_drop = match table_config.options.contains("db_view") {
+                true => "VIEW",
+                false => "TABLE",
+            };
+            let sql = format!(r#"DROP {} IF EXISTS "{}""#, type_to_drop, table);
+            let query = sqlx_query(&sql);
+            query.execute(tx.acquire().await?).await?;
+        }
+    }
 
     Ok(())
 }
 
+/// TODO: Add docstring
 pub async fn delete_table_tx(
+    valve: &Valve,
     table: &str,
     tx: &mut Transaction<'_, sqlx::Any>,
     db_kind: &DbKind,
 ) -> Result<()> {
+    // Drop the table:
+    drop_tables_tx(valve, &vec![table], tx).await?;
+
     // Delete it from the column table:
     let sql = local_sql_syntax(
         db_kind,

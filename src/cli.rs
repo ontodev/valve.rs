@@ -2172,28 +2172,31 @@ pub fn extract_message_fields(
 
 /// Given a JSON representation of a row, which is assumed to be from the datatype table, and
 /// optionally a datatype name, extract the datatype table fields for that datatype
-/// from the row and return them all as a HashMap. Note that if datatype_name
-/// is not given then json_row must contain it, i.e., it must have a "datatype" field.
+/// from the row and return them all as a JsonRow. Note that if datatype_name
+/// is not given then the json_row argument must contain it, i.e., it must have a "datatype" field.
 pub fn extract_datatype_fields(
     valve: &Valve,
     datatype_param: &Option<String>,
     json_row: &JsonRow,
-) -> HashMap<String, String> {
-    let mut dt_fields = HashMap::new();
+) -> JsonRow {
+    let mut dt_fields = JsonRow::new();
     // Add the datatype field to the map first:
     let datatype = match json_row.get("datatype") {
-        Some(input_datatype) => match datatype_param {
-            Some(datatype_param) if datatype_param != input_datatype => {
-                panic!("Mismatch between input datatype and positional parameter, DATATYPE")
+        Some(input_datatype) => {
+            let input_datatype = input_datatype.as_str().expect("Not a string").to_string();
+            match datatype_param {
+                Some(datatype_param) if *datatype_param != input_datatype => {
+                    panic!("Mismatch between input datatype and positional parameter, DATATYPE")
+                }
+                None | Some(_) => input_datatype,
             }
-            None | Some(_) => input_datatype.as_str().expect("Not a string").to_string(),
-        },
+        }
         None => match datatype_param {
             Some(datatype_param) => datatype_param.to_string(),
             None => panic!("No 'datatype' given"),
         },
     };
-    dt_fields.insert("datatype".to_string(), datatype);
+    dt_fields.insert("datatype".to_string(), json!(datatype));
 
     // Now add fields corresponding to the values of every datatype column:
     let mut json_row = json_row.clone();
@@ -2209,12 +2212,12 @@ pub fn extract_datatype_fields(
         .collect::<Vec<_>>();
     for column in configured_columns {
         let value = match json_row.get(column) {
-            Some(value) => value.as_str().expect("Not a string").to_string(),
+            Some(value) => value.clone(),
             None => {
                 if REQUIRED_DATATYPE_COLUMNS.contains(&column.as_str()) {
                     panic!("No '{column}' given");
                 }
-                "".to_string()
+                json!("")
             }
         };
         dt_fields.insert(column.to_string(), value);

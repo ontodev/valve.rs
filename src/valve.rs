@@ -1026,26 +1026,19 @@ impl Valve {
 
     /// Given a map from datatype table column names to their corresponding values, add the
     /// given datatype to Valve.
-    pub async fn add_datatype(&mut self, dt_map: &HashMap<String, String>) -> Result<()> {
+    pub async fn add_datatype(&mut self, dt_map: &JsonRow) -> Result<()> {
+        // Begin a transaction:
         let mut tx = self.pool.begin().await?;
 
+        // Add the datatype and record the change:
         let rn = add_datatype_tx(dt_map, &self.db_kind, &mut tx).await?;
-
-        // TODO: Why were we using a HashMap to collect the dt details? Couldn't we just use a
-        // SerdeMap to begin with, rather than having to convert it here?
-        let dt_details = json!(dt_map);
-        let dt_details = dt_details
-            .as_object()
-            .ok_or(ValveError::InputError(format!(
-                "Not an object '{dt_map:?}'",
-            )))?;
         record_config_change_tx(
             &self.db_kind,
             &mut tx,
             "datatype",
             &rn,
             None,
-            Some(dt_details),
+            Some(dt_map),
             &self.user,
         )
         .await?;
@@ -1063,6 +1056,8 @@ impl Valve {
         // Begin a transaction:
         let mut tx = self.pool.begin().await?;
 
+        // Retrieve the datatype configuration, which we will save in case the delete operation
+        // needs to be undone later:
         let dt_config = self
             .config
             .datatype
@@ -1070,29 +1065,16 @@ impl Valve {
             .ok_or(ValveError::InputError(format!(
                 "No datatype found '{datatype}'",
             )))?;
-
         let dt_config = json!(dt_config);
-        let dt_config = dt_config.as_object().ok_or(ValveError::InputError(format!(
-            "Not an object '{:?}'",
-            dt_config
-        )))?;
+        let dt_config = dt_config
+            .as_object()
+            .ok_or(ValveError::ConfigError(format!(
+                "Not an object '{:?}'",
+                dt_config
+            )))?;
 
-        // TODO: Make this a function, or better, can the number be returned from the delete?
-        let dt_rn = {
-            let sql = local_sql_syntax(
-                &self.db_kind,
-                &format!("SELECT row_number FROM datatype WHERE datatype = {SQL_PARAM}"),
-            );
-            let row = sqlx_query(&sql)
-                .bind(datatype)
-                .fetch_one(&self.pool)
-                .await?;
-            let rn = row.try_get::<i64, _>("row_number").unwrap_or_default();
-            rn as u32
-        };
-
-        delete_datatype_tx(datatype, &mut tx, &self.db_kind).await?;
-
+        // Delete the datatype and store a record of the change in the history table:
+        let dt_rn = delete_datatype_tx(datatype, &mut tx, &self.db_kind).await?;
         record_config_change_tx(
             &self.db_kind,
             &mut tx,
@@ -1117,22 +1099,13 @@ impl Valve {
         // Begin a transaction:
         let mut tx = self.pool.begin().await?;
 
-        rename_datatype_tx(&self, datatype, new_name, &mut tx).await?;
+        // TODO: Here and also elsewhere: We need to save the row_order in addition to the
+        // row_number.
 
-        // TODO: Make this a function, or better, can the number be returned from the delete?
-        let dt_rn = {
-            let sql = local_sql_syntax(
-                &self.db_kind,
-                &format!("SELECT row_number FROM datatype WHERE datatype = {SQL_PARAM}"),
-            );
-            let row = sqlx_query(&sql)
-                .bind(datatype)
-                .fetch_one(&self.pool)
-                .await?;
-            let rn = row.try_get::<i64, _>("row_number").unwrap_or_default();
-            rn as u32
-        };
+        // Rename the datatype:
+        let dt_rn = rename_datatype_tx(&self, datatype, new_name, &mut tx).await?;
 
+        // Save a record of the renaming to the history table:
         let mut from = JsonRow::new();
         let mut to = JsonRow::new();
         from.insert("datatype".to_string(), datatype.into());
@@ -1171,6 +1144,7 @@ impl Valve {
         // Begin a transaction:
         let mut tx = self.pool.begin().await?;
 
+        // Use guess() to propose a table and column configuration:
         let table_added = guess(
             self,
             &mut tx,
@@ -1183,6 +1157,7 @@ impl Valve {
         .await;
 
         if table_added {
+            // Read the current table and column configurations from the database:
             let table_config = read_db_table_into_vector_tx(&mut tx, "table", true).await?;
             let table_config = table_config
                 .iter()
@@ -1194,7 +1169,8 @@ impl Valve {
                 .filter(|t| t.get("table").unwrap() == table)
                 .collect::<Vec<_>>();
 
-            let mut to = JsonRow::new();
+            // The `type` column of the table table maps to the `table_type` field of the
+            // ValveTableConfig struct, so we make the correction here:
             let table_config = {
                 let mut corrected_table_config = JsonRow::new();
                 for (key, value) in table_config[0].iter() {
@@ -1206,9 +1182,9 @@ impl Valve {
                 }
                 corrected_table_config
             };
-            to.insert("table".to_string(), json!(table_config));
-            to.insert("column".to_string(), json!(column_config));
 
+            // Extract the row number from the table table configuration so that we can save it
+            // to the history record
             let rn = match table_config.get("row_number") {
                 Some(SerdeValue::Number(n)) => match n.as_i64() {
                     Some(rn) => rn as u32,
@@ -1216,6 +1192,12 @@ impl Valve {
                 },
                 _ => return Err(ValveError::DataError("Bah!".to_string()).into()),
             };
+
+            // The `to` field of the history table entry contains the table and column configuration
+            // of the table that was just added:
+            let mut to = JsonRow::new();
+            to.insert("table".to_string(), json!(table_config));
+            to.insert("column".to_string(), json!(column_config));
 
             record_config_change_tx(
                 &self.db_kind,
@@ -1231,6 +1213,7 @@ impl Valve {
             // Commit the transaction:
             tx.commit().await?;
 
+            // Save the configuration, reconfigure valve, and create the data table:
             self.save_tables(&vec!["table", "column"], &None).await?;
             self.reconfigure()?;
             self.ensure_all_tables_created(&vec![table]).await?;
@@ -1238,15 +1221,12 @@ impl Valve {
         Ok(())
     }
 
-    /// Delete the given table from the column table. Also drop the table in the database unless
-    /// the `no_drop` flag has been set.
+    /// TODO: Add docstring here.
     pub async fn delete_table(&mut self, table: &str) -> Result<()> {
-        // Drop the table in the database:
-        self.drop_tables(&vec![table]).await?;
-
         // Begin a DB transaction:
         let mut tx = self.pool.begin().await?;
 
+        // Save the row number that is associated with this table in the table table for later:
         let table_rn = {
             let sql = local_sql_syntax(
                 &self.db_kind,
@@ -1257,32 +1237,73 @@ impl Valve {
             rn as u32
         };
 
-        let sql = local_sql_syntax(
-            &self.db_kind,
-            &format!(r#"SELECT "column", "row_number" FROM "column" WHERE "table" = {SQL_PARAM}"#),
-        );
-        let rows = sqlx_query(&sql).bind(table).fetch_all(&self.pool).await?;
-        let mut column_rows = JsonRow::new();
-        for row in rows {
-            let rn = row.get::<i64, _>("row_number");
-            let rn = rn as u32;
-            let column: &str = row.get("column");
-            column_rows.insert(column.to_string(), json!(rn));
-        }
+        // Save the row numbers that are associated with this table's columns in the column table
+        // for later:
+        let column_rns = {
+            let mut column_rns = HashMap::new();
+            let sql = local_sql_syntax(
+                &self.db_kind,
+                &format!(
+                    r#"SELECT "column", "row_number" FROM "column" WHERE "table" = {SQL_PARAM}"#
+                ),
+            );
+            let rows = sqlx_query(&sql).bind(table).fetch_all(&self.pool).await?;
+            for row in &rows {
+                let rn = row.get::<i64, _>("row_number");
+                let rn = rn as u32;
+                let column: &str = row.get("column");
+                column_rns.insert(column.to_string(), rn);
+            }
+            column_rns
+        };
 
-        delete_table_tx(table, &mut tx, &self.db_kind).await?;
+        // Remove all references to the table in the database:
+        delete_table_tx(&self, table, &mut tx, &self.db_kind).await?;
 
+        // Get the table config and use it to populate the `from` field for the record that we
+        // will save to the history table:
         let tconfig = self
             .config
             .table
             .get(table)
-            .ok_or(ValveError::InputError(format!("No table found '{table}'",)))?;
+            .ok_or(ValveError::InputError(format!("No table found '{table}'")))?;
 
-        let mut from = json!(tconfig);
-        let from = from.as_object_mut().ok_or(ValveError::InputError(format!(
-            "Not an object: {tconfig:?}'",
-        )))?;
-        from.insert("column_rows".to_string(), json!(column_rows));
+        let from = {
+            let mut from = JsonRow::new();
+
+            let mut from_table = JsonRow::new();
+            from_table.insert("description".to_string(), json!(tconfig.description));
+            from_table.insert("path".to_string(), json!(tconfig.path));
+            from_table.insert("row_number".to_string(), json!(table_rn));
+            from_table.insert("table".to_string(), json!(tconfig.table));
+            from_table.insert("table_type".to_string(), json!(tconfig.table_type));
+            from_table.insert(
+                "options".to_string(),
+                json!(tconfig.options.iter().join(" ")),
+            );
+            from.insert("table".to_string(), json!(from_table));
+
+            let mut from_columns = vec![];
+            for (column, details) in tconfig.column.iter() {
+                let mut this_column = JsonRow::new();
+                this_column.insert("column".to_string(), json!(details.column));
+                this_column.insert("datatype".to_string(), json!(details.datatype));
+                this_column.insert("default".to_string(), json!(details.default));
+                this_column.insert("description".to_string(), json!(details.description));
+                this_column.insert("label".to_string(), json!(details.label));
+                this_column.insert("nulltype".to_string(), json!(details.nulltype));
+                this_column.insert("structure".to_string(), json!(details.structure));
+                this_column.insert("table".to_string(), json!(details.table));
+                let column_rn = column_rns.get(column).ok_or(ValveError::DataError(format!(
+                    "Row number not found for '{column}'"
+                )))?;
+                this_column.insert("row_number".to_string(), json!(column_rn));
+                from_columns.push(this_column);
+            }
+            from.insert("column".to_string(), json!(from_columns));
+
+            from
+        };
 
         record_config_change_tx(
             &self.db_kind,
@@ -3990,16 +4011,8 @@ impl Valve {
                 "delete datatype" => match &from {
                     None => return Err(make_err("No 'from' found").into()),
                     Some(from) => {
-                        let dt_map = {
-                            let mut dt_map = HashMap::new();
-                            for (key, value) in from.iter() {
-                                dt_map.insert(key.to_string(), value.as_str().unwrap().to_string());
-                            }
-                            dt_map
-                        };
-
                         let mut tx = self.pool.begin().await?;
-                        add_datatype_tx(&dt_map, &self.db_kind, &mut tx).await?;
+                        add_datatype_tx(from, &self.db_kind, &mut tx).await?;
 
                         let datatype = from
                             .get("datatype")
@@ -4082,7 +4095,7 @@ impl Valve {
 
                         let mut tx = self.pool.begin().await?;
 
-                        delete_table_tx(table, &mut tx, &self.db_kind).await?;
+                        delete_table_tx(&self, table, &mut tx, &self.db_kind).await?;
                         switch_undone_state_tx(
                             &self.user,
                             history_id,
@@ -4094,10 +4107,6 @@ impl Valve {
 
                         // Commit the transaction:
                         tx.commit().await?;
-
-                        // TODO: Maybe we should add a _tx version of this function:
-                        // Drop the table in the database:
-                        self.drop_tables(&vec![table]).await?;
 
                         // Save the column and table tables and reconfigure valve:
                         self.save_tables(&vec!["table", "column"], &None).await?;
@@ -4111,17 +4120,24 @@ impl Valve {
                     Some(from) => {
                         let mut values = vec![];
                         let mut params = vec![];
-                        let table = from
+
+                        let from_table = from
+                            .get("table")
+                            .and_then(|t| t.as_object())
+                            .ok_or(make_err("No object 'table' found"))?;
+
+                        let table = from_table
                             .get("table")
                             .and_then(|t| t.as_str())
-                            .ok_or(make_err("No string 'table_type' found"))?;
+                            .ok_or(make_err("No string 'table' found"))?;
                         if table == "" {
                             values.push("NULL");
                         } else {
                             values.push(SQL_PARAM);
                             params.push(table);
                         }
-                        let table_type = from
+
+                        let table_type = from_table
                             .get("table_type")
                             .and_then(|t| t.as_str())
                             .ok_or(make_err("No string 'table_type' found"))?;
@@ -4131,21 +4147,19 @@ impl Valve {
                             values.push(SQL_PARAM);
                             params.push(table_type);
                         }
-                        let options = from
+
+                        let options = from_table
                             .get("options")
-                            .and_then(|t| t.as_array())
-                            .ok_or(make_err("No array 'options' found"))?
-                            .iter()
-                            .map(|o| o.as_str().unwrap())
-                            .collect::<Vec<_>>()
-                            .join(" ");
+                            .and_then(|t| t.as_str())
+                            .ok_or(make_err("No string 'options' found"))?;
                         if options == "" {
                             values.push("NULL");
                         } else {
                             values.push(SQL_PARAM);
-                            params.push(options.as_str());
+                            params.push(options);
                         }
-                        let description = from
+
+                        let description = from_table
                             .get("description")
                             .and_then(|t| t.as_str())
                             .ok_or(make_err("No string 'description' found"))?;
@@ -4155,7 +4169,8 @@ impl Valve {
                             values.push(SQL_PARAM);
                             params.push(description);
                         }
-                        let path = from
+
+                        let path = from_table
                             .get("path")
                             .and_then(|t| t.as_str())
                             .ok_or(make_err("No string 'path' found"))?;
@@ -4166,18 +4181,22 @@ impl Valve {
                             params.push(path);
                         }
 
+                        let rn = from_table
+                            .get("row_number")
+                            .and_then(|r| r.as_i64())
+                            .ok_or(make_err("No integer 'row_number' found"))?;
+                        let rn = rn as u32;
+                        let ro = rn * MOVE_INTERVAL;
+
                         let mut tx = self.pool.begin().await?;
 
                         let sql = {
-                            let rn: i64 = last_change.get("row");
-                            let rn = rn as u32;
-                            let ro = rn * MOVE_INTERVAL;
                             local_sql_syntax(
                                 &self.db_kind,
                                 &format!(
                                     r#"INSERT INTO "table"
-                                           ("row_number", "row_order", "table", "type", "options",
-                                            "description", "path")
+                                       ("row_number", "row_order", "table", "type", "options",
+                                        "description", "path")
                                        VALUES ({rn}, {ro}, {remaining_values})"#,
                                     remaining_values = values.join(", ")
                                 ),
@@ -4189,24 +4208,23 @@ impl Valve {
                         }
                         query.execute(tx.acquire().await?).await?;
 
-                        let columns = from
+                        let from_columns = from
                             .get("column")
-                            .and_then(|t| t.as_object())
-                            .ok_or(make_err("No object 'column' found"))?;
+                            .and_then(|t| t.as_array())
+                            .ok_or(make_err("No array 'column' found"))?;
 
-                        let column_rows = from
-                            .get("column_rows")
-                            .and_then(|t| t.as_object())
-                            .ok_or(make_err("No object 'column_rows' found"))?;
-
-                        for (column, details) in columns.iter() {
+                        for cconfig in from_columns.iter() {
                             let mut values = vec![];
                             let mut params = vec![];
 
-                            let rn = column_rows.get(column).and_then(|rn| rn.as_i64()).unwrap();
+                            let rn = cconfig
+                                .get("row_number")
+                                .and_then(|r| r.as_i64())
+                                .ok_or(make_err("No integer 'row_number' found"))?;
                             let rn = rn as u32;
                             let ro = rn * MOVE_INTERVAL;
-                            let table = details
+
+                            let table = cconfig
                                 .get("table")
                                 .and_then(|t| t.as_str())
                                 .ok_or(make_err("No string 'table' found"))?;
@@ -4216,7 +4234,8 @@ impl Valve {
                                 values.push(SQL_PARAM);
                                 params.push(table);
                             }
-                            let column = details
+
+                            let column = cconfig
                                 .get("column")
                                 .and_then(|t| t.as_str())
                                 .ok_or(make_err("No string 'column' found"))?;
@@ -4226,7 +4245,8 @@ impl Valve {
                                 values.push(SQL_PARAM);
                                 params.push(column);
                             }
-                            let datatype = details
+
+                            let datatype = cconfig
                                 .get("datatype")
                                 .and_then(|t| t.as_str())
                                 .ok_or(make_err("No string 'datatype' found"))?;
@@ -4236,7 +4256,8 @@ impl Valve {
                                 values.push(SQL_PARAM);
                                 params.push(datatype);
                             }
-                            let description = details
+
+                            let description = cconfig
                                 .get("description")
                                 .and_then(|t| t.as_str())
                                 .ok_or(make_err("No string 'description' found"))?;
@@ -4246,7 +4267,8 @@ impl Valve {
                                 values.push(SQL_PARAM);
                                 params.push(description);
                             }
-                            let label = details
+
+                            let label = cconfig
                                 .get("label")
                                 .and_then(|t| t.as_str())
                                 .ok_or(make_err("No string 'label' found"))?;
@@ -4256,7 +4278,8 @@ impl Valve {
                                 values.push(SQL_PARAM);
                                 params.push(label);
                             }
-                            let structure = details
+
+                            let structure = cconfig
                                 .get("structure")
                                 .and_then(|t| t.as_str())
                                 .ok_or(make_err("No string 'structure' found"))?;
@@ -4266,7 +4289,8 @@ impl Valve {
                                 values.push(SQL_PARAM);
                                 params.push(structure);
                             }
-                            let nulltype = details
+
+                            let nulltype = cconfig
                                 .get("nulltype")
                                 .and_then(|t| t.as_str())
                                 .ok_or(make_err("No string 'nulltype' found"))?;
@@ -4276,7 +4300,8 @@ impl Valve {
                                 values.push(SQL_PARAM);
                                 params.push(nulltype);
                             }
-                            let default = details
+
+                            let default = cconfig
                                 .get("default")
                                 .ok_or(make_err("No 'default' found"))?;
                             let default_str = default.to_string();
@@ -4294,6 +4319,7 @@ impl Valve {
                                 }
                                 _ => return Err(make_err("Bah!").into()),
                             };
+
                             let sql = format!(
                                 r#"INSERT INTO "column"
                                    ("row_number", "row_order", "table", "column",
@@ -4694,16 +4720,8 @@ impl Valve {
                 "add datatype" => match &to {
                     None => return Err(make_err("No 'to' found").into()),
                     Some(to) => {
-                        let dt_map = {
-                            let mut dt_map = HashMap::new();
-                            for (key, value) in to.iter() {
-                                dt_map.insert(key.to_string(), value.as_str().unwrap().to_string());
-                            }
-                            dt_map
-                        };
-
                         let mut tx = self.pool.begin().await?;
-                        add_datatype_tx(&dt_map, &self.db_kind, &mut tx).await?;
+                        add_datatype_tx(to, &self.db_kind, &mut tx).await?;
 
                         let datatype = to
                             .get("datatype")
@@ -4806,10 +4824,14 @@ impl Valve {
                     Some(to) => {
                         let mut values = vec![];
                         let mut params = vec![];
-                        let table = to
+
+                        let to_table = to
                             .get("table")
                             .and_then(|t| t.as_object())
-                            .and_then(|o| o.get("table"))
+                            .ok_or(make_err("No object 'table' found"))?;
+
+                        let table = to_table
+                            .get("table")
                             .and_then(|t| t.as_str())
                             .ok_or(make_err("No string 'table' found"))?;
                         if table == "" {
@@ -4818,10 +4840,9 @@ impl Valve {
                             values.push(SQL_PARAM);
                             params.push(table);
                         }
-                        let table_type = to
-                            .get("table")
-                            .and_then(|t| t.as_object())
-                            .and_then(|o| o.get("table_type"))
+
+                        let table_type = to_table
+                            .get("table_type")
                             .and_then(|t| t.as_str())
                             .ok_or(make_err("No string 'table_type' found"))?;
                         if table_type == "" {
@@ -4830,10 +4851,9 @@ impl Valve {
                             values.push(SQL_PARAM);
                             params.push(table_type);
                         }
-                        let options = to
-                            .get("table")
-                            .and_then(|t| t.as_object())
-                            .and_then(|o| o.get("options"))
+
+                        let options = to_table
+                            .get("options")
                             .and_then(|t| t.as_str())
                             .ok_or(make_err("No string 'options' found"))?;
                         if options == "" {
@@ -4842,10 +4862,9 @@ impl Valve {
                             values.push(SQL_PARAM);
                             params.push(options);
                         }
-                        let description = to
-                            .get("table")
-                            .and_then(|t| t.as_object())
-                            .and_then(|o| o.get("description"))
+
+                        let description = to_table
+                            .get("description")
                             .and_then(|t| t.as_str())
                             .ok_or(make_err("No string 'description' found"))?;
                         if description == "" {
@@ -4854,10 +4873,9 @@ impl Valve {
                             values.push(SQL_PARAM);
                             params.push(description);
                         }
-                        let path = to
-                            .get("table")
-                            .and_then(|t| t.as_object())
-                            .and_then(|o| o.get("path"))
+
+                        let path = to_table
+                            .get("path")
                             .and_then(|t| t.as_str())
                             .ok_or(make_err("No string 'path' found"))?;
                         if path == "" {
@@ -4867,18 +4885,22 @@ impl Valve {
                             params.push(path);
                         }
 
+                        let rn = to_table
+                            .get("row_number")
+                            .and_then(|r| r.as_i64())
+                            .ok_or(make_err("No integer 'row_number' found"))?;
+                        let rn = rn as u32;
+                        let ro = rn * MOVE_INTERVAL;
+
                         let mut tx = self.pool.begin().await?;
 
                         let sql = {
-                            let rn: i64 = next_redo.get("row");
-                            let rn = rn as u32;
-                            let ro = rn * MOVE_INTERVAL;
                             local_sql_syntax(
                                 &self.db_kind,
                                 &format!(
                                     r#"INSERT INTO "table"
-                                           ("row_number", "row_order", "table", "type", "options",
-                                            "description", "path")
+                                       ("row_number", "row_order", "table", "type", "options",
+                                        "description", "path")
                                        VALUES ({rn}, {ro}, {remaining_values})"#,
                                     remaining_values = values.join(", ")
                                 ),
@@ -4890,27 +4912,23 @@ impl Valve {
                         }
                         query.execute(tx.acquire().await?).await?;
 
-                        let columns = to
+                        let to_columns = to
                             .get("column")
                             .and_then(|t| t.as_array())
                             .ok_or(make_err("No array 'column' found"))?;
 
-                        for details in columns.iter() {
+                        for cconfig in to_columns.iter() {
                             let mut values = vec![];
                             let mut params = vec![];
 
-                            let rn = match details.get("row_number") {
-                                Some(SerdeValue::Number(n)) => match n.as_i64() {
-                                    Some(rn) => rn as u32,
-                                    _ => {
-                                        return Err(ValveError::DataError("Bah!".to_string()).into())
-                                    }
-                                },
-                                _ => return Err(ValveError::DataError("Bah!".to_string()).into()),
-                            };
+                            let rn = cconfig
+                                .get("row_number")
+                                .and_then(|r| r.as_i64())
+                                .ok_or(make_err("No integer 'row_number' found"))?;
+                            let rn = rn as u32;
                             let ro = rn * MOVE_INTERVAL;
 
-                            let table = details
+                            let table = cconfig
                                 .get("table")
                                 .and_then(|t| t.as_str())
                                 .ok_or(make_err("No string 'table' found"))?;
@@ -4920,7 +4938,8 @@ impl Valve {
                                 values.push(SQL_PARAM);
                                 params.push(table);
                             }
-                            let column = details
+
+                            let column = cconfig
                                 .get("column")
                                 .and_then(|t| t.as_str())
                                 .ok_or(make_err("No string 'column' found"))?;
@@ -4930,7 +4949,8 @@ impl Valve {
                                 values.push(SQL_PARAM);
                                 params.push(column);
                             }
-                            let datatype = details
+
+                            let datatype = cconfig
                                 .get("datatype")
                                 .and_then(|t| t.as_str())
                                 .ok_or(make_err("No string 'datatype' found"))?;
@@ -4940,7 +4960,8 @@ impl Valve {
                                 values.push(SQL_PARAM);
                                 params.push(datatype);
                             }
-                            let description = details
+
+                            let description = cconfig
                                 .get("description")
                                 .and_then(|t| t.as_str())
                                 .ok_or(make_err("No string 'description' found"))?;
@@ -4950,7 +4971,8 @@ impl Valve {
                                 values.push(SQL_PARAM);
                                 params.push(description);
                             }
-                            let label = details
+
+                            let label = cconfig
                                 .get("label")
                                 .and_then(|t| t.as_str())
                                 .ok_or(make_err("No string 'label' found"))?;
@@ -4960,7 +4982,8 @@ impl Valve {
                                 values.push(SQL_PARAM);
                                 params.push(label);
                             }
-                            let structure = details
+
+                            let structure = cconfig
                                 .get("structure")
                                 .and_then(|t| t.as_str())
                                 .ok_or(make_err("No string 'structure' found"))?;
@@ -4970,7 +4993,8 @@ impl Valve {
                                 values.push(SQL_PARAM);
                                 params.push(structure);
                             }
-                            let nulltype = details
+
+                            let nulltype = cconfig
                                 .get("nulltype")
                                 .and_then(|t| t.as_str())
                                 .ok_or(make_err("No string 'nulltype' found"))?;
@@ -4980,7 +5004,8 @@ impl Valve {
                                 values.push(SQL_PARAM);
                                 params.push(nulltype);
                             }
-                            let default = details
+
+                            let default = cconfig
                                 .get("default")
                                 .ok_or(make_err("No 'default' found"))?;
                             let default_str = default.to_string();
@@ -4998,6 +5023,7 @@ impl Valve {
                                 }
                                 _ => return Err(make_err("Bah!").into()),
                             };
+
                             let sql = format!(
                                 r#"INSERT INTO "column"
                                    ("row_number", "row_order", "table", "column",
@@ -5044,7 +5070,7 @@ impl Valve {
 
                         let mut tx = self.pool.begin().await?;
 
-                        delete_table_tx(table, &mut tx, &self.db_kind).await?;
+                        delete_table_tx(&self, table, &mut tx, &self.db_kind).await?;
                         switch_undone_state_tx(
                             &self.user,
                             history_id,
@@ -5056,10 +5082,6 @@ impl Valve {
 
                         // Commit the transaction:
                         tx.commit().await?;
-
-                        // TODO: Maybe we should add a _tx version of this function:
-                        // Drop the table in the database:
-                        self.drop_tables(&vec![table]).await?;
 
                         // Save the column and table tables and reconfigure valve:
                         self.save_tables(&vec!["table", "column"], &None).await?;
