@@ -1074,7 +1074,7 @@ impl Valve {
             )))?;
 
         // Delete the datatype and store a record of the change in the history table:
-        let dt_rn = delete_datatype_tx(datatype, &mut tx, &self.db_kind).await?;
+        let (dt_rn, _) = delete_datatype_tx(datatype, &mut tx, &self.db_kind).await?;
         record_config_change_tx(
             &self.db_kind,
             &mut tx,
@@ -1326,24 +1326,15 @@ impl Valve {
 
     /// Change the name of the given table to the given new name.
     pub async fn rename_table(&mut self, table: &str, new_name: &str) -> Result<()> {
+        // TODO: We need to make sure that we support alternate names for the other configuration
+        // tables - not so much in this function per se, but generally throughout Valve.
         if table == "table" {
             return Err(ValveError::InputError("Can't rename the table table".to_string()).into());
         }
         let mut tx = self.pool.begin().await?;
 
         // Rename the table in the database:
-        rename_table_tx(&self, &mut tx, table, new_name).await?;
-
-        // TODO: Make this a function, or better, can the number be returned from the delete?
-        let table_rn = {
-            let sql = local_sql_syntax(
-                &self.db_kind,
-                &format!(r#"SELECT row_number FROM "table" WHERE "table" = {SQL_PARAM}"#),
-            );
-            let row = sqlx_query(&sql).bind(table).fetch_one(&self.pool).await?;
-            let rn = row.try_get::<i64, _>("row_number").unwrap_or_default();
-            rn as u32
-        };
+        let (table_rn, _) = rename_table_tx(&self, &mut tx, table, new_name).await?;
 
         let mut from = JsonRow::new();
         let mut to = JsonRow::new();
@@ -1416,7 +1407,7 @@ impl Valve {
         };
 
         // Add the column using the low-level toolkit function:
-        let rn = add_column_tx(table, column, column_details, &mut tx, &self.db_kind).await?;
+        let (rn, _) = add_column_tx(table, column, column_details, &mut tx, &self.db_kind).await?;
 
         // Record the configuration change to the history table:
         record_config_change_tx(
@@ -1464,18 +1455,7 @@ impl Valve {
             colconfig
         )))?;
 
-        // TODO: Make this a function, or better, can the number be returned from the delete?
-        let col_rn = {
-            let sql = local_sql_syntax(
-                &self.db_kind,
-                &format!(r#"SELECT row_number FROM "column" WHERE "column" = {SQL_PARAM}"#),
-            );
-            let row = sqlx_query(&sql).bind(column).fetch_one(&self.pool).await?;
-            let rn = row.try_get::<i64, _>("row_number").unwrap_or_default();
-            rn as u32
-        };
-
-        delete_column_tx(table, column, &mut tx, &self.db_kind).await?;
+        let (col_rn, _) = delete_column_tx(table, column, &mut tx, &self.db_kind).await?;
 
         record_config_change_tx(
             &self.db_kind,
@@ -1519,15 +1499,25 @@ impl Valve {
         // as null.
         rename_column_tx(&self, &mut tx, table, column, new_name, new_label).await?;
 
-        // TODO: Make this a function, or better, can the number be returned from the delete?
-        let col_rn = {
+        // TODO: I don't think it is actually necessary to save either the row number or row
+        // order in this particular case (since nothing is being inserted or deleted), but it
+        // seems we are querying for it only because record_config_change() requires that we
+        // send it a rn parameter. Maybe we should change the signature of that function to
+        // accept an option instead?
+        // Save the row number of the column which we will later add to the history record:
+        let (col_rn, _) = {
             let sql = local_sql_syntax(
                 &self.db_kind,
-                &format!(r#"SELECT row_number FROM "column" WHERE "column" = {SQL_PARAM}"#),
+                &format!(
+                    r#"SELECT "row_number", "row_order"
+                       FROM "column"
+                       WHERE "table" = {SQL_PARAM} AND "column" = {SQL_PARAM}"#
+                ),
             );
             let row = sqlx_query(&sql).bind(column).fetch_one(&self.pool).await?;
             let rn = row.try_get::<i64, _>("row_number").unwrap_or_default();
-            rn as u32
+            let ro = row.try_get::<i64, _>("row_order").unwrap_or_default();
+            (rn as u32, ro as u32)
         };
 
         let mut from = JsonRow::new();
@@ -1538,10 +1528,14 @@ impl Valve {
             .config
             .table
             .get(table)
-            .unwrap()
+            .ok_or(ValveError::ConfigError(format!(
+                "Table config for '{table}' not found"
+            )))?
             .column
             .get(column)
-            .unwrap()
+            .ok_or(ValveError::ConfigError(format!(
+                "Column config for '{table}.{column}' not found"
+            )))?
             .label;
         if old_label != "" {
             from.insert("label".to_string(), json!(old_label));
@@ -3900,9 +3894,10 @@ impl Valve {
                             .and_then(|t| t.as_str())
                             .ok_or(make_err("No string 'column' found"))?;
 
+                        // Add a new column to the column table, then update its row number to
+                        // the saved row number of the column that had been previously deleted:
                         let mut tx = self.pool.begin().await?;
                         add_column_tx(table, column, from, &mut tx, &self.db_kind).await?;
-
                         let sql = {
                             let rn: i64 = last_change.get("row");
                             let rn = rn as u32;
@@ -3941,16 +3936,30 @@ impl Valve {
                 "rename column" => match &from {
                     None => return Err(make_err("No 'from' found").into()),
                     Some(from) => {
-                        let table = from.get("table").unwrap().as_str().unwrap();
-                        let old_name = from.get("column").unwrap().as_str().unwrap();
+                        let table = from
+                            .get("table")
+                            .and_then(|t| t.as_str())
+                            .ok_or(make_err("No string 'table' found"))?;
+                        let old_name = from
+                            .get("column")
+                            .and_then(|c| c.as_str())
+                            .ok_or(make_err("No string 'column' found"))?;
                         let old_label = match from.get("label") {
                             None => None,
-                            Some(label) => Some(label.as_str().unwrap().to_string()),
+                            Some(label) => Some(
+                                label
+                                    .as_str()
+                                    .ok_or(make_err("Label is not a string"))?
+                                    .to_string(),
+                            ),
                         };
                         match &to {
                             None => return Err(make_err("No 'to' found").into()),
                             Some(to) => {
-                                let new_name = to.get("column").unwrap().as_str().unwrap();
+                                let new_name = to
+                                    .get("column")
+                                    .and_then(|c| c.as_str())
+                                    .ok_or(make_err("No string 'column' found"))?;
 
                                 let mut tx = self.pool.begin().await?;
                                 rename_column_tx(
@@ -3978,7 +3987,7 @@ impl Valve {
 
                                 return Ok(None);
                             }
-                        };
+                        }
                     }
                 },
                 "add datatype" => match &to {
@@ -4012,8 +4021,11 @@ impl Valve {
                     None => return Err(make_err("No 'from' found").into()),
                     Some(from) => {
                         let mut tx = self.pool.begin().await?;
-                        add_datatype_tx(from, &self.db_kind, &mut tx).await?;
 
+                        // Add a new datatype to the datatype table, then update its row number
+                        // and row order to match the saved values of the datatype row that had
+                        // been previously deleted:
+                        add_datatype_tx(from, &self.db_kind, &mut tx).await?;
                         let datatype = from
                             .get("datatype")
                             .and_then(|d| d.as_str())
@@ -4021,6 +4033,8 @@ impl Valve {
                         let sql = {
                             let rn: i64 = last_change.get("row");
                             let rn = rn as u32;
+                            // TODO: Save this too to the history table instead of regenerating it
+                            // here:
                             let ro = rn * MOVE_INTERVAL;
                             local_sql_syntax(
                                 &self.db_kind,
@@ -4042,6 +4056,7 @@ impl Valve {
                         )
                         .await?;
 
+                        // Commit the transaction:
                         tx.commit().await?;
 
                         // Save the datatype table and then reconfigure valve:
@@ -4053,11 +4068,17 @@ impl Valve {
                 "rename datatype" => match &from {
                     None => return Err(make_err("No 'from' found").into()),
                     Some(from) => {
-                        let old_name = from.get("datatype").unwrap().as_str().unwrap();
+                        let old_name = from
+                            .get("datatype")
+                            .and_then(|d| d.as_str())
+                            .ok_or(make_err("No string 'datatype' found in 'from'"))?;
                         match &to {
                             None => return Err(make_err("No 'to' found").into()),
                             Some(to) => {
-                                let new_name = to.get("datatype").unwrap().as_str().unwrap();
+                                let new_name = to
+                                    .get("datatype")
+                                    .and_then(|d| d.as_str())
+                                    .ok_or(make_err("No string 'datatype' found in 'to'"))?;
 
                                 let mut tx = self.pool.begin().await?;
                                 rename_datatype_tx(&self, new_name, old_name, &mut tx).await?;
@@ -4069,11 +4090,10 @@ impl Valve {
                                     &self.db_kind,
                                 )
                                 .await?;
-
-                                // Commit the transaction:
                                 tx.commit().await?;
 
-                                // Save the column table and the data table and then reconfigure valve:
+                                // Save the column table and the data table and then reconfigure
+                                // valve:
                                 self.save_tables(&vec!["datatype", "column", "rule"], &None)
                                     .await?;
                                 self.reconfigure()?;
@@ -4094,7 +4114,6 @@ impl Valve {
                             .ok_or(make_err("No table found"))?;
 
                         let mut tx = self.pool.begin().await?;
-
                         delete_table_tx(&self, table, &mut tx, &self.db_kind).await?;
                         switch_undone_state_tx(
                             &self.user,
@@ -4104,8 +4123,6 @@ impl Valve {
                             &self.db_kind,
                         )
                         .await?;
-
-                        // Commit the transaction:
                         tx.commit().await?;
 
                         // Save the column and table tables and reconfigure valve:
@@ -4121,6 +4138,8 @@ impl Valve {
                         let mut values = vec![];
                         let mut params = vec![];
 
+                        // Use `from['table']` to build a query for inserting a new table to the
+                        // table table:
                         let from_table = from
                             .get("table")
                             .and_then(|t| t.as_object())
@@ -4188,6 +4207,7 @@ impl Valve {
                         let rn = rn as u32;
                         let ro = rn * MOVE_INTERVAL;
 
+                        // Begin a database transaction and execute the SQL:
                         let mut tx = self.pool.begin().await?;
 
                         let sql = {
@@ -4208,6 +4228,8 @@ impl Valve {
                         }
                         query.execute(tx.acquire().await?).await?;
 
+                        // Use `from['column']` to build a query for inserting new columns to the
+                        // column table:
                         let from_columns = from
                             .get("column")
                             .and_then(|t| t.as_array())
@@ -4222,6 +4244,8 @@ impl Valve {
                                 .and_then(|r| r.as_i64())
                                 .ok_or(make_err("No integer 'row_number' found"))?;
                             let rn = rn as u32;
+                            // TODO: We shoul save the row order previously instead of regenerating
+                            // it here:
                             let ro = rn * MOVE_INTERVAL;
 
                             let table = cconfig
@@ -4304,6 +4328,8 @@ impl Valve {
                             let default = cconfig
                                 .get("default")
                                 .ok_or(make_err("No 'default' found"))?;
+                            // The 'default' field need not be a string, so it needs to be handled
+                            // with more care:
                             let default_str = default.to_string();
                             match default {
                                 SerdeValue::Number(_) => {
@@ -4317,9 +4343,10 @@ impl Valve {
                                         params.push(default);
                                     }
                                 }
-                                _ => return Err(make_err("Bah!").into()),
+                                _ => return Err(make_err("Field 'default' has wrong type").into()),
                             };
 
+                            // Execute the SQL to add this column:
                             let sql = format!(
                                 r#"INSERT INTO "column"
                                    ("row_number", "row_order", "table", "column",
@@ -4346,8 +4373,10 @@ impl Valve {
                         )
                         .await?;
 
+                        // Commit the transaction:
                         tx.commit().await?;
 
+                        // Save and reconfigure:
                         self.save_tables(&vec!["table", "column"], &None).await?;
                         self.reconfigure()?;
                         self.ensure_all_tables_created(&vec![table]).await?;
@@ -4357,11 +4386,17 @@ impl Valve {
                 "rename table" => match &from {
                     None => return Err(make_err("No 'from' found").into()),
                     Some(from) => {
-                        let old_name = from.get("table").unwrap().as_str().unwrap();
+                        let old_name = from
+                            .get("table")
+                            .and_then(|t| t.as_str())
+                            .ok_or(make_err("No string 'table' found in 'from'"))?;
                         match &to {
                             None => return Err(make_err("No 'to' found").into()),
                             Some(to) => {
-                                let new_name = to.get("table").unwrap().as_str().unwrap();
+                                let new_name = to
+                                    .get("table")
+                                    .and_then(|t| t.as_str())
+                                    .ok_or(make_err("No string 'table' found in 'to'"))?;
 
                                 let mut tx = self.pool.begin().await?;
                                 rename_table_tx(&self, &mut tx, new_name, old_name).await?;
@@ -4373,8 +4408,6 @@ impl Valve {
                                     &self.db_kind,
                                 )
                                 .await?;
-
-                                // Commit the transaction:
                                 tx.commit().await?;
 
                                 // Save the column table and the data table and then reconfigure
@@ -4570,8 +4603,8 @@ impl Valve {
 
         let history_id: i32 = next_redo.get("history_id");
         let history_id = history_id as u16;
+        // We do not redo orphaned changes:
         if history_id < next_undo_id {
-            // We do not redo orphaned changes:
             log::warn!("Nothing to redo.");
             return Ok(None);
         }
@@ -4602,9 +4635,12 @@ impl Valve {
                             .and_then(|t| t.as_str())
                             .ok_or(make_err("No string 'column' found"))?;
 
+                        // Begin a transaction:
                         let mut tx = self.pool.begin().await?;
-                        add_column_tx(table, column, to, &mut tx, &self.db_kind).await?;
 
+                        // Add a column to the table and then update its row number and row order
+                        // to the saved values for the previously deleted row:
+                        add_column_tx(table, column, to, &mut tx, &self.db_kind).await?;
                         let sql = {
                             let rn: i64 = next_redo.get("row");
                             let rn = rn as u32;
@@ -4628,6 +4664,8 @@ impl Valve {
                             &self.db_kind,
                         )
                         .await?;
+
+                        // Commit the transaction:
                         tx.commit().await?;
 
                         // Save the column table and the data table and then reconfigure valve:
@@ -4677,16 +4715,30 @@ impl Valve {
                 "rename column" => match &to {
                     None => return Err(make_err("No 'to' found").into()),
                     Some(to) => {
-                        let table = to.get("table").unwrap().as_str().unwrap();
-                        let new_name = to.get("column").unwrap().as_str().unwrap();
+                        let table = to
+                            .get("table")
+                            .and_then(|t| t.as_str())
+                            .ok_or(make_err("No string 'table' in 'to'"))?;
+                        let new_name = to
+                            .get("column")
+                            .and_then(|c| c.as_str())
+                            .ok_or(make_err("No string 'column' in 'to'"))?;
                         let new_label = match to.get("label") {
                             None => None,
-                            Some(label) => Some(label.as_str().unwrap().to_string()),
+                            Some(label) => Some(
+                                label
+                                    .as_str()
+                                    .ok_or(make_err("Label is not a string"))?
+                                    .to_string(),
+                            ),
                         };
                         match &from {
                             None => return Err(make_err("No 'from' found").into()),
                             Some(from) => {
-                                let old_name = from.get("column").unwrap().as_str().unwrap();
+                                let old_name = from
+                                    .get("column")
+                                    .and_then(|c| c.as_str())
+                                    .ok_or(make_err("No string 'column' in 'from'"))?;
 
                                 let mut tx = self.pool.begin().await?;
                                 rename_column_tx(
@@ -4720,9 +4772,12 @@ impl Valve {
                 "add datatype" => match &to {
                     None => return Err(make_err("No 'to' found").into()),
                     Some(to) => {
+                        // Begin a transaction:
                         let mut tx = self.pool.begin().await?;
-                        add_datatype_tx(to, &self.db_kind, &mut tx).await?;
 
+                        // Add the datatype and then update its row number to the save value of the
+                        // previously deleted datatype:
+                        add_datatype_tx(to, &self.db_kind, &mut tx).await?;
                         let datatype = to
                             .get("datatype")
                             .and_then(|d| d.as_str())
@@ -4730,6 +4785,8 @@ impl Valve {
                         let sql = {
                             let rn: i64 = next_redo.get("row");
                             let rn = rn as u32;
+                            // TODO: Also save the row order previously instead of regenerating it
+                            // here:
                             let ro = rn * MOVE_INTERVAL;
                             local_sql_syntax(
                                 &self.db_kind,
@@ -4751,6 +4808,7 @@ impl Valve {
                         )
                         .await?;
 
+                        // Commit the transaction:
                         tx.commit().await?;
 
                         // Save the datatype table and then reconfigure valve:
@@ -4789,11 +4847,17 @@ impl Valve {
                 "rename datatype" => match &from {
                     None => return Err(make_err("No 'from' found").into()),
                     Some(from) => {
-                        let old_name = from.get("datatype").unwrap().as_str().unwrap();
+                        let old_name = from
+                            .get("datatype")
+                            .and_then(|d| d.as_str())
+                            .ok_or(make_err("No string 'datatype' in 'from'"))?;
                         match &to {
                             None => return Err(make_err("No 'to' found").into()),
                             Some(to) => {
-                                let new_name = to.get("datatype").unwrap().as_str().unwrap();
+                                let new_name = to
+                                    .get("datatype")
+                                    .and_then(|d| d.as_str())
+                                    .ok_or(make_err("No string 'datatype' in 'to'"))?;
 
                                 let mut tx = self.pool.begin().await?;
                                 rename_datatype_tx(&self, old_name, new_name, &mut tx).await?;
@@ -4805,11 +4869,10 @@ impl Valve {
                                     &self.db_kind,
                                 )
                                 .await?;
-
-                                // Commit the transaction:
                                 tx.commit().await?;
 
-                                // Save the column table and the data table and then reconfigure valve:
+                                // Save the column table and the data table and then reconfigure
+                                // valve:
                                 self.save_tables(&vec!["datatype", "column", "rule"], &None)
                                     .await?;
                                 self.reconfigure()?;
@@ -4825,6 +4888,7 @@ impl Valve {
                         let mut values = vec![];
                         let mut params = vec![];
 
+                        // Use `to['table']` to build a query for inserting to the table table:
                         let to_table = to
                             .get("table")
                             .and_then(|t| t.as_object())
@@ -4890,8 +4954,10 @@ impl Valve {
                             .and_then(|r| r.as_i64())
                             .ok_or(make_err("No integer 'row_number' found"))?;
                         let rn = rn as u32;
+                        // TODO: Save this previously instead of generating it from scratch here:
                         let ro = rn * MOVE_INTERVAL;
 
+                        // Begin a transaction and execute the insert statement:
                         let mut tx = self.pool.begin().await?;
 
                         let sql = {
@@ -4912,6 +4978,7 @@ impl Valve {
                         }
                         query.execute(tx.acquire().await?).await?;
 
+                        // Use `to['column']` to build a query to add columns to the column table:
                         let to_columns = to
                             .get("column")
                             .and_then(|t| t.as_array())
@@ -4926,6 +4993,7 @@ impl Valve {
                                 .and_then(|r| r.as_i64())
                                 .ok_or(make_err("No integer 'row_number' found"))?;
                             let rn = rn as u32;
+                            // TODO: Save this previously instead of regenerating it here:
                             let ro = rn * MOVE_INTERVAL;
 
                             let table = cconfig
@@ -5005,6 +5073,7 @@ impl Valve {
                                 params.push(nulltype);
                             }
 
+                            // The field 'default' need not be a string:
                             let default = cconfig
                                 .get("default")
                                 .ok_or(make_err("No 'default' found"))?;
@@ -5021,7 +5090,7 @@ impl Valve {
                                         params.push(default);
                                     }
                                 }
-                                _ => return Err(make_err("Bah!").into()),
+                                _ => return Err(make_err("Field 'default' has wrong type").into()),
                             };
 
                             let sql = format!(
@@ -5050,6 +5119,7 @@ impl Valve {
                         )
                         .await?;
 
+                        // Commit the transaction:
                         tx.commit().await?;
 
                         self.save_tables(&vec!["table", "column"], &None).await?;
@@ -5069,7 +5139,6 @@ impl Valve {
                             .ok_or(make_err("No table found"))?;
 
                         let mut tx = self.pool.begin().await?;
-
                         delete_table_tx(&self, table, &mut tx, &self.db_kind).await?;
                         switch_undone_state_tx(
                             &self.user,
@@ -5079,8 +5148,6 @@ impl Valve {
                             &self.db_kind,
                         )
                         .await?;
-
-                        // Commit the transaction:
                         tx.commit().await?;
 
                         // Save the column and table tables and reconfigure valve:
@@ -5093,11 +5160,17 @@ impl Valve {
                 "rename table" => match &from {
                     None => return Err(make_err("No 'from' found").into()),
                     Some(from) => {
-                        let old_name = from.get("table").unwrap().as_str().unwrap();
+                        let old_name = from
+                            .get("table")
+                            .and_then(|t| t.as_str())
+                            .ok_or(make_err("No string 'table' in 'from'"))?;
                         match &to {
                             None => return Err(make_err("No 'to' found").into()),
                             Some(to) => {
-                                let new_name = to.get("table").unwrap().as_str().unwrap();
+                                let new_name = to
+                                    .get("table")
+                                    .and_then(|t| t.as_str())
+                                    .ok_or(make_err("No string 'table' in 'to'"))?;
 
                                 let mut tx = self.pool.begin().await?;
                                 rename_table_tx(&self, &mut tx, old_name, new_name).await?;
@@ -5109,8 +5182,6 @@ impl Valve {
                                     &self.db_kind,
                                 )
                                 .await?;
-
-                                // Commit the transaction:
                                 tx.commit().await?;
 
                                 // Save the column table and the data table and then reconfigure
@@ -5172,6 +5243,7 @@ impl Valve {
             };
         }
 
+        // Handle other kinds of changes to rows:
         match (from, to) {
             (None, None) => {
                 return Err(ValveError::DataError(

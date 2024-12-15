@@ -5,9 +5,10 @@ use crate::{
     internal::generate_internal_table_config,
     validate::{validate_row_tx, validate_rows_constraints, validate_rows_intra},
     valve::{
-        Valve, ValveCell, ValveCellMessage, ValveColumnConfig, ValveConfig, ValveConstraintConfig,
-        ValveDatatypeConfig, ValveError, ValveForeignConstraint, ValveMessage, ValveRow,
-        ValveRuleConfig, ValveSpecialConfig, ValveTableConfig, ValveTreeConstraint,
+        JsonRow, Valve, ValveCell, ValveCellMessage, ValveColumnConfig, ValveConfig,
+        ValveConstraintConfig, ValveDatatypeConfig, ValveError, ValveForeignConstraint,
+        ValveMessage, ValveRow, ValveRuleConfig, ValveSpecialConfig, ValveTableConfig,
+        ValveTreeConstraint,
     },
     valve_grammar::StartParser,
     ALLOWED_OPTIONS, CHUNK_SIZE, INTERNAL_TABLES, MAX_DB_CONNECTIONS, MOVE_INTERVAL,
@@ -63,11 +64,6 @@ impl DbKind {
         }
     }
 }
-
-// TODO: Change this name from SerdeMap to JsonRow. It is just confusing to have two different
-// names.
-/// Alias for [Map](serde_json::map)<[String], [Value](serde_json::value)>.
-pub type SerdeMap = serde_json::Map<String, SerdeValue>;
 
 /// Represents a structure such as those found in the `structure` column of the `column` table in
 /// both its parsed format (i.e., as an [Expression](ast/enum.Expression.html)) as well as in its
@@ -205,7 +201,7 @@ pub fn read_config_files(
     fn check_table_requirements(
         columns_are_required: &Vec<&str>,
         values_are_required: &Vec<&str>,
-        row: &SerdeMap,
+        row: &JsonRow,
     ) -> Result<()> {
         let columns_are_required: HashSet<&str> =
             HashSet::from_iter(columns_are_required.iter().cloned());
@@ -439,7 +435,7 @@ pub fn read_config_files(
         tables_config: &HashMap<String, ValveTableConfig>,
         table_table: &str,
         pool: &AnyPool,
-    ) -> Result<Vec<SerdeMap>> {
+    ) -> Result<Vec<JsonRow>> {
         if table_table.to_lowercase().ends_with(".tsv") {
             let table_name = match table_type {
                 "column" => &specials_config.column,
@@ -959,10 +955,10 @@ pub async fn get_pool_from_connection_string(database: &str) -> Result<AnyPool> 
     Ok(pool)
 }
 
-/// Given a path, read a TSV file and return a vector of rows represented as [SerdeMaps](SerdeMap).
+/// Given a path, read a TSV file and return a vector of rows represented as [JsonRows](JsonRow).
 /// Note: Use this function to read "small" TSVs only. In particular, use this for the special
 /// configuration tables.
-pub fn read_tsv_into_vector(path: &str) -> Result<Vec<SerdeMap>> {
+pub fn read_tsv_into_vector(path: &str) -> Result<Vec<JsonRow>> {
     let mut rdr =
         ReaderBuilder::new()
             .delimiter(b'\t')
@@ -970,7 +966,7 @@ pub fn read_tsv_into_vector(path: &str) -> Result<Vec<SerdeMap>> {
                 ValveError::ConfigError(format!("Unable to open '{}': {}", path, err))
             })?);
 
-    let mut rows: Vec<SerdeMap> = vec![];
+    let mut rows: Vec<JsonRow> = vec![];
     for result in rdr.deserialize() {
         match result {
             Err(e) => {
@@ -1008,8 +1004,8 @@ pub fn read_tsv_into_vector(path: &str) -> Result<Vec<SerdeMap>> {
 
 // TODO: Accept a transaction optionlly:
 /// Given a database at the specified location, query the given table and return a vector of rows
-/// represented as [SerdeMaps](SerdeMap).
-pub fn read_db_table_into_vector(pool: &AnyPool, config_table: &str) -> Result<Vec<SerdeMap>> {
+/// represented as [JsonRows](JsonRow).
+pub fn read_db_table_into_vector(pool: &AnyPool, config_table: &str) -> Result<Vec<JsonRow>> {
     let sql = format!("SELECT * FROM \"{}\"", config_table);
     let rows = block_on(sqlx_query(&sql).fetch_all(pool)).map_err(|e| {
         ValveError::InputError(format!(
@@ -1019,7 +1015,7 @@ pub fn read_db_table_into_vector(pool: &AnyPool, config_table: &str) -> Result<V
     })?;
     let mut table_rows = vec![];
     for row in rows {
-        let mut table_row = SerdeMap::new();
+        let mut table_row = JsonRow::new();
         for column in row.columns() {
             let cname = column.name();
             if cname != "row_number" && cname != "row_order" {
@@ -1040,7 +1036,7 @@ pub async fn read_db_table_into_vector_tx(
     tx: &mut Transaction<'_, sqlx::Any>,
     config_table: &str,
     keep_rn: bool,
-) -> Result<Vec<SerdeMap>> {
+) -> Result<Vec<JsonRow>> {
     let sql = format!("SELECT * FROM \"{}\"", config_table);
     let rows = block_on(sqlx_query(&sql).fetch_all(tx.acquire().await?)).map_err(|e| {
         ValveError::InputError(format!(
@@ -1050,7 +1046,7 @@ pub async fn read_db_table_into_vector_tx(
     })?;
     let mut table_rows = vec![];
     for row in rows {
-        let mut table_row = SerdeMap::new();
+        let mut table_row = JsonRow::new();
         for column in row.columns() {
             let cname = column.name();
             if cname != "row_number" && cname != "row_order" {
@@ -2143,12 +2139,12 @@ pub async fn rename_column_tx(
     new_name: &str,
     new_label: &Option<String>,
 ) -> Result<()> {
-    // Update from() structures in the column table that refer to the column.
+    // Update the `structure` column:
     let mut structure_params = vec![];
     let mut where_params = vec![table];
     let structure_sql = {
         let mut sql_lines = vec![];
-        // Look through foreign constraints:
+        // from() structures that refer to the renamed column:
         for (fkey_table, fkeys) in valve.config.constraint.foreign.iter() {
             for fkey in fkeys {
                 if fkey.ftable == table && fkey.fcolumn == column {
@@ -2172,7 +2168,7 @@ pub async fn rename_column_tx(
             }
         }
 
-        // Update tree() structures that refer to the renamed column:
+        // tree() structures that refer to the renamed column:
         for tkey in valve
             .config
             .constraint
@@ -2197,7 +2193,7 @@ pub async fn rename_column_tx(
             }
         }
 
-        // Only actually build the structure clause if there were matching conditions:
+        // Only actually build the structure update clause if there were matching conditions:
         if !sql_lines.is_empty() {
             format!(
                 r#""structure" = CASE
@@ -2224,14 +2220,14 @@ pub async fn rename_column_tx(
         &valve.db_kind,
         &format!(
             r#"UPDATE "column"
-                      SET {structure_sql}
-                          "column" = CASE WHEN "column" = {SQL_PARAM} THEN {SQL_PARAM}
-                                          ELSE "column"
-                                     END,
-                          "label" = CASE WHEN "column" = {SQL_PARAM} THEN {SQL_PARAM}
-                                          ELSE "label"
-                                     END
-                      {where_sql}"#
+               SET {structure_sql}
+                   "column" = CASE WHEN "column" = {SQL_PARAM} THEN {SQL_PARAM}
+                                   ELSE "column"
+                              END,
+                    "label" = CASE WHEN "column" = {SQL_PARAM} THEN {SQL_PARAM}
+                                   ELSE "label"
+                              END
+               {where_sql}"#
         ),
     );
 
@@ -2255,14 +2251,13 @@ pub async fn rename_column_tx(
         &valve.db_kind,
         &format!(
             r#"UPDATE "rule"
-                     SET "when column" = CASE
-                       WHEN "when column" = {SQL_PARAM} THEN {SQL_PARAM}
-                       ELSE "when column"
-                     END, "then column" = CASE
-                       WHEN "then column" = {SQL_PARAM} THEN {SQL_PARAM}
-                       ELSE "then column"
-                     END
-                   WHERE "table" = {SQL_PARAM}"#
+               SET "when column" = CASE WHEN "when column" = {SQL_PARAM} THEN {SQL_PARAM}
+                                        ELSE "when column"
+                                   END,
+                   "then column" = CASE WHEN "then column" = {SQL_PARAM} THEN {SQL_PARAM}
+                                        ELSE "then column"
+                                   END
+               WHERE "table" = {SQL_PARAM}"#
         ),
     );
 
@@ -2348,7 +2343,7 @@ pub async fn rename_datatype_tx(
             &valve.db_kind,
             &format!(
                 r#"SELECT "row_number", "row_order" FROM "datatype"
-                        WHERE "datatype" = {SQL_PARAM}"#
+                   WHERE "datatype" = {SQL_PARAM}"#
             ),
         );
         let row = sqlx_query(&sql)
@@ -2564,14 +2559,14 @@ pub async fn rename_table_tx(
     tx: &mut Transaction<'_, sqlx::Any>,
     table: &str,
     new_name: &str,
-) -> Result<()> {
+) -> Result<(u32, u32)> {
     // We begin by saving the row number and row order of the table to be renamed:
     let (saved_rn, saved_ro) = {
         let sql = local_sql_syntax(
             &valve.db_kind,
             &format!(
                 r#"SELECT "row_number", "row_order" FROM "table"
-                        WHERE "table" = {SQL_PARAM}"#
+                   WHERE "table" = {SQL_PARAM}"#
             ),
         );
         let row = sqlx_query(&sql)
@@ -2601,21 +2596,23 @@ pub async fn rename_table_tx(
         .collect::<Vec<_>>()
         .join(", ");
 
+    // Now insert a new row to the table table. We will update the row number and row order
+    // to the saved values later:
     let (rn, ro) = get_next_new_row_tx(&valve.db_kind, tx, "table").await?;
     let sql = local_sql_syntax(
         &valve.db_kind,
         &format!(
             r#"INSERT INTO "table" (
-                       "row_number", "row_order", "table",
-                       {main_column_list}
-                   )
-                   SELECT
-                      {rn} AS row_number,
-                      {ro} as row_order,
-                      {SQL_PARAM} as "table",
-                      {t2_column_list}
-                     FROM "table" t2
-                    WHERE t2."table" = {SQL_PARAM}"#
+                   "row_number", "row_order", "table",
+                   {main_column_list}
+               )
+               SELECT
+                   {rn} AS row_number,
+                   {ro} as row_order,
+                   {SQL_PARAM} as "table",
+                   {t2_column_list}
+               FROM "table" t2
+               WHERE t2."table" = {SQL_PARAM}"#
         ),
     );
     let query = sqlx_query(&sql).bind(new_name).bind(table);
@@ -2685,8 +2682,8 @@ pub async fn rename_table_tx(
         &valve.db_kind,
         &format!(
             r#"UPDATE "rule"
-                      SET "table" = {SQL_PARAM}
-                    WHERE "table" = {SQL_PARAM}"#
+               SET "table" = {SQL_PARAM}
+               WHERE "table" = {SQL_PARAM}"#
         ),
     );
     let query = sqlx_query(&sql).bind(new_name).bind(table);
@@ -2703,15 +2700,15 @@ pub async fn rename_table_tx(
     // that we saved earlier, to complete the logical rename operation:
     let sql = format!(
         r#"UPDATE "table"
-                  SET "row_number" = {saved_rn}, "row_order" = {saved_ro}
-                WHERE "row_number" = {rn}"#
+           SET "row_number" = {saved_rn}, "row_order" = {saved_ro}
+           WHERE "row_number" = {rn}"#
     );
     let query = sqlx_query(&sql);
     query.execute(tx.acquire().await?).await?;
 
     // Although PostgreSQL supports an ALTER VIEW statement, SQLite does not, so we have to
     // manually drop and recreate views in that case. For simplicitly, then, we use the manual
-    // method in both cases.
+    // method for both.
 
     // Begin by dropping the standard and text views:
     let sql = format!(r#"DROP VIEW "{table}_text_view""#);
@@ -2742,7 +2739,8 @@ pub async fn rename_table_tx(
     let query = sqlx_query(&sql);
     query.execute(tx.acquire().await?).await?;
 
-    Ok(())
+    // Return the row number and row order in case it is useful for the caller:
+    Ok((saved_rn as u32, saved_ro as u32))
 }
 
 /// Given a global config map, a map of compiled datatype conditions, a table name and a column
@@ -3386,7 +3384,7 @@ pub async fn get_text_row_from_db_tx(
     tx: &mut Transaction<'_, sqlx::Any>,
     table: &str,
     row_number: &u32,
-) -> Result<SerdeMap> {
+) -> Result<JsonRow> {
     let (sql, sql_params) = generic_select_with_message_values(table, config, kind);
     let sql = format!(
         "{} WHERE row_number = {}",
@@ -3416,7 +3414,7 @@ pub async fn get_text_row_from_db_tx(
     valve_row.contents_to_rich_json()
 }
 
-/// Given a Valve configuration, the database kind, a table name, and a [SerdeMap] representing
+/// Given a Valve configuration, the database kind, a table name, and a [JsonRow] representing
 /// a row in the table, such that all of the column values are represented as strings, uses the
 /// configuration to find the actual SQL types of each column in the row, and then converts the
 /// value of each column from a string to the appropriate type, before returning the modified map.
@@ -3424,9 +3422,9 @@ pub fn correct_row_datatypes(
     config: &ValveConfig,
     db_kind: &DbKind,
     table: &str,
-    row: &SerdeMap,
-) -> Result<SerdeMap> {
-    let mut corrected_row = SerdeMap::new();
+    row: &JsonRow,
+) -> Result<JsonRow> {
+    let mut corrected_row = JsonRow::new();
     for (cname, cell) in row {
         let numeric_re = Regex::new(r"^[0-9]*\.?[0-9]+$").expect("Programmer error");
         let sql_type =
@@ -3494,7 +3492,7 @@ pub fn get_json_array_from_column(row: &AnyRow, column: &str) -> Option<Vec<Serd
 }
 
 /// Given a row and a column name, return the contents of the column as a JSON object.
-pub fn get_json_object_from_column(row: &AnyRow, column: &str) -> Option<SerdeMap> {
+pub fn get_json_object_from_column(row: &AnyRow, column: &str) -> Option<JsonRow> {
     let raw_value = row
         .try_get_raw(column)
         .expect("Unable to get raw value from row");
@@ -4227,12 +4225,13 @@ pub async fn update_row_tx(
 pub async fn add_column_tx(
     table: &str,
     column: &str,
-    column_details: &SerdeMap,
+    column_details: &JsonRow,
     tx: &mut Transaction<'_, sqlx::Any>,
     db_kind: &DbKind,
-) -> Result<u32> {
+) -> Result<(u32, u32)> {
     let make_err = |err_str: &str| -> ValveError { ValveError::InputError(err_str.to_string()) };
 
+    // A datatype is required but the other fields are optional:
     let datatype = match column_details.get("datatype") {
         Some(datatype) => datatype.as_str().ok_or(make_err("Not a string"))?,
         None => return Err(make_err("No datatype given").into()),
@@ -4278,12 +4277,12 @@ pub async fn add_column_tx(
     }
     query.execute(tx.acquire().await?).await?;
 
-    Ok(rn)
+    Ok((rn, ro))
 }
 
 /// TODO: Add docstring
 pub async fn add_datatype_tx(
-    dt_map: &SerdeMap,
+    dt_map: &JsonRow,
     db_kind: &DbKind,
     tx: &mut Transaction<'_, sqlx::Any>,
 ) -> Result<u32> {
@@ -4333,16 +4332,22 @@ pub async fn delete_column_tx(
     column: &str,
     tx: &mut Transaction<'_, sqlx::Any>,
     db_kind: &DbKind,
-) -> Result<()> {
+) -> Result<(u32, u32)> {
     let sql = local_sql_syntax(
         db_kind,
-        &format!(r#"DELETE FROM "column" WHERE "table" = {SQL_PARAM} AND "column" = {SQL_PARAM}"#),
+        &format!(
+            r#"DELETE FROM "column"
+               WHERE "table" = {SQL_PARAM} AND "column" = {SQL_PARAM}"
+               RETURNING "row_number" AS "row_number", "row_order" AS "row_order""#
+        ),
     );
 
     let query = sqlx_query(&sql).bind(table).bind(column);
-    query.execute(tx.acquire().await?).await?;
+    let row = query.fetch_one(tx.acquire().await?).await?;
+    let rn = row.get::<i64, _>("row_number") as u32;
+    let ro = row.get::<i64, _>("row_order") as u32;
 
-    Ok(())
+    Ok((rn, ro))
 }
 
 /// TODO: Add docstring
@@ -4350,19 +4355,20 @@ pub async fn delete_datatype_tx(
     datatype: &str,
     tx: &mut Transaction<'_, sqlx::Any>,
     db_kind: &DbKind,
-) -> Result<u32> {
+) -> Result<(u32, u32)> {
     let sql = local_sql_syntax(
         db_kind,
         &format!(
             r#"DELETE FROM "datatype" WHERE "datatype" = {SQL_PARAM}
-               RETURNING "row_number" AS "row_number""#
+               RETURNING "row_number" AS "row_number", "row_order" AS "row_order""#
         ),
     );
     let query = sqlx_query(&sql).bind(datatype);
     let row = query.fetch_one(tx.acquire().await?).await?;
     let rn = row.get::<i64, _>("row_number") as u32;
+    let ro = row.get::<i64, _>("row_order") as u32;
 
-    Ok(rn)
+    Ok((rn, ro))
 }
 
 /// TODO: Add docstring
@@ -4487,8 +4493,8 @@ pub async fn record_row_change_tx(
     tx: &mut Transaction<'_, sqlx::Any>,
     table: &str,
     row_number: &u32,
-    from: Option<&SerdeMap>,
-    to: Option<&SerdeMap>,
+    from: Option<&JsonRow>,
+    to: Option<&JsonRow>,
     user: &str,
 ) -> Result<()> {
     if let (None, None) = (from, to) {
@@ -4498,7 +4504,7 @@ pub async fn record_row_change_tx(
         .into());
     }
 
-    fn to_text(row: Option<&SerdeMap>, omit_redundant_fields: bool) -> String {
+    fn to_text(row: Option<&JsonRow>, omit_redundant_fields: bool) -> String {
         match row {
             None => "NULL".to_string(),
             Some(row) => {
@@ -4520,7 +4526,7 @@ pub async fn record_row_change_tx(
         }
     }
 
-    fn summarize(from: Option<&SerdeMap>, to: Option<&SerdeMap>) -> Result<String> {
+    fn summarize(from: Option<&JsonRow>, to: Option<&JsonRow>) -> Result<String> {
         // Constructs a summary of the form:
         // [{
         //    "column":"bar",
@@ -4588,7 +4594,7 @@ pub async fn record_row_change_tx(
                             ))?,
                     };
                     if new_value != old_value {
-                        let mut column_summary = SerdeMap::new();
+                        let mut column_summary = JsonRow::new();
                         column_summary.insert("column".to_string(), json!(column));
                         column_summary.insert(
                             "level".to_string(),
@@ -4667,11 +4673,11 @@ pub async fn record_config_change_tx(
     tx: &mut Transaction<'_, sqlx::Any>,
     table: &str,
     row_number: &u32,
-    from: Option<&SerdeMap>,
-    to: Option<&SerdeMap>,
+    from: Option<&JsonRow>,
+    to: Option<&JsonRow>,
     user: &str,
 ) -> Result<()> {
-    fn to_text(details: Option<&SerdeMap>) -> String {
+    fn to_text(details: Option<&JsonRow>) -> String {
         match details {
             None => "NULL".to_string(),
             Some(details) => format!("{}", json!(details)),

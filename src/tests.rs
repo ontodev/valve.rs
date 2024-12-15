@@ -2,9 +2,8 @@
 
 use crate::{
     ast::Expression,
-    toolkit::SerdeMap,
     validate::validate_cell_datatype,
-    valve::{Valve, ValveCell, ValveDatatypeConfig, ValveError},
+    valve::{JsonRow, Valve, ValveCell, ValveDatatypeConfig, ValveError},
     PRINTF_RE,
 };
 use anyhow::Result;
@@ -324,8 +323,8 @@ async fn test_randomized_api_test_with_undo_redo(valve: &mut Valve) -> Result<()
         value
     }
 
-    fn generate_row() -> SerdeMap {
-        let mut row = SerdeMap::new();
+    fn generate_row() -> JsonRow {
+        let mut row = JsonRow::new();
         row.insert("prefix".to_string(), json!(generate_value()));
         row.insert("base".to_string(), json!(generate_value()));
         row.insert("ontology IRI".to_string(), json!(generate_value()));
