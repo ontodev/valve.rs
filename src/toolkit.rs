@@ -2316,7 +2316,7 @@ pub async fn rename_datatype_tx(
     datatype: &str,
     new_name: &str,
     tx: &mut Transaction<'_, sqlx::Any>,
-) -> Result<u32> {
+) -> Result<(u32, u32)> {
     let cols_for_query = valve
         .config
         .table
@@ -2549,7 +2549,8 @@ pub async fn rename_datatype_tx(
     query.execute(tx.acquire().await?).await?;
 
     let saved_rn = saved_rn as u32;
-    Ok(saved_rn)
+    let saved_ro = saved_ro as u32;
+    Ok((saved_rn, saved_ro))
 }
 
 /// Given a table name and a new name for the table, rename the table in the database using the
@@ -4285,22 +4286,26 @@ pub async fn add_datatype_tx(
     dt_map: &JsonRow,
     db_kind: &DbKind,
     tx: &mut Transaction<'_, sqlx::Any>,
-) -> Result<u32> {
+) -> Result<(u32, u32)> {
     // Separate the datatype fields into the columns and column parameters that we will
     // use to construct the INSERT statement:
     let mut columns = vec![];
     let mut placeholders = vec![];
     let mut params = vec![];
     for (column, value) in dt_map.iter() {
-        columns.push(format!(r#""{column}""#));
-        let value = value.as_str().ok_or(ValveError::InputError(
-            format!("Not a string: {value}").into(),
-        ))?;
-        if value == "" {
-            placeholders.push("NULL");
-        } else {
-            placeholders.push(SQL_PARAM);
-            params.push(value.to_string());
+        // If the map contains a row_number or row_order field, we ignore it here. The caller
+        // is responsible for dealing with it in case it needs to be updated.
+        if !["row_number", "row_order"].contains(&column.as_str()) {
+            columns.push(format!(r#""{column}""#));
+            let value = value.as_str().ok_or(ValveError::InputError(
+                format!("Not a string: {value}").into(),
+            ))?;
+            if value == "" {
+                placeholders.push("NULL");
+            } else {
+                placeholders.push(SQL_PARAM);
+                params.push(value.to_string());
+            }
         }
     }
 
@@ -4323,7 +4328,7 @@ pub async fn add_datatype_tx(
     }
     query.execute(tx.acquire().await?).await?;
 
-    Ok(rn)
+    Ok((rn, ro))
 }
 
 /// TODO: Add docstring
@@ -4337,7 +4342,7 @@ pub async fn delete_column_tx(
         db_kind,
         &format!(
             r#"DELETE FROM "column"
-               WHERE "table" = {SQL_PARAM} AND "column" = {SQL_PARAM}"
+               WHERE "table" = {SQL_PARAM} AND "column" = {SQL_PARAM}
                RETURNING "row_number" AS "row_number", "row_order" AS "row_order""#
         ),
     );

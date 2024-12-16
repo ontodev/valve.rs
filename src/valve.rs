@@ -23,7 +23,7 @@ use crate::{
     },
     validate::{validate_row_tx, validate_tree_foreign_keys, with_tree_sql},
     valve_grammar::StartParser,
-    CHUNK_SIZE, INTERNAL_TABLES, MOVE_INTERVAL, PRINTF_RE, SQL_PARAM, SQL_TYPES,
+    CHUNK_SIZE, INTERNAL_TABLES, PRINTF_RE, SQL_PARAM, SQL_TYPES,
 };
 use anyhow::Result;
 use csv::{QuoteStyle, ReaderBuilder, WriterBuilder};
@@ -1031,14 +1031,16 @@ impl Valve {
         let mut tx = self.pool.begin().await?;
 
         // Add the datatype and record the change:
-        let rn = add_datatype_tx(dt_map, &self.db_kind, &mut tx).await?;
+        let (rn, ro) = add_datatype_tx(dt_map, &self.db_kind, &mut tx).await?;
+        let mut dt_map = dt_map.clone();
+        dt_map.insert("row_order".to_string(), json!(ro));
         record_config_change_tx(
             &self.db_kind,
             &mut tx,
             "datatype",
             &rn,
             None,
-            Some(dt_map),
+            Some(&dt_map),
             &self.user,
         )
         .await?;
@@ -1066,21 +1068,23 @@ impl Valve {
                 "No datatype found '{datatype}'",
             )))?;
         let dt_config = json!(dt_config);
-        let dt_config = dt_config
+        let mut dt_config = dt_config
             .as_object()
             .ok_or(ValveError::ConfigError(format!(
                 "Not an object '{:?}'",
                 dt_config
-            )))?;
+            )))?
+            .clone();
 
         // Delete the datatype and store a record of the change in the history table:
-        let (dt_rn, _) = delete_datatype_tx(datatype, &mut tx, &self.db_kind).await?;
+        let (dt_rn, dt_ro) = delete_datatype_tx(datatype, &mut tx, &self.db_kind).await?;
+        dt_config.insert("row_order".to_string(), json!(dt_ro));
         record_config_change_tx(
             &self.db_kind,
             &mut tx,
             "datatype",
             &dt_rn,
-            Some(dt_config),
+            Some(&dt_config),
             None,
             &self.user,
         )
@@ -1099,11 +1103,8 @@ impl Valve {
         // Begin a transaction:
         let mut tx = self.pool.begin().await?;
 
-        // TODO: Here and also elsewhere: We need to save the row_order in addition to the
-        // row_number.
-
         // Rename the datatype:
-        let dt_rn = rename_datatype_tx(&self, datatype, new_name, &mut tx).await?;
+        let (dt_rn, _) = rename_datatype_tx(&self, datatype, new_name, &mut tx).await?;
 
         // Save a record of the renaming to the history table:
         let mut from = JsonRow::new();
@@ -1227,37 +1228,46 @@ impl Valve {
         let mut tx = self.pool.begin().await?;
 
         // Save the row number that is associated with this table in the table table for later:
-        let table_rn = {
+        let (table_rn, table_ro) = {
             let sql = local_sql_syntax(
                 &self.db_kind,
-                &format!(r#"SELECT row_number FROM "table" WHERE "table" = {SQL_PARAM}"#),
+                &format!(
+                    r#"SELECT "row_number", "row_order"
+                       FROM "table"
+                       WHERE "table" = {SQL_PARAM}"#
+                ),
             );
             let row = sqlx_query(&sql).bind(table).fetch_one(&self.pool).await?;
             let rn = row.try_get::<i64, _>("row_number").unwrap();
-            rn as u32
+            let ro = row.try_get::<i64, _>("row_order").unwrap();
+            (rn as u32, ro as u32)
         };
 
         // Save the row numbers that are associated with this table's columns in the column table
         // for later:
-        let column_rns = {
+        let (column_rns, column_ros) = {
             let mut column_rns = HashMap::new();
+            let mut column_ros = HashMap::new();
             let sql = local_sql_syntax(
                 &self.db_kind,
                 &format!(
-                    r#"SELECT "column", "row_number" FROM "column" WHERE "table" = {SQL_PARAM}"#
+                    r#"SELECT "column", "row_number", "row_order"
+                       FROM "column"
+                       WHERE "table" = {SQL_PARAM}"#
                 ),
             );
             let rows = sqlx_query(&sql).bind(table).fetch_all(&self.pool).await?;
             for row in &rows {
-                let rn = row.get::<i64, _>("row_number");
-                let rn = rn as u32;
                 let column: &str = row.get("column");
+                let rn = row.get::<i64, _>("row_number") as u32;
+                let ro = row.get::<i64, _>("row_order") as u32;
                 column_rns.insert(column.to_string(), rn);
+                column_ros.insert(column.to_string(), ro);
             }
-            column_rns
+            (column_rns, column_ros)
         };
 
-        // Remove all references to the table in the database:
+        // Delete the table in the database:
         delete_table_tx(&self, table, &mut tx, &self.db_kind).await?;
 
         // Get the table config and use it to populate the `from` field for the record that we
@@ -1275,6 +1285,7 @@ impl Valve {
             from_table.insert("description".to_string(), json!(tconfig.description));
             from_table.insert("path".to_string(), json!(tconfig.path));
             from_table.insert("row_number".to_string(), json!(table_rn));
+            from_table.insert("row_order".to_string(), json!(table_ro));
             from_table.insert("table".to_string(), json!(tconfig.table));
             from_table.insert("table_type".to_string(), json!(tconfig.table_type));
             from_table.insert(
@@ -1298,6 +1309,10 @@ impl Valve {
                     "Row number not found for '{column}'"
                 )))?;
                 this_column.insert("row_number".to_string(), json!(column_rn));
+                let column_ro = column_ros.get(column).ok_or(ValveError::DataError(format!(
+                    "Row order not found for '{column}'"
+                )))?;
+                this_column.insert("row_order".to_string(), json!(column_ro));
                 from_columns.push(this_column);
             }
             from.insert("column".to_string(), json!(from_columns));
@@ -1407,7 +1422,9 @@ impl Valve {
         };
 
         // Add the column using the low-level toolkit function:
-        let (rn, _) = add_column_tx(table, column, column_details, &mut tx, &self.db_kind).await?;
+        let (rn, ro) = add_column_tx(table, column, column_details, &mut tx, &self.db_kind).await?;
+        let mut column_details = column_details.clone();
+        column_details.insert("row_order".to_string(), json!(ro));
 
         // Record the configuration change to the history table:
         record_config_change_tx(
@@ -1416,7 +1433,7 @@ impl Valve {
             "column",
             &rn,
             None,
-            Some(column_details),
+            Some(&column_details),
             &self.user,
         )
         .await?;
@@ -1450,19 +1467,23 @@ impl Valve {
             )))?;
 
         let colconfig = json!(colconfig);
-        let colconfig = colconfig.as_object().ok_or(ValveError::InputError(format!(
-            "Not an object '{:?}'",
-            colconfig
-        )))?;
+        let mut colconfig = colconfig
+            .as_object()
+            .ok_or(ValveError::InputError(format!(
+                "Not an object '{:?}'",
+                colconfig
+            )))?
+            .clone();
 
-        let (col_rn, _) = delete_column_tx(table, column, &mut tx, &self.db_kind).await?;
+        let (col_rn, col_ro) = delete_column_tx(table, column, &mut tx, &self.db_kind).await?;
+        colconfig.insert("row_order".to_string(), json!(col_ro));
 
         record_config_change_tx(
             &self.db_kind,
             &mut tx,
             "column",
             &col_rn,
-            Some(colconfig),
+            Some(&colconfig),
             None,
             &self.user,
         )
@@ -1514,7 +1535,11 @@ impl Valve {
                        WHERE "table" = {SQL_PARAM} AND "column" = {SQL_PARAM}"#
                 ),
             );
-            let row = sqlx_query(&sql).bind(column).fetch_one(&self.pool).await?;
+            let row = sqlx_query(&sql)
+                .bind(table)
+                .bind(column)
+                .fetch_one(&self.pool)
+                .await?;
             let rn = row.try_get::<i64, _>("row_number").unwrap_or_default();
             let ro = row.try_get::<i64, _>("row_order").unwrap_or_default();
             (rn as u32, ro as u32)
@@ -3901,7 +3926,9 @@ impl Valve {
                         let sql = {
                             let rn: i64 = last_change.get("row");
                             let rn = rn as u32;
-                            let ro = rn * MOVE_INTERVAL;
+                            let ro = from
+                                .get("row_order")
+                                .ok_or(make_err("No 'row_order' found"))?;
                             local_sql_syntax(
                                 &self.db_kind,
                                 &format!(
@@ -4033,9 +4060,9 @@ impl Valve {
                         let sql = {
                             let rn: i64 = last_change.get("row");
                             let rn = rn as u32;
-                            // TODO: Save this too to the history table instead of regenerating it
-                            // here:
-                            let ro = rn * MOVE_INTERVAL;
+                            let ro = from
+                                .get("row_order")
+                                .ok_or(make_err("No 'row_order' found"))?;
                             local_sql_syntax(
                                 &self.db_kind,
                                 &format!(
@@ -4205,7 +4232,11 @@ impl Valve {
                             .and_then(|r| r.as_i64())
                             .ok_or(make_err("No integer 'row_number' found"))?;
                         let rn = rn as u32;
-                        let ro = rn * MOVE_INTERVAL;
+                        let ro = from_table
+                            .get("row_order")
+                            .and_then(|r| r.as_i64())
+                            .ok_or(make_err("No integer 'row_number' found"))?;
+                        let ro = ro as u32;
 
                         // Begin a database transaction and execute the SQL:
                         let mut tx = self.pool.begin().await?;
@@ -4244,9 +4275,11 @@ impl Valve {
                                 .and_then(|r| r.as_i64())
                                 .ok_or(make_err("No integer 'row_number' found"))?;
                             let rn = rn as u32;
-                            // TODO: We shoul save the row order previously instead of regenerating
-                            // it here:
-                            let ro = rn * MOVE_INTERVAL;
+                            let ro = cconfig
+                                .get("row_order")
+                                .and_then(|r| r.as_i64())
+                                .ok_or(make_err("No integer 'row_order' found"))?;
+                            let ro = ro as u32;
 
                             let table = cconfig
                                 .get("table")
@@ -4644,7 +4677,9 @@ impl Valve {
                         let sql = {
                             let rn: i64 = next_redo.get("row");
                             let rn = rn as u32;
-                            let ro = rn * MOVE_INTERVAL;
+                            let ro = to
+                                .get("row_order")
+                                .ok_or(make_err("No 'row_order' found"))?;
                             local_sql_syntax(
                                 &self.db_kind,
                                 &format!(
@@ -4785,9 +4820,9 @@ impl Valve {
                         let sql = {
                             let rn: i64 = next_redo.get("row");
                             let rn = rn as u32;
-                            // TODO: Also save the row order previously instead of regenerating it
-                            // here:
-                            let ro = rn * MOVE_INTERVAL;
+                            let ro = to
+                                .get("row_order")
+                                .ok_or(make_err("No 'row_order' found"))?;
                             local_sql_syntax(
                                 &self.db_kind,
                                 &format!(
@@ -4954,8 +4989,11 @@ impl Valve {
                             .and_then(|r| r.as_i64())
                             .ok_or(make_err("No integer 'row_number' found"))?;
                         let rn = rn as u32;
-                        // TODO: Save this previously instead of generating it from scratch here:
-                        let ro = rn * MOVE_INTERVAL;
+                        let ro = to_table
+                            .get("row_order")
+                            .and_then(|r| r.as_i64())
+                            .ok_or(make_err("No integer 'row_number' found"))?;
+                        let ro = ro as u32;
 
                         // Begin a transaction and execute the insert statement:
                         let mut tx = self.pool.begin().await?;
@@ -4993,8 +5031,11 @@ impl Valve {
                                 .and_then(|r| r.as_i64())
                                 .ok_or(make_err("No integer 'row_number' found"))?;
                             let rn = rn as u32;
-                            // TODO: Save this previously instead of regenerating it here:
-                            let ro = rn * MOVE_INTERVAL;
+                            let ro = cconfig
+                                .get("row_order")
+                                .and_then(|r| r.as_i64())
+                                .ok_or(make_err("No integer 'row_number' found"))?;
+                            let ro = ro as u32;
 
                             let table = cconfig
                                 .get("table")
