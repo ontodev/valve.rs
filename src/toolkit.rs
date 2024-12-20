@@ -19,7 +19,6 @@ use anyhow::Result;
 use async_recursion::async_recursion;
 use crossbeam;
 use csv::{ReaderBuilder, StringRecordsIter};
-use futures::executor::block_on;
 use indexmap::IndexMap;
 use indoc::indoc;
 use is_executable::IsExecutable;
@@ -178,7 +177,7 @@ pub enum QueryParam {
 /// - The list of managed tables in dependency order
 /// - A map from table names to the tables that depend on a given table
 /// - A map from table names to the tables that a given table depends on
-pub fn read_config_files(
+pub async fn read_config_files(
     path: &str,
     parser: &StartParser,
     pool: &AnyPool,
@@ -249,7 +248,7 @@ pub fn read_config_files(
         if path.to_lowercase().ends_with(".tsv") {
             read_tsv_into_vector(path)?
         } else {
-            read_db_table_into_vector(pool, "table")?
+            read_db_table_into_vector(pool, "table").await?
         }
     };
 
@@ -429,7 +428,7 @@ pub fn read_config_files(
     // `table_type` is looked up, the TSV is read, and the rows are returned. When `path` does not
     // end in '.tsv', the table name corresponding to `table_type` is looked up in the database
     // indicated by `path`, the table is read, and the rows are returned.
-    fn get_special_config(
+    async fn get_special_config(
         table_type: &str,
         specials_config: &ValveSpecialConfig,
         tables_config: &HashMap<String, ValveTableConfig>,
@@ -487,13 +486,13 @@ pub fn read_config_files(
                 }
                 Some(table) => table,
             };
-            read_db_table_into_vector(pool, db_table)
+            read_db_table_into_vector(pool, db_table).await
         }
     }
 
     // 2. Load the datatype table.
     let mut datatypes_config = HashMap::new();
-    let rows = get_special_config("datatype", &specials_config, &tables_config, path, pool)?;
+    let rows = get_special_config("datatype", &specials_config, &tables_config, path, pool).await?;
     for row in rows {
         if let Err(e) =
             check_table_requirements(&REQUIRED_DATATYPE_COLUMNS, &vec!["datatype"], &row)
@@ -532,7 +531,7 @@ pub fn read_config_files(
     }
 
     // 3. Load the column table.
-    let rows = get_special_config("column", &specials_config, &tables_config, path, pool)?;
+    let rows = get_special_config("column", &specials_config, &tables_config, path, pool).await?;
     let special_tables = vec![
         specials_config.table.to_string(),
         specials_config.column.to_string(),
@@ -643,7 +642,8 @@ pub fn read_config_files(
     let mut rules_config = HashMap::new();
     if specials_config.rule != "" {
         let table_name = &specials_config.rule;
-        let rows = get_special_config(table_name, &specials_config, &tables_config, path, pool)?;
+        let rows =
+            get_special_config(table_name, &specials_config, &tables_config, path, pool).await?;
         for row in rows {
             if let Err(e) = check_table_requirements(
                 &REQUIRED_RULE_COLUMNS,
@@ -1002,48 +1002,35 @@ pub fn read_tsv_into_vector(path: &str) -> Result<Vec<JsonRow>> {
     Ok(rows)
 }
 
-// TODO: Accept a transaction optionlly:
-/// Given a database at the specified location, query the given table and return a vector of rows
-/// represented as [JsonRows](JsonRow).
-pub fn read_db_table_into_vector(pool: &AnyPool, config_table: &str) -> Result<Vec<JsonRow>> {
-    let sql = format!("SELECT * FROM \"{}\"", config_table);
-    let rows = block_on(sqlx_query(&sql).fetch_all(pool)).map_err(|e| {
-        ValveError::InputError(format!(
-            "Error while reading table '{}' from database: {}",
-            config_table, e
-        ))
-    })?;
-    let mut table_rows = vec![];
-    for row in rows {
-        let mut table_row = JsonRow::new();
-        for column in row.columns() {
-            let cname = column.name();
-            if cname != "row_number" && cname != "row_order" {
-                let raw_value = row.try_get_raw(format!(r#"{}"#, cname).as_str()).unwrap();
-                if !raw_value.is_null() {
-                    let value = get_column_value_as_string(&row, &cname, "text");
-                    table_row.insert(cname.to_string(), json!(value));
-                } else {
-                    table_row.insert(cname.to_string(), json!(""));
-                }
-            }
-        }
-        table_rows.push(table_row);
-    }
-    Ok(table_rows)
+/// TODO: Add docstring. Note that this function should be used mainly for "small" tables like
+/// config tables because of the potential memory footprint.
+pub async fn read_db_table_into_vector(
+    pool: &AnyPool,
+    small_table_name: &str,
+) -> Result<Vec<JsonRow>> {
+    let mut tx = pool.begin().await?;
+    let rows = read_db_table_into_vector_tx(&mut tx, small_table_name, false).await?;
+    tx.commit().await?;
+    Ok(rows)
 }
+
+/// TODO: Add docstring. Note that this function should be used mainly for "small" tables like
+/// config tables because of the potential memory footprint.
 pub async fn read_db_table_into_vector_tx(
     tx: &mut Transaction<'_, sqlx::Any>,
-    config_table: &str,
+    small_table_name: &str,
     keep_rn: bool,
 ) -> Result<Vec<JsonRow>> {
-    let sql = format!("SELECT * FROM \"{}\"", config_table);
-    let rows = block_on(sqlx_query(&sql).fetch_all(tx.acquire().await?)).map_err(|e| {
-        ValveError::InputError(format!(
-            "Error while reading table '{}' from database: {}",
-            config_table, e
-        ))
-    })?;
+    let sql = format!("SELECT * FROM \"{}\"", small_table_name);
+    let rows = sqlx_query(&sql)
+        .fetch_all(tx.acquire().await?)
+        .await
+        .map_err(|e| {
+            ValveError::InputError(format!(
+                "Error while reading table '{}' from database: {}",
+                small_table_name, e
+            ))
+        })?;
     let mut table_rows = vec![];
     for row in rows {
         let mut table_row = JsonRow::new();
@@ -3853,7 +3840,7 @@ pub async fn insert_new_row_tx(
 
         let sql_type =
             get_sql_type_from_global_config(config, table, column, &DbKind::from_pool(pool)?);
-        if is_sql_type_error(&sql_type, &cell.strvalue()) {
+        if cell.nulltype != None || is_sql_type_error(&sql_type, &cell.strvalue()) {
             insert_values.push(String::from("NULL"));
         } else {
             insert_values.push(cast_sql_param_from_text(&sql_type));

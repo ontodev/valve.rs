@@ -1681,9 +1681,6 @@ pub async fn validate(
         },
     };
     // Validate the input row:
-    // TODO: validate_row() doesn't seem to be handling empty values correctly. Shouldn't it
-    // assign nulls? Note that the problem is independent of this function as the same issue
-    // arises when adding a new row.
     let output_row = valve
         .validate_row(table, &input_row, rn)
         .await

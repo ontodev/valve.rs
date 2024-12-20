@@ -107,16 +107,16 @@ pub struct ValveRow {
 }
 
 impl ValveRow {
-    /// Given a row number and a row represented as a JSON object in the following ('simple')
+    /// Given a row represented as a JSON object in the following ('simple')
     /// format:
     /// ```
     /// {
     ///     "column_1": value1,
     ///     "column_2": value2,
     ///     ...
-    /// },
+    /// }
     /// ```
-    /// convert it to a [ValveRow] and return it.
+    /// and, optionally, a row number, convert the row into a [ValveRow] and return it.
     pub fn from_simple_json(row: &JsonRow, row_number: Option<u32>) -> Result<Self> {
         let mut valve_cells = IndexMap::new();
         for (column, value) in row.iter() {
@@ -874,7 +874,7 @@ impl Valve {
             table_dependencies_in,
             table_dependencies_out,
             startup_table_messages,
-        ) = read_config_files(table_path, &parser, &pool)?;
+        ) = read_config_files(table_path, &parser, &pool).await?;
 
         let config = ValveConfig {
             special: specials_config,
@@ -909,7 +909,7 @@ impl Valve {
     }
 
     /// Reload the valve configuration from the configuration table files.
-    pub fn reconfigure(&mut self) -> Result<()> {
+    pub async fn reconfigure(&mut self) -> Result<()> {
         let table_path = self.get_path()?;
         let parser = StartParser::new();
         let (
@@ -923,7 +923,7 @@ impl Valve {
             table_dependencies_in,
             table_dependencies_out,
             _startup_table_messages,
-        ) = read_config_files(&table_path, &parser, &self.pool)?;
+        ) = read_config_files(&table_path, &parser, &self.pool).await?;
 
         let config = ValveConfig {
             special: specials_config,
@@ -1050,7 +1050,7 @@ impl Valve {
 
         // Save the datatype table and then reconfigure valve:
         self.save_tables(&vec!["datatype"], &None).await?;
-        self.reconfigure()
+        self.reconfigure().await
     }
 
     /// Given the name of a datatype, delete it from the datatype table.
@@ -1095,7 +1095,7 @@ impl Valve {
 
         // Save the datatype table and then reconfigure valve:
         self.save_tables(&vec!["datatype"], &None).await?;
-        self.reconfigure()
+        self.reconfigure().await
     }
 
     /// Change the name of the given datatype to the given new name.
@@ -1128,7 +1128,7 @@ impl Valve {
         // Save the column table and the data table and then reconfigure valve:
         self.save_tables(&vec!["datatype", "column", "rule"], &None)
             .await?;
-        self.reconfigure()
+        self.reconfigure().await
     }
 
     /// Given a table name, the path of the table's associated TSV file, and other parameters
@@ -1216,7 +1216,7 @@ impl Valve {
 
             // Save the configuration, reconfigure valve, and create the data table:
             self.save_tables(&vec!["table", "column"], &None).await?;
-            self.reconfigure()?;
+            self.reconfigure().await?;
             self.ensure_all_tables_created(&vec![table]).await?;
         }
         Ok(())
@@ -1336,7 +1336,7 @@ impl Valve {
 
         // Save the column and table tables and reconfigure valve:
         self.save_tables(&vec!["table", "column"], &None).await?;
-        self.reconfigure()
+        self.reconfigure().await
     }
 
     /// Change the name of the given table to the given new name.
@@ -1372,7 +1372,7 @@ impl Valve {
         // Save the column table and the data table and then reconfigure valve:
         self.save_tables(&vec!["table", "column", "rule"], &None)
             .await?;
-        self.reconfigure()
+        self.reconfigure().await
     }
 
     /// Add a column to the database corresponding to the given column details. If table is not
@@ -1443,7 +1443,7 @@ impl Valve {
 
         // Save the column table and the data table and then reconfigure valve:
         self.save_tables(&vec!["column", table], &None).await?;
-        self.reconfigure()?;
+        self.reconfigure().await?;
 
         // Refresh the database but do not load any data:
         self.ensure_all_tables_created(&vec![table]).await?;
@@ -1494,7 +1494,7 @@ impl Valve {
 
         // Save the column table and the data table and then reconfigure valve:
         self.save_tables(&vec!["column", table], &None).await?;
-        self.reconfigure()?;
+        self.reconfigure().await?;
 
         // Refresh the database:
         self.ensure_all_tables_created(&vec![table]).await?;
@@ -1525,6 +1525,9 @@ impl Valve {
         // seems we are querying for it only because record_config_change() requires that we
         // send it a rn parameter. Maybe we should change the signature of that function to
         // accept an option instead?
+        // Note that if we do this, then we will need to check for a NULL value when we
+        // pull the "row" field from `last_change` in undo() and from `next_redo` in redo().
+        // But that should be it.
         // Save the row number of the column which we will later add to the history record:
         let (col_rn, _) = {
             let sql = local_sql_syntax(
@@ -1587,7 +1590,7 @@ impl Valve {
         // Save the column and rule tables, and the data table, and then reconfigure valve:
         self.save_tables(&vec!["column", "rule", table], &None)
             .await?;
-        self.reconfigure()?;
+        self.reconfigure().await?;
 
         // Refresh the database but do not load any data:
         self.ensure_all_tables_created(&vec![table]).await?;
@@ -3521,8 +3524,7 @@ impl Valve {
         let table_options = &self.get_table_options_from_config(table_name)?;
         if !table_options.contains("edit") {
             return Err(ValveError::InputError(format!(
-                "Inserting to table '{}' is not allowed",
-                table_name
+                "Inserting to table '{table_name}' is not allowed"
             ))
             .into());
         }
@@ -3899,7 +3901,7 @@ impl Valve {
 
                         // Save the column table and the data table and then reconfigure valve:
                         self.save_tables(&vec!["column", table], &None).await?;
-                        self.reconfigure()?;
+                        self.reconfigure().await?;
 
                         // Refresh the database:
                         self.ensure_all_tables_created(&vec![table]).await?;
@@ -3952,7 +3954,7 @@ impl Valve {
 
                         // Save the column table and the data table and then reconfigure valve:
                         self.save_tables(&vec!["column", table], &None).await?;
-                        self.reconfigure()?;
+                        self.reconfigure().await?;
 
                         // Refresh the database:
                         self.ensure_all_tables_created(&vec![table]).await?;
@@ -4007,7 +4009,7 @@ impl Valve {
                                 // then reconfigure valve:
                                 self.save_tables(&vec!["column", "rule", table], &None)
                                     .await?;
-                                self.reconfigure()?;
+                                self.reconfigure().await?;
 
                                 // Refresh the database but do not load any data:
                                 self.ensure_all_tables_created(&vec![table]).await?;
@@ -4039,7 +4041,7 @@ impl Valve {
 
                         // Save the datatype table and then reconfigure valve:
                         self.save_tables(&vec!["datatype"], &None).await?;
-                        self.reconfigure()?;
+                        self.reconfigure().await?;
 
                         return Ok(None);
                     }
@@ -4088,7 +4090,7 @@ impl Valve {
 
                         // Save the datatype table and then reconfigure valve:
                         self.save_tables(&vec!["datatype"], &None).await?;
-                        self.reconfigure()?;
+                        self.reconfigure().await?;
                         return Ok(None);
                     }
                 },
@@ -4123,7 +4125,7 @@ impl Valve {
                                 // valve:
                                 self.save_tables(&vec!["datatype", "column", "rule"], &None)
                                     .await?;
-                                self.reconfigure()?;
+                                self.reconfigure().await?;
 
                                 return Ok(None);
                             }
@@ -4154,7 +4156,7 @@ impl Valve {
 
                         // Save the column and table tables and reconfigure valve:
                         self.save_tables(&vec!["table", "column"], &None).await?;
-                        self.reconfigure()?;
+                        self.reconfigure().await?;
 
                         return Ok(None);
                     }
@@ -4411,7 +4413,7 @@ impl Valve {
 
                         // Save and reconfigure:
                         self.save_tables(&vec!["table", "column"], &None).await?;
-                        self.reconfigure()?;
+                        self.reconfigure().await?;
                         self.ensure_all_tables_created(&vec![table]).await?;
                         return Ok(None);
                     }
@@ -4447,7 +4449,7 @@ impl Valve {
                                 // valve:
                                 self.save_tables(&vec!["table", "column", "rule"], &None)
                                     .await?;
-                                self.reconfigure()?;
+                                self.reconfigure().await?;
 
                                 return Ok(None);
                             }
@@ -4705,7 +4707,7 @@ impl Valve {
 
                         // Save the column table and the data table and then reconfigure valve:
                         self.save_tables(&vec!["column", table], &None).await?;
-                        self.reconfigure()?;
+                        self.reconfigure().await?;
 
                         // Refresh the database:
                         self.ensure_all_tables_created(&vec![table]).await?;
@@ -4739,7 +4741,7 @@ impl Valve {
 
                         // Save the column table and the data table and then reconfigure valve:
                         self.save_tables(&vec!["column", table], &None).await?;
-                        self.reconfigure()?;
+                        self.reconfigure().await?;
 
                         // Refresh the database:
                         self.ensure_all_tables_created(&vec![table]).await?;
@@ -4794,7 +4796,7 @@ impl Valve {
                                 // then reconfigure valve:
                                 self.save_tables(&vec!["column", "rule", table], &None)
                                     .await?;
-                                self.reconfigure()?;
+                                self.reconfigure().await?;
 
                                 // Refresh the database but do not load any data:
                                 self.ensure_all_tables_created(&vec![table]).await?;
@@ -4848,7 +4850,7 @@ impl Valve {
 
                         // Save the datatype table and then reconfigure valve:
                         self.save_tables(&vec!["datatype"], &None).await?;
-                        self.reconfigure()?;
+                        self.reconfigure().await?;
                         return Ok(None);
                     }
                 },
@@ -4874,7 +4876,7 @@ impl Valve {
 
                         // Save the datatype table and then reconfigure valve:
                         self.save_tables(&vec!["datatype"], &None).await?;
-                        self.reconfigure()?;
+                        self.reconfigure().await?;
 
                         return Ok(None);
                     }
@@ -4910,7 +4912,7 @@ impl Valve {
                                 // valve:
                                 self.save_tables(&vec!["datatype", "column", "rule"], &None)
                                     .await?;
-                                self.reconfigure()?;
+                                self.reconfigure().await?;
 
                                 return Ok(None);
                             }
@@ -5164,7 +5166,7 @@ impl Valve {
                         tx.commit().await?;
 
                         self.save_tables(&vec!["table", "column"], &None).await?;
-                        self.reconfigure()?;
+                        self.reconfigure().await?;
                         self.ensure_all_tables_created(&vec![table]).await?;
                         return Ok(None);
                     }
@@ -5193,7 +5195,7 @@ impl Valve {
 
                         // Save the column and table tables and reconfigure valve:
                         self.save_tables(&vec!["table", "column"], &None).await?;
-                        self.reconfigure()?;
+                        self.reconfigure().await?;
 
                         return Ok(None);
                     }
@@ -5229,7 +5231,7 @@ impl Valve {
                                 // valve:
                                 self.save_tables(&vec!["table", "column", "rule"], &None)
                                     .await?;
-                                self.reconfigure()?;
+                                self.reconfigure().await?;
 
                                 return Ok(None);
                             }
