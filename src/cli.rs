@@ -64,7 +64,6 @@ pub struct Cli {
 // in the usage statement that is printed when valve is run with the option `--help`.
 #[derive(Subcommand)]
 pub enum Commands {
-    // TODO: Add a --dry-run flag.
     /// Load all of the tables
     LoadAll {},
 
@@ -637,6 +636,11 @@ pub async fn add_column(cli: &Cli, table: &Option<String>, column: &Option<Strin
             .await
             .expect("Error loading table");
     }
+    if cli.verbose {
+        // If the verbose flag has been set, write a JSON representation of the column
+        // to STDOUT:
+        println!("{}", json!(column_json));
+    }
 }
 
 /// Use Valve, in conformity with the given command-line parameters, to add a datatype to the
@@ -654,6 +658,11 @@ pub async fn add_datatype(cli: &Cli, datatype: &Option<String>) {
         .add_datatype(&dt_fields)
         .await
         .expect("Error adding datatype");
+    if cli.verbose {
+        // If the verbose flag has been set, write a JSON representation of the datatype
+        // to STDOUT:
+        println!("{}", json!(dt_fields));
+    }
 }
 
 /// Use Valve, in conformity with the given command-line parameters, to add a message to the
@@ -678,7 +687,25 @@ pub async fn add_message(
         .insert_message(&table, row, &column, &value, &level, &rule, &message)
         .await
         .expect("Error inserting message");
-    println!("{message_id}");
+    if cli.verbose {
+        println!(
+            "{}",
+            json!({
+                "ID": message_id,
+                "contents": {
+                    "table": table,
+                    "row": row,
+                    "column": column,
+                    "value": value,
+                    "level": level,
+                    "rule": rule,
+                    "message": message,
+                }
+            })
+        );
+    } else {
+        println!("{message_id}");
+    }
 }
 
 /// Use Valve, in conformity with the given command-line parameters, to add a row to the given
@@ -690,7 +717,7 @@ pub async fn add_row(cli: &Cli, table: &str) {
         Some(s) => panic!("Unsupported input type '{s}'"),
         None => prompt_for_table_columns(&valve, table, &None, false),
     };
-    let (_, row) = valve
+    let (rn, row) = valve
         .insert_row(table, &json_row)
         .await
         .expect("Error inserting row");
@@ -701,6 +728,8 @@ pub async fn add_row(cli: &Cli, table: &str) {
                 .to_rich_json()
                 .expect("Error converting row to rich JSON"))
         );
+    } else {
+        println!("{rn}");
     }
 }
 
@@ -846,7 +875,7 @@ pub async fn delete_rows(cli: &Cli, table: &str, rows: &Vec<u32>) {
         valve
             .delete_row(table, row)
             .await
-            .expect("Error deleting row");
+            .expect(&format!("Error deleting row {row}"));
     }
 }
 
@@ -1341,12 +1370,14 @@ pub async fn undo(cli: &Cli) {
     let mut valve = build_valve(&cli).await;
     let updated_row = valve.undo().await.expect("Error undoing");
     if let Some(valve_row) = updated_row {
-        print!(
-            "{}",
-            json!(valve_row
-                .to_rich_json()
-                .expect("Error converting row to rich JSON"))
-        );
+        if cli.verbose {
+            print!(
+                "{}",
+                json!(valve_row
+                    .to_rich_json()
+                    .expect("Error converting row to rich JSON"))
+            );
+        }
     }
 }
 
@@ -1356,12 +1387,14 @@ pub async fn redo(cli: &Cli) {
     let mut valve = build_valve(&cli).await;
     let updated_row = valve.redo().await.expect("Error redoing");
     if let Some(valve_row) = updated_row {
-        print!(
-            "{}",
-            json!(valve_row
-                .to_rich_json()
-                .expect("Error converting row to rich JSON"))
-        );
+        if cli.verbose {
+            print!(
+                "{}",
+                json!(valve_row
+                    .to_rich_json()
+                    .expect("Error converting row to rich JSON"))
+            );
+        }
     }
 }
 
@@ -1520,6 +1553,23 @@ pub async fn update_message(
         )
         .await
         .expect("Error updating message");
+    if cli.verbose {
+        println!(
+            "{}",
+            json!({
+                "ID": message_id,
+                "contents": {
+                    "table": table,
+                    "row": row,
+                    "column": column,
+                    "value": value,
+                    "level": level,
+                    "rule": rule,
+                    "message": message,
+                }
+            })
+        );
+    }
 }
 
 /// Use Valve, in conformity with the given command-line parameters, to update a row from the given
@@ -1554,20 +1604,19 @@ pub async fn update_row(cli: &Cli, table: &str, row: &Option<u32>) {
             None => panic!("No row given"),
         },
     };
-    // TODO: Look into a possible bug related the row order being the same as the row number
-    // after update. It is possible that the bug only manifests itself when updating the first
-    // row in the table.
     let output_row = valve
         .update_row(table, &rn, &json_row)
         .await
         .expect("Error updating row");
-    // Print the results to STDOUT:
-    println!(
-        "{}",
-        json!(output_row
-            .to_rich_json()
-            .expect("Error converting updated row to rich JSON"))
-    );
+
+    if cli.verbose {
+        println!(
+            "{}",
+            json!(output_row
+                .to_rich_json()
+                .expect("Error converting updated row to rich JSON"))
+        );
+    }
 }
 
 /// Use Valve, in conformity with the given command-line parameters, to update the given column
@@ -1579,13 +1628,15 @@ pub async fn update_value(cli: &Cli, table: &str, row: u32, column: &str, value:
         .update_row(table, &row, &json_row)
         .await
         .expect("Error updating row");
-    // Print the results to STDOUT:
-    println!(
-        "{}",
-        json!(output_row
-            .to_rich_json()
-            .expect("Error converting updated row to rich JSON"))
-    );
+
+    if cli.verbose {
+        println!(
+            "{}",
+            json!(output_row
+                .to_rich_json()
+                .expect("Error converting updated row to rich JSON"))
+        );
+    }
 }
 
 /// Use Valve, in conformity with the given command-line parameters, to validate a row from a given
@@ -1965,9 +2016,17 @@ pub fn read_json_row_for_table(valve: &Valve, table: &str) -> JsonRow {
 /// name "row" or "row_number".
 pub fn extract_rn(json_row: &JsonRow) -> Option<u32> {
     let extract_rn_from_value = |value: &SerdeValue| -> Option<u32> {
-        let row_number = value.as_i64().expect("Not a number");
-        let row_number = Some(row_number as u32);
-        row_number
+        let rn = match value.as_i64() {
+            Some(rn) => Some(rn as u32),
+            None => match value.as_str() {
+                Some(rn_str) => {
+                    let rn = rn_str.parse::<u32>().expect("Not a number");
+                    Some(rn)
+                }
+                None => panic!("Not a number or a string: '{value}'"),
+            },
+        };
+        rn
     };
     match json_row.get("row") {
         None => match json_row.get("row_number") {
