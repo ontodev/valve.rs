@@ -567,10 +567,6 @@ pub enum TestSubcommands {
     /// Application Programmer Interface.
     Api {},
 
-    /// Run a set of predefined tests, on a specified pre-loaded database, that will test Valve's
-    /// Application Programmer Interface.
-    Cli {},
-
     /// Run a set of predefined tests, on a specified pre-loaded database, that will test the
     /// validity of the configured datatype hierarchy.
     DtHierarchy {},
@@ -1498,14 +1494,6 @@ pub async fn test_api(cli: &Cli) {
         .expect("Error running API tests");
 }
 
-// TODO: Remove this function and do the CLI tests using the Makefile and/or an external
-// script instead.
-/// Use Valve, in conformity with the given command-line parameters, to run a set of functions
-/// designed to test Valve's Command Line Interface.
-pub async fn test_cli(cli: &Cli) {
-    todo!()
-}
-
 /// Use Valve, in conformity with the given command-line parameters, to run a set of functions
 /// designed to test how Valve handles datatype hierarchies.
 pub async fn test_dt_hierarchy(cli: &Cli) {
@@ -2408,9 +2396,6 @@ pub async fn process_command() {
             match subcommand {
                 TestSubcommands::Api {} => {
                     test_api(&cli).await;
-                }
-                TestSubcommands::Cli {} => {
-                    test_cli(&cli).await;
                 }
                 TestSubcommands::DtHierarchy {} => {
                     test_dt_hierarchy(&cli).await;

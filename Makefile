@@ -48,14 +48,20 @@ build/valve.db: valve | build test/output
 test/output:
 	mkdir -p test/output
 
-.PHONY: test
-test: clean_test_db sqlite_test pg_test api_test random_test
-
 tables_to_test := $(shell cut -f 1 test/src/table.tsv)
 pg_connect_string := postgresql:///valve_postgres
 
+.PHONY: test
+test: sqlite_test pg_test
+
 .PHONY: sqlite_test
-sqlite_test: build/valve.db test/src/table.tsv | test/output
+sqlite_test: clean_test_db sqlite_load_test sqlite_api_test sqlite_cli_test sqlite_random_test
+
+.PHONY: pg_test
+pg_test: pg_load_test pg_api_test pg_cli_test pg_random_test
+
+.PHONY: sqlite_load_test
+sqlite_load_test: build/valve.db test/src/table.tsv | test/output
 	@echo "Testing valve on sqlite ..."
 	./valve --source test/src/table.tsv --database build/valve.db --assume-yes load-all
 	test/round_trip.sh $^
@@ -68,8 +74,48 @@ sqlite_test: build/valve.db test/src/table.tsv | test/output
 	diff --strip-trailing-cr -q test/expected/messages_pk.tsv test/output/messages.tsv
 	@echo "Test succeeded!"
 
-.PHONY: pg_test
-pg_test: valve test/src/table.tsv | test/output
+.PHONY: sqlite_api_test
+sqlite_api_test: valve test/src/table.tsv build/valve.db test/insert_update.sh | test/output
+	@echo "Testing API functions on sqlite ..."
+	./$< --source $(word 2,$^) --database $(word 3,$^) --assume-yes test api
+	$(word 4,$^) $(word 3,$^) $(word 2,$^)
+	scripts/export_messages.py $(word 3,$^) $| $(tables_to_test)
+	diff --strip-trailing-cr -q test/expected/messages_after_api_test.tsv test/output/messages.tsv
+	echo "select \"history_id\", \"table\", \"row\", \"from\", \"to\", \"summary\", \"user\", \"undone_by\" from history where history_id < 16 order by history_id" | sqlite3 -header -tabs build/valve.db > test/output/history.tsv
+	diff --strip-trailing-cr -q test/expected/history.tsv test/output/history.tsv
+	@echo "Test succeeded!"
+
+.PHONY: sqlite_cli_test
+sqlite_cli_test: valve test/src/table.tsv build/valve.db | test/output
+	@echo "Testing CLI functions on sqlite ..."
+	echo '{"parent": "text", "condition": "equals(custom_str)", "description": "", "sql_type": "TEXT"}' | \
+		./$< --source $(word 2,$^) --database $(word 3,$^) --assume-yes --input JSON add datatype datatype1
+	echo '{"table": "table1", "column": "extra_column", "datatype": "datatype1"}' | \
+		./$< --source $(word 2,$^) --database $(word 3,$^) --assume-yes --input JSON add column table1
+	./$< --source $(word 2,$^) --database $(word 3,$^) --assume-yes rename datatype datatype1 datatype1a
+	./$< --source $(word 2,$^) --database $(word 3,$^) --assume-yes rename column table1 extra_column column_extra
+	diff --strip-trailing-cr -q test/src/datatype.tsv test/expected/cli_test/datatype1.tsv
+	diff --strip-trailing-cr -q test/src/column.tsv test/expected/cli_test/column1.tsv
+	diff --strip-trailing-cr -q test/src/ontology/table1.tsv test/expected/cli_test/table1_1.tsv
+	./$< --source $(word 2,$^) --database $(word 3,$^) --assume-yes delete column table1 column_extra
+	./$< --source $(word 2,$^) --database $(word 3,$^) --assume-yes delete datatype datatype1a
+	diff --strip-trailing-cr -q test/src/datatype.tsv test/expected/cli_test/datatype2.tsv
+	diff --strip-trailing-cr -q test/src/column.tsv test/expected/cli_test/column2.tsv
+	diff --strip-trailing-cr -q test/src/ontology/table1.tsv test/expected/cli_test/table1_2.tsv
+	./$< --source $(word 2,$^) --database $(word 3,$^) --assume-yes rename table table1 tableOne
+	diff --strip-trailing-cr -q test/src/column.tsv test/expected/cli_test/column3.tsv
+	diff --strip-trailing-cr -q test/src/table.tsv test/expected/cli_test/table3.tsv
+	./$< --source $(word 2,$^) --database $(word 3,$^) --assume-yes undo
+	diff --strip-trailing-cr -q test/src/datatype.tsv test/expected/cli_test/datatype2.tsv
+	diff --strip-trailing-cr -q test/src/column.tsv test/expected/cli_test/column2.tsv
+	diff --strip-trailing-cr -q test/src/ontology/table1.tsv test/expected/cli_test/table1_2.tsv
+	# We drop all of the db tables because the schema for the next test (random test) is different
+	# from the schema used for this test.
+	./$<  --source $(word 2,$^) --database $(word 3,$^) --assume-yes drop-all
+	@echo "Test succeeded!"
+
+.PHONY: pg_load_test
+pg_load_test: valve test/src/table.tsv | test/output
 	@echo "Testing valve on postgresql ..."
 	cp -f test/src/ontology/view1_postgresql.sql test/output/view1.sql
 	cp -f test/src/ontology/view2_postgresql.sql test/output/view2.sql
@@ -89,23 +135,6 @@ pg_test: valve test/src/table.tsv | test/output
 	diff --strip-trailing-cr -q test/expected/messages_pk.tsv test/output/messages.tsv
 	@echo "Test succeeded!"
 
-.PHONY: api_test
-api_test: sqlite_api_test pg_api_test
-
-.PHONY: sqlite_api_test
-sqlite_api_test: valve test/src/table.tsv build/valve.db test/insert_update.sh | test/output
-	@echo "Testing API functions on sqlite ..."
-	./$< --source $(word 2,$^) --database $(word 3,$^) --assume-yes test api
-	$(word 4,$^) $(word 3,$^) $(word 2,$^)
-	scripts/export_messages.py $(word 3,$^) $| $(tables_to_test)
-	diff --strip-trailing-cr -q test/expected/messages_after_api_test.tsv test/output/messages.tsv
-	echo "select \"history_id\", \"table\", \"row\", \"from\", \"to\", \"summary\", \"user\", \"undone_by\" from history where history_id < 16 order by history_id" | sqlite3 -header -tabs build/valve.db > test/output/history.tsv
-	diff --strip-trailing-cr -q test/expected/history.tsv test/output/history.tsv
-	# We drop all of the db tables because the schema for the next test (random test) is different
-	# from the schema used for this test.
-	./$<  --source $(word 2,$^) --database $(word 3,$^) --assume-yes drop-all
-	@echo "Test succeeded!"
-
 .PHONY: pg_api_test
 pg_api_test: valve test/src/table.tsv test/insert_update.sh | test/output
 	@echo "Testing API functions on postgresql ..."
@@ -116,6 +145,33 @@ pg_api_test: valve test/src/table.tsv test/insert_update.sh | test/output
 	diff --strip-trailing-cr -q test/expected/messages_after_api_test.tsv test/output/messages.tsv
 	psql $(pg_connect_string) -c "COPY (select \"history_id\", \"table\", \"row\", \"from\", \"to\", \"summary\", \"user\", \"undone_by\" from history where history_id < 16 order by history_id) TO STDOUT WITH NULL AS ''" > test/output/history.tsv
 	tail -n +2 test/expected/history.tsv | diff --strip-trailing-cr -q test/output/history.tsv -
+	@echo "Test succeeded!"
+
+.PHONY: pg_cli_test
+pg_cli_test: valve test/src/table.tsv pg_test | test/output
+	@echo "Testing CLI functions on postgresql ..."
+	./$< --source $(word 2,$^) --database $(pg_connect_string) --assume-yes load-all
+	echo '{"parent": "text", "condition": "equals(custom_str)", "description": "", "sql_type": "TEXT"}' | \
+		./$< --source $(word 2,$^) --database $(pg_connect_string) --assume-yes --input JSON add datatype datatype1
+	echo '{"table": "table1", "column": "extra_column", "datatype": "datatype1"}' | \
+		./$< --source $(word 2,$^) --database $(pg_connect_string) --assume-yes --input JSON add column table1
+	./$< --source $(word 2,$^) --database $(pg_connect_string) --assume-yes rename datatype datatype1 datatype1a
+	./$< --source $(word 2,$^) --database $(pg_connect_string) --assume-yes rename column table1 extra_column column_extra
+	diff --strip-trailing-cr -q test/src/datatype.tsv test/expected/cli_test/datatype1.tsv
+	diff --strip-trailing-cr -q test/src/column.tsv test/expected/cli_test/column1.tsv
+	diff --strip-trailing-cr -q test/src/ontology/table1.tsv test/expected/cli_test/table1_1.tsv
+	./$< --source $(word 2,$^) --database $(pg_connect_string) --assume-yes delete column table1 column_extra
+	./$< --source $(word 2,$^) --database $(pg_connect_string) --assume-yes delete datatype datatype1a
+	diff --strip-trailing-cr -q test/src/datatype.tsv test/expected/cli_test/datatype2.tsv
+	diff --strip-trailing-cr -q test/src/column.tsv test/expected/cli_test/column2.tsv
+	diff --strip-trailing-cr -q test/src/ontology/table1.tsv test/expected/cli_test/table1_2.tsv
+	./$< --source $(word 2,$^) --database $(pg_connect_string) --assume-yes rename table table1 tableOne
+	diff --strip-trailing-cr -q test/src/column.tsv test/expected/cli_test/column3.tsv
+	diff --strip-trailing-cr -q test/src/table.tsv test/expected/cli_test/table3.tsv
+	./$< --source $(word 2,$^) --database $(pg_connect_string) --assume-yes undo
+	diff --strip-trailing-cr -q test/src/datatype.tsv test/expected/cli_test/datatype2.tsv
+	diff --strip-trailing-cr -q test/src/column.tsv test/expected/cli_test/column2.tsv
+	diff --strip-trailing-cr -q test/src/ontology/table1.tsv test/expected/cli_test/table1_2.tsv
 	# We drop all of the db tables because the schema for the next test (random test) is different
 	# from the schema used for this test.
 	./$< --source $(word 2,$^) --database $(pg_connect_string) --assume-yes drop-all
@@ -123,9 +179,6 @@ pg_api_test: valve test/src/table.tsv test/insert_update.sh | test/output
 
 sqlite_random_db = build/valve_random.db
 random_test_dir = test/random_test_data
-
-.PHONY: random_test
-random_test: sqlite_random_test pg_random_test
 
 $(random_test_dir)/ontology:
 	mkdir -p $@
