@@ -1498,6 +1498,8 @@ pub async fn test_api(cli: &Cli) {
         .expect("Error running API tests");
 }
 
+// TODO: Remove this function and do the CLI tests using the Makefile and/or an external
+// script instead.
 /// Use Valve, in conformity with the given command-line parameters, to run a set of functions
 /// designed to test Valve's Command Line Interface.
 pub async fn test_cli(cli: &Cli) {
@@ -1860,11 +1862,14 @@ pub fn prompt_for_parameter_values(columns: &Vec<String>) -> JsonRow {
     json_row
 }
 
-/// TODO: Add docstring here
+/// Given a [Valve] instance, a table name, and, optionally, a row number, return a [JsonRow]
+/// mapping each column of the table to an input value. If `include_rn` is set, then include
+/// the `row_number` column in the map that is returned. If it is not given via `row_number` then
+/// it must be given as an input value.
 pub fn prompt_for_table_columns(
     valve: &Valve,
     table: &str,
-    row: &Option<u32>,
+    row_number: &Option<u32>,
     include_rn: bool,
 ) -> JsonRow {
     let table_columns = {
@@ -1893,9 +1898,9 @@ pub fn prompt_for_table_columns(
                 .expect("Not a string")
                 .parse::<u32>()
                 .expect("Not a number");
-            if let Some(row) = row {
-                if rn != *row {
-                    panic!("Mismatch between input row and positional parameter, ROW")
+            if let Some(row_number) = row_number {
+                if rn != *row_number {
+                    panic!("Mismatch between input value for row_number and row_number parameter")
                 }
             }
             json!(rn)
@@ -1904,7 +1909,9 @@ pub fn prompt_for_table_columns(
     json_row
 }
 
-/// TODO: Add docstring here
+/// Given a [Valve] instance, a table name and a column name, return a [JsonRow] describing
+/// its column configuration, which maps each column configuration parameter to an input value.
+/// If either `table` or `column` are not given they must be provided as input values.
 pub fn prompt_for_column_columns(
     valve: &Valve,
     table: &Option<String>,
@@ -1927,7 +1934,9 @@ pub fn prompt_for_column_columns(
     prompt_for_parameter_values(&column_columns)
 }
 
-/// TODO: Add docstring here
+/// Given a [Valve] instance and, optionally, a datatype name, return a [JsonRow] describing
+/// its datatype configuration, which maps each datatype configuration parameter to an input
+/// value. If `datatype` is not specified it must be provided as an input value.
 pub fn prompt_for_datatype_columns(valve: &Valve, datatype: &Option<String>) -> JsonRow {
     let datatype_columns = &valve
         .config
@@ -1943,10 +1952,16 @@ pub fn prompt_for_datatype_columns(valve: &Valve, datatype: &Option<String>) -> 
         })
         .cloned()
         .collect::<Vec<_>>();
-    prompt_for_parameter_values(&datatype_columns)
+    let mut dt_columns = prompt_for_parameter_values(&datatype_columns);
+    if let Some(datatype) = datatype {
+        dt_columns.insert("datatype".to_string(), json!(datatype));
+    }
+    dt_columns
 }
 
-/// TODO: Add docstring here
+/// Given a [Valve] instance and optionally: a table name, row number, and column name (any of
+/// which, if not given, must be provided as an input value), return a [JsonRow] describing a
+/// validation message, mapping each message parameter to an input value.
 pub fn prompt_for_message_columns(
     valve: &Valve,
     table: &Option<String>,
@@ -1972,8 +1987,8 @@ pub fn prompt_for_message_columns(
     prompt_for_parameter_values(&message_columns)
 }
 
-/// Given a Valve instance, a JSON representation of a row, and a table name, verifies that all
-/// of the row columns exist in the given table and panics otherwise.
+/// Given a [Valve] instance, a JSON representation of a row, and a table name, verifies that all
+/// of the row columns exist in the given table's column configuration and panics otherwise.
 pub fn verify_json_columns_for_table(valve: &Valve, json_row: &JsonRow, table: &str) {
     let json_columns = json_row.keys().collect::<Vec<_>>();
     let ignored_columns = {
@@ -2001,7 +2016,8 @@ pub fn verify_json_columns_for_table(valve: &Valve, json_row: &JsonRow, table: &
 }
 
 /// Read a JSON-formatted string from STDIN and verify, using the given Valve instance, that
-/// the fields in the JSON correspond to the allowed fields in the given table:
+/// the fields in the JSON correspond to the allowed fields in the given table, before returning
+/// the string as a [JsonRow].
 pub fn read_json_row_for_table(valve: &Valve, table: &str) -> JsonRow {
     let json_row = read_json_row_from_stdin();
 
@@ -2012,8 +2028,8 @@ pub fn read_json_row_for_table(valve: &Valve, table: &str) -> JsonRow {
     json_row
 }
 
-/// Try to extract the row number from the given JSON row. It shold be specified using the field
-/// name "row" or "row_number".
+/// Try to extract the row number from the given [JsonRow]. For a successful lookup the input
+/// JSON should contain either the field "row" or "row_number".
 pub fn extract_rn(json_row: &JsonRow) -> Option<u32> {
     let extract_rn_from_value = |value: &SerdeValue| -> Option<u32> {
         let rn = match value.as_i64() {
@@ -2040,37 +2056,17 @@ pub fn extract_rn(json_row: &JsonRow) -> Option<u32> {
 /// Try to extract the row number from the given JSON row. It shold be specified using the field
 /// name "row" or "row_number". Once extracted, remove it from the JSON row.
 pub fn extract_and_remove_rn(json_row: &mut JsonRow) -> Option<u32> {
-    let extract_rn_from_value = |value: &SerdeValue| -> Option<u32> {
-        let row_number = value.as_i64().expect("Not a number");
-        let row_number = Some(row_number as u32);
-        row_number
-    };
-    match json_row.get("row") {
-        None => match json_row.get("row_number") {
-            None => None,
-            Some(value) => {
-                let rn = extract_rn_from_value(value);
-                match json_row.remove("row_number") {
-                    None => unreachable!(),
-                    Some(_) => rn,
-                }
-            }
-        },
-        Some(value) => {
-            let rn = extract_rn_from_value(value);
-            match json_row.remove("row") {
-                None => unreachable!(),
-                Some(_) => rn,
-            }
-        }
-    }
+    let rn = extract_rn(json_row);
+    json_row.remove("row_number");
+    json_row.remove("row");
+    rn
 }
 
 /// Given a JSON representation of a row, which is assumed to be from the column table, and
 /// optionally a table name and a column name, extract the column table fields for that column
 /// from the row and return them all as a JSON object. Note that if table_name or column_name
-/// are not given then json_row must contain them (i.e., a "table" and a "column" field,
-/// respectively).
+/// are not given then json_row must contain them (i.e., it must contain a "table" and a "column"
+/// field, respectively).
 pub fn extract_column_fields(
     json_row: &JsonRow,
     table_param: &Option<String>,

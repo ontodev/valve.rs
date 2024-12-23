@@ -991,8 +991,6 @@ pub async fn run_api_tests(valve: &mut Valve) -> Result<()> {
     test_default(&valve).await?;
     test_move(valve).await?;
 
-    // TODO: Add tests for adding, deleting, updating columns, tables, messages.
-
     // When the first argument to Valve::build() is not a string ending in .tsv, the table table
     // should be read from the database string (given by the second argument) instead, i.e., valve
     // will look in the given database and read the configuration from the "table" db table. Here

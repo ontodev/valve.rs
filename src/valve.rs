@@ -1035,13 +1035,13 @@ impl Valve {
         let mut dt_map = dt_map.clone();
         dt_map.insert("row_order".to_string(), json!(ro));
         record_config_change_tx(
-            &self.db_kind,
-            &mut tx,
             "datatype",
             &rn,
             None,
             Some(&dt_map),
             &self.user,
+            &mut tx,
+            &self.db_kind,
         )
         .await?;
 
@@ -1080,13 +1080,13 @@ impl Valve {
         let (dt_rn, dt_ro) = delete_datatype_tx(datatype, &mut tx, &self.db_kind).await?;
         dt_config.insert("row_order".to_string(), json!(dt_ro));
         record_config_change_tx(
-            &self.db_kind,
-            &mut tx,
             "datatype",
             &dt_rn,
             Some(&dt_config),
             None,
             &self.user,
+            &mut tx,
+            &self.db_kind,
         )
         .await?;
 
@@ -1104,7 +1104,7 @@ impl Valve {
         let mut tx = self.pool.begin().await?;
 
         // Rename the datatype:
-        let (dt_rn, _) = rename_datatype_tx(&self, datatype, new_name, &mut tx).await?;
+        let (dt_rn, _) = rename_datatype_tx(&self, &mut tx, datatype, new_name).await?;
 
         // Save a record of the renaming to the history table:
         let mut from = JsonRow::new();
@@ -1112,13 +1112,13 @@ impl Valve {
         from.insert("datatype".to_string(), datatype.into());
         to.insert("datatype".to_string(), new_name.into());
         record_config_change_tx(
-            &self.db_kind,
-            &mut tx,
             "datatype",
             &dt_rn,
             Some(&from),
             Some(&to),
             &self.user,
+            &mut tx,
+            &self.db_kind,
         )
         .await?;
 
@@ -1201,13 +1201,13 @@ impl Valve {
             to.insert("column".to_string(), json!(column_config));
 
             record_config_change_tx(
-                &self.db_kind,
-                &mut tx,
                 "table",
                 &rn,
                 None,
                 Some(&to),
                 &self.user,
+                &mut tx,
+                &self.db_kind,
             )
             .await?;
 
@@ -1222,7 +1222,7 @@ impl Valve {
         Ok(())
     }
 
-    /// TODO: Add docstring here.
+    /// Delete the given table from the table and column configuration and drop it.
     pub async fn delete_table(&mut self, table: &str) -> Result<()> {
         // Begin a DB transaction:
         let mut tx = self.pool.begin().await?;
@@ -1267,7 +1267,7 @@ impl Valve {
             (column_rns, column_ros)
         };
 
-        // Delete the table in the database:
+        // Drop the table and delete it from the table and column configuration in the database:
         delete_table_tx(&self, table, &mut tx, &self.db_kind).await?;
 
         // Get the table config and use it to populate the `from` field for the record that we
@@ -1321,13 +1321,13 @@ impl Valve {
         };
 
         record_config_change_tx(
-            &self.db_kind,
-            &mut tx,
             "table",
             &table_rn,
             Some(&from),
             None,
             &self.user,
+            &mut tx,
+            &self.db_kind,
         )
         .await?;
 
@@ -1356,13 +1356,13 @@ impl Valve {
         from.insert("table".to_string(), table.into());
         to.insert("table".to_string(), new_name.into());
         record_config_change_tx(
-            &self.db_kind,
-            &mut tx,
             "table",
             &table_rn,
             Some(&from),
             Some(&to),
             &self.user,
+            &mut tx,
+            &self.db_kind,
         )
         .await?;
 
@@ -1428,13 +1428,13 @@ impl Valve {
 
         // Record the configuration change to the history table:
         record_config_change_tx(
-            &self.db_kind,
-            &mut tx,
             "column",
             &rn,
             None,
             Some(&column_details),
             &self.user,
+            &mut tx,
+            &self.db_kind,
         )
         .await?;
 
@@ -1479,13 +1479,13 @@ impl Valve {
         colconfig.insert("row_order".to_string(), json!(col_ro));
 
         record_config_change_tx(
-            &self.db_kind,
-            &mut tx,
             "column",
             &col_rn,
             Some(&colconfig),
             None,
             &self.user,
+            &mut tx,
+            &self.db_kind,
         )
         .await?;
 
@@ -1520,14 +1520,6 @@ impl Valve {
         // as null.
         rename_column_tx(&self, &mut tx, table, column, new_name, new_label).await?;
 
-        // TODO: I don't think it is actually necessary to save either the row number or row
-        // order in this particular case (since nothing is being inserted or deleted), but it
-        // seems we are querying for it only because record_config_change() requires that we
-        // send it a rn parameter. Maybe we should change the signature of that function to
-        // accept an option instead?
-        // Note that if we do this, then we will need to check for a NULL value when we
-        // pull the "row" field from `last_change` in undo() and from `next_redo` in redo().
-        // But that should be it.
         // Save the row number of the column which we will later add to the history record:
         let (col_rn, _) = {
             let sql = local_sql_syntax(
@@ -1574,13 +1566,13 @@ impl Valve {
             to.insert("label".to_string(), json!(new_label));
         }
         record_config_change_tx(
-            &self.db_kind,
-            &mut tx,
             "column",
             &col_rn,
             Some(&from),
             Some(&to),
             &self.user,
+            &mut tx,
+            &self.db_kind,
         )
         .await?;
 
@@ -4110,7 +4102,7 @@ impl Valve {
                                     .ok_or(make_err("No string 'datatype' found in 'to'"))?;
 
                                 let mut tx = self.pool.begin().await?;
-                                rename_datatype_tx(&self, new_name, old_name, &mut tx).await?;
+                                rename_datatype_tx(&self, &mut tx, new_name, old_name).await?;
                                 switch_undone_state_tx(
                                     &self.user,
                                     history_id,
@@ -4897,7 +4889,7 @@ impl Valve {
                                     .ok_or(make_err("No string 'datatype' in 'to'"))?;
 
                                 let mut tx = self.pool.begin().await?;
-                                rename_datatype_tx(&self, old_name, new_name, &mut tx).await?;
+                                rename_datatype_tx(&self, &mut tx, old_name, new_name).await?;
                                 switch_undone_state_tx(
                                     &self.user,
                                     history_id,

@@ -1002,8 +1002,9 @@ pub fn read_tsv_into_vector(path: &str) -> Result<Vec<JsonRow>> {
     Ok(rows)
 }
 
-/// TODO: Add docstring. Note that this function should be used mainly for "small" tables like
-/// config tables because of the potential memory footprint.
+/// Given a database connection pool and a table name, read the entire table contents into
+/// a vector of [JsonRow]s and return it. Note that this function should only be used for "small"
+/// tables, e.g., configuration tables.
 pub async fn read_db_table_into_vector(
     pool: &AnyPool,
     small_table_name: &str,
@@ -1014,8 +1015,10 @@ pub async fn read_db_table_into_vector(
     Ok(rows)
 }
 
-/// TODO: Add docstring. Note that this function should be used mainly for "small" tables like
-/// config tables because of the potential memory footprint.
+/// Given a database transaction and a table name, read the entire table contents into
+/// a vector of [JsonRow]s and return it. If `keep_rn` is set, include the row_number field
+/// with each row that is returned. Note that this function should only be used for "small"
+/// tables, e.g., configuration tables.
 pub async fn read_db_table_into_vector_tx(
     tx: &mut Transaction<'_, sqlx::Any>,
     small_table_name: &str,
@@ -2297,12 +2300,13 @@ pub async fn rename_column_tx(
     Ok(())
 }
 
-/// TODO: Add docstring here
+/// Given a [Valve] instance, a database transaction, the current name of a datatype, and a new
+/// name, rename the datatype to the new name.
 pub async fn rename_datatype_tx(
     valve: &Valve,
+    tx: &mut Transaction<'_, sqlx::Any>,
     datatype: &str,
     new_name: &str,
-    tx: &mut Transaction<'_, sqlx::Any>,
 ) -> Result<(u32, u32)> {
     let cols_for_query = valve
         .config
@@ -4209,7 +4213,9 @@ pub async fn update_row_tx(
     Ok(())
 }
 
-/// TODO: Add docstring
+/// Given a table name, a column name, a [JsonRow] representing the column's column configuration,
+/// a database transaction, and the kind of database, add the given column to the given table,
+/// returning the row_number and row_order for the new column entry in the column table.
 pub async fn add_column_tx(
     table: &str,
     column: &str,
@@ -4268,7 +4274,8 @@ pub async fn add_column_tx(
     Ok((rn, ro))
 }
 
-/// TODO: Add docstring
+/// Given the name of a datatype, a database transaction, and the database kind, add the
+/// datatype to the datatype table, returning its row_number and row_order.
 pub async fn add_datatype_tx(
     dt_map: &JsonRow,
     db_kind: &DbKind,
@@ -4318,7 +4325,8 @@ pub async fn add_datatype_tx(
     Ok((rn, ro))
 }
 
-/// TODO: Add docstring
+/// Given a table and column name, a database transaction, and the database kind, delete the
+/// given column from the column table.
 pub async fn delete_column_tx(
     table: &str,
     column: &str,
@@ -4342,7 +4350,8 @@ pub async fn delete_column_tx(
     Ok((rn, ro))
 }
 
-/// TODO: Add docstring
+/// Given a datatype name, a database transaction and the database kind, delete the given
+/// datatype from the datatype table.
 pub async fn delete_datatype_tx(
     datatype: &str,
     tx: &mut Transaction<'_, sqlx::Any>,
@@ -4363,7 +4372,8 @@ pub async fn delete_datatype_tx(
     Ok((rn, ro))
 }
 
-/// TODO: Add docstring
+/// Given a [Valve] instance, a database transation and a list of table names, drop all of the
+/// tables in the list.
 pub async fn drop_tables_tx(
     valve: &Valve,
     tables: &Vec<&str>,
@@ -4397,7 +4407,8 @@ pub async fn drop_tables_tx(
     Ok(())
 }
 
-/// TODO: Add docstring
+/// Given a [Valve] instance, a table name, a database transaction and the database kind, delete
+/// the given table from both the table table and the column table.
 pub async fn delete_table_tx(
     valve: &Valve,
     table: &str,
@@ -4659,15 +4670,18 @@ pub async fn record_row_change_tx(
     Ok(())
 }
 
-/// TODO: Add docstring
+/// Given the name of a configuration table (the supported tables are "column", "datatype", and
+/// "table"), a row number, the previous state of the given row, the new state of the given row,
+/// the user who initiated the change, a database transaction and the database kind, record the
+/// configuration change in the history table.
 pub async fn record_config_change_tx(
-    kind: &DbKind,
-    tx: &mut Transaction<'_, sqlx::Any>,
     table: &str,
     row_number: &u32,
     from: Option<&JsonRow>,
     to: Option<&JsonRow>,
     user: &str,
+    tx: &mut Transaction<'_, sqlx::Any>,
+    kind: &DbKind,
 ) -> Result<()> {
     fn to_text(details: Option<&JsonRow>) -> String {
         match details {
@@ -4676,6 +4690,8 @@ pub async fn record_config_change_tx(
         }
     }
 
+    // The summary column will just contain a short description of the generic operation:
+    // add/delete/rename column/datatype/table. More detailed info is found in `from` and `to`.
     let summary = match (from, to) {
         (None, None) => {
             return Err(ValveError::InputError(
