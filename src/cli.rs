@@ -590,7 +590,7 @@ pub async fn add_column(cli: &Cli, table: &Option<String>, column: &Option<Strin
     let mut valve = build_valve(&cli).await;
     let json_row = {
         match &cli.input {
-            Some(s) if s == "JSON" => read_json_row_for_table(&valve, "column"),
+            Some(s) if s == "JSON" => read_json_row_for_table(&valve, &valve.config.special.column),
             Some(s) => panic!("Unsupported input type: '{s}'"),
             None => prompt_for_column_columns(&valve, table, column),
         }
@@ -645,7 +645,7 @@ pub async fn add_column(cli: &Cli, table: &Option<String>, column: &Option<Strin
 pub async fn add_datatype(cli: &Cli, datatype: &Option<String>) {
     let mut valve = build_valve(&cli).await;
     let json_row = match &cli.input {
-        Some(s) if s == "JSON" => read_json_row_for_table(&valve, "datatype"),
+        Some(s) if s == "JSON" => read_json_row_for_table(&valve, &valve.config.special.datatype),
         Some(s) => panic!("Unsupported input type: '{s}'"),
         None => prompt_for_datatype_columns(&valve, datatype),
     };
@@ -1092,7 +1092,7 @@ pub async fn print_messages(
         let mid = mid as u16;
         println!(
             "{{\"message_id\":{},\"table\":{},\"row\":{},\"column\":{},\
-                             \"value\":{},\"level\":{},\"rule\":{},\"message\":{}}}",
+             \"value\":{},\"level\":{},\"rule\":{},\"message\":{}}}",
             mid,
             json!(row.get::<&str, _>("table")),
             rn,
@@ -1908,7 +1908,7 @@ pub fn prompt_for_column_columns(
     let column_columns = &valve
         .config
         .table
-        .get("column")
+        .get(&valve.config.special.column)
         .expect("No column table configuration found")
         .column_order
         .iter()
@@ -1929,7 +1929,7 @@ pub fn prompt_for_datatype_columns(valve: &Valve, datatype: &Option<String>) -> 
     let datatype_columns = &valve
         .config
         .table
-        .get("datatype")
+        .get(&valve.config.special.datatype)
         .expect("No datatype table configuration found")
         .column_order
         .iter()
@@ -2244,7 +2244,7 @@ pub fn extract_datatype_fields(
     let configured_columns = valve
         .config
         .table
-        .get("datatype")
+        .get(&valve.config.special.datatype)
         .expect(&format!("No configuration found for 'datatype'"))
         .column
         .keys()

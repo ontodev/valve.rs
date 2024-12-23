@@ -977,7 +977,7 @@ impl Valve {
         Ok(self
             .config
             .table
-            .get("table")
+            .get(&self.config.special.table)
             .and_then(|t| Some(t.path.as_str()))
             .ok_or(ValveError::ConfigError(
                 "Table table is undefined".to_string(),
@@ -1031,11 +1031,11 @@ impl Valve {
         let mut tx = self.pool.begin().await?;
 
         // Add the datatype and record the change:
-        let (rn, ro) = add_datatype_tx(dt_map, &self.db_kind, &mut tx).await?;
+        let (rn, ro) = add_datatype_tx(self, dt_map, &mut tx).await?;
         let mut dt_map = dt_map.clone();
         dt_map.insert("row_order".to_string(), json!(ro));
         record_config_change_tx(
-            "datatype",
+            &self.config.special.datatype,
             &rn,
             None,
             Some(&dt_map),
@@ -1049,7 +1049,8 @@ impl Valve {
         tx.commit().await?;
 
         // Save the datatype table and then reconfigure valve:
-        self.save_tables(&vec!["datatype"], &None).await?;
+        self.save_tables(&vec![&self.config.special.datatype], &None)
+            .await?;
         self.reconfigure().await
     }
 
@@ -1077,10 +1078,10 @@ impl Valve {
             .clone();
 
         // Delete the datatype and store a record of the change in the history table:
-        let (dt_rn, dt_ro) = delete_datatype_tx(datatype, &mut tx, &self.db_kind).await?;
+        let (dt_rn, dt_ro) = delete_datatype_tx(self, datatype, &mut tx).await?;
         dt_config.insert("row_order".to_string(), json!(dt_ro));
         record_config_change_tx(
-            "datatype",
+            &self.config.special.datatype,
             &dt_rn,
             Some(&dt_config),
             None,
@@ -1094,7 +1095,8 @@ impl Valve {
         tx.commit().await?;
 
         // Save the datatype table and then reconfigure valve:
-        self.save_tables(&vec!["datatype"], &None).await?;
+        self.save_tables(&vec![&self.config.special.datatype], &None)
+            .await?;
         self.reconfigure().await
     }
 
@@ -1112,7 +1114,7 @@ impl Valve {
         from.insert("datatype".to_string(), datatype.into());
         to.insert("datatype".to_string(), new_name.into());
         record_config_change_tx(
-            "datatype",
+            &self.config.special.datatype,
             &dt_rn,
             Some(&from),
             Some(&to),
@@ -1126,8 +1128,15 @@ impl Valve {
         tx.commit().await?;
 
         // Save the column table and the data table and then reconfigure valve:
-        self.save_tables(&vec!["datatype", "column", "rule"], &None)
-            .await?;
+        self.save_tables(
+            &vec![
+                &self.config.special.datatype,
+                &self.config.special.column,
+                &self.config.special.rule,
+            ],
+            &None,
+        )
+        .await?;
         self.reconfigure().await
     }
 
@@ -1159,12 +1168,14 @@ impl Valve {
 
         if table_added {
             // Read the current table and column configurations from the database:
-            let table_config = read_db_table_into_vector_tx(&mut tx, "table", true).await?;
+            let table_config =
+                read_db_table_into_vector_tx(&mut tx, &self.config.special.table, true).await?;
             let table_config = table_config
                 .iter()
                 .filter(|t| t.get("table").unwrap() == table)
                 .collect::<Vec<_>>();
-            let column_config = read_db_table_into_vector_tx(&mut tx, "column", true).await?;
+            let column_config =
+                read_db_table_into_vector_tx(&mut tx, &self.config.special.column, true).await?;
             let column_config = column_config
                 .iter()
                 .filter(|t| t.get("table").unwrap() == table)
@@ -1189,9 +1200,17 @@ impl Valve {
             let rn = match table_config.get("row_number") {
                 Some(SerdeValue::Number(n)) => match n.as_i64() {
                     Some(rn) => rn as u32,
-                    _ => return Err(ValveError::DataError("Bah!".to_string()).into()),
+                    _ => {
+                        return Err(
+                            ValveError::DataError("Can't convert row number".to_string()).into(),
+                        )
+                    }
                 },
-                _ => return Err(ValveError::DataError("Bah!".to_string()).into()),
+                _ => {
+                    return Err(
+                        ValveError::DataError("Row number is not a number".to_string()).into(),
+                    )
+                }
             };
 
             // The `to` field of the history table entry contains the table and column configuration
@@ -1201,7 +1220,7 @@ impl Valve {
             to.insert("column".to_string(), json!(column_config));
 
             record_config_change_tx(
-                "table",
+                &self.config.special.table,
                 &rn,
                 None,
                 Some(&to),
@@ -1215,7 +1234,11 @@ impl Valve {
             tx.commit().await?;
 
             // Save the configuration, reconfigure valve, and create the data table:
-            self.save_tables(&vec!["table", "column"], &None).await?;
+            self.save_tables(
+                &vec![&self.config.special.table, &self.config.special.column],
+                &None,
+            )
+            .await?;
             self.reconfigure().await?;
             self.ensure_all_tables_created(&vec![table]).await?;
         }
@@ -1229,11 +1252,12 @@ impl Valve {
 
         // Save the row number that is associated with this table in the table table for later:
         let (table_rn, table_ro) = {
+            let table_table = &self.config.special.table;
             let sql = local_sql_syntax(
                 &self.db_kind,
                 &format!(
                     r#"SELECT "row_number", "row_order"
-                       FROM "table"
+                       FROM "{table_table}"
                        WHERE "table" = {SQL_PARAM}"#
                 ),
             );
@@ -1248,11 +1272,12 @@ impl Valve {
         let (column_rns, column_ros) = {
             let mut column_rns = HashMap::new();
             let mut column_ros = HashMap::new();
+            let column_table = &self.config.special.column;
             let sql = local_sql_syntax(
                 &self.db_kind,
                 &format!(
                     r#"SELECT "column", "row_number", "row_order"
-                       FROM "column"
+                       FROM "{column_table}"
                        WHERE "table" = {SQL_PARAM}"#
                 ),
             );
@@ -1321,7 +1346,7 @@ impl Valve {
         };
 
         record_config_change_tx(
-            "table",
+            &self.config.special.table,
             &table_rn,
             Some(&from),
             None,
@@ -1335,15 +1360,17 @@ impl Valve {
         tx.commit().await?;
 
         // Save the column and table tables and reconfigure valve:
-        self.save_tables(&vec!["table", "column"], &None).await?;
+        self.save_tables(
+            &vec![&self.config.special.table, &self.config.special.column],
+            &None,
+        )
+        .await?;
         self.reconfigure().await
     }
 
     /// Change the name of the given table to the given new name.
     pub async fn rename_table(&mut self, table: &str, new_name: &str) -> Result<()> {
-        // TODO: We need to make sure that we support alternate names for the other configuration
-        // tables - not so much in this function per se, but generally throughout Valve.
-        if table == "table" {
+        if table == &self.config.special.table {
             return Err(ValveError::InputError("Can't rename the table table".to_string()).into());
         }
         let mut tx = self.pool.begin().await?;
@@ -1356,7 +1383,7 @@ impl Valve {
         from.insert("table".to_string(), table.into());
         to.insert("table".to_string(), new_name.into());
         record_config_change_tx(
-            "table",
+            &self.config.special.table,
             &table_rn,
             Some(&from),
             Some(&to),
@@ -1370,8 +1397,15 @@ impl Valve {
         tx.commit().await?;
 
         // Save the column table and the data table and then reconfigure valve:
-        self.save_tables(&vec!["table", "column", "rule"], &None)
-            .await?;
+        self.save_tables(
+            &vec![
+                &self.config.special.table,
+                &self.config.special.column,
+                &self.config.special.rule,
+            ],
+            &None,
+        )
+        .await?;
         self.reconfigure().await
     }
 
@@ -1422,13 +1456,13 @@ impl Valve {
         };
 
         // Add the column using the low-level toolkit function:
-        let (rn, ro) = add_column_tx(table, column, column_details, &mut tx, &self.db_kind).await?;
+        let (rn, ro) = add_column_tx(self, table, column, column_details, &mut tx).await?;
         let mut column_details = column_details.clone();
         column_details.insert("row_order".to_string(), json!(ro));
 
         // Record the configuration change to the history table:
         record_config_change_tx(
-            "column",
+            &self.config.special.column,
             &rn,
             None,
             Some(&column_details),
@@ -1442,7 +1476,8 @@ impl Valve {
         tx.commit().await?;
 
         // Save the column table and the data table and then reconfigure valve:
-        self.save_tables(&vec!["column", table], &None).await?;
+        self.save_tables(&vec![&self.config.special.column, table], &None)
+            .await?;
         self.reconfigure().await?;
 
         // Refresh the database but do not load any data:
@@ -1475,11 +1510,11 @@ impl Valve {
             )))?
             .clone();
 
-        let (col_rn, col_ro) = delete_column_tx(table, column, &mut tx, &self.db_kind).await?;
+        let (col_rn, col_ro) = delete_column_tx(self, table, column, &mut tx).await?;
         colconfig.insert("row_order".to_string(), json!(col_ro));
 
         record_config_change_tx(
-            "column",
+            &self.config.special.column,
             &col_rn,
             Some(&colconfig),
             None,
@@ -1493,7 +1528,8 @@ impl Valve {
         tx.commit().await?;
 
         // Save the column table and the data table and then reconfigure valve:
-        self.save_tables(&vec!["column", table], &None).await?;
+        self.save_tables(&vec![&self.config.special.column, table], &None)
+            .await?;
         self.reconfigure().await?;
 
         // Refresh the database:
@@ -1522,11 +1558,12 @@ impl Valve {
 
         // Save the row number of the column which we will later add to the history record:
         let (col_rn, _) = {
+            let column_table = &self.config.special.column;
             let sql = local_sql_syntax(
                 &self.db_kind,
                 &format!(
                     r#"SELECT "row_number", "row_order"
-                       FROM "column"
+                       FROM "{column_table}"
                        WHERE "table" = {SQL_PARAM} AND "column" = {SQL_PARAM}"#
                 ),
             );
@@ -1566,7 +1603,7 @@ impl Valve {
             to.insert("label".to_string(), json!(new_label));
         }
         record_config_change_tx(
-            "column",
+            &self.config.special.column,
             &col_rn,
             Some(&from),
             Some(&to),
@@ -1580,8 +1617,15 @@ impl Valve {
         tx.commit().await?;
 
         // Save the column and rule tables, and the data table, and then reconfigure valve:
-        self.save_tables(&vec!["column", "rule", table], &None)
-            .await?;
+        self.save_tables(
+            &vec![
+                &self.config.special.column,
+                &self.config.special.rule,
+                table,
+            ],
+            &None,
+        )
+        .await?;
         self.reconfigure().await?;
 
         // Refresh the database but do not load any data:
@@ -2875,8 +2919,8 @@ impl Valve {
                         &self.db_kind,
                         &format!(
                             r#"INSERT INTO "message"
-                       ("table", "row", "column", "value", "level", "rule", "message")
-                       VALUES ({}, {}, {}, {}, {}, {}, {})"#,
+                               ("table", "row", "column", "value", "level", "rule", "message")
+                               VALUES ({}, {}, {}, {}, {}, {}, {})"#,
                             SQL_PARAM,
                             row_number,
                             SQL_PARAM,
@@ -2980,7 +3024,8 @@ impl Valve {
     /// Save all configured savable tables to their configured paths, unless save_dir is specified,
     /// in which case save them all there instead.
     pub async fn save_all_tables(&self, save_dir: &Option<String>) -> Result<&Self> {
-        let options_enabled = self.column_enabled_in_db("table", "options").await?;
+        let table_table = &self.config.special.table;
+        let options_enabled = self.column_enabled_in_db(table_table, "options").await?;
 
         // Get the list of potential tables to save by querying the table table for all tables
         // whose paths are TSV files:
@@ -2988,9 +3033,9 @@ impl Valve {
         let sql = {
             let select_from_table = String::from({
                 if !options_enabled {
-                    r#"SELECT "table" FROM "table""#
+                    format!(r#"SELECT "table" FROM "{table_table}""#)
                 } else {
-                    r#"SELECT "table", "options" FROM "table""#
+                    format!(r#"SELECT "table", "options" FROM "{table_table}""#)
                 }
             });
             if self.db_kind == DbKind::Postgres {
@@ -3041,7 +3086,9 @@ impl Valve {
         }
         // Build the query to get the path and possibly the options info from the table table for
         // all of the tables that were requested to be saved:
-        let options_enabled = self.column_enabled_in_db("table", "options").await?;
+        let options_enabled = self
+            .column_enabled_in_db(&self.config.special.table, "options")
+            .await?;
         let mut params = vec![];
         let sql_param_str = tables
             .iter()
@@ -3052,14 +3099,15 @@ impl Valve {
             .collect::<Vec<_>>()
             .join(", ");
         let sql = {
+            let table_table = &self.config.special.table;
             if options_enabled {
                 format!(
-                    r#"SELECT "table", "path", "options" FROM "table" WHERE "table" IN ({})"#,
+                    r#"SELECT "table", "path", "options" FROM "{table_table}" WHERE "table" IN ({})"#,
                     sql_param_str
                 )
             } else {
                 format!(
-                    r#"SELECT "table", "path" FROM "table" WHERE "table" IN ({})"#,
+                    r#"SELECT "table", "path" FROM "{table_table}" WHERE "table" IN ({})"#,
                     sql_param_str
                 )
             }
@@ -3202,11 +3250,15 @@ impl Valve {
                 save_path
             ))
             .into());
-        } else if self.column_enabled_in_db("table", "options").await? {
+        } else if self
+            .column_enabled_in_db(&self.config.special.table, "options")
+            .await?
+        {
+            let table_table = &self.config.special.table;
             let sql = local_sql_syntax(
                 &self.db_kind,
                 &format!(
-                    r#"SELECT "path", "options" FROM "table" WHERE "table" = {}"#,
+                    r#"SELECT "path", "options" FROM "{table_table}" WHERE "table" = {}"#,
                     SQL_PARAM
                 ),
             );
@@ -3233,18 +3285,21 @@ impl Valve {
         // querying the column table joined with information from the table and datatype tables.
         let mut columns: IndexMap<String, (String, String)> = IndexMap::new();
         let sql = {
+            let table_table = &self.config.special.table;
+            let column_table = &self.config.special.column;
+            let datatype_table = &self.config.special.datatype;
             let mut sql_columns = r#"c."column", c."label", t."type" AS "table_type""#.to_string();
-            if self.column_enabled_in_db("datatype", "format").await? {
+            if self.column_enabled_in_db(datatype_table, "format").await? {
                 sql_columns.push_str(r#", d."format""#);
             }
             local_sql_syntax(
                 &self.db_kind,
                 &format!(
                     r#"SELECT {sql_columns}
-                         FROM "column" c
-                         JOIN "table" t
+                         FROM "{column_table}" c
+                         JOIN "{table_table}" t
                            ON c."table" = t."table"
-                    LEFT JOIN "datatype" d
+                    LEFT JOIN "{datatype_table}" d
                            ON c."datatype" = d."datatype"
                         WHERE c."table" = t."table"
                           AND c."table" = {SQL_PARAM}
@@ -3356,7 +3411,7 @@ impl Valve {
         if !self
             .config
             .table
-            .get("datatype")
+            .get(&self.config.special.datatype)
             .and_then(|t| Some(&t.column))
             .and_then(|c| Some(c.keys().collect::<Vec<_>>()))
             .and_then(|v| Some(v.contains(&&"format".to_string())))
@@ -3364,9 +3419,14 @@ impl Valve {
         {
             Ok("".to_string())
         } else {
+            let datatype_table = &self.config.special.datatype;
             let sql = local_sql_syntax(
                 &self.db_kind,
-                &format!(r#"SELECT "format" FROM "datatype" WHERE "datatype" = {SQL_PARAM}"#,),
+                &format!(
+                    r#"SELECT "format"
+                       FROM "{datatype_table}"
+                       WHERE "datatype" = {SQL_PARAM}"#
+                ),
             );
             let rows = sqlx_query(&sql)
                 .bind(datatype)
@@ -3393,7 +3453,7 @@ impl Valve {
         if !self
             .config
             .table
-            .get("datatype")
+            .get(&self.config.special.datatype)
             .and_then(|t| Some(t.column.clone()))
             .and_then(|c| Some(c.keys().cloned().collect::<Vec<_>>()))
             .and_then(|v| Some(v.contains(&"format".to_string())))
@@ -3401,11 +3461,13 @@ impl Valve {
         {
             Ok("".to_string())
         } else {
+            let column_table = &self.config.special.column;
+            let datatype_table = &self.config.special.datatype;
             let sql = local_sql_syntax(
                 &self.db_kind,
                 &format!(
                     r#"SELECT d."format"
-                         FROM "column" c, "datatype" d
+                         FROM "{column_table}" c, "{datatype_table}" d
                         WHERE c."table" = {SQL_PARAM}
                           AND c."column" = {SQL_PARAM}
                           AND c."datatype" = d."datatype""#,
@@ -3880,7 +3942,7 @@ impl Valve {
                             .ok_or(make_err("No string 'column' found"))?;
 
                         let mut tx = self.pool.begin().await?;
-                        delete_column_tx(table, column, &mut tx, &self.db_kind).await?;
+                        delete_column_tx(self, table, column, &mut tx).await?;
                         switch_undone_state_tx(
                             &self.user,
                             history_id,
@@ -3892,7 +3954,8 @@ impl Valve {
                         tx.commit().await?;
 
                         // Save the column table and the data table and then reconfigure valve:
-                        self.save_tables(&vec!["column", table], &None).await?;
+                        self.save_tables(&vec![&self.config.special.column, table], &None)
+                            .await?;
                         self.reconfigure().await?;
 
                         // Refresh the database:
@@ -3916,8 +3979,9 @@ impl Valve {
                         // Add a new column to the column table, then update its row number to
                         // the saved row number of the column that had been previously deleted:
                         let mut tx = self.pool.begin().await?;
-                        add_column_tx(table, column, from, &mut tx, &self.db_kind).await?;
+                        add_column_tx(self, table, column, from, &mut tx).await?;
                         let sql = {
+                            let column_table = &self.config.special.column;
                             let rn: i64 = last_change.get("row");
                             let rn = rn as u32;
                             let ro = from
@@ -3926,7 +3990,8 @@ impl Valve {
                             local_sql_syntax(
                                 &self.db_kind,
                                 &format!(
-                                    r#"UPDATE "column" SET "row_number" = {rn}, "row_order" = {ro}
+                                    r#"UPDATE "{column_table}"
+                                       SET "row_number" = {rn}, "row_order" = {ro}
                                        WHERE "table" = {SQL_PARAM} AND "column" = {SQL_PARAM}"#
                                 ),
                             )
@@ -3945,7 +4010,8 @@ impl Valve {
                         tx.commit().await?;
 
                         // Save the column table and the data table and then reconfigure valve:
-                        self.save_tables(&vec!["column", table], &None).await?;
+                        self.save_tables(&vec![&self.config.special.column, table], &None)
+                            .await?;
                         self.reconfigure().await?;
 
                         // Refresh the database:
@@ -3999,8 +4065,15 @@ impl Valve {
 
                                 // Save the column and rule tables, and the data table, and
                                 // then reconfigure valve:
-                                self.save_tables(&vec!["column", "rule", table], &None)
-                                    .await?;
+                                self.save_tables(
+                                    &vec![
+                                        &self.config.special.column,
+                                        &self.config.special.rule,
+                                        table,
+                                    ],
+                                    &None,
+                                )
+                                .await?;
                                 self.reconfigure().await?;
 
                                 // Refresh the database but do not load any data:
@@ -4020,7 +4093,7 @@ impl Valve {
                             .ok_or(make_err("No string 'datatype' found"))?;
 
                         let mut tx = self.pool.begin().await?;
-                        delete_datatype_tx(datatype, &mut tx, &self.db_kind).await?;
+                        delete_datatype_tx(self, datatype, &mut tx).await?;
                         switch_undone_state_tx(
                             &self.user,
                             history_id,
@@ -4032,7 +4105,8 @@ impl Valve {
                         tx.commit().await?;
 
                         // Save the datatype table and then reconfigure valve:
-                        self.save_tables(&vec!["datatype"], &None).await?;
+                        self.save_tables(&vec![&self.config.special.datatype], &None)
+                            .await?;
                         self.reconfigure().await?;
 
                         return Ok(None);
@@ -4046,7 +4120,7 @@ impl Valve {
                         // Add a new datatype to the datatype table, then update its row number
                         // and row order to match the saved values of the datatype row that had
                         // been previously deleted:
-                        add_datatype_tx(from, &self.db_kind, &mut tx).await?;
+                        add_datatype_tx(self, from, &mut tx).await?;
                         let datatype = from
                             .get("datatype")
                             .and_then(|d| d.as_str())
@@ -4057,10 +4131,12 @@ impl Valve {
                             let ro = from
                                 .get("row_order")
                                 .ok_or(make_err("No 'row_order' found"))?;
+                            let datatype_table = &self.config.special.datatype;
                             local_sql_syntax(
                                 &self.db_kind,
                                 &format!(
-                                    r#"UPDATE "datatype" SET "row_number" = {rn}, "row_order" = {ro}
+                                    r#"UPDATE "{datatype_table}"
+                                       SET "row_number" = {rn}, "row_order" = {ro}
                                        WHERE "datatype" = {SQL_PARAM}"#
                                 ),
                             )
@@ -4081,7 +4157,8 @@ impl Valve {
                         tx.commit().await?;
 
                         // Save the datatype table and then reconfigure valve:
-                        self.save_tables(&vec!["datatype"], &None).await?;
+                        self.save_tables(&vec![&self.config.special.datatype], &None)
+                            .await?;
                         self.reconfigure().await?;
                         return Ok(None);
                     }
@@ -4115,8 +4192,15 @@ impl Valve {
 
                                 // Save the column table and the data table and then reconfigure
                                 // valve:
-                                self.save_tables(&vec!["datatype", "column", "rule"], &None)
-                                    .await?;
+                                self.save_tables(
+                                    &vec![
+                                        &self.config.special.datatype,
+                                        &self.config.special.column,
+                                        &self.config.special.rule,
+                                    ],
+                                    &None,
+                                )
+                                .await?;
                                 self.reconfigure().await?;
 
                                 return Ok(None);
@@ -4147,7 +4231,11 @@ impl Valve {
                         tx.commit().await?;
 
                         // Save the column and table tables and reconfigure valve:
-                        self.save_tables(&vec!["table", "column"], &None).await?;
+                        self.save_tables(
+                            &vec![&self.config.special.table, &self.config.special.column],
+                            &None,
+                        )
+                        .await?;
                         self.reconfigure().await?;
 
                         return Ok(None);
@@ -4236,10 +4324,11 @@ impl Valve {
                         let mut tx = self.pool.begin().await?;
 
                         let sql = {
+                            let table_table = &self.config.special.table;
                             local_sql_syntax(
                                 &self.db_kind,
                                 &format!(
-                                    r#"INSERT INTO "table"
+                                    r#"INSERT INTO "{table_table}"
                                        ("row_number", "row_order", "table", "type", "options",
                                         "description", "path")
                                        VALUES ({rn}, {ro}, {remaining_values})"#,
@@ -4375,12 +4464,13 @@ impl Valve {
 
                             // Execute the SQL to add this column:
                             let sql = format!(
-                                r#"INSERT INTO "column"
+                                r#"INSERT INTO "{column_table}"
                                    ("row_number", "row_order", "table", "column",
                                     "datatype", "description", "label", "structure",
                                     "nulltype", "default")
                                    VALUES
                                    ({rn}, {ro}, {remaining_values})"#,
+                                column_table = &self.config.special.column,
                                 remaining_values = values.join(", "),
                             );
                             let sql = local_sql_syntax(&self.db_kind, &sql.to_string());
@@ -4404,7 +4494,11 @@ impl Valve {
                         tx.commit().await?;
 
                         // Save and reconfigure:
-                        self.save_tables(&vec!["table", "column"], &None).await?;
+                        self.save_tables(
+                            &vec![&self.config.special.table, &self.config.special.column],
+                            &None,
+                        )
+                        .await?;
                         self.reconfigure().await?;
                         self.ensure_all_tables_created(&vec![table]).await?;
                         return Ok(None);
@@ -4439,8 +4533,15 @@ impl Valve {
 
                                 // Save the column table and the data table and then reconfigure
                                 // valve:
-                                self.save_tables(&vec!["table", "column", "rule"], &None)
-                                    .await?;
+                                self.save_tables(
+                                    &vec![
+                                        &self.config.special.table,
+                                        &self.config.special.column,
+                                        &self.config.special.rule,
+                                    ],
+                                    &None,
+                                )
+                                .await?;
                                 self.reconfigure().await?;
 
                                 return Ok(None);
@@ -4667,17 +4768,19 @@ impl Valve {
 
                         // Add a column to the table and then update its row number and row order
                         // to the saved values for the previously deleted row:
-                        add_column_tx(table, column, to, &mut tx, &self.db_kind).await?;
+                        add_column_tx(self, table, column, to, &mut tx).await?;
                         let sql = {
                             let rn: i64 = next_redo.get("row");
                             let rn = rn as u32;
                             let ro = to
                                 .get("row_order")
                                 .ok_or(make_err("No 'row_order' found"))?;
+                            let column_table = &self.config.special.column;
                             local_sql_syntax(
                                 &self.db_kind,
                                 &format!(
-                                    r#"UPDATE "column" SET "row_number" = {rn}, "row_order" = {ro}
+                                    r#"UPDATE "{column_table}"
+                                       SET "row_number" = {rn}, "row_order" = {ro}
                                        WHERE "table" = {SQL_PARAM} AND "column" = {SQL_PARAM}"#
                                 ),
                             )
@@ -4698,7 +4801,8 @@ impl Valve {
                         tx.commit().await?;
 
                         // Save the column table and the data table and then reconfigure valve:
-                        self.save_tables(&vec!["column", table], &None).await?;
+                        self.save_tables(&vec![&self.config.special.column, table], &None)
+                            .await?;
                         self.reconfigure().await?;
 
                         // Refresh the database:
@@ -4720,7 +4824,7 @@ impl Valve {
                             .ok_or(make_err("No string 'column' found"))?;
 
                         let mut tx = self.pool.begin().await?;
-                        delete_column_tx(table, column, &mut tx, &self.db_kind).await?;
+                        delete_column_tx(self, table, column, &mut tx).await?;
                         switch_undone_state_tx(
                             &self.user,
                             history_id,
@@ -4732,7 +4836,8 @@ impl Valve {
                         tx.commit().await?;
 
                         // Save the column table and the data table and then reconfigure valve:
-                        self.save_tables(&vec!["column", table], &None).await?;
+                        self.save_tables(&vec![&self.config.special.column, table], &None)
+                            .await?;
                         self.reconfigure().await?;
 
                         // Refresh the database:
@@ -4786,8 +4891,15 @@ impl Valve {
 
                                 // Save the column and rule tables, and the data table, and
                                 // then reconfigure valve:
-                                self.save_tables(&vec!["column", "rule", table], &None)
-                                    .await?;
+                                self.save_tables(
+                                    &vec![
+                                        &self.config.special.column,
+                                        &self.config.special.rule,
+                                        table,
+                                    ],
+                                    &None,
+                                )
+                                .await?;
                                 self.reconfigure().await?;
 
                                 // Refresh the database but do not load any data:
@@ -4806,7 +4918,7 @@ impl Valve {
 
                         // Add the datatype and then update its row number to the save value of the
                         // previously deleted datatype:
-                        add_datatype_tx(to, &self.db_kind, &mut tx).await?;
+                        add_datatype_tx(self, to, &mut tx).await?;
                         let datatype = to
                             .get("datatype")
                             .and_then(|d| d.as_str())
@@ -4817,10 +4929,12 @@ impl Valve {
                             let ro = to
                                 .get("row_order")
                                 .ok_or(make_err("No 'row_order' found"))?;
+                            let datatype_table = &self.config.special.datatype;
                             local_sql_syntax(
                                 &self.db_kind,
                                 &format!(
-                                    r#"UPDATE "datatype" SET "row_number" = {rn}, "row_order" = {ro}
+                                    r#"UPDATE "{datatype_table}"
+                                       SET "row_number" = {rn}, "row_order" = {ro}
                                        WHERE "datatype" = {SQL_PARAM}"#
                                 ),
                             )
@@ -4841,7 +4955,8 @@ impl Valve {
                         tx.commit().await?;
 
                         // Save the datatype table and then reconfigure valve:
-                        self.save_tables(&vec!["datatype"], &None).await?;
+                        self.save_tables(&vec![&self.config.special.datatype], &None)
+                            .await?;
                         self.reconfigure().await?;
                         return Ok(None);
                     }
@@ -4855,7 +4970,7 @@ impl Valve {
                             .ok_or(make_err("No string 'datatype' found"))?;
 
                         let mut tx = self.pool.begin().await?;
-                        delete_datatype_tx(datatype, &mut tx, &self.db_kind).await?;
+                        delete_datatype_tx(self, datatype, &mut tx).await?;
                         switch_undone_state_tx(
                             &self.user,
                             history_id,
@@ -4867,7 +4982,8 @@ impl Valve {
                         tx.commit().await?;
 
                         // Save the datatype table and then reconfigure valve:
-                        self.save_tables(&vec!["datatype"], &None).await?;
+                        self.save_tables(&vec![&self.config.special.datatype], &None)
+                            .await?;
                         self.reconfigure().await?;
 
                         return Ok(None);
@@ -4902,8 +5018,15 @@ impl Valve {
 
                                 // Save the column table and the data table and then reconfigure
                                 // valve:
-                                self.save_tables(&vec!["datatype", "column", "rule"], &None)
-                                    .await?;
+                                self.save_tables(
+                                    &vec![
+                                        &self.config.special.datatype,
+                                        &self.config.special.column,
+                                        &self.config.special.rule,
+                                    ],
+                                    &None,
+                                )
+                                .await?;
                                 self.reconfigure().await?;
 
                                 return Ok(None);
@@ -4986,17 +5109,18 @@ impl Valve {
                         let ro = to_table
                             .get("row_order")
                             .and_then(|r| r.as_i64())
-                            .ok_or(make_err("No integer 'row_number' found"))?;
+                            .ok_or(make_err("No integer 'row_order' found"))?;
                         let ro = ro as u32;
 
                         // Begin a transaction and execute the insert statement:
                         let mut tx = self.pool.begin().await?;
 
                         let sql = {
+                            let table_table = &self.config.special.table;
                             local_sql_syntax(
                                 &self.db_kind,
                                 &format!(
-                                    r#"INSERT INTO "table"
+                                    r#"INSERT INTO "{table_table}"
                                        ("row_number", "row_order", "table", "type", "options",
                                         "description", "path")
                                        VALUES ({rn}, {ro}, {remaining_values})"#,
@@ -5129,12 +5253,13 @@ impl Valve {
                             };
 
                             let sql = format!(
-                                r#"INSERT INTO "column"
+                                r#"INSERT INTO "{column_table}"
                                    ("row_number", "row_order", "table", "column",
                                     "datatype", "description", "label", "structure",
                                     "nulltype", "default")
                                    VALUES
                                    ({rn}, {ro}, {remaining_values})"#,
+                                column_table = &self.config.special.column,
                                 remaining_values = values.join(", "),
                             );
                             let sql = local_sql_syntax(&self.db_kind, &sql.to_string());
@@ -5157,7 +5282,11 @@ impl Valve {
                         // Commit the transaction:
                         tx.commit().await?;
 
-                        self.save_tables(&vec!["table", "column"], &None).await?;
+                        self.save_tables(
+                            &vec![&self.config.special.table, &self.config.special.column],
+                            &None,
+                        )
+                        .await?;
                         self.reconfigure().await?;
                         self.ensure_all_tables_created(&vec![table]).await?;
                         return Ok(None);
@@ -5186,7 +5315,11 @@ impl Valve {
                         tx.commit().await?;
 
                         // Save the column and table tables and reconfigure valve:
-                        self.save_tables(&vec!["table", "column"], &None).await?;
+                        self.save_tables(
+                            &vec![&self.config.special.table, &self.config.special.column],
+                            &None,
+                        )
+                        .await?;
                         self.reconfigure().await?;
 
                         return Ok(None);
@@ -5221,8 +5354,15 @@ impl Valve {
 
                                 // Save the column table and the data table and then reconfigure
                                 // valve:
-                                self.save_tables(&vec!["table", "column", "rule"], &None)
-                                    .await?;
+                                self.save_tables(
+                                    &vec![
+                                        &self.config.special.table,
+                                        &self.config.special.column,
+                                        &self.config.special.rule,
+                                    ],
+                                    &None,
+                                )
+                                .await?;
                                 self.reconfigure().await?;
 
                                 return Ok(None);

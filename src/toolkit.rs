@@ -641,9 +641,7 @@ pub async fn read_config_files(
     // 4. Load rule table if it exists
     let mut rules_config = HashMap::new();
     if specials_config.rule != "" {
-        let table_name = &specials_config.rule;
-        let rows =
-            get_special_config(table_name, &specials_config, &tables_config, path, pool).await?;
+        let rows = get_special_config("rule", &specials_config, &tables_config, path, pool).await?;
         for row in rows {
             if let Err(e) = check_table_requirements(
                 &REQUIRED_RULE_COLUMNS,
@@ -1047,8 +1045,8 @@ pub async fn read_db_table_into_vector_tx(
                 } else {
                     table_row.insert(cname.to_string(), json!(""));
                 }
-            } else if keep_rn && cname == "row_number" {
-                let value = row.get::<i64, _>("row_number") as u32;
+            } else if keep_rn && (cname == "row_number" || cname == "row_order") {
+                let value = row.get::<i64, _>(cname) as u32;
                 table_row.insert(cname.to_string(), json!(value));
             }
         }
@@ -2209,7 +2207,7 @@ pub async fn rename_column_tx(
     let sql = local_sql_syntax(
         &valve.db_kind,
         &format!(
-            r#"UPDATE "column"
+            r#"UPDATE "{column_table}"
                SET {structure_sql}
                    "column" = CASE WHEN "column" = {SQL_PARAM} THEN {SQL_PARAM}
                                    ELSE "column"
@@ -2217,7 +2215,8 @@ pub async fn rename_column_tx(
                     "label" = CASE WHEN "column" = {SQL_PARAM} THEN {SQL_PARAM}
                                    ELSE "label"
                               END
-               {where_sql}"#
+               {where_sql}"#,
+            column_table = &valve.config.special.column,
         ),
     );
 
@@ -2240,14 +2239,15 @@ pub async fn rename_column_tx(
     let sql = local_sql_syntax(
         &valve.db_kind,
         &format!(
-            r#"UPDATE "rule"
+            r#"UPDATE "{rule_table}"
                SET "when column" = CASE WHEN "when column" = {SQL_PARAM} THEN {SQL_PARAM}
                                         ELSE "when column"
                                    END,
                    "then column" = CASE WHEN "then column" = {SQL_PARAM} THEN {SQL_PARAM}
                                         ELSE "then column"
                                    END
-               WHERE "table" = {SQL_PARAM}"#
+               WHERE "table" = {SQL_PARAM}"#,
+            rule_table = &valve.config.special.rule,
         ),
     );
 
@@ -2311,7 +2311,7 @@ pub async fn rename_datatype_tx(
     let cols_for_query = valve
         .config
         .table
-        .get("datatype")
+        .get(&valve.config.special.datatype)
         .ok_or(ValveError::ConfigError(
             "Datatype table not found in config".to_string(),
         ))?
@@ -2333,8 +2333,9 @@ pub async fn rename_datatype_tx(
         let sql = local_sql_syntax(
             &valve.db_kind,
             &format!(
-                r#"SELECT "row_number", "row_order" FROM "datatype"
-                   WHERE "datatype" = {SQL_PARAM}"#
+                r#"SELECT "row_number", "row_order" FROM "{datatype_table}"
+                   WHERE "datatype" = {SQL_PARAM}"#,
+                datatype_table = &valve.config.special.datatype,
             ),
         );
         let row = sqlx_query(&sql)
@@ -2347,19 +2348,20 @@ pub async fn rename_datatype_tx(
     };
 
     // We then add a new datatype corresponding to the new name:
-    let (rn, ro) = get_next_new_row_tx(&valve.db_kind, tx, "datatype").await?;
+    let (rn, ro) = get_next_new_row_tx(&valve.db_kind, tx, &valve.config.special.datatype).await?;
     let sql = local_sql_syntax(
         &valve.db_kind,
         &format!(
-            r#"INSERT INTO "datatype"
+            r#"INSERT INTO "{datatype_table}"
                    ("row_number", "row_order", "datatype", {main_column_list})
                    SELECT
                       {rn} AS row_number,
                       {ro} as row_order,
                       {SQL_PARAM} as "datatype",
                       {t2_column_list}
-                     FROM "datatype" t2
-                    WHERE t2."datatype" = {SQL_PARAM}"#
+                     FROM "{datatype_table}" t2
+                    WHERE t2."datatype" = {SQL_PARAM}"#,
+            datatype_table = &valve.config.special.datatype,
         ),
     );
     let query = sqlx_query(&sql).bind(new_name).bind(datatype);
@@ -2369,14 +2371,15 @@ pub async fn rename_datatype_tx(
     let sql = local_sql_syntax(
         &valve.db_kind,
         &format!(
-            r#"UPDATE "column"
+            r#"UPDATE "{column_table}"
                      SET "datatype" = CASE
                        WHEN "datatype" = {SQL_PARAM} THEN {SQL_PARAM}
                        ELSE "datatype"
                      END, "nulltype" = CASE
                        WHEN "nulltype" = {SQL_PARAM} THEN {SQL_PARAM}
                        ELSE "nulltype"
-                     END"#
+                     END"#,
+            column_table = &valve.config.special.column,
         ),
     );
     let query = sqlx_query(&sql)
@@ -2442,11 +2445,12 @@ pub async fn rename_datatype_tx(
     let sql = local_sql_syntax(
         &valve.db_kind,
         &format!(
-            r#"UPDATE "datatype"
+            r#"UPDATE "{datatype_table}"
                     SET {condition_sql}"parent" = CASE
                       WHEN "parent" = {SQL_PARAM} THEN {SQL_PARAM}
                       ELSE "parent"
-                    END"#
+                    END"#,
+            datatype_table = &valve.config.special.datatype,
         ),
     );
     let mut query = sqlx_query(&sql);
@@ -2508,8 +2512,9 @@ pub async fn rename_datatype_tx(
     let sql = local_sql_syntax(
         &valve.db_kind,
         &format!(
-            r#"UPDATE "rule"
-                     SET {when_condition_sql}, {then_condition_sql}"#
+            r#"UPDATE "{rule_table}"
+               SET {when_condition_sql}, {then_condition_sql}"#,
+            rule_table = &valve.config.special.rule
         ),
     );
     let mut query = sqlx_query(&sql);
@@ -2524,7 +2529,10 @@ pub async fn rename_datatype_tx(
     // Now delete the old datatype name from the database:
     let sql = local_sql_syntax(
         &valve.db_kind,
-        &format!(r#"DELETE FROM "datatype" WHERE "datatype" = {SQL_PARAM}"#),
+        &format!(
+            r#"DELETE FROM "{datatype_table}" WHERE "datatype" = {SQL_PARAM}"#,
+            datatype_table = &valve.config.special.datatype,
+        ),
     );
     let query = sqlx_query(&sql).bind(datatype);
     query.execute(tx.acquire().await?).await?;
@@ -2532,9 +2540,10 @@ pub async fn rename_datatype_tx(
     // Finally update the newly added datatype's row number and row order to the values
     // that we saved earlier, to complete the logical rename operation:
     let sql = format!(
-        r#"UPDATE "datatype"
+        r#"UPDATE "{datatype_table}"
                   SET "row_number" = {saved_rn}, "row_order" = {saved_ro}
-                WHERE "row_number" = {rn}"#
+                WHERE "row_number" = {rn}"#,
+        datatype_table = &valve.config.special.datatype,
     );
     let query = sqlx_query(&sql);
     query.execute(tx.acquire().await?).await?;
@@ -2557,8 +2566,9 @@ pub async fn rename_table_tx(
         let sql = local_sql_syntax(
             &valve.db_kind,
             &format!(
-                r#"SELECT "row_number", "row_order" FROM "table"
-                   WHERE "table" = {SQL_PARAM}"#
+                r#"SELECT "row_number", "row_order" FROM "{table_table}"
+                   WHERE "table" = {SQL_PARAM}"#,
+                table_table = &valve.config.special.table,
             ),
         );
         let row = sqlx_query(&sql)
@@ -2573,7 +2583,7 @@ pub async fn rename_table_tx(
     let cols_for_query = valve
         .config
         .table
-        .get("table")
+        .get(&valve.config.special.table)
         .expect("Table table not found in config")
         .column
         .keys()
@@ -2590,11 +2600,11 @@ pub async fn rename_table_tx(
 
     // Now insert a new row to the table table. We will update the row number and row order
     // to the saved values later:
-    let (rn, ro) = get_next_new_row_tx(&valve.db_kind, tx, "table").await?;
+    let (rn, ro) = get_next_new_row_tx(&valve.db_kind, tx, &valve.config.special.table).await?;
     let sql = local_sql_syntax(
         &valve.db_kind,
         &format!(
-            r#"INSERT INTO "table" (
+            r#"INSERT INTO "{table_table}" (
                    "row_number", "row_order", "table",
                    {main_column_list}
                )
@@ -2603,8 +2613,9 @@ pub async fn rename_table_tx(
                    {ro} as row_order,
                    {SQL_PARAM} as "table",
                    {t2_column_list}
-               FROM "table" t2
-               WHERE t2."table" = {SQL_PARAM}"#
+               FROM "{table_table}" t2
+               WHERE t2."table" = {SQL_PARAM}"#,
+            table_table = &valve.config.special.table,
         ),
     );
     let query = sqlx_query(&sql).bind(new_name).bind(table);
@@ -2656,11 +2667,12 @@ pub async fn rename_table_tx(
     let sql = local_sql_syntax(
         &valve.db_kind,
         &format!(
-            r#"UPDATE "column"
+            r#"UPDATE "{column_table}"
                       SET "table" = CASE
                         WHEN "table" = {SQL_PARAM} THEN {SQL_PARAM}
                         ELSE "table"
-                      END{structure_sql}"#
+                      END{structure_sql}"#,
+            column_table = &valve.config.special.column,
         ),
     );
     let mut query = sqlx_query(&sql).bind(table).bind(new_name);
@@ -2673,9 +2685,10 @@ pub async fn rename_table_tx(
     let sql = local_sql_syntax(
         &valve.db_kind,
         &format!(
-            r#"UPDATE "rule"
+            r#"UPDATE "{rule_table}"
                SET "table" = {SQL_PARAM}
-               WHERE "table" = {SQL_PARAM}"#
+               WHERE "table" = {SQL_PARAM}"#,
+            rule_table = &valve.config.special.rule,
         ),
     );
     let query = sqlx_query(&sql).bind(new_name).bind(table);
@@ -2683,7 +2696,10 @@ pub async fn rename_table_tx(
 
     let sql = local_sql_syntax(
         &valve.db_kind,
-        &format!(r#"DELETE FROM "table" WHERE "table" = {SQL_PARAM}"#),
+        &format!(
+            r#"DELETE FROM "{table_table}" WHERE "table" = {SQL_PARAM}"#,
+            table_table = &valve.config.special.table
+        ),
     );
     let query = sqlx_query(&sql).bind(table);
     query.execute(tx.acquire().await?).await?;
@@ -2691,9 +2707,10 @@ pub async fn rename_table_tx(
     // Finally update the newly added table's row number and row order to the values
     // that we saved earlier, to complete the logical rename operation:
     let sql = format!(
-        r#"UPDATE "table"
+        r#"UPDATE "{table_table}"
            SET "row_number" = {saved_rn}, "row_order" = {saved_ro}
-           WHERE "row_number" = {rn}"#
+           WHERE "row_number" = {rn}"#,
+        table_table = &valve.config.special.table
     );
     let query = sqlx_query(&sql);
     query.execute(tx.acquire().await?).await?;
@@ -4213,15 +4230,15 @@ pub async fn update_row_tx(
     Ok(())
 }
 
-/// Given a table name, a column name, a [JsonRow] representing the column's column configuration,
-/// a database transaction, and the kind of database, add the given column to the given table,
+/// Given a [Valve] instance, a table name, a column name, a [JsonRow] representing the column's
+/// column configuration, and a database transaction, add the given column to the given table,
 /// returning the row_number and row_order for the new column entry in the column table.
 pub async fn add_column_tx(
+    valve: &Valve,
     table: &str,
     column: &str,
     column_details: &JsonRow,
     tx: &mut Transaction<'_, sqlx::Any>,
-    db_kind: &DbKind,
 ) -> Result<(u32, u32)> {
     let make_err = |err_str: &str| -> ValveError { ValveError::InputError(err_str.to_string()) };
 
@@ -4255,14 +4272,16 @@ pub async fn add_column_tx(
             }
         }
     }
-    let (rn, ro) = get_next_new_row_tx(db_kind, tx, "column").await?;
+
+    let (rn, ro) = get_next_new_row_tx(&valve.db_kind, tx, &valve.config.special.column).await?;
     let sql = local_sql_syntax(
-        db_kind,
+        &valve.db_kind,
         &format!(
-            r#"INSERT INTO "column" ("row_number", "row_order", {fields})
+            r#"INSERT INTO "{column_table}" ("row_number", "row_order", {fields})
                VALUES ({rn}, {ro}, {placeholders})"#,
             fields = fields.join(", "),
-            placeholders = placeholders.join(", ")
+            placeholders = placeholders.join(", "),
+            column_table = &valve.config.special.column,
         ),
     );
     let mut query = sqlx_query(&sql);
@@ -4274,11 +4293,11 @@ pub async fn add_column_tx(
     Ok((rn, ro))
 }
 
-/// Given the name of a datatype, a database transaction, and the database kind, add the
-/// datatype to the datatype table, returning its row_number and row_order.
+/// Given a [Valve] instance the name of a datatype, and a database transaction,
+/// add the datatype to the datatype table, returning its row_number and row_order.
 pub async fn add_datatype_tx(
+    valve: &Valve,
     dt_map: &JsonRow,
-    db_kind: &DbKind,
     tx: &mut Transaction<'_, sqlx::Any>,
 ) -> Result<(u32, u32)> {
     // Separate the datatype fields into the columns and column parameters that we will
@@ -4304,14 +4323,15 @@ pub async fn add_datatype_tx(
     }
 
     // Generate an INSERT statement:
-    let (rn, ro) = get_next_new_row_tx(db_kind, tx, "datatype").await?;
+    let (rn, ro) = get_next_new_row_tx(&valve.db_kind, tx, &valve.config.special.datatype).await?;
     let sql = local_sql_syntax(
-        db_kind,
+        &valve.db_kind,
         &format!(
-            r#"INSERT INTO "datatype" ("row_number", "row_order", {columns})
+            r#"INSERT INTO "{datatype_table}" ("row_number", "row_order", {columns})
                VALUES ({rn}, {ro}, {placeholders})"#,
             columns = columns.join(", "),
             placeholders = placeholders.join(", "),
+            datatype_table = &valve.config.special.datatype,
         ),
     );
 
@@ -4325,20 +4345,21 @@ pub async fn add_datatype_tx(
     Ok((rn, ro))
 }
 
-/// Given a table and column name, a database transaction, and the database kind, delete the
+/// Given a [Valve] instance, a table and column name, and a database transaction, delete the
 /// given column from the column table.
 pub async fn delete_column_tx(
+    valve: &Valve,
     table: &str,
     column: &str,
     tx: &mut Transaction<'_, sqlx::Any>,
-    db_kind: &DbKind,
 ) -> Result<(u32, u32)> {
     let sql = local_sql_syntax(
-        db_kind,
+        &valve.db_kind,
         &format!(
-            r#"DELETE FROM "column"
+            r#"DELETE FROM "{column_table}"
                WHERE "table" = {SQL_PARAM} AND "column" = {SQL_PARAM}
-               RETURNING "row_number" AS "row_number", "row_order" AS "row_order""#
+               RETURNING "row_number" AS "row_number", "row_order" AS "row_order""#,
+            column_table = &valve.config.special.column,
         ),
     );
 
@@ -4350,18 +4371,19 @@ pub async fn delete_column_tx(
     Ok((rn, ro))
 }
 
-/// Given a datatype name, a database transaction and the database kind, delete the given
+/// Given a [Valve] instance, a datatype name, and a database transaction, delete the given
 /// datatype from the datatype table.
 pub async fn delete_datatype_tx(
+    valve: &Valve,
     datatype: &str,
     tx: &mut Transaction<'_, sqlx::Any>,
-    db_kind: &DbKind,
 ) -> Result<(u32, u32)> {
     let sql = local_sql_syntax(
-        db_kind,
+        &valve.db_kind,
         &format!(
-            r#"DELETE FROM "datatype" WHERE "datatype" = {SQL_PARAM}
-               RETURNING "row_number" AS "row_number", "row_order" AS "row_order""#
+            r#"DELETE FROM "{datatype_table}" WHERE "datatype" = {SQL_PARAM}
+               RETURNING "row_number" AS "row_number", "row_order" AS "row_order""#,
+            datatype_table = &valve.config.special.datatype,
         ),
     );
     let query = sqlx_query(&sql).bind(datatype);
@@ -4421,7 +4443,10 @@ pub async fn delete_table_tx(
     // Delete it from the column table:
     let sql = local_sql_syntax(
         db_kind,
-        &format!(r#"DELETE FROM "column" WHERE "table" = {SQL_PARAM}"#),
+        &format!(
+            r#"DELETE FROM "{column_table}" WHERE "table" = {SQL_PARAM}"#,
+            column_table = &valve.config.special.column
+        ),
     );
     let query = sqlx_query(&sql).bind(table);
     query.execute(tx.acquire().await?).await?;
@@ -4429,7 +4454,10 @@ pub async fn delete_table_tx(
     // Delete it from tbe table table:
     let sql = local_sql_syntax(
         db_kind,
-        &format!(r#"DELETE FROM "table" WHERE "table" = {SQL_PARAM}"#),
+        &format!(
+            r#"DELETE FROM "{table_table}" WHERE "table" = {SQL_PARAM}"#,
+            table_table = &valve.config.special.table
+        ),
     );
     let query = sqlx_query(&sql).bind(table);
     query.execute(tx.acquire().await?).await?;
@@ -4670,12 +4698,12 @@ pub async fn record_row_change_tx(
     Ok(())
 }
 
-/// Given the name of a configuration table (the supported tables are "column", "datatype", and
+/// Given the name of a configuration table type (the supported types are "column", "datatype", and
 /// "table"), a row number, the previous state of the given row, the new state of the given row,
 /// the user who initiated the change, a database transaction and the database kind, record the
 /// configuration change in the history table.
 pub async fn record_config_change_tx(
-    table: &str,
+    table_type: &str,
     row_number: &u32,
     from: Option<&JsonRow>,
     to: Option<&JsonRow>,
@@ -4699,38 +4727,44 @@ pub async fn record_config_change_tx(
             )
             .into())
         }
-        (None, _) => match table {
+        (None, _) => match table_type {
             "column" => "add column",
             "datatype" => "add datatype",
             "table" => "add table",
             _ => {
                 return Err(ValveError::InputError(
-                    format!("In record_config_change_tx(): Unrecognized config table '{table}'.")
-                        .into(),
+                    format!(
+                    "In record_config_change_tx(): Unrecognized config table_type '{table_type}'."
+                )
+                    .into(),
                 )
                 .into())
             }
         },
-        (_, None) => match table {
+        (_, None) => match table_type {
             "column" => "delete column",
             "datatype" => "delete datatype",
             "table" => "delete table",
             _ => {
                 return Err(ValveError::InputError(
-                    format!("In record_config_change_tx(): Unrecognized config table '{table}'.")
-                        .into(),
+                    format!(
+                    "In record_config_change_tx(): Unrecognized config table_type '{table_type}'."
+                )
+                    .into(),
                 )
                 .into())
             }
         },
-        (Some(_), Some(_)) => match table {
+        (Some(_), Some(_)) => match table_type {
             "column" => "rename column",
             "datatype" => "rename datatype",
             "table" => "rename table",
             _ => {
                 return Err(ValveError::InputError(
-                    format!("In record_config_change_tx(): Unrecognized config table '{table}'.")
-                        .into(),
+                    format!(
+                    "In record_config_change_tx(): Unrecognized config table_type '{table_type}'."
+                )
+                    .into(),
                 )
                 .into())
             }
@@ -4738,7 +4772,7 @@ pub async fn record_config_change_tx(
     };
 
     let (from, to) = (to_text(from), to_text(to));
-    let mut params = vec![table];
+    let mut params = vec![table_type];
     let from_param = match from.as_str() {
         "NULL" => from.to_string(),
         _ => {
