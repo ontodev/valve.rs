@@ -4734,8 +4734,9 @@ pub async fn record_config_change_tx(
             _ => {
                 return Err(ValveError::InputError(
                     format!(
-                    "In record_config_change_tx(): Unrecognized config table_type '{table_type}'."
-                )
+                        "In record_config_change_tx(): Unrecognized config table_type \
+                         '{table_type}'."
+                    )
                     .into(),
                 )
                 .into())
@@ -4748,8 +4749,9 @@ pub async fn record_config_change_tx(
             _ => {
                 return Err(ValveError::InputError(
                     format!(
-                    "In record_config_change_tx(): Unrecognized config table_type '{table_type}'."
-                )
+                        "In record_config_change_tx(): Unrecognized config table_type \
+                         '{table_type}'."
+                    )
                     .into(),
                 )
                 .into())
@@ -4762,8 +4764,9 @@ pub async fn record_config_change_tx(
             _ => {
                 return Err(ValveError::InputError(
                     format!(
-                    "In record_config_change_tx(): Unrecognized config table_type '{table_type}'."
-                )
+                        "In record_config_change_tx(): Unrecognized config table_type \
+                         '{table_type}'."
+                    )
                     .into(),
                 )
                 .into())
